@@ -6,7 +6,7 @@ excludeAgent: "cloud-agent"
 # Copilot code review — fukulow
 
 You are an additional, advisory reviewer. Another AI reviews risky pull requests separately,
-and CI (rustfmt, clippy, tests, OpenAPI diff, web check) already enforces style.
+and CI (rustfmt, clippy, tests, web check/test/build) already enforces style.
 
 ## Prioritise
 - The PR description or the linked issue's "Done when" disagrees with the code in this diff.

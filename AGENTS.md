@@ -10,7 +10,7 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 - Backend: Rust (axum, tokio, sqlx), PostgreSQL, WebSocket for real-time. Dir: `server/`
 - Frontend: Svelte + Vite SPA (no SvelteKit/SSR), embedded into the Rust binary (rust-embed). Dir: `web/`
 - Delivery: one Docker image. Compose profiles for a reverse proxy: Caddy (default) or nginx. Target: Xserver VPS.
-- API: `/api/v1`, OpenAPI generated from Rust (utoipa) into `openapi.json` (committed). TS types are generated from it;
+- API: `/api/v1`, OpenAPI generated from Rust (utoipa) into `openapi.json` (committed; planned, lands with the auth slice). TS types are generated from it;
   Kotlin (KMP) clients later. Real-time event types are in the same schema.
 - Auth: session cookie (web) and bearer token (native apps).
 
@@ -25,7 +25,7 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 ## Commands (fill in as they appear)
 - Server: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
 - Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build`
-- API types: `make api` (regenerates openapi.json and TS types; CI fails on diff)
+- API types: `make api` (regenerates openapi.json and TS types). Planned: arrives with the auth slice PR (#4); CI will then fail on a diff.
 
 ## Workflow
 - Work in your own worktree and branch: `claude/<topic>`, `codex/<topic>`, `antigravity/<topic>`. Never push to `main`.
@@ -43,10 +43,16 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
   Scripts over ~20 lines or sharing variables become TypeScript. Shared settings live in `.env.example` / Makefile variables.
 
 ## Versions and updates
-- Pinned: `rust-toolchain.toml`, `.node-version`, `engines`, Docker image tags. Pinning is for predictability, not for staying old.
-- Dependabot (weekly, grouped; security updates immediately) covers Cargo, npm, Actions, Docker. CI runs a vulnerability check
-  (`cargo deny`, `npm audit`). Update PRs: an AI checks the changelog for breaking changes, then asks the maintainer to merge.
-- Production VPS: automatic OS security updates.
+- Policy: pin the exact patch version everywhere, and move it deliberately (Dependabot PRs or a manual bump), never implicitly.
+  Single sources: Rust = `rust-toolchain.toml`; Node = `.node-version` (and `web/package.json` `engines`, kept equal).
+  The Dockerfile tags (`rust:<ver>-slim`, `node:<ver>-slim`) and CI (`rustup` / `node-version-file`) follow those files.
+  CI fails if the Dockerfile or `engines` disagree with them.
+- Version updates: `.github/dependabot.yml` (weekly, grouped) covers Cargo, npm, GitHub Actions, Docker.
+  Security updates are a separate GitHub setting (Settings > Code security: Dependabot alerts and Dependabot security updates);
+  as of 2026-11-08 it is OFF, the maintainer must enable it. Do not claim it works until a security PR has been seen.
+- Planned, not in CI yet: `cargo deny` and `npm audit` (vulnerability checks, also on a nightly schedule).
+- Update PRs: an AI checks the changelog for breaking changes, then asks the maintainer to merge.
+- Production VPS: automatic OS security updates (planned with the deploy work).
 
 ## Who is on the move (labels)
 Every open issue/PR carries at most one status label, set by the AI that hands off:
