@@ -11,16 +11,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List public channels of the caller's organization and private channels they belong to.
-         *     Contract only: currently returns 501 without authentication or database access.
-         */
+        /** List public channels of the caller's organization and private channels they belong to. */
         get: operations["list_channels"];
         put?: never;
         /**
          * Create a public or private channel in the caller's organization.
          *     A private channel includes its creator as a member in the same transaction.
-         *     Contract only: currently returns 501 without parsing input or accessing the database.
          */
         post: operations["create_channel"];
         delete?: never;
@@ -422,13 +418,6 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
         };
     };
     create_channel: {
@@ -483,13 +472,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
-            };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

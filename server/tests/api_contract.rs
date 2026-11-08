@@ -127,7 +127,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
 }
 
 #[tokio::test]
-async fn contract_routes_are_stubs_without_authentication_or_database_access() {
+async fn remaining_contract_routes_are_stubs_without_authentication_or_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
@@ -138,8 +138,6 @@ async fn contract_routes_are_stubs_without_authentication_or_database_access() {
         sign_in_throttle: Default::default(),
     });
     for (method, path) in [
-        ("GET", "/api/v1/channels"),
-        ("POST", "/api/v1/channels"),
         (
             "GET",
             "/api/v1/channels/00000000-0000-0000-0000-000000000001/messages?after_seq=0",
