@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 default-run = "fukulow-server"
 
+[lints]
+workspace = true
+
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }

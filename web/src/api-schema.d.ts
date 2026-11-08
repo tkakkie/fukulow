@@ -4,6 +4,63 @@
  */
 
 export interface paths {
+    "/api/v1/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List public channels of the caller's organization and private channels they belong to.
+         *     Contract only: currently returns 501 without authentication or database access.
+         */
+        get: operations["list_channels"];
+        put?: never;
+        /**
+         * Create a public or private channel in the caller's organization.
+         *     A private channel includes its creator as a member in the same transaction.
+         *     Contract only: currently returns 501 without parsing input or accessing the database.
+         */
+        post: operations["create_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/channels/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List visible channel messages using exclusive per-channel sequence cursors.
+         *     after_seq and before_seq are mutually exclusive; neither selects the latest page.
+         *     Pages are always ascending seq. Continue after_seq with the last seq, or before_seq
+         *     (including older history from the latest page) with the first seq. has_more refers
+         *     to that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries
+         *     return 400. Identity and organization come only from the authenticated session.
+         *     Contract only: currently returns 501 without parsing input or accessing the database.
+         */
+        get: operations["list_messages"];
+        put?: never;
+        /**
+         * Send a message to a visible channel; topic_id is always null.
+         *     The session supplies organization and sender. A successful retry returns the same
+         *     canonical message with 201, allocating no new sequence and publishing no new event.
+         *     A reused client_message_id with different body or channel returns 409.
+         *     Contract only: currently returns 501 without parsing input or accessing the database.
+         */
+        post: operations["send_message"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -79,16 +136,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/ws": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.
+         *     Authenticate with the session cookie or Authorization: Bearer, never a query token.
+         *     Cookie auth requires a matching allowed Origin (configured, same-origin by default);
+         *     reject a missing/foreign Origin with 403. Bearer clients need no Origin header.
+         * @description On subscribe: first register the live subscription, queueing events per connection;
+         *     replay committed messages with seq > after_seq ascending in pages of up to the page
+         *     limit (default 50, max 200); flush queued live events with seq > last replayed;
+         *     then send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):
+         *     duplicates are harmless, gaps are forbidden. Publish only committed new messages.
+         *     Queue overflow closes with 4008 (never silently drops an event); reconnect and
+         *     re-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;
+         *     stop protected delivery and go to Sign in.
+         *     Contract only: currently returns 501; no authentication, Origin check or upgrade.
+         */
+        get: operations["upgrade"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Channel: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            visibility: components["schemas"]["ChannelVisibility"];
+        };
+        ChannelList: {
+            channels: components["schemas"]["Channel"][];
+        };
+        /** @enum {string} */
+        ChannelVisibility: "public" | "private";
+        /** @description Client -> server control messages. Cursors are per channel and exclusive. */
+        ClientMessage: components["schemas"]["Subscribe"] | components["schemas"]["Unsubscribe"];
+        /** @description Identity and organization come from the session, never from request fields. */
+        CreateChannelRequest: {
+            name: string;
+            visibility: components["schemas"]["ChannelVisibility"];
+        };
         ErrorBody: {
             error: string;
+        };
+        ErrorEvent: {
+            /** Format: uuid */
+            channel_id?: string | null;
+            code: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "error";
         };
         Identity: {
             member: components["schemas"]["Member"];
             organization: components["schemas"]["Organization"];
+        };
+        /** @description Use after_seq XOR before_seq, or neither for the latest page. Cursors are exclusive. */
+        ListMessagesQuery: {
+            /**
+             * Format: int64
+             * @description Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
+             */
+            after_seq?: number | null;
+            /**
+             * Format: int64
+             * @description Return seq < before_seq. Cannot combine with after_seq.
+             */
+            before_seq?: number | null;
+            /**
+             * Format: int32
+             * @description Page size, default 50, maximum 200.
+             */
+            limit?: number | null;
         };
         Member: {
             email: string;
@@ -97,6 +231,47 @@ export interface components {
             name: string;
             role: components["schemas"]["Role"];
         };
+        Message: {
+            body: string;
+            /** Format: uuid */
+            channel_id: string;
+            /** Format: uuid */
+            client_message_id: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: uuid
+             * @description Member id of the sender.
+             */
+            sender: string;
+            /**
+             * Format: int64
+             * @description Per-channel sequence, starting at 1.
+             */
+            seq: number;
+            topic_id: null;
+        };
+        /** @description Live and replayed messages have exactly the same canonical shape. */
+        MessageEvent: {
+            message: components["schemas"]["Message"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "message";
+        };
+        MessagePage: {
+            /**
+             * @description More messages exist in the queried direction (older for latest/before_seq,
+             *     newer for after_seq). Continue after_seq with the last seq or before_seq
+             *     with the first seq; continue the latest page toward older messages with before_seq.
+             */
+            has_more: boolean;
+            /** @description Always ascending seq (newest last), including latest and before_seq pages. */
+            messages: components["schemas"]["Message"][];
+        };
         Organization: {
             name: string;
             /** Format: uuid */
@@ -104,6 +279,18 @@ export interface components {
         };
         /** @enum {string} */
         Role: "owner" | "admin" | "member" | "guest";
+        /**
+         * @description Idempotency key: (organization, sender, client_message_id), derived from the session.
+         *     A retry with the same body and channel returns the same canonical message and sequence;
+         *     reusing the key with a different body or channel returns 409.
+         */
+        SendMessageRequest: {
+            body: string;
+            /** Format: uuid */
+            client_message_id: string;
+        };
+        /** @description Server -> client events. Clients dedupe messages by (channel_id, seq). */
+        ServerEvent: components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ErrorEvent"];
         SessionResponse: {
             /** Format: int32 */
             expires_in: number;
@@ -139,6 +326,44 @@ export interface components {
             /** Format: password */
             password: string;
         };
+        Subscribe: {
+            /**
+             * Format: int64
+             * @description Replay committed messages with seq > after_seq; 0 starts at the beginning.
+             */
+            after_seq: number;
+            /** Format: uuid */
+            channel_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "subscribe";
+        };
+        /** @description Sent after committed replay and queued live events have been handed off. */
+        Subscribed: {
+            /**
+             * Format: int64
+             * @description Last sequence caught up through; 0 when the channel has no messages.
+             */
+            caught_up_seq: number;
+            /** Format: uuid */
+            channel_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "subscribed";
+        };
+        Unsubscribe: {
+            /** Format: uuid */
+            channel_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "unsubscribe";
+        };
     };
     responses: never;
     parameters: never;
@@ -146,8 +371,290 @@ export interface components {
     headers: never;
     pathItems: never;
 }
+export type Channel = components['schemas']['Channel'];
+export type ChannelList = components['schemas']['ChannelList'];
+export type ChannelVisibility = components['schemas']['ChannelVisibility'];
+export type ClientMessage = components['schemas']['ClientMessage'];
+export type CreateChannelRequest = components['schemas']['CreateChannelRequest'];
+export type ErrorBody = components['schemas']['ErrorBody'];
+export type ErrorEvent = components['schemas']['ErrorEvent'];
+export type Identity = components['schemas']['Identity'];
+export type ListMessagesQuery = components['schemas']['ListMessagesQuery'];
+export type Member = components['schemas']['Member'];
+export type Message = components['schemas']['Message'];
+export type MessageEvent = components['schemas']['MessageEvent'];
+export type MessagePage = components['schemas']['MessagePage'];
+export type Organization = components['schemas']['Organization'];
+export type Role = components['schemas']['Role'];
+export type SendMessageRequest = components['schemas']['SendMessageRequest'];
+export type ServerEvent = components['schemas']['ServerEvent'];
+export type SessionResponse = components['schemas']['SessionResponse'];
+export type SetupRequest = components['schemas']['SetupRequest'];
+export type SetupStatus = components['schemas']['SetupStatus'];
+export type SignInRequest = components['schemas']['SignInRequest'];
+export type Subscribe = components['schemas']['Subscribe'];
+export type Subscribed = components['schemas']['Subscribed'];
+export type Unsubscribe = components['schemas']['Unsubscribe'];
 export type $defs = Record<string, never>;
 export interface operations {
+    list_channels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelList"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Contract stub; not implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateChannelRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Channel"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Contract stub; not implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_messages: {
+        parameters: {
+            query?: {
+                /** @description Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
+                after_seq?: number;
+                /** @description Return seq < before_seq. Cannot combine with after_seq. */
+                before_seq?: number;
+                /** @description Page size, default 50, maximum 200. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Channel id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagePage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Channel access denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Contract stub; not implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    send_message: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Channel id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendMessageRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Message"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Channel access denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Client message id reused with different body or channel */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Contract stub; not implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     health: {
         parameters: {
             query?: never;
@@ -374,6 +881,48 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
+            };
+        };
+    };
+    upgrade: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebSocket upgrade; frames use ClientMessage / ServerEvent */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Cookie Origin missing or not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Contract stub; not implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

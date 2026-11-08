@@ -1,9 +1,11 @@
 pub mod auth;
+pub mod channels;
+pub mod messages;
 pub mod openapi;
+pub mod realtime;
 
 use axum::{
     Router,
-    body::Body,
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -30,6 +32,15 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(auth::sign_in).delete(auth::sign_out),
         )
         .route("/api/v1/me", get(auth::me))
+        .route(
+            "/api/v1/channels",
+            get(channels::list_channels).post(channels::create_channel),
+        )
+        .route(
+            "/api/v1/channels/{id}/messages",
+            get(messages::list_messages).post(messages::send_message),
+        )
+        .route("/api/v1/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .fallback(static_handler)
         .with_state(state)
@@ -63,10 +74,7 @@ async fn static_handler(uri: Uri) -> Response {
 
 fn serve(name: &str, file: rust_embed::EmbeddedFile) -> Response {
     let mime = mime_guess::from_path(name).first_or_octet_stream();
-    Response::builder()
-        .header(header::CONTENT_TYPE, mime.as_ref())
-        .body(Body::from(file.data.into_owned()))
-        .unwrap()
+    ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response()
 }
 
 #[cfg(test)]
