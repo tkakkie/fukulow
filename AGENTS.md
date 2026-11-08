@@ -30,7 +30,10 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 ## Workflow
 - Work in your own worktree and branch: `claude/<topic>`, `codex/<topic>`, `antigravity/<topic>`. Never push to `main`.
 - Issue with a "Done when" and label `status:ready` before implementing. Open a draft PR; CI must pass.
-- Issue review by the maintainer (label `status:human-review`, "OK" comment = approved, then the AI sets `status:ready`):
+- Issue review. Needs the maintainer (below): first an AI that did not write the Issue reviews it (`status:ai-review`), then it goes
+  to `status:human-review`; "OK" comment = approved, then the AI sets `status:ready`. The AI review is required for `risk:needs-review`
+  and large Issues, optional for small ones (author decides, says so in the Issue). Max 2 rounds (round 2 = changes only); if still
+  open, `status:needs-decision` with the question. Needs the maintainer:
   always for any new feature or behaviour change (a misread spec means rework), and for auth/permissions/real-time/migrations,
   API or schema contract changes, new dependencies or languages, cost, deploy, secrets. Feature Issues start with
   "How I read the spec" (3-5 lines, spec terms) before "Done when".
@@ -80,6 +83,8 @@ Every open issue/PR carries at most one status label, set by the AI that hands o
   lets web work proceed without waiting for the server.
 
 ## Reviews
+- Review cap: an AI review of an Issue or PR is at most 2 rounds; round 2 checks only what changed. Non-blocking findings become
+  follow-up Issues, not another round. Unresolved after round 2 -> `status:needs-decision`.
 - Copilot auto-review is OFF (it burns credits). Request it once per PR, by hand, when CI is green and the work is
   done: `gh pr edit <n> --add-reviewer @copilot`. Only for `risk:needs-review` or large code PRs. Re-request only if the maintainer asks.
 - Every issue comment, review and PR body from an AI ends with one line: `AI: <name> / model: <id> / effort: <level>`.
