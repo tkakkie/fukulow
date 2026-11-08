@@ -48,8 +48,8 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
   The Dockerfile tags (`rust:<ver>-slim`, `node:<ver>-slim`) and CI (`rustup` / `node-version-file`) follow those files.
   CI fails if the Dockerfile or `engines` disagree with them.
 - Version updates: `.github/dependabot.yml` (weekly, grouped) covers Cargo, npm, GitHub Actions, Docker.
-  Security updates are a separate GitHub setting (Settings > Code security: Dependabot alerts and Dependabot security updates);
-  as of 2026-11-08 it is OFF, the maintainer must enable it. Do not claim it works until a security PR has been seen.
+  Security updates are a separate GitHub setting (Settings > Advanced Security: Dependabot alerts, Dependabot security updates);
+  enabled by the maintainer on 2026-11-08 (verified via API). No security PR has been seen yet, so do not claim it is proven.
 - Planned, not in CI yet: `cargo deny` and `npm audit` (vulnerability checks, also on a nightly schedule).
 - Update PRs: an AI checks the changelog for breaking changes, then asks the maintainer to merge.
 - Production VPS: automatic OS security updates (planned with the deploy work).
