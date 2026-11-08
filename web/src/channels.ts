@@ -40,8 +40,13 @@ export function createChannels(api: ChannelsApi = defaultApi) {
       const mine = generation
       set({ status: 'loading' })
       const r = await api.listChannels()
-      if (mine !== generation) return set({ status: 'ready' }) // stale: would drop a channel created meanwhile
-      if (!r.ok) return set({ status: 'error' })
+      if (!r.ok) return set({ status: mine !== generation ? 'ready' : 'error' })
+      if (mine !== generation) {
+        // stale: read before a create committed; merge so neither side is lost
+        const ids = new Set(r.data.channels.map((c) => c.id))
+        const channels = [...r.data.channels, ...state.channels.filter((c) => !ids.has(c.id))]
+        return set({ status: 'ready', channels })
+      }
       const keep = r.data.channels.some((c) => c.id === state.selectedId)
       set({ status: 'ready', channels: r.data.channels, selectedId: keep ? state.selectedId : (r.data.channels[0]?.id ?? null) })
     },

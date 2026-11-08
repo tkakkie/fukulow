@@ -55,7 +55,32 @@ describe('channels', () => {
     await c.create({ name: 'n', visibility: 'public' })
     release(ok({ channels: [ch('a')] })) // list read before the create committed
     await loading
-    expect(c.get().channels.map((x) => x.id)).toEqual(['n'])
+    expect(c.get().channels.map((x) => x.id)).toContain('n')
     expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'n' })
+  })
+  it('create during the initial load keeps pre-existing channels, once each', async () => {
+    let release!: (r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void
+    const listChannels = vi.fn().mockReturnValue(new Promise((r) => (release = r)))
+    const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
+    const loading = c.load()
+    await c.create({ name: 'n', visibility: 'public' })
+    release(ok({ channels: [ch('a'), ch('b'), ch('n')] }))
+    await loading
+    expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'b', 'n'])
+    expect(c.get().selectedId).toBe('n')
+    // a normal later load still replaces the list
+    listChannels.mockResolvedValue(ok({ channels: [ch('z')] }))
+    await c.load()
+    expect(c.get().channels.map((x) => x.id)).toEqual(['z'])
+  })
+  it('stale load without the new channel merges it in', async () => {
+    let release!: (r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void
+    const listChannels = vi.fn().mockReturnValue(new Promise((r) => (release = r)))
+    const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
+    const loading = c.load()
+    await c.create({ name: 'n', visibility: 'public' })
+    release(ok({ channels: [ch('a'), ch('b')] }))
+    await loading
+    expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'b', 'n'])
   })
 })
