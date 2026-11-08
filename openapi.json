@@ -9,6 +9,369 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/channels": {
+      "get": {
+        "tags": [
+          "crate::channels"
+        ],
+        "summary": "List public channels of the caller's organization and private channels they belong to.\nContract only: currently returns 501 without authentication or database access.",
+        "operationId": "list_channels",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Contract stub; not implemented"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "crate::channels"
+        ],
+        "summary": "Create a public or private channel in the caller's organization.\nA private channel includes its creator as a member in the same transaction.\nContract only: currently returns 501 without parsing input or accessing the database.",
+        "operationId": "create_channel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Contract stub; not implemented"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/channels/{id}/messages": {
+      "get": {
+        "tags": [
+          "crate::messages"
+        ],
+        "summary": "List visible channel messages using exclusive per-channel sequence cursors.\nafter_seq and before_seq are mutually exclusive; neither selects the latest page.\nPages are always ascending seq. Continue after_seq with the last seq, or before_seq\n(including older history from the latest page) with the first seq. has_more refers\nto that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries\nreturn 400. Identity and organization come only from the authenticated session.\nContract only: currently returns 501 without parsing input or accessing the database.",
+        "operationId": "list_messages",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before_seq",
+            "in": "query",
+            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, default 50, maximum 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Channel access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Contract stub; not implemented"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "crate::messages"
+        ],
+        "summary": "Send a message to a visible channel; topic_id is always null.\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body or channel returns 409.\nContract only: currently returns 501 without parsing input or accessing the database.",
+        "operationId": "send_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Channel access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Client message id reused with different body or channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Contract stub; not implemented"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
@@ -300,10 +663,132 @@
           }
         }
       }
+    },
+    "/api/v1/ws": {
+      "get": {
+        "tags": [
+          "crate::realtime"
+        ],
+        "summary": "Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.\nAuthenticate with the session cookie or Authorization: Bearer, never a query token.\nCookie auth requires a matching allowed Origin (configured, same-origin by default);\nreject a missing/foreign Origin with 403. Bearer clients need no Origin header.",
+        "description": "On subscribe: first register the live subscription, queueing events per connection;\nreplay committed messages with seq > after_seq ascending in pages of up to the page\nlimit (default 50, max 200); flush queued live events with seq > last replayed;\nthen send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):\nduplicates are harmless, gaps are forbidden. Publish only committed new messages.\nQueue overflow closes with 4008 (never silently drops an event); reconnect and\nre-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;\nstop protected delivery and go to Sign in.\nContract only: currently returns 501; no authentication, Origin check or upgrade.",
+        "operationId": "upgrade",
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade; frames use ClientMessage / ServerEvent"
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Cookie Origin missing or not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Contract stub; not implemented"
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
     "schemas": {
+      "Channel": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "visibility"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/ChannelVisibility"
+          }
+        }
+      },
+      "ChannelList": {
+        "type": "object",
+        "required": [
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            }
+          }
+        }
+      },
+      "ChannelVisibility": {
+        "type": "string",
+        "enum": [
+          "public",
+          "private"
+        ]
+      },
+      "ClientMessage": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Subscribe"
+          },
+          {
+            "$ref": "#/components/schemas/Unsubscribe"
+          }
+        ],
+        "description": "Client -> server control messages. Cursors are per channel and exclusive.",
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "subscribe": "#/components/schemas/Subscribe",
+            "unsubscribe": "#/components/schemas/Unsubscribe"
+          }
+        }
+      },
+      "CreateChannelRequest": {
+        "type": "object",
+        "description": "Identity and organization come from the session, never from request fields.",
+        "required": [
+          "name",
+          "visibility"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/ChannelVisibility"
+          }
+        },
+        "additionalProperties": false
+      },
       "ErrorBody": {
         "type": "object",
         "required": [
@@ -312,6 +797,31 @@
         "properties": {
           "error": {
             "type": "string"
+          }
+        }
+      },
+      "ErrorEvent": {
+        "type": "object",
+        "required": [
+          "code",
+          "type"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "error"
+            ]
           }
         }
       },
@@ -327,6 +837,41 @@
           },
           "organization": {
             "$ref": "#/components/schemas/Organization"
+          }
+        }
+      },
+      "ListMessagesQuery": {
+        "type": "object",
+        "description": "Use after_seq XOR before_seq, or neither for the latest page. Cursors are exclusive.",
+        "properties": {
+          "after_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "minimum": 0
+          },
+          "before_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "minimum": 1
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Page size, default 50, maximum 200.",
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1
           }
         }
       },
@@ -354,6 +899,93 @@
           }
         }
       },
+      "Message": {
+        "type": "object",
+        "required": [
+          "id",
+          "channel_id",
+          "seq",
+          "client_message_id",
+          "sender",
+          "body",
+          "created_at",
+          "topic_id"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "client_message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sender": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Member id of the sender."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-channel sequence, starting at 1.",
+            "minimum": 1
+          },
+          "topic_id": {
+            "type": "null"
+          }
+        }
+      },
+      "MessageEvent": {
+        "type": "object",
+        "description": "Live and replayed messages have exactly the same canonical shape.",
+        "required": [
+          "message",
+          "type"
+        ],
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message"
+            ]
+          }
+        }
+      },
+      "MessagePage": {
+        "type": "object",
+        "required": [
+          "messages",
+          "has_more"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "description": "More messages exist in the queried direction (older for latest/before_seq,\nnewer for after_seq). Continue after_seq with the last seq or before_seq\nwith the first seq; continue the latest page toward older messages with before_seq."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "description": "Always ascending seq (newest last), including latest and before_seq pages."
+          }
+        }
+      },
       "Organization": {
         "type": "object",
         "required": [
@@ -378,6 +1010,46 @@
           "member",
           "guest"
         ]
+      },
+      "SendMessageRequest": {
+        "type": "object",
+        "description": "Idempotency key: (organization, sender, client_message_id), derived from the session.\nA retry with the same body and channel returns the same canonical message and sequence;\nreusing the key with a different body or channel returns 409.",
+        "required": [
+          "client_message_id",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "client_message_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServerEvent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MessageEvent"
+          },
+          {
+            "$ref": "#/components/schemas/Subscribed"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorEvent"
+          }
+        ],
+        "description": "Server -> client events. Clients dedupe messages by (channel_id, seq).",
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "error": "#/components/schemas/ErrorEvent",
+            "message": "#/components/schemas/MessageEvent",
+            "subscribed": "#/components/schemas/Subscribed"
+          }
+        }
       },
       "SessionResponse": {
         "type": "object",
@@ -478,6 +1150,78 @@
           }
         },
         "additionalProperties": false
+      },
+      "Subscribe": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "after_seq",
+          "type"
+        ],
+        "properties": {
+          "after_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Replay committed messages with seq > after_seq; 0 starts at the beginning.",
+            "minimum": 0
+          },
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "subscribe"
+            ]
+          }
+        }
+      },
+      "Subscribed": {
+        "type": "object",
+        "description": "Sent after committed replay and queued live events have been handed off.",
+        "required": [
+          "channel_id",
+          "caught_up_seq",
+          "type"
+        ],
+        "properties": {
+          "caught_up_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last sequence caught up through; 0 when the channel has no messages.",
+            "minimum": 0
+          },
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "subscribed"
+            ]
+          }
+        }
+      },
+      "Unsubscribe": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "type"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "unsubscribe"
+            ]
+          }
+        }
       }
     },
     "securitySchemes": {
