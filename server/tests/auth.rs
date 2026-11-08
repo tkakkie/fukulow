@@ -16,6 +16,7 @@ fn router(pool: &PgPool) -> Router {
     app(AppState {
         pool: pool.clone(),
         cookie_secure: true,
+        setup_token: None,
     })
 }
 
@@ -116,6 +117,180 @@ async fn setup_works_once_and_is_atomic(pool: PgPool) {
     assert!(hash.starts_with("$argon2id$"));
     assert!(!hash.contains(PASSWORD));
     assert_eq!(role, "owner");
+}
+
+#[sqlx::test]
+async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPool) {
+    let setup_token = "setup-token-test-only";
+    let app = app(AppState {
+        pool: pool.clone(),
+        cookie_secure: true,
+        setup_token: Some(setup_token.into()),
+    });
+    let expected = json!({"error": "invalid credentials"});
+    for completed in [false, true] {
+        for token in [
+            None,
+            Some(Value::Null),
+            Some(json!("")),
+            Some(json!("wrong-token-test-only")),
+            Some(json!("setup-token-test-onlY")),
+            Some(json!("setup-token-test-only-longer")),
+            Some(json!("setup-token-test-only\u{200b}")),
+        ] {
+            let mut input = setup_input();
+            if let Some(token) = token {
+                input["setup_token"] = token;
+            }
+            let response = request(&app, "POST", "/api/v1/setup", input, &[]).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(body(response).await, expected);
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM organizations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, i64::from(completed));
+        let mut input = setup_input();
+        input["setup_token"] = json!(setup_token);
+        let response = request(&app, "POST", "/api/v1/setup", input, &[]).await;
+        assert_eq!(
+            response.status(),
+            if completed {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::CREATED
+            }
+        );
+    }
+}
+
+#[sqlx::test]
+async fn setup_with_unconfigured_token_ignores_supplied_token(pool: PgPool) {
+    let app = router(&pool);
+    let mut input = setup_input();
+    input["setup_token"] = json!("client-supplied-test-only");
+    assert_eq!(
+        request(&app, "POST", "/api/v1/setup", input, &[])
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+}
+
+#[sqlx::test]
+async fn setup_with_empty_configured_token_still_requires_the_field(pool: PgPool) {
+    let app = app(AppState {
+        pool,
+        cookie_secure: true,
+        setup_token: Some(String::new()),
+    });
+    assert_eq!(
+        request(&app, "POST", "/api/v1/setup", setup_input(), &[])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let mut input = setup_input();
+    input["setup_token"] = json!("");
+    assert_eq!(
+        request(&app, "POST", "/api/v1/setup", input, &[])
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+}
+
+#[sqlx::test]
+async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let organization_id = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap();
+    let input = json!({"email": "Owner@Example.com", "password": PASSWORD});
+    let response = request(&app, "POST", "/api/v1/session", input.clone(), &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session = body(response).await;
+    assert_eq!(session["identity"], identity);
+    let token = session["token"].as_str().unwrap();
+    assert!(token.starts_with(&format!("{organization_id}.")));
+    let bearer = format!("Bearer {token}");
+    for headers in [[("cookie", cookie.as_str())], [("authorization", &bearer)]] {
+        let response = request(&app, "GET", "/api/v1/me", Value::Null, &headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await, identity);
+    }
+    let mut null_organization = input.clone();
+    null_organization["organization_id"] = Value::Null;
+    assert_eq!(
+        request(&app, "POST", "/api/v1/session", null_organization, &[])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    for (field, value) in [
+        ("email", "unknown@example.com".to_owned()),
+        ("password", "incorrect password".to_owned()),
+        ("organization_id", Uuid::new_v4().to_string()),
+    ] {
+        let mut invalid = input.clone();
+        invalid[field] = json!(value);
+        let response = request(&app, "POST", "/api/v1/session", invalid, &[]).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            body(response).await,
+            json!({"error": "invalid credentials"})
+        );
+    }
+}
+
+#[sqlx::test]
+async fn sign_in_without_organization_rejects_multiple_organizations(pool: PgPool) {
+    let app = router(&pool);
+    let (_, second_id) = two_organizations(&pool, &app).await;
+    let mut input = json!({"email": "owner@example.com", "password": PASSWORD});
+    for explicit_null in [false, true] {
+        if explicit_null {
+            input["organization_id"] = Value::Null;
+        }
+        let response = request(&app, "POST", "/api/v1/session", input.clone(), &[]).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body(response).await, json!({"error": "invalid input"}));
+    }
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions, 0);
+    assert_eq!(
+        sign_in(&app, &second_id.to_string(), PASSWORD)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test]
+async fn sign_in_without_organization_rejects_an_unconfigured_instance(pool: PgPool) {
+    let response = request(
+        &router(&pool),
+        "POST",
+        "/api/v1/session",
+        json!({"email": "owner@example.com", "password": PASSWORD}),
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test]

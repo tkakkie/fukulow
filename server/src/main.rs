@@ -4,6 +4,11 @@ use sqlx::postgres::PgPoolOptions;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = std::env::var("DATABASE_URL")?;
+    let setup_token = match std::env::var("FUKULOW_SETUP_TOKEN") {
+        Ok(token) => Some(token),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
     let cookie_secure = match std::env::var("FUKULOW_COOKIE_SECURE").as_deref() {
         Ok("false") => false,
         Ok("true") | Err(std::env::VarError::NotPresent) => true,
@@ -22,6 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app(AppState {
             pool,
             cookie_secure,
+            setup_token,
         }),
     )
     .await?;

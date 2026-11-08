@@ -198,6 +198,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or invalid setup token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "Setup already completed",
             "content": {
@@ -340,6 +350,14 @@
             "description": "At least 12 characters, at most 1024 UTF-8 bytes.",
             "maxLength": 1024,
             "minLength": 12
+          },
+          "setup_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "password",
+            "description": "Required when FUKULOW_SETUP_TOKEN is configured on the server."
           }
         },
         "additionalProperties": false
@@ -347,7 +365,6 @@
       "SignInRequest": {
         "type": "object",
         "required": [
-          "organization_id",
           "email",
           "password"
         ],
@@ -356,9 +373,12 @@
             "type": "string"
           },
           "organization_id": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid",
-            "description": "Returned by setup; email addresses are unique within this organization."
+            "description": "Returned by setup; may be omitted only when exactly one organization exists."
           },
           "password": {
             "type": "string",

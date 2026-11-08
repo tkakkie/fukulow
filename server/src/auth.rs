@@ -9,6 +9,7 @@ use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
+use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -89,6 +90,9 @@ pub struct Identity {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetupRequest {
+    /// Required when FUKULOW_SETUP_TOKEN is configured on the server.
+    #[schema(format = Password)]
+    pub setup_token: Option<String>,
     #[schema(min_length = 1, max_length = 200)]
     pub organization_name: String,
     #[schema(min_length = 1, max_length = 200)]
@@ -103,8 +107,8 @@ pub struct SetupRequest {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SignInRequest {
-    /// Returned by setup; email addresses are unique within this organization.
-    pub organization_id: Uuid,
+    /// Returned by setup; may be omitted only when exactly one organization exists.
+    pub organization_id: Option<Uuid>,
     pub email: String,
     #[schema(max_length = 1024, format = Password)]
     pub password: String,
@@ -149,11 +153,24 @@ async fn hash_password(password: String) -> Result<String, ApiError> {
 
 #[utoipa::path(post, path = "/api/v1/setup", request_body = SetupRequest,
     responses((status = 201, body = Identity), (status = 400, body = ErrorBody),
+    (status = 401, description = "Missing or invalid setup token", body = ErrorBody),
     (status = 409, description = "Setup already completed", body = ErrorBody)))]
 pub async fn setup(
     State(state): State<AppState>,
     Json(input): Json<SetupRequest>,
 ) -> Result<Response, ApiError> {
+    if let Some(expected) = &state.setup_token {
+        let supplied = input
+            .setup_token
+            .as_deref()
+            .ok_or_else(ApiError::unauthorized)?;
+        // Compare fixed-size digests so equality never exits on token length or prefix.
+        if !bool::from(
+            Sha256::digest(expected.as_bytes()).ct_eq(&Sha256::digest(supplied.as_bytes())),
+        ) {
+            return Err(ApiError::unauthorized());
+        }
+    }
     let email = email(&input.email)?;
     let organization_name = input.organization_name.trim();
     let name = input.name.trim();
@@ -245,10 +262,24 @@ pub async fn sign_in(
     if input.password.is_empty() || input.password.len() > 1024 {
         return Err(ApiError::bad_request());
     }
+    let organization_id = match input.organization_id {
+        Some(id) => id,
+        None => {
+            // Discover only whether there is a sole tenant; member lookup stays scoped.
+            let organizations =
+                sqlx::query_scalar::<_, Uuid>("SELECT organization_id FROM organizations LIMIT 2")
+                    .fetch_all(&state.pool)
+                    .await?;
+            let [id] = organizations.as_slice() else {
+                return Err(ApiError::bad_request());
+            };
+            *id
+        }
+    };
     let stored = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, password_hash FROM users WHERE organization_id = $1 AND email = $2",
     )
-    .bind(input.organization_id)
+    .bind(organization_id)
     .bind(email)
     .fetch_optional(&state.pool)
     .await?;
@@ -277,15 +308,15 @@ pub async fn sign_in(
     let mut random = [0u8; 32];
     OsRng.fill_bytes(&mut random);
     let secret: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-    let token = format!("{}.{}", input.organization_id, secret);
+    let token = format!("{organization_id}.{secret}");
     let token_hash = Sha256::digest(token.as_bytes()).to_vec();
     sqlx::query("INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)")
-        .bind(input.organization_id)
+        .bind(organization_id)
         .bind(&token_hash)
         .bind(user_id)
         .execute(&state.pool)
         .await?;
-    let identity = identity(&state, input.organization_id, &token_hash).await?;
+    let identity = identity(&state, organization_id, &token_hash).await?;
     Ok((
         [
             (header::SET_COOKIE, cookie(&state, &token, SESSION_SECONDS)),

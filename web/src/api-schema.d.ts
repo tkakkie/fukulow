@@ -109,14 +109,19 @@ export interface components {
              * @description At least 12 characters, at most 1024 UTF-8 bytes.
              */
             password: string;
+            /**
+             * Format: password
+             * @description Required when FUKULOW_SETUP_TOKEN is configured on the server.
+             */
+            setup_token?: string | null;
         };
         SignInRequest: {
             email: string;
             /**
              * Format: uuid
-             * @description Returned by setup; email addresses are unique within this organization.
+             * @description Returned by setup; may be omitted only when exactly one organization exists.
              */
-            organization_id: string;
+            organization_id?: string | null;
             /** Format: password */
             password: string;
         };
@@ -265,6 +270,15 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid setup token */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
