@@ -1,10 +1,12 @@
 <script lang="ts">
   import { createChannels } from './channels'
+  import { createTimelines } from './timeline'
   import ChannelList from './ChannelList.svelte'
   import CreateChannelForm from './CreateChannelForm.svelte'
   import Timeline from './Timeline.svelte'
 
   const channels = createChannels()
+  const timelines = createTimelines()
   let s = $state(channels.get())
   const unsubscribe = channels.subscribe(() => (s = channels.get()))
   channels.load()
@@ -32,7 +34,7 @@
   <div class="main">
     {#if selected}
       <h2>{selected.name}</h2>
-      {#key selected.id}<Timeline channelId={selected.id} />{/key}
+      {#key selected.id}<Timeline timeline={timelines.get(selected.id)} />{/key}
     {:else if s.status === 'ready'}
       <p>チャンネルがありません。左のフォームから作成してください。</p>
     {/if}

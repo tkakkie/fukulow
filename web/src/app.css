@@ -6,3 +6,4 @@ small { opacity: 0.7; }
 .workspace { display: grid; grid-template-columns: 16rem 1fr; gap: 1rem; align-items: start; }
 .workspace ul { list-style: none; padding: 0; }
 .workspace nav button[aria-current='true'] { font-weight: bold; }
+.body { white-space: pre-wrap; }

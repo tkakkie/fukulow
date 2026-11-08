@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Message, Result } from './api'
-import { createTimeline, mergeMessages } from './timeline'
+import { createTimeline, createTimelines, mergeMessages } from './timeline'
 
 const msg = (seq: number, cid = `c${seq}`, body = `m${seq}`): Message => ({
   id: `id${seq}`, client_message_id: cid, created_at: '2026-01-01T00:00:00Z', sender: 's', seq, topic_id: null, body,
@@ -119,5 +119,24 @@ describe('optimistic send', () => {
     release(ok(msg(1, 'cid1', 'x')))
     await p
     expect(t.get().messages).toEqual([])
+  })
+})
+
+describe('timelines per channel', () => {
+  it('failed send survives switching channels; retry reuses the same client_message_id', async () => {
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(fail())
+      .mockResolvedValueOnce(ok(msg(1, 'cid1', 'hi')))
+    const timelines = createTimelines({ listMessages: vi.fn(), sendMessage }, ids())
+    await timelines.get('a').send('hi')
+    expect(timelines.get('a').get().pending[0]).toMatchObject({ clientMessageId: 'cid1', status: 'failed' })
+    timelines.get('b') // switch away
+    const back = timelines.get('a') // and back
+    expect(back.get().pending).toEqual([{ clientMessageId: 'cid1', body: 'hi', status: 'failed', retryable: true }])
+    await back.retry('cid1')
+    expect(sendMessage.mock.calls[1]).toEqual(['a', { body: 'hi', client_message_id: 'cid1' }])
+    expect(sendMessage.mock.calls[0][1].client_message_id).toBe(sendMessage.mock.calls[1][1].client_message_id)
+    expect(back.get().pending).toEqual([])
+    expect(back.get().messages).toHaveLength(1)
   })
 })

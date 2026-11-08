@@ -43,6 +43,18 @@ export function mergeMessages(current: Message[], incoming: Message[]): Message[
  * and optimistic send. A retry reuses the same client message id, so a lost acknowledgement
  * converges to one entry. Create one instance per selected channel.
  */
+/** One timeline per channel, kept alive across channel switches so pending messages survive. */
+export function createTimelines(api: TimelineApi = defaultApi, newId?: () => string) {
+  const byChannel = new Map<string, ReturnType<typeof createTimeline>>()
+  return {
+    get(channelId: string) {
+      let t = byChannel.get(channelId)
+      if (!t) byChannel.set(channelId, (t = createTimeline(channelId, api, newId)))
+      return t
+    },
+  }
+}
+
 export function createTimeline(
   channelId: string,
   api: TimelineApi = defaultApi,

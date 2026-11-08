@@ -47,4 +47,15 @@ describe('channels', () => {
     expect(await c.create({ name: 'x', visibility: 'public' })).toEqual({ error: '同じ名前のチャンネルがすでにあります。' })
     expect(c.get().channels).toEqual([])
   })
+  it('a stale load response does not drop a channel created meanwhile', async () => {
+    let release!: (r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void
+    const listChannels = vi.fn().mockReturnValue(new Promise((r) => (release = r)))
+    const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
+    const loading = c.load()
+    await c.create({ name: 'n', visibility: 'public' })
+    release(ok({ channels: [ch('a')] })) // list read before the create committed
+    await loading
+    expect(c.get().channels.map((x) => x.id)).toEqual(['n'])
+    expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'n' })
+  })
 })

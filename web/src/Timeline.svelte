@@ -1,19 +1,15 @@
 <script lang="ts">
-  import { createTimeline, sendErrorMessage } from './timeline'
+  import { sendErrorMessage, type createTimeline } from './timeline'
   import Composer from './Composer.svelte'
 
-  let { channelId }: { channelId: string } = $props()
-
-  // The parent keys this component by channel, so channelId never changes during its life.
+  // The parent keys this component by channel and owns the instance (it outlives this component).
+  let { timeline: given }: { timeline: ReturnType<typeof createTimeline> } = $props()
   // svelte-ignore state_referenced_locally
-  const timeline = createTimeline(channelId)
+  const timeline = given
   let s = $state(timeline.get())
   const unsubscribe = timeline.subscribe(() => (s = timeline.get()))
-  timeline.loadLatest()
-  $effect(() => () => {
-    unsubscribe()
-    timeline.dispose()
-  })
+  if (s.status !== 'ready') timeline.loadLatest()
+  $effect(() => unsubscribe)
 </script>
 
 <section aria-label="タイムライン">
@@ -28,11 +24,11 @@
     {/if}
     <ul>
       {#each s.messages as m (m.id)}
-        <li><time datetime={m.created_at}>{new Date(m.created_at).toLocaleString('ja-JP')}</time> {m.body}</li>
+        <li><time datetime={m.created_at}>{new Date(m.created_at).toLocaleString('ja-JP')}</time> <span class="body">{m.body}</span></li>
       {/each}
       {#each s.pending as p (p.clientMessageId)}
         <li data-status={p.status}>
-          {p.body}
+          <span class="body">{p.body}</span>
           {#if p.status === 'sending'}
             <small>送信中…</small>
           {:else}

@@ -23,6 +23,7 @@ export function channelError(r: Extract<Result<unknown>, { ok: false }>): string
 /** Channel list, selection and creation. `subscribe` fires after every state change. */
 export function createChannels(api: ChannelsApi = defaultApi) {
   let state: ChannelsState = { status: 'loading', channels: [], selectedId: null }
+  let generation = 0 // bumped by create(): a load that started earlier is stale
   const listeners = new Set<() => void>()
   const set = (patch: Partial<ChannelsState>) => {
     state = { ...state, ...patch }
@@ -36,8 +37,10 @@ export function createChannels(api: ChannelsApi = defaultApi) {
       return () => listeners.delete(l)
     },
     async load() {
+      const mine = generation
       set({ status: 'loading' })
       const r = await api.listChannels()
+      if (mine !== generation) return set({ status: 'ready' }) // stale: would drop a channel created meanwhile
       if (!r.ok) return set({ status: 'error' })
       const keep = r.data.channels.some((c) => c.id === state.selectedId)
       set({ status: 'ready', channels: r.data.channels, selectedId: keep ? state.selectedId : (r.data.channels[0]?.id ?? null) })
@@ -49,6 +52,7 @@ export function createChannels(api: ChannelsApi = defaultApi) {
     async create(req: CreateChannelRequest): Promise<{ error: string } | { channel: Channel }> {
       const r = await api.createChannel({ ...req, name: req.name.trim() })
       if (!r.ok) return { error: channelError(r) }
+      generation++
       set({ channels: [...state.channels, r.data], selectedId: r.data.id })
       return { channel: r.data }
     },
