@@ -1,2 +1,5 @@
 :root { font-family: system-ui, sans-serif; color-scheme: light dark; }
 body { margin: 0; display: grid; place-items: center; min-height: 100vh; }
+form { display: grid; gap: 0.75rem; min-width: 18rem; }
+label { display: grid; gap: 0.25rem; }
+small { opacity: 0.7; }
