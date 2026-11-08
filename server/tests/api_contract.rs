@@ -135,6 +135,7 @@ async fn contract_routes_are_stubs_without_authentication_or_database_access() {
         pool,
         cookie_secure: true,
         setup_token: None,
+        sign_in_throttle: Default::default(),
     });
     for (method, path) in [
         ("GET", "/api/v1/channels"),
