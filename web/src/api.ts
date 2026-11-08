@@ -54,3 +54,30 @@ export const deleteSession = (f: typeof fetch = fetch) =>
   call<undefined>(f, '/api/v1/session', { method: 'DELETE' }, false)
 
 export const getMe = (f: typeof fetch = fetch) => call<Identity>(f, '/api/v1/me', { cache: 'no-store' }, true)
+
+export type Channel = components['schemas']['Channel']
+export type ChannelVisibility = components['schemas']['ChannelVisibility']
+export type CreateChannelRequest = components['schemas']['CreateChannelRequest']
+export type Message = components['schemas']['Message']
+export type MessagePage = components['schemas']['MessagePage']
+export type SendMessageRequest = components['schemas']['SendMessageRequest']
+export type ListMessagesQuery = NonNullable<
+  import('./api-schema').operations['list_messages']['parameters']['query']
+>
+
+export const listChannels = (f: typeof fetch = fetch) =>
+  call<components['schemas']['ChannelList']>(f, '/api/v1/channels', { cache: 'no-store' }, true)
+
+export const createChannel = (body: CreateChannelRequest, f: typeof fetch = fetch) =>
+  call<Channel>(f, '/api/v1/channels', json(body), true)
+
+/** No cursor = latest page; pages are ascending by seq. */
+export const listMessages = (channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(query)) if (v !== undefined) qs.set(k, String(v))
+  const suffix = qs.size > 0 ? `?${qs}` : ''
+  return call<MessagePage>(f, `/api/v1/channels/${encodeURIComponent(channelId)}/messages${suffix}`, { cache: 'no-store' }, true)
+}
+
+export const sendMessage = (channelId: string, body: SendMessageRequest, f: typeof fetch = fetch) =>
+  call<Message>(f, `/api/v1/channels/${encodeURIComponent(channelId)}/messages`, json(body), true)

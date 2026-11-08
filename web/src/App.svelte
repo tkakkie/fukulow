@@ -1,5 +1,6 @@
 <script lang="ts">
   import { restore, setupAndSignIn, signIn, signOut, errorMessage, type AuthState } from './auth'
+  import Workspace from './Workspace.svelte'
 
   let view = $state<AuthState>({ screen: 'loading' })
   let error = $state('')
@@ -95,6 +96,7 @@
       <button type="submit" disabled={busy}>ログイン</button>
     </form>
   {:else}
+    <Workspace />
     <p>{view.identity.organization.name} / {view.identity.member.name} さん</p>
     {#if error}<p role="alert">{error}</p>{/if}
     <button onclick={doSignOut} disabled={busy}>ログアウト</button>

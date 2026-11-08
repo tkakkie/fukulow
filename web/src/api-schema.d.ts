@@ -707,6 +707,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Too many failed or in-flight sign-in attempts */
+            429: {
+                headers: {
+                    /** @description Seconds until retry; at least 1 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     sign_out: {
