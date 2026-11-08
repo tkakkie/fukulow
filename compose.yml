@@ -1,0 +1,29 @@
+# Default: `docker compose --profile caddy up -d`  (or `--profile nginx`)
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      FUKULOW_ADDR: 0.0.0.0:8080
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  caddy:
+    profiles: ["caddy"]
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+  nginx:
+    profiles: ["nginx"]
+    image: nginx:1
+    restart: unless-stopped
+    ports: ["80:80"]
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  caddy_data:
