@@ -130,7 +130,7 @@
         "tags": [
           "crate::messages"
         ],
-        "summary": "List visible channel messages using exclusive per-channel sequence cursors.\nafter_seq and before_seq are mutually exclusive; neither selects the latest page.\nPages are always ascending seq. Continue after_seq with the last seq, or before_seq\n(including older history from the latest page) with the first seq. has_more refers\nto that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries\nreturn 400. Identity and organization come only from the authenticated session.\nContract only: currently returns 501 without parsing input or accessing the database.",
+        "summary": "List visible channel messages using exclusive per-channel sequence cursors.\nafter_seq and before_seq are mutually exclusive; neither selects the latest page.\nPages are always ascending seq. Continue after_seq with the last seq, or before_seq\n(including older history from the latest page) with the first seq. has_more refers\nto that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries\nreturn 400. Identity and organization come only from the authenticated session.",
         "operationId": "list_messages",
         "parameters": [
           {
@@ -229,9 +229,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Contract stub; not implemented"
           }
         },
         "security": [
@@ -247,7 +244,7 @@
         "tags": [
           "crate::messages"
         ],
-        "summary": "Send a message to a visible channel; topic_id is always null.\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body or channel returns 409.\nContract only: currently returns 501 without parsing input or accessing the database.",
+        "summary": "Send a message to a visible channel; topic_id is always null.\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body or channel returns 409.",
         "operationId": "send_message",
         "parameters": [
           {
@@ -351,9 +348,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Contract stub; not implemented"
           }
         },
         "security": [

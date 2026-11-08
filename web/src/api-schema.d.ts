@@ -39,7 +39,6 @@ export interface paths {
          *     (including older history from the latest page) with the first seq. has_more refers
          *     to that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries
          *     return 400. Identity and organization come only from the authenticated session.
-         *     Contract only: currently returns 501 without parsing input or accessing the database.
          */
         get: operations["list_messages"];
         put?: never;
@@ -48,7 +47,6 @@ export interface paths {
          *     The session supplies organization and sender. A successful retry returns the same
          *     canonical message with 201, allocating no new sequence and publishing no new event.
          *     A reused client_message_id with different body or channel returns 409.
-         *     Contract only: currently returns 501 without parsing input or accessing the database.
          */
         post: operations["send_message"];
         delete?: never;
@@ -536,13 +534,6 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
         };
     };
     send_message: {
@@ -627,13 +618,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
-            };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

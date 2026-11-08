@@ -136,17 +136,7 @@ async fn remaining_contract_routes_are_stubs_without_authentication_or_database_
         cookie_secure: true,
         setup_token: None,
     });
-    for (method, path) in [
-        (
-            "GET",
-            "/api/v1/channels/00000000-0000-0000-0000-000000000001/messages?after_seq=0",
-        ),
-        (
-            "POST",
-            "/api/v1/channels/00000000-0000-0000-0000-000000000001/messages",
-        ),
-        ("GET", "/api/v1/ws"),
-    ] {
+    for (method, path) in [("GET", "/api/v1/ws")] {
         let response = router
             .clone()
             .oneshot(
