@@ -1,12 +1,12 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json,
-    extract::{FromRequestParts, State},
+    extract::{FromRequest, FromRequestParts, Request, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use rand::{RngCore, rngs::OsRng};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use subtle::ConstantTimeEq;
@@ -54,6 +54,33 @@ impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
         eprintln!("database operation failed: {error}");
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+    }
+}
+
+// Keep extractor failures in the same JSON contract as handler errors.
+pub struct ApiJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<T>::from_request(request, state)
+            .await
+            .map(|Json(value)| Self(value))
+            .map_err(|rejection| match rejection.status() {
+                StatusCode::PAYLOAD_TOO_LARGE => {
+                    ApiError(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+                }
+                StatusCode::UNSUPPORTED_MEDIA_TYPE => ApiError(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "expected application/json",
+                ),
+                _ => ApiError::bad_request(),
+            })
     }
 }
 
@@ -154,10 +181,12 @@ async fn hash_password(password: String) -> Result<String, ApiError> {
 #[utoipa::path(post, path = "/api/v1/setup", request_body = SetupRequest,
     responses((status = 201, body = Identity), (status = 400, body = ErrorBody),
     (status = 401, description = "Missing or invalid setup token", body = ErrorBody),
-    (status = 409, description = "Setup already completed", body = ErrorBody)))]
+    (status = 409, description = "Setup already completed", body = ErrorBody),
+    (status = 413, description = "Request body too large", body = ErrorBody),
+    (status = 415, description = "Expected application/json", body = ErrorBody)))]
 pub async fn setup(
     State(state): State<AppState>,
-    Json(input): Json<SetupRequest>,
+    ApiJson(input): ApiJson<SetupRequest>,
 ) -> Result<Response, ApiError> {
     if let Some(expected) = &state.setup_token {
         let supplied = input
@@ -183,9 +212,17 @@ pub async fn setup(
     {
         return Err(ApiError::bad_request());
     }
+    // Global bootstrap fast path: completed setup never consumes password workers
+    // or takes the setup lock. The transactional check below still closes the race.
+    if sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM organizations)")
+        .fetch_one(&state.pool)
+        .await?
+    {
+        return Err(ApiError(StatusCode::CONFLICT, "setup already completed"));
+    }
     let password_hash = hash_password(input.password).await?;
     let mut tx = state.pool.begin().await?;
-    // Global bootstrap is the sole tenant-scope exception. The table lock also
+    // Global bootstrap is a tenant-scope exception. The table lock also
     // serializes setup across processes and concurrent first requests.
     sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
         .execute(&mut *tx)
@@ -253,10 +290,12 @@ impl From<IdentityRow> for Identity {
 
 #[utoipa::path(post, path = "/api/v1/session", request_body = SignInRequest,
     responses((status = 200, body = SessionResponse, headers(("Set-Cookie" = String, description = "HttpOnly; SameSite=Strict; Path=/; Secure by default"))),
-    (status = 400, body = ErrorBody), (status = 401, body = ErrorBody)))]
+    (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
+    (status = 413, description = "Request body too large", body = ErrorBody),
+    (status = 415, description = "Expected application/json", body = ErrorBody)))]
 pub async fn sign_in(
     State(state): State<AppState>,
-    Json(input): Json<SignInRequest>,
+    ApiJson(input): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
     let email = email(&input.email)?;
     if input.password.is_empty() || input.password.len() > 1024 {
@@ -445,4 +484,62 @@ pub async fn sign_out(State(state): State<AppState>, auth: Auth) -> Result<Respo
         ],
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    #[sqlx::test]
+    async fn completed_setup_skips_password_workers_and_setup_lock(pool: sqlx::PgPool) {
+        sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Existing')")
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _workers = PASSWORD_WORKERS.acquire_many(4).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        for setup_token in [None, Some("test-only-token".to_owned())] {
+            let app = crate::app(AppState {
+                pool: pool.clone(),
+                cookie_secure: true,
+                setup_token: setup_token.clone(),
+            });
+            let request = Request::post("/api/v1/setup")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "setup_token": setup_token,
+                        "organization_name": "Another organization",
+                        "name": "Owner",
+                        "email": "owner@example.com",
+                        "password": "correct horse battery staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            // Neither an Argon2 permit nor the authoritative setup lock is available.
+            let response =
+                tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(request))
+                    .await
+                    .expect("completed setup must not wait for password workers or the setup lock")
+                    .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"error": "setup already completed"})
+            );
+        }
+    }
 }

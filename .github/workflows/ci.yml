@@ -54,7 +54,7 @@ jobs:
       - run: docker compose --profile caddy up -d --build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
-      - run: test "$(curl --retry 10 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:8080/api/v1/health)" = ok
+      - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
       - if: failure()
         run: docker compose --profile caddy logs
         env:

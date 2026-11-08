@@ -119,6 +119,93 @@ async fn setup_works_once_and_is_atomic(pool: PgPool) {
     assert_eq!(role, "owner");
 }
 
+#[tokio::test]
+async fn json_rejections_use_error_body_on_setup_and_sign_in() {
+    // Rejections must happen without accessing a database or password workers.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let app = router(&pool);
+    for path in ["/api/v1/setup", "/api/v1/session"] {
+        let valid_input = if path == "/api/v1/setup" {
+            setup_input()
+        } else {
+            json!({"email": "owner@example.com", "password": PASSWORD})
+        };
+        let mut wrong_type = valid_input.clone();
+        wrong_type["password"] = json!(123);
+        let mut unknown_field = valid_input.clone();
+        unknown_field["unexpected"] = json!(true);
+        let mut oversized = valid_input.clone();
+        oversized["password"] = json!("x".repeat(16 * 1024));
+        for (content_type, input, status, error) in [
+            (
+                Some("application/json"),
+                "{".into(),
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+            (
+                Some("application/json"),
+                String::new(),
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+            (
+                Some("application/json"),
+                "{}".into(),
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+            (
+                Some("application/json"),
+                wrong_type.to_string(),
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+            (
+                Some("application/json"),
+                unknown_field.to_string(),
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+            (
+                None,
+                valid_input.to_string(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "expected application/json",
+            ),
+            (
+                Some("text/plain"),
+                valid_input.to_string(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "expected application/json",
+            ),
+            (
+                Some("application/json"),
+                oversized.to_string(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large",
+            ),
+        ] {
+            let mut request = Request::post(path);
+            if let Some(content_type) = content_type {
+                request = request.header(header::CONTENT_TYPE, content_type);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(input)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{path}: {error}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert_eq!(body(response).await, json!({"error": error}));
+        }
+    }
+}
+
 #[sqlx::test]
 async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPool) {
     let setup_token = "setup-token-test-only";
