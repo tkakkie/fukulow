@@ -26,7 +26,7 @@ describe('web boundary: network', () => {
 
   it('rejects network use in a Svelte script and in the template (negative)', () => {
     expect(uses('<script lang="ts">const r = fetch("/x")</script>')).toEqual(['fetch'])
-    expect(uses('<button onclick={() => fetch("/x")}>x</button>')).toEqual(['fetch'])
+    expect(uses('<script lang="ts"></script><button onclick={() => fetch("/x")}>x</button>')).toEqual(['fetch'])
   })
 
   it('does not flag unrelated names, comments, strings or types', () => {
@@ -50,5 +50,25 @@ describe('web boundary: storage', () => {
 
   it('does not allow network use in the storage helper (negative)', () => {
     expect(uses('fetch("/x")', 'src/ui-settings.ts')).toEqual(['fetch'])
+  })
+})
+
+describe('web boundary: wrapped and chained owners (negative)', () => {
+  const ts = (src: string) => uses(src, 'src/x.ts')
+  const sv = (src: string) => uses(`<script lang="ts">${src}</script>`)
+  const cases: [string, string, string][] = [
+    ['parenthesised cast', '(window as any).fetch("/x")', 'fetch'],
+    ['parenthesised cast on globalThis', '(globalThis as any).localStorage.x = 1', 'localStorage'],
+    ['non-null assertion', 'window!.fetch("/x")', 'fetch'],
+    ['member chain', 'window.document.cookie = "a"', 'document.cookie'],
+    ['globalThis member chain', 'globalThis.document.cookie', 'document.cookie'],
+    ['angle-bracket cast', '(<any>window).fetch("/x")', 'fetch'],
+  ]
+  for (const [name, src, use] of cases) {
+    it(`${name} in .ts`, () => expect(ts(src)).toEqual([use]))
+    it(`${name} in .svelte script`, () => expect(sv(src)).toEqual([use]))
+  }
+  it('is caught in a .svelte template', () => {
+    expect(uses('<script lang="ts"></script><button onclick={() => (window as any).fetch("/x")}>x</button>')).toEqual(['fetch'])
   })
 })
