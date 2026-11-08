@@ -36,7 +36,7 @@ export function errorMessage(r: Extract<Result<unknown>, { ok: false }>, context
 }
 
 /** First load: /me decides. 401 = signed out (then setup status picks the screen). */
-export async function restore(f: Fetch = fetch): Promise<AuthState> {
+export async function restore(f?: Fetch): Promise<AuthState> {
   const me = await getMe(f)
   if (me.ok) return { screen: 'app', identity: me.data }
   if (me.kind === 'network' || me.status !== 401) return { screen: 'error' }
@@ -46,7 +46,7 @@ export async function restore(f: Fetch = fetch): Promise<AuthState> {
 }
 
 /** Sign in; on success returns the app state, otherwise the failure. */
-export async function signIn(email: string, password: string, f: Fetch = fetch) {
+export async function signIn(email: string, password: string, f?: Fetch) {
   return postSession({ email, password }, f)
 }
 
@@ -56,7 +56,7 @@ export async function signIn(email: string, password: string, f: Fetch = fetch) 
  */
 export async function setupAndSignIn(
   req: SetupRequest,
-  f: Fetch = fetch,
+  f?: Fetch,
 ): Promise<{ state: AuthState } | { error: string }> {
   const setup = await postSetup(req, f)
   if (!setup.ok) {
@@ -76,7 +76,7 @@ export async function setupAndSignIn(
 }
 
 /** Sign out; 401 means already signed out. Network/5xx keeps the user signed in. */
-export async function signOut(f: Fetch = fetch): Promise<boolean> {
+export async function signOut(f?: Fetch): Promise<boolean> {
   const r = await deleteSession(f)
   return r.ok || (r.kind === 'http' && r.status === 401)
 }
