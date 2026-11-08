@@ -1,13 +1,22 @@
 use utoipa::{
     Modify, OpenApi,
-    openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
+    openapi::{
+        RefOr,
+        schema::{Discriminator, Ref, Schema},
+        security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
+    },
 };
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::sign_out, crate::auth::me),
-    components(schemas(crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::ErrorBody)),
-    modifiers(&Security)
+    paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::sign_out, crate::auth::me,
+        crate::channels::list_channels, crate::channels::create_channel,
+        crate::messages::list_messages, crate::messages::send_message, crate::realtime::upgrade),
+    components(schemas(crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::ErrorBody,
+        crate::channels::Channel, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::channels::ChannelList,
+        crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage,
+        crate::realtime::ClientMessage, crate::realtime::ServerEvent)),
+    modifiers(&Security, &WebSocketDiscriminators)
 )]
 pub struct ApiDoc;
 
@@ -23,5 +32,52 @@ impl Modify for Security {
             "cookie",
             SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new("fukulow_session"))),
         );
+    }
+}
+
+struct WebSocketDiscriminators;
+impl Modify for WebSocketDiscriminators {
+    #[expect(
+        clippy::panic,
+        reason = "utoipa Modify cannot return Result; an invalid generated contract must fail API export"
+    )]
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        for (root, variants) in [
+            (
+                "ClientMessage",
+                &[("subscribe", "Subscribe"), ("unsubscribe", "Unsubscribe")][..],
+            ),
+            (
+                "ServerEvent",
+                &[
+                    ("message", "MessageEvent"),
+                    ("subscribed", "Subscribed"),
+                    ("error", "ErrorEvent"),
+                ][..],
+            ),
+        ] {
+            // utoipa derives the serde-tagged oneOf items but not a discriminator.
+            // Lift those items into components so discriminator mappings target refs;
+            // the variant properties still come exclusively from the Rust enum.
+            let Some(RefOr::T(Schema::OneOf(mut schema))) = components.schemas.remove(root) else {
+                panic!("{root} must be a oneOf");
+            };
+            assert_eq!(schema.items.len(), variants.len());
+            let mut discriminator = Discriminator::new("type");
+            for (item, (tag, name)) in schema.items.iter_mut().zip(variants) {
+                let reference = Ref::from_schema_name(*name);
+                discriminator
+                    .mapping
+                    .insert((*tag).into(), reference.ref_location.clone());
+                components
+                    .schemas
+                    .insert((*name).into(), std::mem::replace(item, reference.into()));
+            }
+            schema.discriminator = Some(discriminator);
+            components
+                .schemas
+                .insert(root.into(), Schema::OneOf(schema).into());
+        }
     }
 }

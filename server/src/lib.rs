@@ -1,5 +1,8 @@
 pub mod auth;
+pub mod channels;
+pub mod messages;
 pub mod openapi;
+pub mod realtime;
 
 use axum::{
     Router,
@@ -29,6 +32,15 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(auth::sign_in).delete(auth::sign_out),
         )
         .route("/api/v1/me", get(auth::me))
+        .route(
+            "/api/v1/channels",
+            get(channels::list_channels).post(channels::create_channel),
+        )
+        .route(
+            "/api/v1/channels/{id}/messages",
+            get(messages::list_messages).post(messages::send_message),
+        )
+        .route("/api/v1/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .fallback(static_handler)
         .with_state(state)
