@@ -89,7 +89,7 @@ Also: sending a message is idempotent (client-generated id); reconnect uses per-
 Every open issue/PR carries at most one status label, set by the AI that hands off:
 - `status:working` - an AI is working; do not review yet.
 - `status:ai-review` - waiting for CI / AI review / Copilot.
-- `status:human-review` - maintainer's turn: an Issue to approve, or a PR with CI green, required AI reviews done and marked ready.
+- `status:human-review` - maintainer's turn: an Issue to approve, or a PR with CI green, required AI reviews done (including Copilot, when requested: wait until its review has finished) and marked ready.
   Filter: `label:status:human-review`. After approval an Issue becomes `status:ready`; a PR is merged, or goes back to `status:working` if changes are requested.
 - `status:ready` - Issue approved by the maintainer; an AI may start (then `status:working`).
 - `status:needs-decision` - maintainer's turn: a decision is needed; the question is in the last comment.
