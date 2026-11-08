@@ -124,4 +124,11 @@ fn helpers_are_allowed() {
         "#![cfg(test)]\npub unsafe fn forbidden() {}",
     );
     assert_denied(&output, &["unsafe_code"]);
+
+    // `forbid`, unlike `deny`, cannot be relaxed by an inner attribute.
+    let output = fixture.check(
+        "#[allow(unsafe_code)] pub unsafe fn cannot_override_forbid() {}",
+        "",
+    );
+    assert_denied(&output, &["E0453"]);
 }
