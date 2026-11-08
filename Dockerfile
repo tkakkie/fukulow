@@ -5,7 +5,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM rust:1.98.1-slim AS server
+FROM rust:1.99.0-slim AS server
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY server/ server/
