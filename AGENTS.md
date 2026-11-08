@@ -35,6 +35,27 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them.
 - Only the maintainer merges (or explicitly tells an AI to).
 
+## Languages (keep it small)
+- Allowed: Rust (server, server tests), TypeScript (web, vitest, Playwright, small scripts run with Node), SQL, short bash.
+- No Python, Go or other languages. Adding one needs the maintainer's approval and a line in `docs/decisions.md`.
+- Config files may use the tool's native format (e.g. `svelte.config.js`). Everything we write is TypeScript.
+- bash: macOS ships 3.2; write scripts that work on 3.2 (`#!/usr/bin/env bash`, `set -euo pipefail`, no associative arrays).
+  Scripts over ~20 lines or sharing variables become TypeScript. Shared settings live in `.env.example` / Makefile variables.
+
+## Versions and updates
+- Pinned: `rust-toolchain.toml`, `.node-version`, `engines`, Docker image tags. Pinning is for predictability, not for staying old.
+- Dependabot (weekly, grouped; security updates immediately) covers Cargo, npm, Actions, Docker. CI runs a vulnerability check
+  (`cargo deny`, `npm audit`). Update PRs: an AI checks the changelog for breaking changes, then asks the maintainer to merge.
+- Production VPS: automatic OS security updates.
+
+## Who is on the move (labels)
+Every open issue/PR carries at most one status label, set by the AI that hands off:
+- `status:working` - an AI is working; do not review yet.
+- `status:ai-review` - waiting for CI / AI review / Copilot.
+- `status:human-review` - maintainer's turn: CI green, required AI reviews done, PR marked ready. Filter: `label:status:human-review`.
+- `status:needs-decision` - maintainer's turn: a decision is needed; the question is in the last comment.
+- Decide-free work continues without asking; only decisions go to the maintainer. Nothing stays green and unlabelled: when CI and reviews are done, the label moves to `status:human-review`.
+
 ## Planning and labels
 - Milestone = one-week sprint (keep at most 2 open). Modules are expressed with labels, not milestones.
 - Labels: `ready`, `blocked`; `area:server|web|api|infra`; `type:feature|bug|chore`; `ai:codex|claude|antigravity`;
