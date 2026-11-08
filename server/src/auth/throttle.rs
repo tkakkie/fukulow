@@ -69,6 +69,16 @@ fn reserve<K: Eq + std::hash::Hash>(
     Ok(())
 }
 
+fn ip_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => IpAddr::V4(ip),
+        IpAddr::V6(ip) => {
+            let [a, b, c, d, ..] = ip.segments();
+            IpAddr::from([a, b, c, d, 0, 0, 0, 0])
+        }
+    }
+}
+
 impl SignInThrottle {
     /// Exact proxy peer IPs, plus a header whose rightmost value is the client IP.
     /// Both settings must be present; the default trusts no forwarded headers.
@@ -142,10 +152,23 @@ impl SignInThrottle {
                 .retain(|_, bucket| bucket.pending > 0 || bucket.expires > now);
             buckets.last_prune = Some(now);
         }
-        reserve(&mut buckets.ips, ip.to_canonical(), IP_LIMIT, now)?;
+        let ip = ip_key(ip);
+        if !buckets.ips.contains_key(&ip) && buckets.ips.len() >= MAX_KEYS {
+            // Never evict a reservation: its eventual Drop must release this bucket.
+            let oldest = buckets
+                .ips
+                .iter()
+                .filter(|(_, bucket)| bucket.pending == 0)
+                .min_by_key(|(_, bucket)| bucket.expires)
+                .map(|(key, _)| *key);
+            if let Some(key) = oldest {
+                buckets.ips.remove(&key);
+            }
+        }
+        reserve(&mut buckets.ips, ip, IP_LIMIT, now)?;
         Ok(Attempt {
             throttle: self.clone(),
-            ip: ip.to_canonical(),
+            ip,
             account: None,
             failed: false,
         })
@@ -191,6 +214,9 @@ impl Drop for Attempt {
         }
         if let Some(bucket) = buckets.ips.get_mut(&self.ip) {
             finish(bucket, self.failed);
+            if bucket.failures == 0 && bucket.pending == 0 {
+                buckets.ips.remove(&self.ip);
+            }
         }
     }
 }
@@ -313,6 +339,121 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn mapped_ipv6_shares_the_ipv4_budget() {
+        let throttle = SignInThrottle::default();
+        let mapped = "::ffff:192.0.2.1".parse().unwrap();
+        for n in 0..IP_LIMIT {
+            throttle
+                .begin(if n % 2 == 0 { ip(1) } else { mapped })
+                .unwrap()
+                .failed();
+        }
+        assert!(throttle.begin(ip(1)).is_err());
+        assert!(throttle.begin(mapped).is_err());
+        assert!(throttle.begin(ip(2)).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ipv6_prefix_pending_reservations_release_on_drop() {
+        let throttle = SignInThrottle::default();
+        let mut attempts = Vec::new();
+        for n in 0..IP_LIMIT {
+            attempts.push(
+                throttle
+                    .begin(format!("2001:db8:abcd:1::{n}").parse().unwrap())
+                    .unwrap(),
+            );
+        }
+        let fresh = "2001:db8:abcd:1::ffff".parse().unwrap();
+        assert!(throttle.begin(fresh).is_err());
+        drop(attempts.pop());
+        drop(throttle.begin(fresh).unwrap());
+        drop(attempts);
+        assert!(throttle.lock().ips.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_ip_map_allows_successful_password_verification_and_stays_bounded() {
+        let password = "correct horse battery staple";
+        let stored = crate::auth::hash_password(password.into()).await.unwrap();
+        let throttle = SignInThrottle::default();
+        // Successful/cancelled attempts leave no idle IP bucket.
+        for n in 0..MAX_KEYS as u32 {
+            drop(throttle.begin(IpAddr::from(n.to_be_bytes())).unwrap());
+        }
+        assert!(throttle.lock().ips.is_empty());
+        // Failed attempts may fill the map, but cannot lock out a new source.
+        for n in 0..MAX_KEYS as u32 {
+            throttle
+                .begin(IpAddr::from(n.to_be_bytes()))
+                .unwrap()
+                .failed();
+        }
+        assert_eq!(throttle.lock().ips.len(), MAX_KEYS);
+        let mut attempt = throttle.begin(ip(1)).unwrap();
+        attempt
+            .account(Uuid::new_v4(), "owner@example.com".into())
+            .unwrap();
+        assert_eq!(throttle.lock().ips.len(), MAX_KEYS);
+        assert!(
+            crate::auth::check_password(password.into(), Some(stored), attempt)
+                .await
+                .unwrap()
+        );
+        let buckets = throttle.lock();
+        assert_eq!(buckets.ips.len(), MAX_KEYS - 1);
+        assert!(!buckets.ips.contains_key(&ip(1)));
+        assert!(buckets.ips.values().all(|bucket| bucket.pending == 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ip_eviction_removes_oldest_idle_bucket_and_preserves_pending_reservations() {
+        let throttle = SignInThrottle::default();
+        let pending = throttle.begin(ip(1)).unwrap();
+        // An expired pending reservation must survive both pruning and eviction.
+        tokio::time::advance(WINDOW).await;
+        throttle.begin(ip(2)).unwrap().failed();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for n in 0..MAX_KEYS as u32 - 2 {
+            throttle
+                .begin(IpAddr::from(n.to_be_bytes()))
+                .unwrap()
+                .failed();
+        }
+        let new = throttle.begin(ip(3)).unwrap();
+        {
+            let buckets = throttle.lock();
+            assert_eq!(buckets.ips.len(), MAX_KEYS);
+            assert!(!buckets.ips.contains_key(&ip(2)));
+            assert_eq!(buckets.ips[&ip(1)].pending, 1);
+        }
+        pending.failed();
+        drop(new);
+        let buckets = throttle.lock();
+        assert_eq!(buckets.ips[&ip(1)].pending, 0);
+        assert_eq!(buckets.ips[&ip(1)].failures, 1);
+        assert_eq!(buckets.ips.len(), MAX_KEYS - 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_ip_map_keeps_pending_reservations_bounded_until_drop() {
+        let throttle = SignInThrottle::default();
+        let mut attempts = Vec::new();
+        for n in 0..MAX_KEYS as u32 {
+            attempts.push(throttle.begin(IpAddr::from(n.to_be_bytes())).unwrap());
+        }
+        tokio::time::advance(WINDOW).await;
+        assert!(throttle.begin(ip(1)).is_err());
+        assert_eq!(throttle.lock().ips.len(), MAX_KEYS);
+        drop(attempts.pop());
+        let new = throttle.begin(ip(1)).unwrap();
+        assert_eq!(throttle.lock().ips.len(), MAX_KEYS);
+        drop(attempts);
+        drop(new);
+        assert!(throttle.lock().ips.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn bucket_storage_is_bounded_and_expired_entries_are_purged() {
         let throttle = SignInThrottle::default();
         let organization = Uuid::new_v4();
@@ -330,6 +471,7 @@ mod tests {
         );
         assert_eq!(throttle.lock().accounts.len(), MAX_KEYS);
         drop(rejected);
+        assert!(throttle.lock().ips.is_empty());
         tokio::time::advance(WINDOW).await;
         let mut allowed = throttle.begin(ip(1)).unwrap();
         allowed

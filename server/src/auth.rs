@@ -691,6 +691,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ipv6_prefix_failures_return_429_while_another_prefix_remains_usable() {
+        let throttle = SignInThrottle::default();
+        for n in 0..20 {
+            throttle
+                .begin(format!("2001:db8:abcd:1:{n}:1:2:{n}").parse().unwrap())
+                .unwrap()
+                .failed();
+        }
+        assert!(
+            throttle
+                .begin("2001:db8:abcd:2::1".parse().unwrap())
+                .is_ok()
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let app = crate::app(AppState {
+            pool,
+            cookie_secure: true,
+            setup_token: None,
+            sign_in_throttle: throttle,
+        });
+        let request = Request::post("/api/v1/session")
+            .extension(ConnectInfo(
+                "[2001:db8:abcd:1:ffff:ffff:ffff:ffff]:1234"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                json!({"email": "owner@example.com", "password": "incorrect password"}).to_string(),
+            ))
+            .unwrap();
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(1), app.oneshot(request))
+                .await
+                .expect("same-prefix requests must be throttled before database access")
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    #[tokio::test]
     async fn retry_after_rounds_up_and_is_never_zero() {
         for (millis, seconds) in [(0, "1"), (1, "1"), (1000, "1"), (1001, "2"), (60_000, "60")] {
             let response =
