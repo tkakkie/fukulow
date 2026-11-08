@@ -5,8 +5,29 @@ services:
     restart: unless-stopped
     environment:
       FUKULOW_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://fukulow:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/fukulow
+      FUKULOW_COOKIE_SECURE: ${FUKULOW_COOKIE_SECURE:-true}
+      FUKULOW_SETUP_TOKEN:
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8080:8080"
+
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fukulow
+      POSTGRES_DB: fukulow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fukulow -d fukulow"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
 
   caddy:
     profiles: ["caddy"]
@@ -30,3 +51,4 @@ services:
 
 volumes:
   caddy_data:
+  postgres_data:
