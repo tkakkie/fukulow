@@ -1,0 +1,21 @@
+name: security
+on:
+  pull_request:
+  schedule:
+    - cron: "17 20 * * *" # nightly (UTC)
+permissions:
+  contents: read
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 26 }
+      # Production dependencies only: build-time (dev) advisories do not ship in the image.
+      - run: npm --prefix web audit --omit=dev --audit-level=high
