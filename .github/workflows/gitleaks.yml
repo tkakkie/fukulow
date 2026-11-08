@@ -3,6 +3,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:  # manual full-history scan (the action scans the whole history for this event)
 permissions:
   contents: read
   pull-requests: read
@@ -11,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }  # full history
+        with: { fetch-depth: 0 }  # history must be present; which commits are scanned depends on the event
       # gitleaks-action v3.0.0; no GITLEAKS_LICENSE needed (personal account, not an Organization)
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
         env:
