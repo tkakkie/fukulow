@@ -25,7 +25,6 @@ Tier 1, enforced by CI today:
 Tier 1, approved, CI check pending (review enforces until the Issue lands):
 - Every table has `organization_id` (NOT NULL), except the `organizations` root and migration bookkeeping (#31). Migrations are append-only: an existing migration file is never edited or deleted (#31).
 - Rust: `unsafe` forbidden; `unwrap()`, `expect()` and `panic!()` denied outside `#[cfg(test)]` (clippy). Startup errors propagate as `Result`. An unavoidable exception needs a stated reason and the maintainer's approval; do not add abstractions just to satisfy the lint (#32).
-- Module dependency direction (see Boundaries), checked on every reference path; `main`, `openapi` and `lib` are the only exceptions (#32).
 - Every row of `docs/invariants.md` names a test that exists (checked against real test definitions, not text search) (#34).
 - The web reaches the server only through its API layer (REST and WebSocket), using the types generated from `openapi.json` as the source of truth (no hand-written copies of API types); credentials are never kept in web storage (harmless UI settings may be) (#34).
 
@@ -34,6 +33,8 @@ Tier 1, review-enforced (tests run in CI; review judges whether they are the rig
 - A change to permissions, tenant scoping or real-time delivery needs denial tests for the authorization rule it touches: another Organization is always denied, and so is any other denial the rule defines (e.g. a non-member of a private Channel inside the same Organization). Cross-Organization denial alone is not enough (see `docs/invariants.md`).
 
 Tier 2 (defaults): terms from `docs/spec.md` everywhere (UI, API, DB, code), no synonyms; languages (see Languages); errors as `ErrorBody`; SQL only in the module that owns the table; indexes added with the migration that needs them; no N+1 on hot paths; small files and functions; comments only for non-obvious reasons; Svelte: small components, state in plain TS modules with vitest tests.
+
+Module dependency direction (see Boundaries) remains Tier 2/review-enforced under #32's fallback; `main`, `openapi` and `lib` are the only exceptions. A check must cover every reference path, including re-exports, before this rule becomes Tier 1 (see `docs/decisions.md`).
 
 Also: sending a message is idempotent (client-generated id); reconnect uses per-channel sequence numbers. Keep it simple: no new dependency, abstraction or doc without a reason in the PR.
 
