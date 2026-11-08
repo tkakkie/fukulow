@@ -279,6 +279,7 @@ export interface components {
          *     reusing the key with a different body or channel returns 409.
          */
         SendMessageRequest: {
+            /** @description 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming. */
             body: string;
             /** Format: uuid */
             client_message_id: string;

@@ -211,6 +211,129 @@ async fn message_json_rejections_use_error_body() {
     }
 }
 
+#[tokio::test]
+async fn message_body_validation_matches_contract() {
+    let schema =
+        serde_json::to_value(<crate::openapi::ApiDoc as utoipa::OpenApi>::openapi()).unwrap();
+    let body_schema = &schema["components"]["schemas"]["SendMessageRequest"]["properties"]["body"];
+    assert_eq!(body_schema["minLength"], 1);
+    assert_eq!(body_schema["maxLength"], 4000);
+    for text in [
+        "hello\0world".into(),
+        "".into(),
+        " \t\r\n\u{2003}".into(),
+        "🦉".repeat(4001),
+    ] {
+        let input = SendMessageRequest {
+            client_message_id: Uuid::new_v4(),
+            body: text,
+        };
+        let error = input.validate().unwrap_err().into_response();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body(error).await, json!({"error": "invalid input"}));
+    }
+    for text in [
+        "a".into(),
+        " \nhello\t ".into(),
+        "x".repeat(4000),
+        "🦉".repeat(4000),
+        "e\u{301}".repeat(2000),
+    ] {
+        let input = SendMessageRequest {
+            client_message_id: Uuid::new_v4(),
+            body: text.clone(),
+        };
+        input.validate().unwrap();
+        assert_eq!(input.body, text);
+    }
+}
+
+#[sqlx::test]
+async fn invalid_message_bodies_write_nothing_and_do_not_allocate_sequences(pool: PgPool) {
+    let (app, organization_id, _, channel_id, token) = fixture(&pool).await;
+    for expected_seq in [None, Some(1_i64)] {
+        if expected_seq.is_some() {
+            sent(
+                &app,
+                &token,
+                channel_id,
+                input(Uuid::new_v4(), "existing message"),
+            )
+            .await;
+        }
+        for text in [
+            "hello\0world".into(),
+            "".into(),
+            " \t\r\n\u{2003}".into(),
+            "🦉".repeat(4001),
+        ] {
+            let key = Uuid::new_v4();
+            let response = send(&app, &token, channel_id, input(key, &text)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(body(response).await, json!({"error": "invalid input"}));
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM messages WHERE organization_id = $1 AND channel_id = $2",
+            )
+            .bind(organization_id)
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count, expected_seq.unwrap_or(0));
+            let seq: Option<i64> = sqlx::query_scalar("SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2")
+                .bind(organization_id).bind(channel_id).fetch_optional(&pool).await.unwrap();
+            assert_eq!(seq, expected_seq);
+            // A rejected body must not reserve the client's idempotency key either.
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE organization_id = $1 AND client_message_id = $2")
+                .bind(organization_id).bind(key).fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+}
+
+#[sqlx::test]
+async fn message_at_body_limit_preserves_whitespace_and_idempotent_retries(pool: PgPool) {
+    let (app, organization_id, _, channel_id, token) = fixture(&pool).await;
+    let key = Uuid::new_v4();
+    let text = format!(" \n{}\t", "🦉".repeat(3997));
+    assert_eq!(text.chars().count(), 4000);
+    let first = sent(&app, &token, channel_id, input(key, &text)).await;
+    assert_eq!(first["body"], text);
+    assert_eq!(first["seq"], 1);
+    assert_eq!(
+        sent(&app, &token, channel_id, input(key, &text)).await,
+        first
+    );
+    assert_error(
+        send(&app, &token, channel_id, input(key, text.trim())).await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM messages WHERE organization_id = $1 AND channel_id = $2",
+    )
+    .bind(organization_id)
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    let seq: i64 = sqlx::query_scalar(
+        "SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2",
+    )
+    .bind(organization_id)
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(seq, 1);
+    assert_eq!(
+        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["seq"],
+        2
+    );
+}
+
 #[sqlx::test]
 async fn messages_deny_cross_organization_send_and_list(pool: PgPool) {
     let (app, organization_id, sender, channel_id, token) = fixture(&pool).await;

@@ -1007,7 +1007,10 @@
         ],
         "properties": {
           "body": {
-            "type": "string"
+            "type": "string",
+            "description": "1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming.",
+            "maxLength": 4000,
+            "minLength": 1
           },
           "client_message_id": {
             "type": "string",

@@ -51,6 +51,8 @@ fn null_schema() -> utoipa::openapi::schema::Object {
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub client_message_id: Uuid,
+    /// 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming.
+    #[schema(min_length = 1, max_length = 4000)]
     pub body: String,
 }
 
@@ -169,6 +171,7 @@ pub async fn send_message(
     ApiJson(input): ApiJson<SendMessageRequest>,
 ) -> Result<Response, MessageError> {
     let Path(channel_id) = path.map_err(|_| MessageError::InvalidInput)?;
+    input.validate()?;
     let organization_id = auth.identity.organization.organization_id;
     let sender = auth.identity.member.id;
     require_visible(&state.pool, organization_id, sender, channel_id).await?;
@@ -179,6 +182,18 @@ pub async fn send_message(
         Json(message),
     )
         .into_response())
+}
+
+impl SendMessageRequest {
+    fn validate(&self) -> Result<(), MessageError> {
+        if self.body.contains('\0')
+            || self.body.trim().is_empty()
+            || self.body.chars().count() > 4000
+        {
+            return Err(MessageError::InvalidInput);
+        }
+        Ok(())
+    }
 }
 
 impl ListMessagesQuery {
@@ -306,6 +321,7 @@ async fn persist(
         return Ok(message);
     }
     tx.rollback().await?;
+    // The unique-key conflict implies a committed winner; absence is an invariant failure.
     let message = existing(pool, organization_id, sender, input.client_message_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;

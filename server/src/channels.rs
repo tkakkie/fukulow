@@ -113,9 +113,6 @@ pub async fn create_channel(
         .into_response())
 }
 
-#[cfg(test)]
-mod tests;
-
 // Keep channel visibility SQL here for message reads and sends.
 pub(crate) async fn is_visible(
     pool: &sqlx::PgPool,
@@ -137,3 +134,6 @@ pub(crate) async fn is_visible(
     .fetch_one(pool)
     .await
 }
+
+#[cfg(test)]
+mod tests;
