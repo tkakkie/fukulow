@@ -34,8 +34,9 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
   always for any new feature or behaviour change (a misread spec means rework), and for auth/permissions/real-time/migrations,
   API or schema contract changes, new dependencies or languages, cost, deploy, secrets. Feature Issues start with
   "How I read the spec" (3-5 lines, spec terms) before "Done when".
-  AI decides alone: bug fixes with a clear repro, refactors without behaviour change, tests, CI, docs, patch updates,
-  and work already written in `docs/spec.md`. PRs always get the maintainer's review.
+  AI decides alone only when none of the above applies: bug fixes with a clear repro, refactors without behaviour change,
+  tests, CI, docs, patch updates. Being described in `docs/spec.md` does not exempt a feature: the maintainer still approves
+  the Issue (the spec says what, the Issue says how it will be read and built). PRs always get the maintainer's review.
 - Implementer by area: Codex = Rust server, DB, auth/permissions, real-time, concurrency, load tests.
   Claude = design, OpenAPI, Svelte logic, docs. Antigravity = browser checks, UI, smoke E2E.
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them.
