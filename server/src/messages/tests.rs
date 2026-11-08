@@ -765,7 +765,7 @@ async fn message_pages_are_bounded_exclusive_ascending_and_directional(pool: PgP
         StatusCode::BAD_REQUEST,
     )
     .await;
-    let oversized = input(Uuid::new_v4(), &"x".repeat(16 * 1024));
+    let oversized = input(Uuid::new_v4(), &"x".repeat(32 * 1024 + 1));
     assert_error(
         send(&app, &token, channel_id, oversized).await,
         StatusCode::PAYLOAD_TOO_LARGE,
