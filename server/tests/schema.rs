@@ -1,17 +1,15 @@
 use sqlx::PgPool;
 
-async fn migrate(pool: &PgPool) {
+async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     // Discover files at runtime: adding a migration must not depend on Cargo
     // invalidating SQLx's compile-time migration list in a cached test binary.
     sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/migrations"
     )))
-    .await
-    .unwrap()
+    .await?
     .run(pool)
     .await
-    .unwrap();
 }
 
 async fn check_organization_ids(pool: &PgPool) -> Result<(), String> {
@@ -36,7 +34,7 @@ async fn check_organization_ids(pool: &PgPool) -> Result<(), String> {
     )
     .fetch_all(pool)
     .await
-    .expect("inspect all migrated tables");
+    .map_err(|e| format!("inspect all migrated tables: {e}"))?;
 
     if violations.is_empty() {
         Ok(())
@@ -49,13 +47,13 @@ async fn check_organization_ids(pool: &PgPool) -> Result<(), String> {
 
 #[sqlx::test(migrations = false)]
 async fn migrated_tables_have_not_null_organization_id(pool: PgPool) {
-    migrate(&pool).await;
+    migrate(&pool).await.unwrap();
     check_organization_ids(&pool).await.unwrap();
 }
 
 #[sqlx::test(migrations = false)]
 async fn schema_guard_rejects_missing_and_nullable_organization_id(pool: PgPool) {
-    migrate(&pool).await;
+    migrate(&pool).await.unwrap();
     check_organization_ids(&pool).await.unwrap();
     sqlx::raw_sql(
         "CREATE TABLE missing_organization (id uuid PRIMARY KEY);
