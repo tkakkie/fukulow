@@ -29,7 +29,13 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 
 ## Workflow
 - Work in your own worktree and branch: `claude/<topic>`, `codex/<topic>`, `antigravity/<topic>`. Never push to `main`.
-- Issue with a "Done when" and label `ready` before implementing. Open a draft PR; CI must pass.
+- Issue with a "Done when" and label `status:ready` before implementing. Open a draft PR; CI must pass.
+- Issue review by the maintainer (label `status:human-review`, "OK" comment = approved, then the AI sets `status:ready`):
+  always for any new feature or behaviour change (a misread spec means rework), and for auth/permissions/real-time/migrations,
+  API or schema contract changes, new dependencies or languages, cost, deploy, secrets. Feature Issues start with
+  "How I read the spec" (3-5 lines, spec terms) before "Done when".
+  AI decides alone: bug fixes with a clear repro, refactors without behaviour change, tests, CI, docs, patch updates,
+  and work already written in `docs/spec.md`. PRs always get the maintainer's review.
 - Implementer by area: Codex = Rust server, DB, auth/permissions, real-time, concurrency, load tests.
   Claude = design, OpenAPI, Svelte logic, docs. Antigravity = browser checks, UI, smoke E2E.
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them.
@@ -58,14 +64,17 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 Every open issue/PR carries at most one status label, set by the AI that hands off:
 - `status:working` - an AI is working; do not review yet.
 - `status:ai-review` - waiting for CI / AI review / Copilot.
-- `status:human-review` - maintainer's turn: CI green, required AI reviews done, PR marked ready. Filter: `label:status:human-review`.
+- `status:human-review` - maintainer's turn: an Issue to approve, or a PR with CI green, required AI reviews done and marked ready.
+  Filter: `label:status:human-review`. After approval an Issue becomes `status:ready`; a PR is merged, or goes back to `status:working` if changes are requested.
+- `status:ready` - Issue approved by the maintainer; an AI may start (then `status:working`).
 - `status:needs-decision` - maintainer's turn: a decision is needed; the question is in the last comment.
 - Decide-free work continues without asking; only decisions go to the maintainer. Nothing stays green and unlabelled: when CI and reviews are done, the label moves to `status:human-review`.
 
 ## Planning and labels
 - Milestone = one-week sprint (keep at most 2 open). Modules are expressed with labels, not milestones.
-- Labels: `ready`, `blocked`; `area:server|web|api|infra`; `type:feature|bug|chore`; `ai:codex|claude|antigravity`;
-  `risk:needs-review` (auth, permissions, real-time, migrations). Every issue gets area, type, milestone.
+- Labels are only the status labels above plus: `security` (red) and `bug` (orange) so urgent items stand out
+  (urgent = `security`/`bug` + `status:human-review`/`status:needs-decision`); `risk:needs-review` (auth, permissions,
+  real-time, migrations); `blocked`. No area/type/ai labels: files, commits and the AI signature line say that. Every issue gets a milestone.
 - Server code is split by module inside one crate (`auth`, `channels`, `messages`, `realtime`, ...); the OpenAPI contract
   lets web work proceed without waiting for the server.
 
