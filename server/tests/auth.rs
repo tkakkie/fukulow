@@ -1,0 +1,397 @@
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+    response::Response,
+};
+use fukulow_server::{AppState, app};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+const PASSWORD: &str = "correct horse battery staple";
+
+fn router(pool: &PgPool) -> Router {
+    app(AppState {
+        pool: pool.clone(),
+        cookie_secure: true,
+    })
+}
+
+async fn request(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Value,
+    headers: &[(&str, &str)],
+) -> Response {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    app.clone()
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn body(response: Response) -> Value {
+    serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap()
+}
+
+fn setup_input() -> Value {
+    json!({"organization_name": "Organization A", "name": "Owner A", "email": "Owner@Example.com", "password": PASSWORD})
+}
+
+async fn setup(app: &Router) -> Value {
+    let response = request(app, "POST", "/api/v1/setup", setup_input(), &[]).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    body(response).await
+}
+
+async fn sign_in(app: &Router, organization_id: &str, password: &str) -> Response {
+    request(app, "POST", "/api/v1/session", json!({"organization_id": organization_id, "email": "owner@example.com", "password": password}), &[]).await
+}
+
+// Reusable fixture for later tenant denial tests. The production setup API is
+// deliberately single-use; insert the second organization only through test SQL.
+async fn two_organizations(pool: &PgPool, app: &Router) -> (Value, Uuid) {
+    let first = setup(app).await;
+    let first_id: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let second_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Organization B')")
+        .bind(second_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    // Use the same member id and email in both organizations to catch joins
+    // which accidentally omit the organization_id part of a composite key.
+    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) SELECT $1, id, email, 'Owner B', password_hash, 'guest' FROM users WHERE organization_id = $2")
+        .bind(second_id).bind(first_id).execute(pool).await.unwrap();
+    (first, second_id)
+}
+
+#[sqlx::test]
+async fn setup_works_once_and_is_atomic(pool: PgPool) {
+    let app = router(&pool);
+    let (a, b) = tokio::join!(
+        request(&app, "POST", "/api/v1/setup", setup_input(), &[]),
+        request(&app, "POST", "/api/v1/setup", setup_input(), &[])
+    );
+    let mut statuses = [a.status().as_u16(), b.status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [201, 409]);
+    assert_eq!(
+        request(&app, "POST", "/api/v1/setup", setup_input(), &[])
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let organization_id = body(if a.status() == StatusCode::CREATED {
+        a
+    } else {
+        b
+    })
+    .await["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let (count, hash, role): (i64, String, String) = sqlx::query_as(
+        "SELECT count(*) OVER (), password_hash, role FROM users WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(!hash.contains(PASSWORD));
+    assert_eq!(role, "owner");
+}
+
+#[sqlx::test]
+async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let organization_id = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        sign_in(&app, organization_id, "incorrect password")
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let unknown = request(&app, "POST", "/api/v1/session", json!({"organization_id": organization_id, "email": "unknown@example.com", "password": PASSWORD}), &[]).await;
+    assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+    let response = sign_in(&app, organization_id, PASSWORD).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    for flag in [
+        "HttpOnly",
+        "Secure",
+        "SameSite=Strict",
+        "Path=/",
+        "Max-Age=2592000",
+    ] {
+        assert!(cookie.contains(flag));
+    }
+    let cookie = cookie.split(';').next().unwrap();
+    let session = body(response).await;
+    let token = session["token"].as_str().unwrap();
+    let bearer = format!("Bearer {token}");
+    for headers in [[("cookie", cookie)], [("authorization", bearer.as_str())]] {
+        let response = request(&app, "GET", "/api/v1/me", Value::Null, &headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(body(response).await, identity);
+    }
+    // Raw credentials must never be persisted.
+    let hashes: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT token_hash FROM sessions WHERE organization_id = $1")
+            .bind(organization_id.parse::<Uuid>().unwrap())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(hashes[0].len(), 32);
+    assert_ne!(hashes[0], token.as_bytes());
+    let other = body(sign_in(&app, organization_id, PASSWORD).await).await;
+    let other_bearer = format!("Bearer {}", other["token"].as_str().unwrap());
+    let response = request(
+        &app,
+        "DELETE",
+        "/api/v1/session",
+        Value::Null,
+        &[("cookie", cookie)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    for headers in [[("cookie", cookie)], [("authorization", bearer.as_str())]] {
+        assert_eq!(
+            request(&app, "GET", "/api/v1/me", Value::Null, &headers)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("authorization", &other_bearer)]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &app,
+            "DELETE",
+            "/api/v1/session",
+            Value::Null,
+            &[("authorization", &other_bearer)]
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("authorization", &other_bearer)]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let id = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap();
+    let session = body(sign_in(&app, id, PASSWORD).await).await;
+    let token = session["token"].as_str().unwrap();
+    let cookie = format!("fukulow_session={token}");
+    let bearer = format!("Bearer {token}");
+    let duplicate_cookie = format!("{cookie}; {cookie}");
+    let forged = format!("Bearer {id}.{}", "0".repeat(64));
+    for headers in [
+        vec![],
+        vec![("authorization", "Bearer garbage")],
+        vec![("authorization", forged.as_str())],
+        vec![("cookie", duplicate_cookie.as_str())],
+        vec![
+            ("authorization", "Basic invalid"),
+            ("cookie", cookie.as_str()),
+        ],
+        vec![
+            ("authorization", bearer.as_str()),
+            ("authorization", bearer.as_str()),
+        ],
+    ] {
+        assert_eq!(
+            request(&app, "GET", "/api/v1/me", Value::Null, &headers)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    sqlx::query(
+        "UPDATE sessions SET expires_at = now() - interval '1 second' WHERE organization_id = $1",
+    )
+    .bind(id.parse::<Uuid>().unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("authorization", &bearer)]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("cookie", &cookie)]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn session_cannot_access_another_organization(pool: PgPool) {
+    let app = router(&pool);
+    let (first, second_id) = two_organizations(&pool, &app).await;
+    let first_id = first["organization"]["organization_id"].as_str().unwrap();
+    let session = body(sign_in(&app, first_id, PASSWORD).await).await;
+    let token = session["token"].as_str().unwrap();
+    let bearer = format!("Bearer {token}");
+    let response = request(
+        &app,
+        "GET",
+        &format!("/api/v1/me?organization_id={second_id}"),
+        Value::Null,
+        &[
+            ("authorization", &bearer),
+            ("x-organization-id", &second_id.to_string()),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, first);
+    let swapped = format!("{}.{}", second_id, token.split_once('.').unwrap().1);
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("authorization", &format!("Bearer {swapped}"))]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("cookie", &format!("fukulow_session={swapped}"))]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        sign_in(&app, &Uuid::new_v4().to_string(), PASSWORD)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let second = body(sign_in(&app, &second_id.to_string(), PASSWORD).await).await;
+    assert_eq!(
+        second["identity"]["organization"]["organization_id"],
+        second_id.to_string()
+    );
+    assert_eq!(second["identity"]["member"]["name"], "Owner B");
+    assert_eq!(second["identity"]["member"]["role"], "guest");
+    // A composite FK must reject a member id belonging only to another tenant.
+    let first_only = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) SELECT organization_id, $2, 'only-a@example.com', name, password_hash, role FROM users WHERE organization_id = $1")
+        .bind(first_id.parse::<Uuid>().unwrap()).bind(first_only).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)"
+        )
+        .bind(second_id)
+        .bind(vec![0u8; 32])
+        .bind(first_only)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+}
+
+#[sqlx::test]
+async fn invalid_setup_does_not_consume_bootstrap(pool: PgPool) {
+    let app = router(&pool);
+    for (field, value) in [
+        ("password", "short"),
+        ("email", "invalid"),
+        ("organization_name", "  "),
+        ("name", ""),
+    ] {
+        let mut input = setup_input();
+        input[field] = json!(value);
+        assert_eq!(
+            request(&app, "POST", "/api/v1/setup", input, &[])
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    setup(&app).await;
+}
