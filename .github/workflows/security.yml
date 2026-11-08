@@ -18,6 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 26 }
+        with: { node-version-file: .node-version }
       # All dependencies: Svelte and other runtime code are in devDependencies but ship in the built bundle.
       - run: npm --prefix web audit --audit-level=high
