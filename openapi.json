@@ -869,7 +869,6 @@
             ],
             "format": "int32",
             "description": "Page size, default 50, maximum 200.",
-            "default": 50,
             "maximum": 200,
             "minimum": 1
           }

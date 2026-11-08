@@ -1,5 +1,7 @@
 // Included by npm run check. These types come only from make api's generated schema.
-import type { ClientMessage, Message, ServerEvent } from './api-schema'
+import type { ClientMessage, ListMessagesQuery, Message, ServerEvent } from './api-schema'
+
+export const latestMessagesQuery: ListMessagesQuery = {}
 
 function assertNever(value: never): never {
   throw new Error(`Unhandled contract variant: ${JSON.stringify(value)}`)

@@ -55,7 +55,7 @@ pub struct ListMessagesQuery {
     pub before_seq: Option<i64>,
     /// Page size, default 50, maximum 200.
     #[param(minimum = 1, maximum = 200, default = 50)]
-    #[schema(minimum = 1, maximum = 200, default = 50)]
+    #[schema(minimum = 1, maximum = 200)]
     pub limit: Option<u16>,
 }
 

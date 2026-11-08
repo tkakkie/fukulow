@@ -221,9 +221,8 @@ export interface components {
             /**
              * Format: int32
              * @description Page size, default 50, maximum 200.
-             * @default 50
              */
-            limit: number | null;
+            limit?: number | null;
         };
         Member: {
             email: string;
