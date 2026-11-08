@@ -36,3 +36,4 @@
 - Maintainer-approved API contract (#17): message body is 1..=4000 Unicode scalar values (no NUL, not whitespace-only, whitespace preserved). Only the send route has a 32 KiB request cap (worst case ~24 KB JSON-escaped); every other route keeps 16 KiB.
   Stored bodies are not trimmed; leading and trailing whitespace remain part of the body and idempotency comparison.
 - The per-Channel counter row serializes writes to a hot Channel; measure its throughput and contention in load test #20.
+- #46 supersedes the review-only module-direction fallback with a rustc-driver check of resolved HIR path segments, type-dependent calls and all macro expansions (including empty/re-exported macros), guarded by negative compiler fixtures; the pinned toolchain's `rustc-dev` component is a development-only dependency for real name resolution, with `RUSTC_BOOTSTRAP` scoped to building the checker and no application dependency or crate split.
