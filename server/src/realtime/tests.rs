@@ -591,6 +591,36 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn session_check_database_timeout_at_connect_closes_with_internal_error(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let exhausted = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let _held = exhausted.acquire().await.unwrap();
+    // Authenticate normally, then exhaust only the pool used by the post-upgrade session check.
+    let router = Router::new()
+        .route(
+            "/api/v1/ws",
+            axum::routing::get(
+                move |State(mut state): State<AppState>, auth: Auth, ws: WebSocketUpgrade| {
+                    let exhausted = exhausted.clone();
+                    async move {
+                        state.pool = exhausted;
+                        ws.on_upgrade(move |socket| connected(socket, state, auth))
+                    }
+                },
+            ),
+        )
+        .with_state(f.state.clone());
+    let server = Server::start(router).await;
+    let mut socket = server.connect(&f.token).await;
+    closed(&mut socket, 1011).await;
+}
+
+#[sqlx::test]
 async fn malformed_controls_and_future_cursor_do_not_break_subscription_state(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -606,10 +636,16 @@ async fn malformed_controls_and_future_cursor_do_not_break_subscription_state(po
     assert_eq!(event(&mut socket).await["code"], "invalid_input");
     subscribe(&mut socket, f.channel, 100).await;
     ready(&mut socket, f.channel, 0).await;
-    subscribe(&mut socket, f.channel, 0).await;
-    ready(&mut socket, f.channel, 0).await;
+    for _ in 0..2 {
+        let canonical = post(&f, f.channel).await;
+        assert_eq!(event(&mut socket).await["message"], canonical);
+    }
+    silent(&mut socket).await;
+    subscribe(&mut socket, f.channel, i64::MAX).await;
+    ready(&mut socket, f.channel, 2).await;
     let canonical = post(&f, f.channel).await;
     assert_eq!(event(&mut socket).await["message"], canonical);
+    silent(&mut socket).await;
 }
 
 #[sqlx::test]

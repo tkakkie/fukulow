@@ -143,8 +143,8 @@ export interface paths {
          *     Cookie auth requires a matching allowed Origin (configured, same-origin by default);
          *     reject a missing/foreign Origin with 403. Bearer clients need no Origin header.
          * @description On subscribe: first register the live subscription, queueing events per connection;
-         *     replay committed messages with seq > after_seq ascending in pages of up to the page
-         *     limit (default 50, max 200); flush queued live events with seq > last replayed;
+         *     replay committed messages with seq > after_seq ascending in pages of up to 50
+         *     messages; flush queued live events with seq > last replayed;
          *     then send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):
          *     duplicates are harmless, gaps are forbidden. Publish only committed new messages.
          *     Queue overflow closes with 4008 (never silently drops an event); reconnect and

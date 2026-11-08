@@ -89,6 +89,8 @@ impl Connection<'_> {
         let through = messages::latest_seq(&self.state.pool, organization, channel)
             .await
             .map_err(|_| 1011u16)?;
+        after = after.min(through);
+        self.cursors.insert(channel, after);
         #[cfg(test)]
         super::tests::replay_gate(channel).await;
         while after < through {

@@ -27,28 +27,31 @@ pub(crate) struct SessionWatch {
 
 impl Auth {
     /// Register revocation before checking SQL, so sign-out during upgrade cannot be missed.
-    pub(crate) async fn watch_session(&self, state: &AppState) -> Option<SessionWatch> {
+    pub(crate) async fn watch_session(
+        &self,
+        state: &AppState,
+    ) -> Result<Option<SessionWatch>, sqlx::Error> {
         let changes = state.session_changes.0.subscribe();
         let organization = self.identity.organization.organization_id;
         let checked_at = Instant::now();
         let remaining = sqlx::query_scalar::<_, f64>(
             "SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 \
              FROM sessions WHERE organization_id = $1 AND token_hash = $2 AND expires_at > clock_timestamp()",
-        ).bind(organization).bind(&self.token_hash).fetch_optional(&state.pool).await;
-        let Ok(Some(seconds)) = remaining else {
-            return None;
+        ).bind(organization).bind(&self.token_hash).fetch_optional(&state.pool).await?;
+        let Some(seconds) = remaining else {
+            return Ok(None);
         };
         if !seconds.is_finite() || seconds <= 0.0 {
-            return None;
+            return Ok(None);
         }
-        Some(SessionWatch {
+        Ok(Some(SessionWatch {
             changes,
             organization,
             hash: self.token_hash.clone(),
             // Count SQL latency conservatively: never extend a session past its DB expiry.
             deadline: checked_at
                 + Duration::from_secs_f64(seconds.min(f64::from(super::SESSION_SECONDS))),
-        })
+        }))
     }
 }
 
