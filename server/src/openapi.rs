@@ -5,8 +5,8 @@ use utoipa::{
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(crate::health, crate::auth::setup, crate::auth::sign_in, crate::auth::sign_out, crate::auth::me),
-    components(schemas(crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::ErrorBody)),
+    paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::sign_out, crate::auth::me),
+    components(schemas(crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::ErrorBody)),
     modifiers(&Security)
 )]
 pub struct ApiDoc;

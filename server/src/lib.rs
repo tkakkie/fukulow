@@ -24,7 +24,7 @@ pub struct AppState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
-        .route("/api/v1/setup", axum::routing::post(auth::setup))
+        .route("/api/v1/setup", get(auth::setup_status).post(auth::setup))
         .route(
             "/api/v1/session",
             axum::routing::post(auth::sign_in).delete(auth::sign_out),
