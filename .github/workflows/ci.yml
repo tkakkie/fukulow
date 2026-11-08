@@ -6,6 +6,18 @@ on:
 permissions:
   contents: read
 jobs:
+  migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version }
+      - run: node --test scripts/check-migrations.test.ts
+      - name: Existing migrations are append-only
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/check-migrations.sh "$BASE_SHA"
   web:
     runs-on: ubuntu-latest
     steps:
