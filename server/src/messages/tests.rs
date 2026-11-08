@@ -15,6 +15,7 @@ fn router(pool: &PgPool) -> Router {
         pool: pool.clone(),
         cookie_secure: true,
         setup_token: None,
+        sign_in_throttle: Default::default(),
     })
 }
 
