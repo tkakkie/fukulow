@@ -1,0 +1,9 @@
+target/
+node_modules/
+web/dist/
+.env
+.env.*
+!.env.example
+.DS_Store
+.claude/worktrees/
+.claude/settings.local.json
