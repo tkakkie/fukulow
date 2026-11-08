@@ -14,7 +14,7 @@
         "tags": [
           "crate::channels"
         ],
-        "summary": "List public channels of the caller's organization and private channels they belong to.\nContract only: currently returns 501 without authentication or database access.",
+        "summary": "List public channels of the caller's organization and private channels they belong to.",
         "operationId": "list_channels",
         "responses": {
           "200": {
@@ -36,9 +36,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Contract stub; not implemented"
           }
         },
         "security": [
@@ -54,7 +51,7 @@
         "tags": [
           "crate::channels"
         ],
-        "summary": "Create a public or private channel in the caller's organization.\nA private channel includes its creator as a member in the same transaction.\nContract only: currently returns 501 without parsing input or accessing the database.",
+        "summary": "Create a public or private channel in the caller's organization.\nA private channel includes its creator as a member in the same transaction.",
         "operationId": "create_channel",
         "requestBody": {
           "content": {
@@ -116,9 +113,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Contract stub; not implemented"
           }
         },
         "security": [
