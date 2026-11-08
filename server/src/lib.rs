@@ -39,7 +39,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/api/v1/channels/{id}/messages",
-            get(messages::list_messages).post(messages::send_message),
+            get(messages::list_messages)
+                .post(messages::send_message)
+                // 4000 control characters escape to 6 bytes each in JSON, so the global 16 KiB would reject valid bodies.
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
         )
         .route("/api/v1/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))

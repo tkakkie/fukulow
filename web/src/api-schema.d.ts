@@ -39,7 +39,6 @@ export interface paths {
          *     (including older history from the latest page) with the first seq. has_more refers
          *     to that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries
          *     return 400. Identity and organization come only from the authenticated session.
-         *     Contract only: currently returns 501 without parsing input or accessing the database.
          */
         get: operations["list_messages"];
         put?: never;
@@ -48,7 +47,6 @@ export interface paths {
          *     The session supplies organization and sender. A successful retry returns the same
          *     canonical message with 201, allocating no new sequence and publishing no new event.
          *     A reused client_message_id with different body or channel returns 409.
-         *     Contract only: currently returns 501 without parsing input or accessing the database.
          */
         post: operations["send_message"];
         delete?: never;
@@ -281,6 +279,7 @@ export interface components {
          *     reusing the key with a different body or channel returns 409.
          */
         SendMessageRequest: {
+            /** @description 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming. */
             body: string;
             /** Format: uuid */
             client_message_id: string;
@@ -518,16 +517,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Channel access denied */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Channel not found */
+            /** @description Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -535,13 +525,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
-            };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };
@@ -585,16 +568,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Channel access denied */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Channel not found */
+            /** @description Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -627,13 +601,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
-            };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

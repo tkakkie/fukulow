@@ -113,5 +113,27 @@ pub async fn create_channel(
         .into_response())
 }
 
+// Keep channel visibility SQL here for message reads and sends.
+pub(crate) async fn is_visible(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    member_id: Uuid,
+    channel_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channels c \
+         WHERE c.organization_id = $1 AND c.id = $3 \
+           AND (c.visibility = 'public' OR EXISTS (\
+               SELECT 1 FROM channel_members cm \
+               WHERE cm.organization_id = c.organization_id \
+                 AND cm.channel_id = c.id AND cm.member_id = $2)))",
+    )
+    .bind(organization_id)
+    .bind(member_id)
+    .bind(channel_id)
+    .fetch_one(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests;

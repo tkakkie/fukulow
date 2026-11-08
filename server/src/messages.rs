@@ -1,11 +1,23 @@
-use axum::http::StatusCode;
+use axum::{
+    Json,
+    extract::{
+        Path, Query, State,
+        rejection::{PathRejection, QueryRejection},
+    },
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::auth::ErrorBody;
+use crate::{
+    AppState,
+    auth::{ApiError, ApiJson, Auth, ErrorBody},
+    channels,
+};
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct Message {
     pub id: Uuid,
     pub channel_id: Uuid,
@@ -20,6 +32,7 @@ pub struct Message {
     pub created_at: String,
     /// Always null in this contract; topics are deferred.
     #[schema(schema_with = null_schema)]
+    #[sqlx(skip)]
     pub topic_id: (),
 }
 
@@ -38,6 +51,8 @@ fn null_schema() -> utoipa::openapi::schema::Object {
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub client_message_id: Uuid,
+    /// 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming.
+    #[schema(min_length = 1, max_length = 4000)]
     pub body: String,
 }
 
@@ -75,34 +90,241 @@ pub struct MessagePage {
 /// (including older history from the latest page) with the first seq. has_more refers
 /// to that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries
 /// return 400. Identity and organization come only from the authenticated session.
-/// Contract only: currently returns 501 without parsing input or accessing the database.
 #[utoipa::path(get, path = "/api/v1/channels/{id}/messages",
     params(("id" = Uuid, Path, description = "Channel id"), ListMessagesQuery),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, body = MessagePage),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
-        (status = 403, description = "Channel access denied", body = ErrorBody),
-        (status = 404, description = "Channel not found", body = ErrorBody),
-        (status = 501, description = "Contract stub; not implemented")))]
-pub async fn list_messages() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
+        (status = 404, description = "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody)))]
+pub async fn list_messages(
+    State(state): State<AppState>,
+    auth: Auth,
+    path: Result<Path<Uuid>, PathRejection>,
+    query: Result<Query<ListMessagesQuery>, QueryRejection>,
+) -> Result<Response, MessageError> {
+    let Path(channel_id) = path.map_err(|_| MessageError::InvalidInput)?;
+    let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
+    let limit = query.validate()?;
+    let organization_id = auth.identity.organization.organization_id;
+    require_visible(
+        &state.pool,
+        organization_id,
+        auth.identity.member.id,
+        channel_id,
+    )
+    .await?;
+    let ascending = query.after_seq.is_some();
+    let sql = if ascending {
+        "SELECT id, channel_id, seq, client_message_id, sender, body, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+         FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 \
+         ORDER BY seq ASC LIMIT $4"
+    } else {
+        "SELECT id, channel_id, seq, client_message_id, sender, body, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+         FROM messages WHERE organization_id = $1 AND channel_id = $2 \
+           AND seq <= $3 ORDER BY seq DESC LIMIT $4"
+    };
+    let cursor = if ascending {
+        query.after_seq.unwrap_or(0)
+    } else {
+        // Convert exclusive before to an inclusive upper bound; validation guarantees >= 1.
+        query.before_seq.map(|seq| seq - 1).unwrap_or(i64::MAX)
+    };
+    let mut messages = sqlx::query_as::<_, Message>(sql)
+        .bind(organization_id)
+        .bind(channel_id)
+        .bind(cursor)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&state.pool)
+        .await?;
+    let has_more = messages.len() > usize::from(limit);
+    messages.truncate(usize::from(limit));
+    if !ascending {
+        messages.reverse();
+    }
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(MessagePage { messages, has_more }),
+    )
+        .into_response())
 }
 
 /// Send a message to a visible channel; topic_id is always null.
 /// The session supplies organization and sender. A successful retry returns the same
 /// canonical message with 201, allocating no new sequence and publishing no new event.
 /// A reused client_message_id with different body or channel returns 409.
-/// Contract only: currently returns 501 without parsing input or accessing the database.
 #[utoipa::path(post, path = "/api/v1/channels/{id}/messages", request_body = SendMessageRequest,
     params(("id" = Uuid, Path, description = "Channel id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, body = Message),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
-        (status = 403, description = "Channel access denied", body = ErrorBody),
-        (status = 404, description = "Channel not found", body = ErrorBody),
+        (status = 404, description = "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
         (status = 409, description = "Client message id reused with different body or channel", body = ErrorBody),
-        (status = 413, body = ErrorBody), (status = 415, body = ErrorBody),
-        (status = 501, description = "Contract stub; not implemented")))]
-pub async fn send_message() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
+        (status = 413, body = ErrorBody), (status = 415, body = ErrorBody)))]
+pub async fn send_message(
+    State(state): State<AppState>,
+    auth: Auth,
+    path: Result<Path<Uuid>, PathRejection>,
+    ApiJson(input): ApiJson<SendMessageRequest>,
+) -> Result<Response, MessageError> {
+    let Path(channel_id) = path.map_err(|_| MessageError::InvalidInput)?;
+    input.validate()?;
+    let organization_id = auth.identity.organization.organization_id;
+    let sender = auth.identity.member.id;
+    require_visible(&state.pool, organization_id, sender, channel_id).await?;
+    let message = persist(&state.pool, organization_id, sender, channel_id, input).await?;
+    Ok((
+        StatusCode::CREATED,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(message),
+    )
+        .into_response())
 }
+
+impl SendMessageRequest {
+    fn validate(&self) -> Result<(), MessageError> {
+        if self.body.contains('\0')
+            || self.body.trim().is_empty()
+            || self.body.chars().count() > 4000
+        {
+            return Err(MessageError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
+impl ListMessagesQuery {
+    fn validate(&self) -> Result<u16, MessageError> {
+        let limit = self.limit.unwrap_or(50);
+        if (self.after_seq.is_some() && self.before_seq.is_some())
+            || self.after_seq.is_some_and(|seq| seq < 0)
+            || self.before_seq.is_some_and(|seq| seq < 1)
+            || !(1..=200).contains(&limit)
+        {
+            return Err(MessageError::InvalidInput);
+        }
+        Ok(limit)
+    }
+}
+
+#[derive(Debug)]
+pub enum MessageError {
+    InvalidInput,
+    NotFound,
+    Conflict,
+    Database(sqlx::Error),
+}
+
+impl From<sqlx::Error> for MessageError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl IntoResponse for MessageError {
+    fn into_response(self) -> Response {
+        let (status, error) = match self {
+            Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "channel not found"),
+            Self::Conflict => (
+                StatusCode::CONFLICT,
+                "client message id reused with different body or channel",
+            ),
+            Self::Database(error) => return ApiError::from(error).into_response(),
+        };
+        (
+            status,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(ErrorBody {
+                error: error.into(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+async fn require_visible(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    member_id: Uuid,
+    channel_id: Uuid,
+) -> Result<(), MessageError> {
+    if !channels::is_visible(pool, organization_id, member_id, channel_id).await? {
+        return Err(MessageError::NotFound);
+    }
+    Ok(())
+}
+
+async fn existing<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+    sender: Uuid,
+    client_message_id: Uuid,
+) -> Result<Option<Message>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, channel_id, seq, client_message_id, sender, body, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+         FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
+    )
+    .bind(organization_id)
+    .bind(sender)
+    .bind(client_message_id)
+    .fetch_optional(executor)
+    .await
+}
+
+fn canonical(
+    message: Message,
+    channel_id: Uuid,
+    input: &SendMessageRequest,
+) -> Result<Message, MessageError> {
+    if message.channel_id != channel_id || message.body != input.body {
+        return Err(MessageError::Conflict);
+    }
+    Ok(message)
+}
+
+async fn persist(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    sender: Uuid,
+    channel_id: Uuid,
+    input: SendMessageRequest,
+) -> Result<Message, MessageError> {
+    let mut tx = pool.begin().await?;
+    if let Some(message) =
+        existing(&mut *tx, organization_id, sender, input.client_message_id).await?
+    {
+        tx.rollback().await?;
+        return canonical(message, channel_id, &input);
+    }
+    // Row locking serializes only sends in this channel. Both allocation and insertion
+    // roll back together, including a concurrent duplicate that loses the unique-key race.
+    let seq: i64 = sqlx::query_scalar(
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $2, 1) \
+         ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = channel_message_sequences.seq + 1 \
+         RETURNING seq",
+    ).bind(organization_id).bind(channel_id).fetch_one(&mut *tx).await?;
+    let message = sqlx::query_as::<_, Message>(
+        "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
+         RETURNING id, channel_id, seq, client_message_id, sender, body, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at",
+    ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
+        .bind(input.client_message_id).bind(&input.body).fetch_optional(&mut *tx).await?;
+    if let Some(message) = message {
+        tx.commit().await?;
+        return Ok(message);
+    }
+    tx.rollback().await?;
+    // The unique-key conflict implies a committed winner; absence is an invariant failure.
+    let message = existing(pool, organization_id, sender, input.client_message_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    canonical(message, channel_id, &input)
+}
+
+#[cfg(test)]
+mod tests;
