@@ -25,6 +25,7 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 ## Commands (fill in as they appear)
 - Server: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
 - Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build`
+- Migrations: `bash scripts/check-migrations.sh <base-sha>`; guard tests: `node --test scripts/check-migrations.test.ts`. Schema guard runs in `cargo test` with Postgres.
 - API types: `make api` (regenerates openapi.json and TS types). Planned: arrives with the auth slice PR (#4); CI will then fail on a diff.
 
 ## Workflow
