@@ -34,3 +34,15 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
   Claude = design, OpenAPI, Svelte logic, docs. Antigravity = browser checks, UI, smoke E2E.
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them.
 - Only the maintainer merges (or explicitly tells an AI to).
+
+## Planning and labels
+- Milestone = one-week sprint (keep at most 2 open). Modules are expressed with labels, not milestones.
+- Labels: `ready`, `blocked`; `area:server|web|api|infra`; `type:feature|bug|chore`; `ai:codex|claude|antigravity`;
+  `risk:needs-review` (auth, permissions, real-time, migrations). Every issue gets area, type, milestone.
+- Server code is split by module inside one crate (`auth`, `channels`, `messages`, `realtime`, ...); the OpenAPI contract
+  lets web work proceed without waiting for the server.
+
+## Reviews
+- Copilot auto-review is OFF (it burns credits). Request it once per PR, by hand, when CI is green and the work is
+  done: `gh pr edit <n> --add-reviewer @copilot`. Only for `risk:needs-review` or large code PRs. Re-request only if the maintainer asks.
+- Every issue comment, review and PR body from an AI ends with one line: `AI: <name> / model: <id> / effort: <level>`.
