@@ -150,7 +150,6 @@ export interface paths {
          *     Queue overflow closes with 4008 (never silently drops an event); reconnect and
          *     re-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;
          *     stop protected delivery and go to Sign in.
-         *     Contract only: currently returns 501; no authentication, Origin check or upgrade.
          */
         get: operations["upgrade"];
         put?: never;
@@ -876,13 +875,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
-            };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

@@ -17,7 +17,12 @@ use crate::{
     channels,
 };
 
-#[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+mod delivery;
+pub use delivery::Delivery;
+#[cfg(test)]
+pub(crate) use delivery::pause_publication;
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct Message {
     pub id: Uuid,
     pub channel_id: Uuid,
@@ -173,7 +178,20 @@ pub async fn send_message(
     let organization_id = auth.identity.organization.organization_id;
     let sender = auth.identity.member.id;
     require_visible(&state.pool, organization_id, sender, channel_id).await?;
-    let message = persist(&state.pool, organization_id, sender, channel_id, input).await?;
+    // Finish persistence + fan-out even if the HTTP caller disconnects.
+    let message = tokio::spawn(async move {
+        persist(
+            &state.pool,
+            &state.message_delivery,
+            organization_id,
+            sender,
+            channel_id,
+            input,
+        )
+        .await
+    })
+    .await
+    .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -244,7 +262,7 @@ impl IntoResponse for MessageError {
     }
 }
 
-async fn require_visible(
+pub(crate) async fn require_visible(
     pool: &sqlx::PgPool,
     organization_id: Uuid,
     member_id: Uuid,
@@ -287,6 +305,7 @@ fn canonical(
 
 async fn persist(
     pool: &sqlx::PgPool,
+    delivery: &Delivery,
     organization_id: Uuid,
     sender: Uuid,
     channel_id: Uuid,
@@ -316,6 +335,7 @@ async fn persist(
         .bind(input.client_message_id).bind(&input.body).fetch_optional(&mut *tx).await?;
     if let Some(message) = message {
         tx.commit().await?;
+        delivery.publish(pool, organization_id, &message).await;
         return Ok(message);
     }
     tx.rollback().await?;
@@ -324,6 +344,44 @@ async fn persist(
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
     canonical(message, channel_id, &input)
+}
+
+pub(crate) use delivery::LiveQueue;
+
+pub(crate) async fn latest_seq(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    channel: Uuid,
+) -> Result<i64, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2",
+    )
+    .bind(organization)
+    .bind(channel)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(0))
+}
+
+pub(crate) async fn replay_page(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    channel: Uuid,
+    after: i64,
+    through: i64,
+) -> Result<Vec<Message>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, channel_id, seq, client_message_id, sender, body, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+         FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
+         ORDER BY seq ASC LIMIT 50",
+    )
+    .bind(organization)
+    .bind(channel)
+    .bind(after)
+    .bind(through)
+    .fetch_all(pool)
+    .await
 }
 
 #[cfg(test)]

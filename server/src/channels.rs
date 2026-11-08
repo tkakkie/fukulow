@@ -135,5 +135,26 @@ pub(crate) async fn is_visible(
     .await
 }
 
+// Resolve all live recipients in one query, using the same rule as REST and replay.
+pub(crate) async fn visible_members(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    channel_id: Uuid,
+    members: &[Uuid],
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT member_id FROM UNNEST($3::uuid[]) AS candidate(member_id) \
+         WHERE EXISTS (SELECT 1 FROM channels c WHERE c.organization_id = $1 AND c.id = $2 \
+           AND (c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
+             WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
+               AND cm.member_id = candidate.member_id)))",
+    )
+    .bind(organization_id)
+    .bind(channel_id)
+    .bind(members)
+    .fetch_all(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests;

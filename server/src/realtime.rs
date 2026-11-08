@@ -1,9 +1,26 @@
-use axum::http::StatusCode;
+use axum::{
+    Json,
+    extract::{
+        State, WebSocketUpgrade,
+        ws::{CloseFrame, Message as Frame, WebSocket, rejection::WebSocketUpgradeRejection},
+    },
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, time::Duration};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{auth::ErrorBody, messages::Message};
+use crate::{
+    AppState,
+    auth::{Auth, ErrorBody},
+    messages::Message,
+};
+
+mod connection;
+mod origin;
+pub use origin::AllowedOrigins;
 
 /// Queue overflow: reconnect and subscribe from the last seq per channel; never drop silently.
 pub const CLOSE_QUEUE_OVERFLOW: u16 = 4008;
@@ -58,13 +75,86 @@ pub enum ServerEvent {
 /// Queue overflow closes with 4008 (never silently drops an event); reconnect and
 /// re-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;
 /// stop protected delivery and go to Sign in.
-/// Contract only: currently returns 501; no authentication, Origin check or upgrade.
 #[utoipa::path(get, path = "/api/v1/ws",
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 101, description = "WebSocket upgrade; frames use ClientMessage / ServerEvent"),
         (status = 401, body = ErrorBody),
-        (status = 403, description = "Cookie Origin missing or not allowed", body = ErrorBody),
-        (status = 501, description = "Contract stub; not implemented")))]
-pub async fn upgrade() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
+        (status = 403, description = "Cookie Origin missing or not allowed", body = ErrorBody)))]
+pub async fn upgrade(
+    State(state): State<AppState>,
+    auth: Auth,
+    headers: HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    if !state
+        .ws_allowed_origins
+        .permits(&headers, state.cookie_secure)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(ErrorBody {
+                error: "origin not allowed".into(),
+            }),
+        )
+            .into_response();
+    }
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(ErrorBody {
+                    error: "invalid websocket upgrade".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    ws.max_message_size(16 * 1024)
+        .max_frame_size(16 * 1024)
+        .on_upgrade(move |socket| connected(socket, state, auth))
 }
+
+async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
+    let Some(mut session) = auth.watch_session(&state).await else {
+        close(&mut socket, CLOSE_SESSION_ENDED).await;
+        return;
+    };
+    let queue = state.message_delivery.queue(
+        auth.identity.organization.organization_id,
+        auth.identity.member.id,
+        256,
+    );
+    let mut overflow = queue.overflow.clone();
+    let mut connection = connection::Connection {
+        state: &state,
+        auth: &auth,
+        queue,
+        cursors: HashMap::new(),
+    };
+    let code = tokio::select! {
+        biased;
+        _ = session.ended() => Some(CLOSE_SESSION_ENDED),
+        _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
+        result = connection.run(&mut socket) => result.err(),
+    };
+    if let Some(code) = code {
+        close(&mut socket, code).await;
+    }
+}
+
+async fn close(socket: &mut WebSocket, code: u16) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        socket.send(Frame::Close(Some(CloseFrame {
+            code,
+            reason: "".into(),
+        }))),
+    )
+    .await;
+}
+
+#[cfg(test)]
+mod tests;

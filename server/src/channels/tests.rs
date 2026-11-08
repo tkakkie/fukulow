@@ -16,6 +16,9 @@ fn router(pool: &PgPool) -> Router {
         cookie_secure: true,
         setup_token: None,
         sign_in_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        ws_allowed_origins: Default::default(),
     })
 }
 
