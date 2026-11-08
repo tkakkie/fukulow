@@ -186,6 +186,8 @@
         "tags": [
           "crate::auth"
         ],
+        "summary": "Create the first organization and Owner.",
+        "description": "Body extraction precedes setup-token verification: malformed JSON or invalid field\ntypes return 400, oversized bodies return 413, and unsupported content types return\n415 even when the setup token is missing or invalid. After extraction, the token is\nchecked before semantic input validation, password hashing, or database access.",
         "operationId": "setup",
         "requestBody": {
           "content": {
@@ -209,7 +211,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Invalid JSON, fields, or input; body extraction precedes setup-token verification",
             "content": {
               "application/json": {
                 "schema": {
@@ -219,7 +221,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid setup token",
+            "description": "Missing or invalid setup token after successful body extraction",
             "content": {
               "application/json": {
                 "schema": {

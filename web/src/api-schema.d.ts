@@ -61,6 +61,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Create the first organization and Owner.
+         * @description Body extraction precedes setup-token verification: malformed JSON or invalid field
+         *     types return 400, oversized bodies return 413, and unsupported content types return
+         *     415 even when the setup token is missing or invalid. After extraction, the token is
+         *     checked before semantic input validation, password hashing, or database access.
+         */
         post: operations["setup"];
         delete?: never;
         options?: never;
@@ -287,6 +294,7 @@ export interface operations {
                     "application/json": components["schemas"]["Identity"];
                 };
             };
+            /** @description Invalid JSON, fields, or input; body extraction precedes setup-token verification */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -295,7 +303,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing or invalid setup token */
+            /** @description Missing or invalid setup token after successful body extraction */
             401: {
                 headers: {
                     [name: string]: unknown;

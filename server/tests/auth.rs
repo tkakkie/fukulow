@@ -125,8 +125,16 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = router(&pool);
-    for path in ["/api/v1/setup", "/api/v1/session"] {
+    for (path, setup_token) in [
+        ("/api/v1/setup", None),
+        ("/api/v1/setup", Some("setup-token-test-only")),
+        ("/api/v1/session", None),
+    ] {
+        let app = app(AppState {
+            pool: pool.clone(),
+            cookie_secure: true,
+            setup_token: setup_token.map(str::to_owned),
+        });
         let valid_input = if path == "/api/v1/setup" {
             setup_input()
         } else {
@@ -266,27 +274,31 @@ async fn setup_with_unconfigured_token_ignores_supplied_token(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn setup_with_empty_configured_token_still_requires_the_field(pool: PgPool) {
+#[tokio::test]
+async fn setup_token_precedes_semantic_validation_and_database_access() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
     let app = app(AppState {
         pool,
         cookie_secure: true,
-        setup_token: Some(String::new()),
+        setup_token: Some("setup-token-test-only".into()),
     });
-    assert_eq!(
-        request(&app, "POST", "/api/v1/setup", setup_input(), &[])
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let mut input = setup_input();
-    input["setup_token"] = json!("");
-    assert_eq!(
-        request(&app, "POST", "/api/v1/setup", input, &[])
-            .await
-            .status(),
-        StatusCode::CREATED
-    );
+    for token in [None, Some(""), Some("wrong-token-test-only")] {
+        let mut input = setup_input();
+        input["email"] = json!("invalid");
+        input["password"] = json!("short");
+        if let Some(token) = token {
+            input["setup_token"] = json!(token);
+        }
+        let response = request(&app, "POST", "/api/v1/setup", input, &[]).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            body(response).await,
+            json!({"error": "invalid credentials"})
+        );
+    }
 }
 
 #[sqlx::test]

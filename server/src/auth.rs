@@ -178,9 +178,16 @@ async fn hash_password(password: String) -> Result<String, ApiError> {
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
 }
 
+/// Create the first organization and Owner.
+///
+/// Body extraction precedes setup-token verification: malformed JSON or invalid field
+/// types return 400, oversized bodies return 413, and unsupported content types return
+/// 415 even when the setup token is missing or invalid. After extraction, the token is
+/// checked before semantic input validation, password hashing, or database access.
 #[utoipa::path(post, path = "/api/v1/setup", request_body = SetupRequest,
-    responses((status = 201, body = Identity), (status = 400, body = ErrorBody),
-    (status = 401, description = "Missing or invalid setup token", body = ErrorBody),
+    responses((status = 201, body = Identity),
+    (status = 400, description = "Invalid JSON, fields, or input; body extraction precedes setup-token verification", body = ErrorBody),
+    (status = 401, description = "Missing or invalid setup token after successful body extraction", body = ErrorBody),
     (status = 409, description = "Setup already completed", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody)))]
