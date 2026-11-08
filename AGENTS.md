@@ -15,17 +15,38 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 - Auth: session cookie (web) and bearer token (native apps).
 
 ## Rules
-- Use the terms in `docs/spec.md` everywhere (UI, API, DB, code). Do not invent synonyms.
-- Every table has `organization_id`; every query is scoped by it (multi-organization later, never retrofit).
-- A change to permissions, tenant scoping or real-time delivery needs a denial test (see `docs/invariants.md`).
-- Sending a message is idempotent (client-generated id). Reconnect uses per-channel sequence numbers.
-- Never commit secrets. The repo is public.
-- Keep it simple: no new dependency, abstraction or doc without a reason in the PR.
+Three tiers: **Absolute** (Tier 1) is meant to be enforced by CI; **Default** (Tier 2) is followed unless there is a better way, and a deviation needs one line in the PR saying why; everything else is free.
+A Tier 1 rule only gets a CI check that is reliable (with a negative test); without one it is Tier 2 or a review item. Until a check lands, a Tier 1 rule is approved but enforced by review only.
+
+Tier 1, enforced by CI today:
+- `openapi.json` and the generated TS types are regenerated and diff-checked (`make api`); toolchain versions agree (see Versions).
+- No secrets in the repo (gitleaks on PR and main, plus `.gitignore` and review). The repo is public.
+
+Tier 1, approved, CI check pending (review enforces until the Issue lands):
+- Every table has `organization_id` (NOT NULL), except the `organizations` root and migration bookkeeping (#31). Migrations are append-only: an existing migration file is never edited or deleted (#31).
+- Rust: `unsafe` forbidden; `unwrap()`, `expect()` and `panic!()` denied outside `#[cfg(test)]` (clippy). Startup errors propagate as `Result`. An unavoidable exception needs a stated reason and the maintainer's approval; do not add abstractions just to satisfy the lint (#32).
+- Module dependency direction (see Boundaries), checked on every reference path; `main`, `openapi` and `lib` are the only exceptions (#32).
+- Every row of `docs/invariants.md` names a test that exists (checked against real test definitions, not text search) (#34).
+- The web reaches the server only through its API layer (REST and WebSocket), using the types generated from `openapi.json` as the source of truth (no hand-written copies of API types); credentials are never kept in web storage (harmless UI settings may be) (#34).
+
+Tier 1, review-enforced (tests run in CI; review judges whether they are the right ones):
+- Data that belongs to an Organization is accessed scoped by `organization_id`. Explicitly documented global operations (e.g. the setup existence check, see `docs/decisions.md`) are exceptions; do not force an artificial Organization scope onto genuinely global operations.
+- A change to permissions, tenant scoping or real-time delivery needs denial tests for the authorization rule it touches: another Organization is always denied, and so is any other denial the rule defines (e.g. a non-member of a private Channel inside the same Organization). Cross-Organization denial alone is not enough (see `docs/invariants.md`).
+
+Tier 2 (defaults): terms from `docs/spec.md` everywhere (UI, API, DB, code), no synonyms; languages (see Languages); errors as `ErrorBody`; SQL only in the module that owns the table; indexes added with the migration that needs them; no N+1 on hot paths; small files and functions; comments only for non-obvious reasons; Svelte: small components, state in plain TS modules with vitest tests.
+
+Also: sending a message is idempotent (client-generated id); reconnect uses per-channel sequence numbers. Keep it simple: no new dependency, abstraction or doc without a reason in the PR.
+
+## Boundaries
+- One Rust crate, split by module: `auth`, `channels`, `messages`, `realtime`. Dependency direction (may use): `realtime` -> `messages` -> `channels` -> `auth`; no reverse edges.
+- Each module owns its tables and exposes functions; other modules do not query its tables directly. HTTP handlers live in their module: parse input, call module functions, map errors.
+- Web: API layer (`src/api.ts`, plus the WebSocket client) -> plain TS state modules -> Svelte components; components never call `fetch` or open sockets. Message and event types come from the generated `api-schema.d.ts`, not local copies.
+- Split into crates only when build time, dependencies or parallel-work conflicts hurt; no premature design.
 
 ## Commands (fill in as they appear)
 - Server: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
 - Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build`
-- API types: `make api` (regenerates openapi.json and TS types). Planned: arrives with the auth slice PR (#4); CI will then fail on a diff.
+- API types: `make api` (regenerates openapi.json and TS types). CI fails on a diff.
 
 ## Workflow
 - Work in your own worktree and branch: `claude/<topic>`, `codex/<topic>`, `antigravity/<topic>`. Never push to `main`.
@@ -41,11 +62,11 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
   tests, CI, docs, patch updates. Being described in `docs/spec.md` does not exempt a feature: the maintainer still approves
   the Issue (the spec says what, the Issue says how it will be read and built). PRs always get the maintainer's review.
 - Implementer by area: Codex = Rust server, DB, auth/permissions, real-time, concurrency, load tests.
-  Claude = design, OpenAPI, Svelte logic, docs. Antigravity = browser checks, UI, smoke E2E.
+  Claude = design, OpenAPI, docs, review. Antigravity = Svelte (screens and state modules), browser checks, E2E.
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them.
 - Only the maintainer merges (or explicitly tells an AI to).
 
-## Languages (keep it small)
+## Languages (keep it small; Tier 2 default)
 - Allowed: Rust (server, server tests), TypeScript (web, vitest, Playwright, small scripts run with Node), SQL, short bash.
 - No Python, Go or other languages. Adding one needs the maintainer's approval and a line in `docs/decisions.md`.
 - Config files may use the tool's native format (e.g. `svelte.config.js`). Everything we write is TypeScript.
@@ -60,7 +81,7 @@ Do not create other docs. Code, tests and `openapi.json` are the source of truth
 - Version updates: `.github/dependabot.yml` (weekly, grouped) covers Cargo, npm, GitHub Actions, Docker.
   Security updates are a separate GitHub setting (Settings > Advanced Security: Dependabot alerts, Dependabot security updates);
   enabled by the maintainer on 2026-11-08 (verified via API). No security PR has been seen yet, so do not claim it is proven.
-- Planned, not in CI yet: `cargo deny` and `npm audit` (vulnerability checks, also on a nightly schedule).
+- `cargo deny` and `npm audit` run in CI (PR, main, nightly).
 - Update PRs: an AI checks the changelog for breaking changes, then asks the maintainer to merge.
 - Production VPS: automatic OS security updates (planned with the deploy work).
 
@@ -88,4 +109,5 @@ Every open issue/PR carries at most one status label, set by the AI that hands o
   follow-up Issues, not another round. Blocking findings unresolved after round 2 -> `status:needs-decision`.
 - Copilot auto-review is OFF (it burns credits). Request it once per PR, by hand, when CI is green and the work is
   done: `gh pr edit <n> --add-reviewer @copilot`. Only for `risk:needs-review` or large code PRs. Re-request only if the maintainer asks.
+- Write everything on GitHub (Issues, PRs, comments, reviews, commits) in English; Japanese only where unavoidable (e.g. UI strings).
 - Every issue comment, review and PR body from an AI ends with one line: `AI: <name> / model: <id> / effort: <level>`.
