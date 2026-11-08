@@ -11,9 +11,15 @@ const fail = <T>(kind: 'network' | 'http' = 'network', status = 400): Result<T> 
 const ids = () => { let n = 0; return () => `cid${++n}` }
 
 describe('mergeMessages', () => {
-  it('sorts ascending and dedupes by seq and client_message_id', () => {
-    const out = mergeMessages([msg(2), msg(3)], [msg(1), msg(2), msg(9, 'c3')])
+  it('sorts ascending and dedupes by seq', () => {
+    const out = mergeMessages([msg(2), msg(3)], [msg(1), msg(2), msg(3)])
     expect(out.map((m) => m.seq)).toEqual([1, 2, 3])
+  })
+  it('keeps messages from different senders that share a client_message_id', () => {
+    const a = { ...msg(1, 'same'), sender: 'alice' }
+    const b = { ...msg(2, 'same'), sender: 'bob' }
+    expect(mergeMessages([a], [b]).map((m) => m.sender)).toEqual(['alice', 'bob'])
+    expect(mergeMessages([b, a], [a, b]).map((m) => m.seq)).toEqual([1, 2])
   })
 })
 

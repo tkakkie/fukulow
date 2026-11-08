@@ -17,7 +17,7 @@ export type Pending = {
 
 export type TimelineState = {
   status: 'loading' | 'ready' | 'error'
-  /** Confirmed messages, ascending seq, unique by seq and by client_message_id. */
+  /** Confirmed messages, ascending seq, unique by seq. */
   messages: Message[]
   pending: Pending[]
   hasOlder: boolean
@@ -28,14 +28,11 @@ export type TimelineState = {
 export const sendErrorMessage = (retryable: boolean) =>
   retryable ? '送信できませんでした。再送できます。' : '送信できませんでした。内容を確認してください。'
 
-/** Merge into an ascending list: dedupe by seq and by client_message_id (the sender's own ack/echo). */
+/** Merge into an ascending list, deduped by seq (unique per channel; client_message_id is only unique per sender). */
 export function mergeMessages(current: Message[], incoming: Message[]): Message[] {
   const bySeq = new Map<number, Message>()
   for (const m of [...current, ...incoming]) bySeq.set(m.seq, m)
-  const seen = new Set<string>()
-  return [...bySeq.values()]
-    .sort((a, b) => a.seq - b.seq)
-    .filter((m) => !seen.has(m.client_message_id) && !!seen.add(m.client_message_id))
+  return [...bySeq.values()].sort((a, b) => a.seq - b.seq)
 }
 
 /**
