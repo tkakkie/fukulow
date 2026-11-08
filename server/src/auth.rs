@@ -1,7 +1,7 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json,
-    extract::{FromRequest, FromRequestParts, Request, State},
+    extract::{ConnectInfo, FromRequest, FromRequestParts, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
@@ -15,6 +15,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+mod throttle;
+pub use throttle::SignInThrottle;
+
 // Bound Argon2 memory/CPU work independently from Tokio blocking-thread capacity.
 static PASSWORD_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
@@ -26,13 +29,21 @@ pub struct ErrorBody {
     pub error: String,
 }
 
-pub struct ApiError(StatusCode, &'static str);
+#[derive(Debug)]
+pub struct ApiError(StatusCode, &'static str, Option<std::time::Duration>);
 impl ApiError {
     fn unauthorized() -> Self {
-        Self(StatusCode::UNAUTHORIZED, "invalid credentials")
+        Self(StatusCode::UNAUTHORIZED, "invalid credentials", None)
     }
     fn bad_request() -> Self {
-        Self(StatusCode::BAD_REQUEST, "invalid input")
+        Self(StatusCode::BAD_REQUEST, "invalid input", None)
+    }
+    fn throttled(retry: std::time::Duration) -> Self {
+        Self(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many sign-in attempts",
+            Some(retry),
+        )
     }
 }
 impl IntoResponse for ApiError {
@@ -47,13 +58,19 @@ impl IntoResponse for ApiError {
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        if let Some(retry) = self.2 {
+            let seconds = retry.as_secs() + u64::from(retry.subsec_nanos() > 0);
+            if let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
         response
     }
 }
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
         eprintln!("database operation failed: {error}");
-        Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
     }
 }
 
@@ -72,12 +89,15 @@ where
             .await
             .map(|Json(value)| Self(value))
             .map_err(|rejection| match rejection.status() {
-                StatusCode::PAYLOAD_TOO_LARGE => {
-                    ApiError(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
-                }
+                StatusCode::PAYLOAD_TOO_LARGE => ApiError(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body too large",
+                    None,
+                ),
                 StatusCode::UNSUPPORTED_MEDIA_TYPE => ApiError(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     "expected application/json",
+                    None,
                 ),
                 _ => ApiError::bad_request(),
             })
@@ -174,7 +194,7 @@ async fn hash_password(password: String) -> Result<String, ApiError> {
     let permit = PASSWORD_WORKERS
         .acquire()
         .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         Argon2::default()
@@ -182,8 +202,45 @@ async fn hash_password(password: String) -> Result<String, ApiError> {
             .map(|hash| hash.to_string())
     })
     .await
-    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?
-    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))
+}
+
+async fn check_password(
+    password: String,
+    stored: Option<String>,
+    attempt: throttle::Attempt,
+) -> Result<bool, ApiError> {
+    let permit = PASSWORD_WORKERS
+        .acquire()
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let valid = match stored {
+            Some(stored) => PasswordHash::new(&stored).is_ok_and(|hash| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &hash)
+                    .is_ok()
+            }),
+            None => {
+                // Unknown organization/email spends the same password work.
+                Argon2::default()
+                    .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+                    .map_err(|_| {
+                        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
+                    })?;
+                false
+            }
+        };
+        // Keep the reservation and record failures even if the HTTP task was cancelled.
+        if !valid {
+            attempt.failed();
+        }
+        Ok(valid)
+    })
+    .await
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?
 }
 
 // Global bootstrap is a tenant-scope exception: only existence is exposed.
@@ -252,7 +309,11 @@ pub async fn setup(
     // Global bootstrap fast path: completed setup never consumes password workers
     // or takes the setup lock. The transactional check below still closes the race.
     if organization_exists(&state.pool).await? {
-        return Err(ApiError(StatusCode::CONFLICT, "setup already completed"));
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "setup already completed",
+            None,
+        ));
     }
     let password_hash = hash_password(input.password).await?;
     let mut tx = state.pool.begin().await?;
@@ -262,7 +323,11 @@ pub async fn setup(
         .execute(&mut *tx)
         .await?;
     if organization_exists(&mut *tx).await? {
-        return Err(ApiError(StatusCode::CONFLICT, "setup already completed"));
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "setup already completed",
+            None,
+        ));
     }
     let organization_id = Uuid::new_v4();
     let id = Uuid::new_v4();
@@ -319,19 +384,45 @@ impl From<IdentityRow> for Identity {
     }
 }
 
+struct RetryAfterSeconds;
+
+impl utoipa::PartialSchema for RetryAfterSeconds {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{KnownFormat, Object, SchemaFormat, Type};
+
+        Object::builder()
+            .schema_type(Type::Integer)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64)))
+            .minimum(Some(1.0))
+            .build()
+            .into()
+    }
+}
+
+impl ToSchema for RetryAfterSeconds {}
+
 #[utoipa::path(post, path = "/api/v1/session", request_body = SignInRequest,
     responses((status = 200, body = SessionResponse, headers(("Set-Cookie" = String, description = "HttpOnly; SameSite=Strict; Path=/; Secure by default"))),
     (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
-    (status = 415, description = "Expected application/json", body = ErrorBody)))]
+    (status = 415, description = "Expected application/json", body = ErrorBody),
+    (status = 429, description = "Too many failed or in-flight sign-in attempts", body = ErrorBody,
+        headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1")))))]
 pub async fn sign_in(
     State(state): State<AppState>,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
     let email = email(&input.email)?;
     if input.password.is_empty() || input.password.len() > 1024 {
         return Err(ApiError::bad_request());
     }
+    let ip = state.sign_in_throttle.client_ip(peer, &headers);
+    let mut attempt = state
+        .sign_in_throttle
+        .begin(ip)
+        .map_err(ApiError::throttled)?;
     let organization_id = match input.organization_id {
         Some(id) => id,
         None => {
@@ -346,6 +437,9 @@ pub async fn sign_in(
             *id
         }
     };
+    attempt
+        .account(organization_id, email.clone())
+        .map_err(ApiError::throttled)?;
     let stored = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, password_hash FROM users WHERE organization_id = $1 AND email = $2",
     )
@@ -353,31 +447,11 @@ pub async fn sign_in(
     .bind(email)
     .fetch_optional(&state.pool)
     .await?;
-    let (user_id, password_hash) = match stored {
-        Some(value) => value,
-        None => {
-            // Spend the same Argon2 work for an unknown organization/email.
-            hash_password(input.password).await?;
-            return Err(ApiError::unauthorized());
-        }
-    };
-    let permit = PASSWORD_WORKERS
-        .acquire()
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
-    let valid = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        PasswordHash::new(&password_hash).is_ok_and(|hash| {
-            Argon2::default()
-                .verify_password(input.password.as_bytes(), &hash)
-                .is_ok()
-        })
-    })
-    .await
-    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
-    if !valid {
+    let (user_id, password_hash) = stored.unzip();
+    if !check_password(input.password, password_hash, attempt).await? {
         return Err(ApiError::unauthorized());
     }
+    let user_id = user_id.ok_or_else(ApiError::unauthorized)?;
     let mut random = [0u8; 32];
     OsRng.fill_bytes(&mut random);
     let secret: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -527,6 +601,164 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
+    #[tokio::test]
+    async fn password_verification_records_failures_for_known_and_unknown_accounts() {
+        let password = "correct horse battery staple";
+        let stored = hash_password(password.into()).await.unwrap();
+        for stored in [Some(stored), None] {
+            let throttle = SignInThrottle::default();
+            let organization = Uuid::new_v4();
+            let ip = "192.0.2.1".parse().unwrap();
+            if stored.is_some() {
+                // Successful verification must release reservations without charging failures.
+                for _ in 0..6 {
+                    let mut attempt = throttle.begin(ip).unwrap();
+                    attempt
+                        .account(organization, "owner@example.com".into())
+                        .unwrap();
+                    assert!(
+                        check_password(password.into(), stored.clone(), attempt)
+                            .await
+                            .unwrap()
+                    );
+                }
+            }
+            for _ in 0..5 {
+                let mut attempt = throttle.begin(ip).unwrap();
+                attempt
+                    .account(organization, "owner@example.com".into())
+                    .unwrap();
+                assert!(
+                    !check_password("incorrect password".into(), stored.clone(), attempt)
+                        .await
+                        .unwrap()
+                );
+            }
+            let mut rejected = throttle.begin(ip).unwrap();
+            assert!(
+                rejected
+                    .account(organization, "owner@example.com".into())
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn throttled_sign_in_skips_password_workers_and_database() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let organization = Uuid::new_v4();
+        let peer: std::net::SocketAddr = "192.0.2.1:1234".parse().unwrap();
+        let _workers = PASSWORD_WORKERS.acquire_many(4).await.unwrap();
+        for by_ip in [false, true] {
+            let throttle = SignInThrottle::default();
+            for _ in 0..if by_ip { 20 } else { 5 } {
+                let mut attempt = throttle.begin(peer.ip()).unwrap();
+                if !by_ip {
+                    attempt
+                        .account(organization, "owner@example.com".into())
+                        .unwrap();
+                }
+                attempt.failed();
+            }
+            let app = crate::app(AppState {
+                pool: pool.clone(),
+                cookie_secure: true,
+                setup_token: None,
+                sign_in_throttle: throttle,
+            });
+            for forwarded in ["198.51.100.1", "198.51.100.2"] {
+                let request = Request::post("/api/v1/session")
+                    .extension(ConnectInfo(peer))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-forwarded-for", forwarded)
+                    .body(axum::body::Body::from(
+                        json!({
+                            "organization_id": if by_ip { None } else { Some(organization) },
+                            "email": " Owner@Example.com ", "password": "incorrect password"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    app.clone().oneshot(request),
+                )
+                .await
+                .expect("throttled requests must not touch the database or wait for Argon2")
+                .unwrap();
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                assert!(!response.headers().contains_key(header::SET_COOKIE));
+                let retry = response.headers()[header::RETRY_AFTER]
+                    .to_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                assert!((1..=60).contains(&retry));
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                    json!({"error": "too many sign-in attempts"})
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ipv6_prefix_failures_return_429_while_another_prefix_remains_usable() {
+        let throttle = SignInThrottle::default();
+        for n in 0..20 {
+            throttle
+                .begin(format!("2001:db8:abcd:1:{n}:1:2:{n}").parse().unwrap())
+                .unwrap()
+                .failed();
+        }
+        assert!(
+            throttle
+                .begin("2001:db8:abcd:2::1".parse().unwrap())
+                .is_ok()
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let app = crate::app(AppState {
+            pool,
+            cookie_secure: true,
+            setup_token: None,
+            sign_in_throttle: throttle,
+        });
+        let request = Request::post("/api/v1/session")
+            .extension(ConnectInfo(
+                "[2001:db8:abcd:1:ffff:ffff:ffff:ffff]:1234"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                json!({"email": "owner@example.com", "password": "incorrect password"}).to_string(),
+            ))
+            .unwrap();
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(1), app.oneshot(request))
+                .await
+                .expect("same-prefix requests must be throttled before database access")
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    #[tokio::test]
+    async fn retry_after_rounds_up_and_is_never_zero() {
+        for (millis, seconds) in [(0, "1"), (1, "1"), (1000, "1"), (1001, "2"), (60_000, "60")] {
+            let response =
+                ApiError::throttled(std::time::Duration::from_millis(millis)).into_response();
+            assert_eq!(response.headers()[header::RETRY_AFTER], seconds);
+        }
+    }
+
     #[sqlx::test]
     async fn completed_setup_skips_password_workers_and_setup_lock(pool: sqlx::PgPool) {
         sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Existing')")
@@ -546,6 +778,7 @@ mod tests {
                 pool: pool.clone(),
                 cookie_secure: true,
                 setup_token: setup_token.clone(),
+                sign_in_throttle: Default::default(),
             });
             let request = Request::post("/api/v1/setup")
                 .header(header::CONTENT_TYPE, "application/json")

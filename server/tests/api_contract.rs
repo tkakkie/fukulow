@@ -15,6 +15,15 @@ use tower::ServiceExt;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
+#[test]
+fn sign_in_retry_after_is_at_least_one_second() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schema = &document["paths"]["/api/v1/session"]["post"]["responses"]["429"]["headers"]["Retry-After"]
+        ["schema"];
+    assert_eq!(schema["type"], "integer");
+    assert_eq!(schema["minimum"], 1);
+}
+
 fn assert_variant_contract<T: Serialize>(root: &str, variants: &[(T, &str)]) {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let schemas = &document["components"]["schemas"];
@@ -135,6 +144,7 @@ async fn remaining_contract_routes_are_stubs_without_authentication_or_database_
         pool,
         cookie_secure: true,
         setup_token: None,
+        sign_in_throttle: Default::default(),
     });
     for (method, path) in [
         (

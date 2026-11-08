@@ -19,6 +19,7 @@ fn router(pool: &PgPool) -> Router {
         pool: pool.clone(),
         cookie_secure: true,
         setup_token: None,
+        sign_in_throttle: Default::default(),
     })
 }
 
@@ -32,7 +33,10 @@ async fn request(
     let mut request = Request::builder()
         .method(method)
         .uri(path)
-        .header(header::CONTENT_TYPE, "application/json");
+        .header(header::CONTENT_TYPE, "application/json")
+        .extension(axum::extract::ConnectInfo(
+            "192.0.2.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
@@ -88,6 +92,7 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
             pool: pool.clone(),
             cookie_secure: true,
             setup_token,
+            sign_in_throttle: Default::default(),
         });
         let response = app
             .oneshot(Request::get("/api/v1/setup").body(Body::empty()).unwrap())
@@ -184,6 +189,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
             pool: pool.clone(),
             cookie_secure: true,
             setup_token: setup_token.map(str::to_owned),
+            sign_in_throttle: Default::default(),
         });
         let valid_input = if path == "/api/v1/setup" {
             setup_input()
@@ -246,7 +252,9 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
                 "request body too large",
             ),
         ] {
-            let mut request = Request::post(path);
+            let mut request = Request::post(path).extension(axum::extract::ConnectInfo(
+                "192.0.2.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+            ));
             if let Some(content_type) = content_type {
                 request = request.header(header::CONTENT_TYPE, content_type);
             }
@@ -271,6 +279,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
         pool: pool.clone(),
         cookie_secure: true,
         setup_token: Some(setup_token.into()),
+        sign_in_throttle: Default::default(),
     });
     let expected = json!({"error": "invalid credentials"});
     for completed in [false, true] {
@@ -333,6 +342,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
         pool,
         cookie_secure: true,
         setup_token: Some("setup-token-test-only".into()),
+        sign_in_throttle: Default::default(),
     });
     for token in [None, Some(""), Some("wrong-token-test-only")] {
         let mut input = setup_input();
@@ -718,4 +728,285 @@ async fn invalid_setup_does_not_consume_bootstrap(pool: PgPool) {
         );
     }
     setup(&app).await;
+}
+
+async fn sign_in_from(
+    app: &Router,
+    peer: &str,
+    organization_id: Option<Uuid>,
+    email: &str,
+    password: &str,
+    forwarded: Option<&str>,
+) -> Response {
+    let mut request = Request::post("/api/v1/session")
+        .extension(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ))
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(forwarded) = forwarded {
+        request = request.header("x-forwarded-for", forwarded);
+    }
+    app.clone()
+        .oneshot(
+            request
+                .body(Body::from(
+                    json!({
+                        "organization_id": organization_id, "email": email, "password": password
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn assert_throttled(response: Response) {
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert!(
+        (1..=60).contains(
+            &response.headers()[header::RETRY_AFTER]
+                .to_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        body(response).await,
+        json!({"error": "too many sign-in attempts"})
+    );
+}
+
+#[sqlx::test]
+async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts_or_organizations(
+    pool: PgPool,
+) {
+    let app = router(&pool);
+    let (first, second) = two_organizations(&pool, &app).await;
+    let first: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) SELECT organization_id, $2, 'other@example.com', name, password_hash, role FROM users WHERE organization_id = $1")
+        .bind(first).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+    for n in 1..=5 {
+        let response = sign_in_from(
+            &app,
+            &format!("192.0.2.{n}:1234"),
+            Some(first),
+            " Owner@Example.com ",
+            "incorrect password",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    // Another IP cannot bypass the account budget, even with the correct password.
+    assert_throttled(
+        sign_in_from(
+            &app,
+            "192.0.2.6:1234",
+            Some(first),
+            "owner@example.com",
+            PASSWORD,
+            None,
+        )
+        .await,
+    )
+    .await;
+    // A different account on the same IP and the same email in another tenant work.
+    for (organization, email) in [(first, "other@example.com"), (second, "owner@example.com")] {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                Some(organization),
+                email,
+                PASSWORD,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    // Advance only between DB operations; SQLx needs a running clock for network I/O.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+    assert_eq!(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            Some(first),
+            "owner@example.com",
+            PASSWORD,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test]
+async fn failed_sign_ins_throttle_ip_and_ignore_spoofed_forwarded_header_by_default(pool: PgPool) {
+    let app = router(&pool);
+    let first = setup(&app).await;
+    let organization: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for n in 1..=20 {
+        // Unknown accounts count too; changing an untrusted header cannot split the IP budget.
+        let response = sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            Some(organization),
+            &format!("unknown{n}@example.com"),
+            "incorrect password",
+            Some(&format!("198.51.100.{n}")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_throttled(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            None,
+            "owner@example.com",
+            PASSWORD,
+            Some("203.0.113.99"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        sign_in_from(
+            &app,
+            "192.0.2.2:1234",
+            Some(organization),
+            "owner@example.com",
+            PASSWORD,
+            Some("203.0.113.99")
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+    assert_eq!(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            None,
+            "owner@example.com",
+            PASSWORD,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test]
+async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_account_budget(
+    pool: PgPool,
+) {
+    let app = app(AppState {
+        pool: pool.clone(),
+        cookie_secure: true,
+        setup_token: None,
+        sign_in_throttle: fukulow_server::auth::SignInThrottle::with_proxy_config(
+            Some("192.0.2.1"),
+            Some("x-forwarded-for"),
+        )
+        .unwrap(),
+    });
+    let first = setup(&app).await;
+    let organization: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for n in 1..=20 {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                Some(organization),
+                &format!("unknown{n}@example.com"),
+                "incorrect password",
+                Some("spoofed, 198.51.100.1")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_throttled(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            None,
+            "owner@example.com",
+            PASSWORD,
+            Some("198.51.100.99, 198.51.100.1"),
+        )
+        .await,
+    )
+    .await;
+    // The second real client behind the same proxy remains unaffected.
+    for _ in 0..6 {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                None,
+                "owner@example.com",
+                PASSWORD,
+                Some("198.51.100.2")
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    for n in 1..=5 {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                if n % 2 == 0 { Some(organization) } else { None },
+                " Owner@Example.com ",
+                "incorrect password",
+                Some("198.51.100.2")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_throttled(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            Some(organization),
+            "owner@example.com",
+            PASSWORD,
+            Some("198.51.100.3"),
+        )
+        .await,
+    )
+    .await;
 }

@@ -31,3 +31,42 @@ fn startup_rejects_empty_setup_token_but_accepts_unset_or_nonempty() {
     }
     assert_eq!(database_errors[0], database_errors[1]);
 }
+
+#[test]
+fn startup_rejects_partial_or_invalid_proxy_configuration_before_database_access() {
+    for (peers, header, expected) in [
+        (Some("192.0.2.1"), None, "configure FUKULOW_TRUSTED_PROXIES"),
+        (
+            None,
+            Some("x-forwarded-for"),
+            "configure FUKULOW_TRUSTED_PROXIES",
+        ),
+        (
+            Some(""),
+            Some("x-forwarded-for"),
+            "FUKULOW_TRUSTED_PROXIES must contain",
+        ),
+        (
+            Some("192.0.2.1"),
+            Some("bad header"),
+            "FUKULOW_CLIENT_IP_HEADER must be",
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
+        command
+            .env("DATABASE_URL", "invalid-test-url")
+            .env_remove("FUKULOW_SETUP_TOKEN")
+            .env_remove("FUKULOW_TRUSTED_PROXIES")
+            .env_remove("FUKULOW_CLIENT_IP_HEADER");
+        if let Some(peers) = peers {
+            command.env("FUKULOW_TRUSTED_PROXIES", peers);
+        }
+        if let Some(header) = header {
+            command.env("FUKULOW_CLIENT_IP_HEADER", header);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(expected), "{error}");
+    }
+}

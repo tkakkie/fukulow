@@ -10,6 +10,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     };
     let database_url = std::env::var("DATABASE_URL")?;
+    let proxy_peers = std::env::var("FUKULOW_TRUSTED_PROXIES").ok();
+    let proxy_header = std::env::var("FUKULOW_CLIENT_IP_HEADER").ok();
+    let sign_in_throttle = fukulow_server::auth::SignInThrottle::with_proxy_config(
+        proxy_peers.as_deref(),
+        proxy_header.as_deref(),
+    )?;
     let cookie_secure = match std::env::var("FUKULOW_COOKIE_SECURE").as_deref() {
         Ok("false") => false,
         Ok("true") | Err(std::env::VarError::NotPresent) => true,
@@ -29,7 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pool,
             cookie_secure,
             setup_token,
-        }),
+            sign_in_throttle,
+        })
+        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
     Ok(())

@@ -21,6 +21,7 @@ pub struct AppState {
     pub pool: sqlx::PgPool,
     pub cookie_secure: bool,
     pub setup_token: Option<String>,
+    pub sign_in_throttle: auth::SignInThrottle,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -91,6 +92,7 @@ mod tests {
             pool,
             cookie_secure: true,
             setup_token: None,
+            sign_in_throttle: Default::default(),
         })
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await

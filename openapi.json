@@ -498,6 +498,26 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Too many failed or in-flight sign-in attempts",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Seconds until retry; at least 1"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },

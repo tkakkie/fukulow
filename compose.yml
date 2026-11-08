@@ -8,6 +8,8 @@ services:
       DATABASE_URL: postgres://fukulow:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/fukulow
       FUKULOW_COOKIE_SECURE: ${FUKULOW_COOKIE_SECURE:-true}
       FUKULOW_SETUP_TOKEN:
+      FUKULOW_TRUSTED_PROXIES:
+      FUKULOW_CLIENT_IP_HEADER:
     depends_on:
       db:
         condition: service_healthy
