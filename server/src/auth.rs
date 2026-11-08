@@ -2,7 +2,7 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_ha
 use axum::{
     Json,
     extract::{FromRequest, FromRequestParts, Request, State},
-    http::{HeaderMap, StatusCode, header, request::Parts},
+    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use rand::{RngCore, rngs::OsRng};
@@ -46,7 +46,7 @@ impl IntoResponse for ApiError {
             .into_response();
         response
             .headers_mut()
-            .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         response
     }
 }
@@ -171,7 +171,10 @@ fn email(value: &str) -> Result<String, ApiError> {
 }
 
 async fn hash_password(password: String) -> Result<String, ApiError> {
-    let permit = PASSWORD_WORKERS.acquire().await.unwrap();
+    let permit = PASSWORD_WORKERS
+        .acquire()
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         Argon2::default()
@@ -358,7 +361,10 @@ pub async fn sign_in(
             return Err(ApiError::unauthorized());
         }
     };
-    let permit = PASSWORD_WORKERS.acquire().await.unwrap();
+    let permit = PASSWORD_WORKERS
+        .acquire()
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
     let valid = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         PasswordHash::new(&password_hash).is_ok_and(|hash| {
@@ -458,7 +464,7 @@ fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
         let mut values = headers.get_all(header::AUTHORIZATION).iter();
         let value = values
             .next()
-            .unwrap()
+            .ok_or_else(ApiError::unauthorized)?
             .to_str()
             .map_err(|_| ApiError::unauthorized())?;
         if values.next().is_some() {

@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::collections::BTreeSet;
 
 use axum::{body::Body, http::Request};

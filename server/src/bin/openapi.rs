@@ -1,10 +1,9 @@
 use utoipa::OpenApi;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
-        fukulow_server::openapi::ApiDoc::openapi()
-            .to_pretty_json()
-            .unwrap()
+        fukulow_server::openapi::ApiDoc::openapi().to_pretty_json()?
     );
+    Ok(())
 }

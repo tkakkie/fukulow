@@ -6,7 +6,6 @@ pub mod realtime;
 
 use axum::{
     Router,
-    body::Body,
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -75,10 +74,7 @@ async fn static_handler(uri: Uri) -> Response {
 
 fn serve(name: &str, file: rust_embed::EmbeddedFile) -> Response {
     let mime = mime_guess::from_path(name).first_or_octet_stream();
-    Response::builder()
-        .header(header::CONTENT_TYPE, mime.as_ref())
-        .body(Body::from(file.data.into_owned()))
-        .unwrap()
+    ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response()
 }
 
 #[cfg(test)]

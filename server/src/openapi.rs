@@ -23,7 +23,7 @@ pub struct ApiDoc;
 struct Security;
 impl Modify for Security {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        let components = openapi.components.as_mut().unwrap();
+        let components = openapi.components.get_or_insert_with(Default::default);
         components.add_security_scheme(
             "bearer",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
@@ -37,8 +37,12 @@ impl Modify for Security {
 
 struct WebSocketDiscriminators;
 impl Modify for WebSocketDiscriminators {
+    #[expect(
+        clippy::panic,
+        reason = "utoipa Modify cannot return Result; an invalid generated contract must fail API export"
+    )]
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        let components = openapi.components.as_mut().unwrap();
+        let components = openapi.components.get_or_insert_with(Default::default);
         for (root, variants) in [
             (
                 "ClientMessage",
