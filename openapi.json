@@ -506,7 +506,7 @@
                 "schema": {
                   "type": "integer",
                   "format": "int64",
-                  "minimum": 0
+                  "minimum": 1
                 },
                 "description": "Seconds until retry; at least 1"
               }

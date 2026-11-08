@@ -384,13 +384,30 @@ impl From<IdentityRow> for Identity {
     }
 }
 
+struct RetryAfterSeconds;
+
+impl utoipa::PartialSchema for RetryAfterSeconds {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{KnownFormat, Object, SchemaFormat, Type};
+
+        Object::builder()
+            .schema_type(Type::Integer)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64)))
+            .minimum(Some(1.0))
+            .build()
+            .into()
+    }
+}
+
+impl ToSchema for RetryAfterSeconds {}
+
 #[utoipa::path(post, path = "/api/v1/session", request_body = SignInRequest,
     responses((status = 200, body = SessionResponse, headers(("Set-Cookie" = String, description = "HttpOnly; SameSite=Strict; Path=/; Secure by default"))),
     (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts", body = ErrorBody,
-        headers(("Retry-After" = u64, description = "Seconds until retry; at least 1")))))]
+        headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1")))))]
 pub async fn sign_in(
     State(state): State<AppState>,
     peer: ConnectInfo<std::net::SocketAddr>,
