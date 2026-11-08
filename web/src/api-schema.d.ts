@@ -517,16 +517,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Channel access denied */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Channel not found */
+            /** @description Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -577,16 +568,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Channel access denied */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Channel not found */
+            /** @description Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
             404: {
                 headers: {
                     [name: string]: unknown;

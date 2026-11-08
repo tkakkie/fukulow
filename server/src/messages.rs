@@ -95,8 +95,7 @@ pub struct MessagePage {
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, body = MessagePage),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
-        (status = 403, description = "Channel access denied", body = ErrorBody),
-        (status = 404, description = "Channel not found", body = ErrorBody)))]
+        (status = 404, description = "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody)))]
 pub async fn list_messages(
     State(state): State<AppState>,
     auth: Auth,
@@ -160,8 +159,7 @@ pub async fn list_messages(
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, body = Message),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
-        (status = 403, description = "Channel access denied", body = ErrorBody),
-        (status = 404, description = "Channel not found", body = ErrorBody),
+        (status = 404, description = "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
         (status = 409, description = "Client message id reused with different body or channel", body = ErrorBody),
         (status = 413, body = ErrorBody), (status = 415, body = ErrorBody)))]
 pub async fn send_message(

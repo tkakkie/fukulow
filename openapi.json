@@ -210,18 +210,8 @@
               }
             }
           },
-          "403": {
-            "description": "Channel access denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
           "404": {
-            "description": "Channel not found",
+            "description": "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -299,18 +289,8 @@
               }
             }
           },
-          "403": {
-            "description": "Channel access denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
           "404": {
-            "description": "Channel not found",
+            "description": "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists",
             "content": {
               "application/json": {
                 "schema": {
