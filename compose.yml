@@ -13,6 +13,9 @@ services:
     image: caddy:2
     restart: unless-stopped
     ports: ["80:80", "443:443"]
+    environment:
+      # Public domain for automatic HTTPS (DNS must point to this host; ports 80/443 open).
+      FUKULOW_DOMAIN: ${FUKULOW_DOMAIN:-localhost}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
