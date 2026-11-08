@@ -1,11 +1,11 @@
-FROM node:26-slim AS web
+FROM node:26.8.1-slim AS web
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM rust:1.98-slim AS server
+FROM rust:1.98.1-slim AS server
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY server/ server/
