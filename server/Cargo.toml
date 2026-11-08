@@ -2,12 +2,22 @@
 name = "fukulow-server"
 version = "0.1.0"
 edition = "2024"
+default-run = "fukulow-server"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 rust-embed = "8"
 mime_guess = "2"
+argon2 = "0.5"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+subtle = "2.6"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "macros", "migrate"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+utoipa = { version = "5", features = ["uuid"] }
 
 [dev-dependencies]
+serde_json = "1"
 tower = { version = "0.5", features = ["util"] }

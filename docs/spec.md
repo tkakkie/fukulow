@@ -18,5 +18,10 @@ Archive/アーカイブ, Sign in/ログイン, Settings/設定.
 Sign in, organization, channels, topics, reply chains, DM, unread/mention, basic search.
 Later: attachments, reactions, push notifications, bots/webhooks, multiple organizations UI, OIDC.
 
+## Setup
+- `FUKULOW_SETUP_TOKEN` is optional: unset preserves setup without a token; an explicitly empty value fails startup.
+- Setup extracts the JSON body before checking `setup_token`. Malformed JSON, missing required fields or invalid field types return 400, oversized bodies return 413, and unsupported content types return 415 even if the token is missing or invalid.
+- After successful extraction, a configured token must match before semantic input validation, password hashing or database access; missing or incorrect tokens return the same generic 401 before and after setup.
+
 ## Performance targets (first)
 One node: 10k concurrent connections, thousands of message writes/s. Measure with load tests before optimizing.

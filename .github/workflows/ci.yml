@@ -21,6 +21,19 @@ jobs:
   server:
     needs: web
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: ci-test-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -30,11 +43,25 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - uses: actions/setup-node@v4
+        with: { node-version: 26 }
+      - run: make api && git diff --exit-code -- openapi.json web/src/api-schema.d.ts
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t fukulow:ci .
+      - run: docker compose --profile caddy up -d --build --wait
+        env:
+          POSTGRES_PASSWORD: ci-compose-only
+      - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
+      - if: failure()
+        run: docker compose --profile caddy logs
+        env:
+          POSTGRES_PASSWORD: ci-compose-only
+      - if: always()
+        run: docker compose --profile caddy down -v --remove-orphans
+        env:
+          POSTGRES_PASSWORD: ci-compose-only
       - name: Versions agree (rust-toolchain.toml, .node-version, engines, Dockerfile)
         run: |
           set -euo pipefail
