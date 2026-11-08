@@ -80,6 +80,54 @@ async fn two_organizations(pool: &PgPool, app: &Router) -> (Value, Uuid) {
     (first, second_id)
 }
 
+async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
+    for setup_token in [None, Some("setup-status-test-only".into())] {
+        let app = app(AppState {
+            pool: pool.clone(),
+            cookie_secure: true,
+            setup_token,
+        });
+        let response = app
+            .oneshot(Request::get("/api/v1/setup").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        // Exact equality denies any disclosure of organization, member or token data.
+        assert_eq!(
+            body(response).await,
+            json!({"setup_required": setup_required})
+        );
+    }
+}
+
+#[sqlx::test]
+async fn setup_status_empty_database_is_public_and_reveals_only_boolean(pool: PgPool) {
+    assert_setup_status(&pool, true).await;
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM sessions)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (0, 0, 0));
+}
+
+#[sqlx::test]
+async fn setup_status_after_setup_is_public_and_reveals_only_boolean(pool: PgPool) {
+    setup(&router(&pool)).await;
+    assert_setup_status(&pool, false).await;
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM sessions)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1, 0));
+}
+
 #[sqlx::test]
 async fn setup_works_once_and_is_atomic(pool: PgPool) {
     let app = router(&pool);

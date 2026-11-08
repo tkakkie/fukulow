@@ -182,6 +182,44 @@
       }
     },
     "/api/v1/setup": {
+      "get": {
+        "tags": [
+          "crate::auth"
+        ],
+        "summary": "Report whether the first organization still needs to be created.\nAccessible without authentication or a setup token; reveals only setup_required.",
+        "operationId": "setup_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      },
       "post": {
         "tags": [
           "crate::auth"
@@ -403,6 +441,17 @@
           }
         },
         "additionalProperties": false
+      },
+      "SetupStatus": {
+        "type": "object",
+        "required": [
+          "setup_required"
+        ],
+        "properties": {
+          "setup_required": {
+            "type": "boolean"
+          }
+        }
       },
       "SignInRequest": {
         "type": "object",

@@ -131,6 +131,11 @@ pub struct SetupRequest {
     pub password: String,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct SetupStatus {
+    pub setup_required: bool,
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SignInRequest {
@@ -178,6 +183,28 @@ async fn hash_password(password: String) -> Result<String, ApiError> {
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
 }
 
+// Global bootstrap is a tenant-scope exception: only existence is exposed.
+async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organizations)")
+        .fetch_one(executor)
+        .await
+}
+
+/// Report whether the first organization still needs to be created.
+/// Accessible without authentication or a setup token; reveals only setup_required.
+#[utoipa::path(get, path = "/api/v1/setup", security(),
+    responses((status = 200, body = SetupStatus,
+        headers(("Cache-Control" = String, description = "no-store"))),
+    (status = 500, body = ErrorBody)))]
+pub async fn setup_status(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let setup_required = !organization_exists(&state.pool).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(SetupStatus { setup_required }),
+    )
+        .into_response())
+}
+
 /// Create the first organization and Owner.
 ///
 /// Body extraction precedes setup-token verification: malformed JSON or invalid field
@@ -221,10 +248,7 @@ pub async fn setup(
     }
     // Global bootstrap fast path: completed setup never consumes password workers
     // or takes the setup lock. The transactional check below still closes the race.
-    if sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM organizations)")
-        .fetch_one(&state.pool)
-        .await?
-    {
+    if organization_exists(&state.pool).await? {
         return Err(ApiError(StatusCode::CONFLICT, "setup already completed"));
     }
     let password_hash = hash_password(input.password).await?;
@@ -234,10 +258,7 @@ pub async fn setup(
     sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
         .execute(&mut *tx)
         .await?;
-    if sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM organizations)")
-        .fetch_one(&mut *tx)
-        .await?
-    {
+    if organization_exists(&mut *tx).await? {
         return Err(ApiError(StatusCode::CONFLICT, "setup already completed"));
     }
     let organization_id = Uuid::new_v4();

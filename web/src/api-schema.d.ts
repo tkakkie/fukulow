@@ -59,7 +59,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Report whether the first organization still needs to be created.
+         *     Accessible without authentication or a setup token; reveals only setup_required.
+         */
+        get: operations["setup_status"];
         put?: never;
         /**
          * Create the first organization and Owner.
@@ -121,6 +125,9 @@ export interface components {
              * @description Required when FUKULOW_SETUP_TOKEN is configured on the server.
              */
             setup_token?: string | null;
+        };
+        SetupStatus: {
+            setup_required: boolean;
         };
         SignInRequest: {
             email: string;
@@ -264,6 +271,35 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    setup_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupStatus"];
+                };
+            };
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
