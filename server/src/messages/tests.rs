@@ -805,3 +805,20 @@ async fn messages_reject_cross_organization_foreign_keys(pool: PgPool) {
         Some("23503")
     );
 }
+
+#[sqlx::test]
+async fn send_route_accepts_the_largest_valid_body_and_still_caps_the_request(pool: PgPool) {
+    let (app, _, _, channel_id, token) = fixture(&pool).await;
+    // 3999 control characters + 1 letter: 4000 scalar values, ~24 KB once JSON-escaped (> 16 KiB).
+    let worst = format!("{}a", "\u{1}".repeat(3999));
+    let stored = sent(&app, &token, channel_id, input(Uuid::new_v4(), &worst)).await;
+    assert_eq!(stored["body"], worst);
+    let response = send(
+        &app,
+        &token,
+        channel_id,
+        input(Uuid::new_v4(), &"x".repeat(40 * 1024)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
