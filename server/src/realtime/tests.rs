@@ -595,7 +595,7 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
     let f = fixture(&pool).await;
     let exhausted = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(Duration::from_millis(50))
+        .acquire_timeout(Duration::from_secs(2))
         .connect_with(pool.connect_options().as_ref().clone())
         .await
         .unwrap();
