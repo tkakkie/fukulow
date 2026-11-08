@@ -20,6 +20,7 @@
   function go(next: AuthState) {
     error = ''
     password = ''
+    setupToken = '' // not needed once setup has finished or been abandoned
     view = next
   }
 

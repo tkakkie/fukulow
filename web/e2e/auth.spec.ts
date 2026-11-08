@@ -42,3 +42,18 @@ test('set-up instance shows the sign-in screen and signs in', async ({ page }) =
   await page.getByRole('button', { name: 'ログイン' }).click()
   await expect(page.getByText('Acme / Alice さん')).toBeVisible()
 })
+
+test('sign out returns to the sign-in screen and stays signed out after reload', async ({ page }) => {
+  await page.goto('/')
+  await page.getByLabel('メールアドレス').fill(owner.email)
+  await page.getByLabel('パスワード').fill(owner.password)
+  await page.getByRole('button', { name: 'ログイン' }).click()
+  await expect(page.getByText('Acme / Alice さん')).toBeVisible()
+
+  await page.getByRole('button', { name: 'ログアウト' }).click()
+  await expect(page.getByRole('heading', { name: 'ログイン' })).toBeVisible()
+
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'ログイン' })).toBeVisible()
+  await expect(page.getByText('Acme / Alice さん')).toHaveCount(0)
+})
