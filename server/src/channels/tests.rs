@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+mod names;
+
 fn router(pool: &PgPool) -> Router {
     crate::app(AppState {
         pool: pool.clone(),

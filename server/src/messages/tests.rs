@@ -79,9 +79,16 @@ async fn member(pool: &PgPool, organization_id: Uuid, id: Uuid) -> String {
 }
 
 async fn channel(pool: &PgPool, organization_id: Uuid, id: Uuid, creator: Uuid, private: bool) {
-    sqlx::query("INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $2, 'Channel', $3)")
-        .bind(organization_id).bind(id).bind(if private { "private" } else { "public" })
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(organization_id)
+    .bind(id)
+    .bind(format!("Channel {id}"))
+    .bind(if private { "private" } else { "public" })
+    .execute(pool)
+    .await
+    .unwrap();
     if private {
         sqlx::query("INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $2, $3)")
             .bind(organization_id).bind(id).bind(creator).execute(pool).await.unwrap();
