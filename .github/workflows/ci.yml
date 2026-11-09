@@ -117,13 +117,16 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            core.exportVariable("ACTIONS_RESULTS_URL", process.env.ACTIONS_RESULTS_URL || "");
-            core.exportVariable("ACTIONS_RUNTIME_TOKEN", process.env.ACTIONS_RUNTIME_TOKEN || "");
+            const url = process.env.ACTIONS_RESULTS_URL;
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            if (!url || !token) { throw new Error("Actions cache credentials are not available"); }
+            core.exportVariable("ACTIONS_RESULTS_URL", url);
+            core.exportVariable("ACTIONS_RUNTIME_TOKEN", token);
       - name: Build image with GitHub Actions layer cache
         run: docker buildx bake --load --file compose.yml --set "app.cache-from=type=gha,scope=docker" --set "app.cache-to=type=gha,scope=docker,mode=max"
         env:
           POSTGRES_PASSWORD: ci-compose-only
-      - run: docker compose --profile caddy up -d --wait
+      - run: docker compose --profile caddy up -d --no-build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
       - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
