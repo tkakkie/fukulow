@@ -435,6 +435,7 @@ it('a late non-401 result of a stale request is ignored and a 401 from a replace
   d.feed({ type: 'unwatch', channel: 'A' })
   expect(d.feed({ type: 'send_failed', request: old, status: 403 })).toEqual([])
   d.feed({ type: 'session_replaced', selfId: 'other' })
+  expect(d.get().requests).toEqual({})
   expect(d.feed({ type: 'send_failed', request: other, status: 401 })).toEqual([])
   expect(d.get().session).toBe('signed_in')
 })

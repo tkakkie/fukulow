@@ -125,7 +125,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     cancel(c.wait)
     c.wait = c.fill = c.latest = c.older = undefined
     for (const [key, r] of Object.entries(state.requests)) {
-      if (r.channel === id && (sends || r.type === 'history')) state.requests[Number(key)] = { ...r, stale: true }
+      if (!r.stale && r.channel === id && (sends || r.type === 'history')) state.requests[Number(key)] = { ...r, stale: true }
     }
   }
   const stop = (signIn: boolean) => {
