@@ -14,7 +14,7 @@
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
         {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[1]},{"type":"subscribed","channel":"general","caught_up_seq":1}]},
         {"do":"post","as":"alice","channel":"general"},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[2]},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[2]},{"type":"silent","barrier":{"channel":"general","caught_up_seq":2}}]}
       ]
     },
     {
@@ -35,7 +35,9 @@
         {"do":"subscribe","socket":"s1","channel":"bulk#257","after_seq":0},
         {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"bulk#257","caught_up_seq":0}]},
         {"do":"post","as":"alice","channel":"bulk#257","label":"new"},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"bulk#257","from_post":"new"},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"bulk#257","from_post":"new"}]},
+        {"do":"post","as":"alice","channel":"bulk#2","label":"unsubscribed"},
+        {"do":"expect","socket":"s1","events":[{"type":"silent","barrier":{"channel":"bulk#1","caught_up_seq":1}}]}
       ]
     },
     {
@@ -54,7 +56,7 @@
         {"do":"release_replay","channel":"general"},
         {"do":"connect","socket":"s2","as":"alice"},
         {"do":"subscribe","socket":"s2","channel":"general","after_seq":0},
-        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":258}]},{"type":"subscribed","channel":"general","caught_up_seq":258},{"type":"silent"}]}
+        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":258}]},{"type":"subscribed","channel":"general","caught_up_seq":258},{"type":"silent","barrier":{"channel":"general","caught_up_seq":258}}]}
       ]
     },
     {

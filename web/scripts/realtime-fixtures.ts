@@ -141,9 +141,10 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
     members.set(m.id, m.organization)
   }
   const channels = new Map<string, { organization: string; count?: number }>()
-  for (const c of setup.channels as { id: string; organization: string; creator: string; members?: string[]; count?: number }[]) {
+  for (const c of setup.channels as { id: string; organization: string; creator: string; visibility: string; members?: string[]; count?: number }[]) {
     if (channels.has(c.id)) errors.push(`${where}: duplicate channel ${c.id}`)
     channels.set(c.id, c)
+    if (c.visibility === 'public' && c.members !== undefined) errors.push(`${where}: public channel ${c.id} cannot specify members`)
     if (!orgs.has(c.organization)) errors.push(`${where}: channel ${c.id} uses undeclared organization ${c.organization}`)
     for (const member of [c.creator, ...(c.members ?? [])]) {
       if (members.get(member) !== c.organization) errors.push(`${where}: channel ${c.id} member ${member} is not in organization ${c.organization}`)
@@ -238,10 +239,12 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
           if (e.type === 'silent' && j !== events.length - 1) errors.push(`${ea}: silent must be the last event`)
           if (e.type === 'message') {
             if (e.seqs === undefined && e.from_post === undefined) errors.push(`${ea}: message needs seqs or from_post`)
+            if (Array.isArray(e.seqs) && e.seqs.length === 0) errors.push(`${ea}.seqs: message needs at least one seq when seqs is specified`)
             if (typeof e.from_post === 'string' && !postLabels.has(e.from_post)) errors.push(`${ea}: from_post ${e.from_post} is not a label of an earlier post`)
             checkSeqList(e.seqs, `${ea}.seqs`, errors)
           }
           if (e.channel !== undefined) checkChannel(e.channel, ea)
+          if (e.type === 'silent') checkChannel((e.barrier as Record<string, Json>).channel, `${ea}.barrier`, false)
           if (e.type === 'error' && e.code === 'channel_not_found' && e.channel === undefined) errors.push(`${ea}: channel_not_found needs a channel`)
         })
         break

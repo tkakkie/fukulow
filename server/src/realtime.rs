@@ -22,6 +22,8 @@ mod connection;
 mod origin;
 pub use origin::AllowedOrigins;
 
+const LIVE_QUEUE_CAPACITY: usize = 256;
+
 /// Queue overflow: reconnect and subscribe from the last seq per channel; never drop silently.
 pub const CLOSE_QUEUE_OVERFLOW: u16 = 4008;
 /// Session expired or signed out: stop protected delivery and go to Sign in.
@@ -132,7 +134,7 @@ async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
     let queue = state.message_delivery.queue(
         auth.identity.organization.organization_id,
         auth.identity.member.id,
-        256,
+        LIVE_QUEUE_CAPACITY,
     );
     let mut overflow = queue.overflow.clone();
     let mut connection = connection::Connection {

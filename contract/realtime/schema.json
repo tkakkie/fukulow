@@ -83,7 +83,7 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "$comment": "creator is a Member of the Channel's Organization and, for a private Channel, its first member. members adds further members of a private Channel (ignored for public). messages = number of Messages committed before the steps start, seq 1..n, sent by creator (a runner may insert them directly). count = N makes N Channels named '<id>#1'..'<id>#N' with identical settings (for subscription limit scenarios); refer to one as '<id>#k' or to a range with {group, from, to}.",
+            "$comment": "creator is a Member of the Channel's Organization and, for a private Channel, its first member. members adds further members of a private Channel; specifying members on a public Channel is invalid (semantic), even an empty list. messages = number of Messages committed before the steps start, seq 1..n, sent by creator (a runner may insert them directly). count = N makes N Channels named '<id>#1'..'<id>#N' with identical settings (for subscription limit scenarios); refer to one as '<id>#k' or to a range with {group, from, to}.",
             "type": "object",
             "required": ["id", "organization", "visibility", "creator"],
             "properties": {
@@ -264,7 +264,7 @@
     "DeliveryEvent": {
       "oneOf": [
         {
-          "$comment": "A {type:message} event. seqs = the Channel's Messages with these seqs, one event per seq in the listed order (a range expands ascending). from_post = the event's message equals the canonical Message the labelled post returned. At least one of seqs / from_post (semantic). A range ChannelRef expands per Channel.",
+          "$comment": "A {type:message} event. seqs = the Channel's Messages with these seqs, one event per seq in the listed order (a range expands ascending). from_post = the event's message equals the canonical Message the labelled post returned. At least one of seqs / from_post (semantic); if seqs is specified it must be non-empty, including when from_post is also specified. Empty SeqLists elsewhere remain valid. A range ChannelRef expands per Channel.",
           "type": "object",
           "required": ["type", "channel"],
           "properties": {
@@ -305,10 +305,18 @@
           "additionalProperties": false
         },
         {
-          "$comment": "Nothing arrives on the socket for a short quiet period chosen by the runner (the existing harness uses 100 ms). Only meaningful after a barrier (see DeliveryStep) and as the last item of an 'expect'.",
+          "$comment": "No earlier delivery remains on the socket. The runner subscribes to barrier.channel at barrier.caught_up_seq then sends a nonce-bearing WebSocket ping and requires exactly its subscribed watermark followed by the matching pong. The pong proves this subscribe was processed, so an old duplicate subscribed cannot impersonate the barrier. Choose an authorized Channel at its current high-water seq, without concurrent posts or held replay. POST responses await publication; subscribe drains the entire connection queue before subscribed, so this barrier covers earlier work across Channels, not a time window. It must not re-subscribe the Channel whose unsubscribe or loss of access is under test. Only as the last item of an expect.",
           "type": "object",
-          "required": ["type"],
-          "properties": { "type": { "const": "silent" } },
+          "required": ["type", "barrier"],
+          "properties": {
+            "type": { "const": "silent" },
+            "barrier": {
+              "type": "object",
+              "required": ["channel", "caught_up_seq"],
+              "properties": { "channel": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*(#[1-9][0-9]*)?$" }, "caught_up_seq": { "$ref": "#/$defs/Cursor" } },
+              "additionalProperties": false
+            }
+          },
           "additionalProperties": false
         }
       ]

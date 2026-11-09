@@ -52,8 +52,7 @@ pub(super) struct ChannelSpec {
     pub organization: String,
     pub creator: String,
     pub visibility: String,
-    #[serde(default)]
-    pub members: Vec<String>,
+    pub members: Option<Vec<String>>,
     #[serde(default)]
     pub messages: usize,
     pub count: Option<usize>,
@@ -208,5 +207,14 @@ pub(super) enum Event {
     Closed {
         code: u16,
     },
-    Silent,
+    Silent {
+        barrier: Barrier,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Barrier {
+    pub channel: String,
+    pub caught_up_seq: i64,
 }
