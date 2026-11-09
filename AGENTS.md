@@ -26,7 +26,7 @@ Do not create docs other than `docs/spec.md`, `docs/decisions.md`, `docs/invaria
 - `main`, `openapi` and `lib` are composition exceptions; root nominal-wrapper fields and composition-root bodies are not traced (review-enforced).
 - Tier 1, approved, CI pending (review-enforced): every row of `docs/invariants.md` names a test that exists.
 - `npm test` checks invariants statically only (no Rust build); Rust tests and the cargo-based invariants matching run in the CI server job.
-- Tier 1, approved, CI pending (review-enforced): the web reaches the server only through its API layer, with types generated from `openapi.json` (no hand-written copies).
+- Tier 1: the web reaches the server only through its API layer (CI web-boundary check). Generated types are CI-enforced only as far as `make api` diff and `tsc` go; that no hand-written copy of an API type exists is review-enforced (a structural duplicate still type-checks).
 - Credentials are never kept in web storage (harmless UI settings may be).
 - Tier 1, review-enforced: Organization data is accessed scoped by `organization_id`; documented global operations (e.g. setup existence check) are exceptions.
 - Do not force an artificial Organization scope onto genuinely global operations.
@@ -47,7 +47,7 @@ Do not create docs other than `docs/spec.md`, `docs/decisions.md`, `docs/invaria
 - (4) Pure protocol (plain `.ts`: `step(state, input) -> {state, effects}`; no clock, randomness, I/O or `svelte`). (5) API/transport (`src/api.ts`, WebSocket client, generated types).
 - Layers 4 and 5 do not know each other. Only message sync has a protocol layer; simple CRUD is controller + adapter.
 - Components never call `fetch` or open sockets. `$state` is for the adapter and local component state, not the controller or protocol (Tier 2 for new code).
-- Message and event types come from generated `api-schema.d.ts`, not local copies. Behaviour contract: `docs/spec.md` "Real-time sync contract".
+- REST request/response types and WebSocket message/event types come from generated `api-schema.d.ts`, never local copies (review-enforced). Web-only types (UI state, view models, test adapters) that do not duplicate the server contract are fine. Behaviour contract: `docs/spec.md` "Real-time sync contract".
 - Split into crates only when build time, dependencies or parallel-work conflicts hurt.
 
 ## Commands

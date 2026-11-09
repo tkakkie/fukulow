@@ -1035,7 +1035,7 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
     .await;
 }
 
-async fn advance_cleanup_interval() {
+async fn advance_cleanup_interval_and_expire_throttle_window() {
     // Pause only between SQL operations; network I/O needs a running clock.
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(61)).await;
@@ -1113,7 +1113,7 @@ async fn ambiguous_organization_charges_only_ip_budget_and_leaves_other_sign_ins
             StatusCode::OK
         );
     }
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     // Existing credential failures and ambiguous lookups consume the same IP budget.
     for _ in 0..19 {
         assert_eq!(
