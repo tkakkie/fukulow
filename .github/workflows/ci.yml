@@ -6,7 +6,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.ref }}
+  # PRs: one group per PR, so a newer push cancels the older run. main: unique group per run, so no push is cancelled or queued.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   migrations:
