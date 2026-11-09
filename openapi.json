@@ -658,7 +658,7 @@
           "crate::realtime"
         ],
         "summary": "Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.\nAuthenticate with the session cookie or Authorization: Bearer, never a query token.\nCookie auth requires a matching allowed Origin (configured, same-origin by default);\nreject a missing/foreign Origin with 403. Bearer clients need no Origin header.",
-        "description": "On subscribe: first register the live subscription, queueing events per connection;\nreplay committed messages with seq > after_seq ascending in pages of up to the page\nlimit (default 50, max 200); flush queued live events with seq > last replayed;\nthen send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):\nduplicates are harmless, gaps are forbidden. Publish only committed new messages.\nQueue overflow closes with 4008 (never silently drops an event); reconnect and\nre-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;\nstop protected delivery and go to Sign in.\nContract only: currently returns 501; no authentication, Origin check or upgrade.",
+        "description": "On subscribe: first register the live subscription, queueing events per connection;\nreplay committed messages with seq > after_seq ascending in pages of up to 50\nmessages; flush queued live events with seq > last replayed;\nthen send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):\nduplicates are harmless, gaps are forbidden. Publish only committed new messages.\nQueue overflow closes with 4008 (never silently drops an event); reconnect and\nre-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;\nstop protected delivery and go to Sign in.",
         "operationId": "upgrade",
         "responses": {
           "101": {
@@ -683,9 +683,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Contract stub; not implemented"
           }
         },
         "security": [

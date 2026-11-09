@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+mod session;
 mod throttle;
+pub use session::SessionChanges;
 pub use throttle::SignInThrottle;
 
 // Bound Argon2 memory/CPU work independently from Tokio blocking-thread capacity.
@@ -579,11 +581,21 @@ pub async fn me(auth: Auth) -> impl IntoResponse {
 #[utoipa::path(delete, path = "/api/v1/session", security(("cookie" = []), ("bearer" = [])),
     responses((status = 204, description = "Session revoked and cookie cleared", headers(("Set-Cookie" = String))), (status = 401, body = ErrorBody)))]
 pub async fn sign_out(State(state): State<AppState>, auth: Auth) -> Result<Response, ApiError> {
-    sqlx::query("DELETE FROM sessions WHERE organization_id = $1 AND token_hash = $2")
-        .bind(auth.identity.organization.organization_id)
-        .bind(auth.token_hash)
-        .execute(&state.pool)
-        .await?;
+    let pool = state.pool.clone();
+    let changes = state.session_changes.clone();
+    // Finish revocation + notification even if the HTTP caller disconnects.
+    tokio::spawn(async move {
+        let organization = auth.identity.organization.organization_id;
+        sqlx::query("DELETE FROM sessions WHERE organization_id = $1 AND token_hash = $2")
+            .bind(organization)
+            .bind(&auth.token_hash)
+            .execute(&pool)
+            .await?;
+        changes.revoked(organization, auth.token_hash);
+        Ok::<_, sqlx::Error>(())
+    })
+    .await
+    .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     Ok((
         StatusCode::NO_CONTENT,
         [
@@ -667,6 +679,9 @@ mod tests {
                 cookie_secure: true,
                 setup_token: None,
                 sign_in_throttle: throttle,
+                message_delivery: Default::default(),
+                session_changes: Default::default(),
+                ws_allowed_origins: Default::default(),
             });
             for forwarded in ["198.51.100.1", "198.51.100.2"] {
                 let request = Request::post("/api/v1/session")
@@ -729,6 +744,9 @@ mod tests {
             cookie_secure: true,
             setup_token: None,
             sign_in_throttle: throttle,
+            message_delivery: Default::default(),
+            session_changes: Default::default(),
+            ws_allowed_origins: Default::default(),
         });
         let request = Request::post("/api/v1/session")
             .extension(ConnectInfo(
@@ -779,6 +797,9 @@ mod tests {
                 cookie_secure: true,
                 setup_token: setup_token.clone(),
                 sign_in_throttle: Default::default(),
+                message_delivery: Default::default(),
+                session_changes: Default::default(),
+                ws_allowed_origins: Default::default(),
             });
             let request = Request::post("/api/v1/setup")
                 .header(header::CONTENT_TYPE, "application/json")

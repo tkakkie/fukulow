@@ -20,6 +20,9 @@ fn router(pool: &PgPool) -> Router {
         cookie_secure: true,
         setup_token: None,
         sign_in_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        ws_allowed_origins: Default::default(),
     })
 }
 
@@ -93,6 +96,9 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
             cookie_secure: true,
             setup_token,
             sign_in_throttle: Default::default(),
+            message_delivery: Default::default(),
+            session_changes: Default::default(),
+            ws_allowed_origins: Default::default(),
         });
         let response = app
             .oneshot(Request::get("/api/v1/setup").body(Body::empty()).unwrap())
@@ -190,6 +196,9 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
             cookie_secure: true,
             setup_token: setup_token.map(str::to_owned),
             sign_in_throttle: Default::default(),
+            message_delivery: Default::default(),
+            session_changes: Default::default(),
+            ws_allowed_origins: Default::default(),
         });
         let valid_input = if path == "/api/v1/setup" {
             setup_input()
@@ -280,6 +289,9 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
         cookie_secure: true,
         setup_token: Some(setup_token.into()),
         sign_in_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        ws_allowed_origins: Default::default(),
     });
     let expected = json!({"error": "invalid credentials"});
     for completed in [false, true] {
@@ -343,6 +355,9 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
         cookie_secure: true,
         setup_token: Some("setup-token-test-only".into()),
         sign_in_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        ws_allowed_origins: Default::default(),
     });
     for token in [None, Some(""), Some("wrong-token-test-only")] {
         let mut input = setup_input();
@@ -932,6 +947,9 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
             Some("x-forwarded-for"),
         )
         .unwrap(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        ws_allowed_origins: Default::default(),
     });
     let first = setup(&app).await;
     let organization: Uuid = first["organization"]["organization_id"]

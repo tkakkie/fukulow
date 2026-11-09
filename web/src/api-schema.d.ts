@@ -143,14 +143,13 @@ export interface paths {
          *     Cookie auth requires a matching allowed Origin (configured, same-origin by default);
          *     reject a missing/foreign Origin with 403. Bearer clients need no Origin header.
          * @description On subscribe: first register the live subscription, queueing events per connection;
-         *     replay committed messages with seq > after_seq ascending in pages of up to the page
-         *     limit (default 50, max 200); flush queued live events with seq > last replayed;
+         *     replay committed messages with seq > after_seq ascending in pages of up to 50
+         *     messages; flush queued live events with seq > last replayed;
          *     then send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):
          *     duplicates are harmless, gaps are forbidden. Publish only committed new messages.
          *     Queue overflow closes with 4008 (never silently drops an event); reconnect and
          *     re-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;
          *     stop protected delivery and go to Sign in.
-         *     Contract only: currently returns 501; no authentication, Origin check or upgrade.
          */
         get: operations["upgrade"];
         put?: never;
@@ -876,13 +875,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
-            };
-            /** @description Contract stub; not implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

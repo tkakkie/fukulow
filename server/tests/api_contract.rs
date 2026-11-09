@@ -136,7 +136,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
 }
 
 #[tokio::test]
-async fn remaining_contract_routes_are_stubs_without_authentication_or_database_access() {
+async fn websocket_upgrade_requires_authentication_without_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
@@ -145,6 +145,9 @@ async fn remaining_contract_routes_are_stubs_without_authentication_or_database_
         cookie_secure: true,
         setup_token: None,
         sign_in_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        ws_allowed_origins: Default::default(),
     });
     for (method, path) in [("GET", "/api/v1/ws")] {
         let response = router
@@ -158,6 +161,6 @@ async fn remaining_contract_routes_are_stubs_without_authentication_or_database_
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), 501, "{method} {path}");
+        assert_eq!(response.status(), 401, "{method} {path}");
     }
 }

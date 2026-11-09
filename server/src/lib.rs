@@ -22,6 +22,9 @@ pub struct AppState {
     pub cookie_secure: bool,
     pub setup_token: Option<String>,
     pub sign_in_throttle: auth::SignInThrottle,
+    pub message_delivery: messages::Delivery,
+    pub session_changes: auth::SessionChanges,
+    pub ws_allowed_origins: realtime::AllowedOrigins,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -96,6 +99,9 @@ mod tests {
             cookie_secure: true,
             setup_token: None,
             sign_in_throttle: Default::default(),
+            message_delivery: Default::default(),
+            session_changes: Default::default(),
+            ws_allowed_origins: Default::default(),
         })
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await
