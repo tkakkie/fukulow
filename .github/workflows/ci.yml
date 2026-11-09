@@ -112,7 +112,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: docker compose --profile caddy up -d --build --wait
+      - uses: docker/setup-buildx-action@v4
+      - name: Build image with GitHub Actions layer cache
+        run: docker buildx bake --load --file compose.yml --set "app.cache-from=type=gha,scope=docker" --set "app.cache-to=type=gha,scope=docker,mode=max"
+        env:
+          POSTGRES_PASSWORD: ci-compose-only
+      - run: docker compose --profile caddy up -d --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
       - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
