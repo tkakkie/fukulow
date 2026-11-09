@@ -17,11 +17,185 @@ use uuid::Uuid;
 
 #[test]
 fn generated_openapi_matches_committed_contract() {
-    let baseline: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
 
     // Compare JSON values so formatting and object-key order do not hide contract drift.
-    assert_eq!(generated, baseline);
+    assert_eq!(generated, committed);
+}
+
+fn check_response_descriptions(responses: &Value, location: &str) -> Result<(), String> {
+    for (status, response) in responses.as_object().unwrap() {
+        // A Reference Object is not a Response Object; its target is checked separately.
+        if status.starts_with("x-") || response.get("$ref").is_some() {
+            continue;
+        }
+        if response
+            .get("description")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return Err(format!("{location}/{status}: missing string description"));
+        }
+    }
+    Ok(())
+}
+
+fn check_callback_descriptions(callback: &Value, location: &str) -> Result<(), String> {
+    for (expression, path_item) in callback.as_object().unwrap() {
+        if expression != "$ref" && !expression.starts_with("x-") {
+            check_path_item_descriptions(path_item, &format!("{location}/{expression}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn check_path_item_descriptions(path_item: &Value, location: &str) -> Result<(), String> {
+    for method in [
+        "get", "put", "post", "delete", "options", "head", "patch", "trace",
+    ] {
+        if let Some(operation) = path_item.get(method) {
+            let location = format!("{location}/{method}");
+            if let Some(responses) = operation.get("responses") {
+                check_response_descriptions(responses, &format!("{location}/responses"))?;
+            }
+            if let Some(callbacks) = operation.get("callbacks").and_then(Value::as_object) {
+                for (name, callback) in callbacks {
+                    if !name.starts_with("x-") {
+                        check_callback_descriptions(
+                            callback,
+                            &format!("{location}/callbacks/{name}"),
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_document_response_descriptions(document: &Value) -> Result<(), String> {
+    for location in ["/paths", "/webhooks", "/components/pathItems"] {
+        if let Some(items) = document.pointer(location).and_then(Value::as_object) {
+            for (name, path_item) in items {
+                if !name.starts_with("x-") {
+                    check_path_item_descriptions(path_item, &format!("{location}/{name}"))?;
+                }
+            }
+        }
+    }
+    if let Some(responses) = document.pointer("/components/responses") {
+        check_response_descriptions(responses, "/components/responses")?;
+    }
+    if let Some(callbacks) = document
+        .pointer("/components/callbacks")
+        .and_then(Value::as_object)
+    {
+        for (name, callback) in callbacks {
+            if !name.starts_with("x-") {
+                check_callback_descriptions(callback, &format!("/components/callbacks/{name}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn openapi_response_objects_require_descriptions() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        check_document_response_descriptions(&document).unwrap();
+    }
+}
+
+#[test]
+fn response_description_check_rejects_removed_descriptions() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    for (path, item) in committed["paths"].as_object().unwrap() {
+        for (method, operation) in item.as_object().unwrap() {
+            for status in operation["responses"].as_object().unwrap().keys() {
+                let mut missing = committed.clone();
+                missing["paths"][path][method]["responses"][status]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("description")
+                    .unwrap();
+                assert_eq!(
+                    check_document_response_descriptions(&missing),
+                    Err(format!(
+                        "/paths/{path}/{method}/responses/{status}: missing string description"
+                    ))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn response_description_check_covers_reusable_and_nested_responses() {
+    let mut document = json!({
+        "paths": {},
+        "webhooks": {},
+        "components": {
+            "responses": {},
+            "pathItems": {},
+            "callbacks": {},
+            "schemas": {"Example": {"properties": {"responses": {"type": "string"}}}}
+        }
+    });
+    let path_item = json!({"post": {"responses": {
+        "default": {"description": ""},
+        "2XX": {"$ref": "#/components/responses/Success"},
+        "x-note": "Not a Response Object"
+    }}});
+    for (location, value, response_location) in [
+        (
+            "/components/responses",
+            json!({"Success": {"description": ""}}),
+            "/components/responses/Success",
+        ),
+        (
+            "/components/pathItems",
+            json!({"Reusable": path_item}),
+            "/components/pathItems/Reusable/post/responses/default",
+        ),
+        (
+            "/webhooks",
+            json!({"message": path_item}),
+            "/webhooks/message/post/responses/default",
+        ),
+        (
+            "/paths",
+            json!({"/callback": {"get": {"callbacks": {"message": {"{$request.body#/url}": path_item}}}}}),
+            "/paths/~1callback/get/callbacks/message/{$request.body#~1url}/post/responses/default",
+        ),
+        (
+            "/components/callbacks",
+            json!({"Message": {"{$request.body#/url}": path_item}}),
+            "/components/callbacks/Message/{$request.body#~1url}/post/responses/default",
+        ),
+    ] {
+        *document.pointer_mut(location).unwrap() = value;
+        check_document_response_descriptions(&document).unwrap();
+        for invalid in [None, Some(Value::Null), Some(json!(42))] {
+            let mut missing = document.clone();
+            let response = missing
+                .pointer_mut(response_location)
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            if let Some(value) = invalid {
+                response.insert("description".into(), value);
+            } else {
+                response.remove("description");
+            }
+            assert!(
+                check_document_response_descriptions(&missing).is_err(),
+                "{response_location}"
+            );
+        }
+    }
 }
 
 #[test]
