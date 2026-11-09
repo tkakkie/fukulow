@@ -578,7 +578,7 @@ export interface operations {
                     "application/json": components["schemas"]["Message"];
                 };
             };
-            /** @description Invalid Channel id, Message JSON or fields, or body that is whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
+            /** @description Invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
             400: {
                 headers: {
                     [name: string]: unknown;

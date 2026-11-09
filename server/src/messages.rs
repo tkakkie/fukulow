@@ -164,7 +164,7 @@ pub async fn list_messages(
     params(("id" = Uuid, Path, description = "Channel id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, description = "Confirmed Message; an idempotent retry returns the same Message and sequence", body = Message),
-        (status = 400, description = "Invalid Channel id, Message JSON or fields, or body that is whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values", body = ErrorBody),
+        (status = 400, description = "Invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values", body = ErrorBody),
         (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
         (status = 404, description = "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
         (status = 409, description = "Client message id reused with different body or channel", body = ErrorBody),
