@@ -407,6 +407,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Public Channels and private Channels the Member belongs to in their Organization */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -415,6 +416,7 @@ export interface operations {
                     "application/json": components["schemas"]["ChannelList"];
                 };
             };
+            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -438,6 +440,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Created Channel; a private Channel includes its creator as a Member */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -446,6 +449,7 @@ export interface operations {
                     "application/json": components["schemas"]["Channel"];
                 };
             };
+            /** @description Invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -454,6 +458,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -471,6 +476,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Channel creation request body exceeds the size limit */
             413: {
                 headers: {
                     [name: string]: unknown;
@@ -479,6 +485,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Channel creation requires an application/json content type */
             415: {
                 headers: {
                     [name: string]: unknown;
@@ -508,6 +515,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Page of Channel Messages in ascending sequence order with directional has_more */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -516,6 +524,7 @@ export interface operations {
                     "application/json": components["schemas"]["MessagePage"];
                 };
             };
+            /** @description Invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -524,6 +533,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -559,6 +569,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Confirmed Message; an idempotent retry returns the same Message and sequence */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -567,6 +578,7 @@ export interface operations {
                     "application/json": components["schemas"]["Message"];
                 };
             };
+            /** @description Invalid Channel id, Message JSON or fields, or body that is whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -575,6 +587,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -601,6 +614,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Message send request body exceeds the size limit */
             413: {
                 headers: {
                     [name: string]: unknown;
@@ -609,6 +623,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Sending a Message requires an application/json content type */
             415: {
                 headers: {
                     [name: string]: unknown;
@@ -628,6 +643,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Server is responding; returns the plain-text body ok */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -647,6 +663,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Current session's Member and Organization identity */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -655,6 +672,7 @@ export interface operations {
                     "application/json": components["schemas"]["Identity"];
                 };
             };
+            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -678,6 +696,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Signed in; returns identity, session token and expiry, and sets the session cookie */
             200: {
                 headers: {
                     /** @description HttpOnly; SameSite=Strict; Path=/; Secure by default */
@@ -688,6 +707,7 @@ export interface operations {
                     "application/json": components["schemas"]["SessionResponse"];
                 };
             };
+            /** @description Invalid sign-in JSON, fields, email or password length, or omitted Organization when no sole Organization exists */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -696,6 +716,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Email or password does not match an account in the selected Organization */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -752,6 +773,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -771,6 +793,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Whether the first Organization still needs to be created */
             200: {
                 headers: {
                     /** @description no-store */
@@ -781,6 +804,7 @@ export interface operations {
                     "application/json": components["schemas"]["SetupStatus"];
                 };
             };
+            /** @description Database failure while checking whether an Organization exists */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -804,6 +828,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Created the first Organization and Owner; returns their identity */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -875,6 +900,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade */
             401: {
                 headers: {
                     [name: string]: unknown;

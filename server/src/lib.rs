@@ -70,7 +70,7 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-#[utoipa::path(get, path = "/api/v1/health", responses((status = 200, body = String, content_type = "text/plain")))]
+#[utoipa::path(get, path = "/api/v1/health", responses((status = 200, description = "Server is responding; returns the plain-text body ok", body = String, content_type = "text/plain")))]
 async fn health() -> &'static str {
     "ok"
 }

@@ -18,7 +18,7 @@
         "operationId": "list_channels",
         "responses": {
           "200": {
-            "description": "",
+            "description": "Public Channels and private Channels the Member belongs to in their Organization",
             "content": {
               "application/json": {
                 "schema": {
@@ -28,7 +28,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -65,7 +65,7 @@
         },
         "responses": {
           "201": {
-            "description": "",
+            "description": "Created Channel; a private Channel includes its creator as a Member",
             "content": {
               "application/json": {
                 "schema": {
@@ -75,7 +75,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace",
             "content": {
               "application/json": {
                 "schema": {
@@ -85,7 +85,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -105,7 +105,7 @@
             }
           },
           "413": {
-            "description": "",
+            "description": "Channel creation request body exceeds the size limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -115,7 +115,7 @@
             }
           },
           "415": {
-            "description": "",
+            "description": "Channel creation requires an application/json content type",
             "content": {
               "application/json": {
                 "schema": {
@@ -191,7 +191,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Page of Channel Messages in ascending sequence order with directional has_more",
             "content": {
               "application/json": {
                 "schema": {
@@ -201,7 +201,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined",
             "content": {
               "application/json": {
                 "schema": {
@@ -211,7 +211,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -270,7 +270,7 @@
         },
         "responses": {
           "201": {
-            "description": "",
+            "description": "Confirmed Message; an idempotent retry returns the same Message and sequence",
             "content": {
               "application/json": {
                 "schema": {
@@ -280,7 +280,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Invalid Channel id, Message JSON or fields, or body that is whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values",
             "content": {
               "application/json": {
                 "schema": {
@@ -290,7 +290,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -320,7 +320,7 @@
             }
           },
           "413": {
-            "description": "",
+            "description": "Message send request body exceeds the size limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -330,7 +330,7 @@
             }
           },
           "415": {
-            "description": "",
+            "description": "Sending a Message requires an application/json content type",
             "content": {
               "application/json": {
                 "schema": {
@@ -358,7 +358,7 @@
         "operationId": "health",
         "responses": {
           "200": {
-            "description": "",
+            "description": "Server is responding; returns the plain-text body ok",
             "content": {
               "text/plain": {
                 "schema": {
@@ -378,7 +378,7 @@
         "operationId": "me",
         "responses": {
           "200": {
-            "description": "",
+            "description": "Current session's Member and Organization identity",
             "content": {
               "application/json": {
                 "schema": {
@@ -388,7 +388,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -426,7 +426,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Signed in; returns identity, session token and expiry, and sets the session cookie",
             "headers": {
               "Set-Cookie": {
                 "schema": {
@@ -444,7 +444,7 @@
             }
           },
           "400": {
-            "description": "",
+            "description": "Invalid sign-in JSON, fields, email or password length, or omitted Organization when no sole Organization exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -454,7 +454,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Email or password does not match an account in the selected Organization",
             "content": {
               "application/json": {
                 "schema": {
@@ -522,7 +522,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -551,7 +551,7 @@
         "operationId": "setup_status",
         "responses": {
           "200": {
-            "description": "",
+            "description": "Whether the first Organization still needs to be created",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -569,7 +569,7 @@
             }
           },
           "500": {
-            "description": "",
+            "description": "Database failure while checking whether an Organization exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -600,7 +600,7 @@
         },
         "responses": {
           "201": {
-            "description": "",
+            "description": "Created the first Organization and Owner; returns their identity",
             "content": {
               "application/json": {
                 "schema": {
@@ -675,7 +675,7 @@
             "description": "WebSocket upgrade; frames use ClientMessage / ServerEvent"
           },
           "401": {
-            "description": "",
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade",
             "content": {
               "application/json": {
                 "schema": {
