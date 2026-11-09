@@ -343,6 +343,86 @@ async fn a_running_cleanup_blocks_new_runs_until_completion_or_cancellation(pool
 }
 
 #[sqlx::test]
+async fn cancelled_cleanup_releases_the_guard_but_consumes_the_interval(pool: PgPool) {
+    // The normal 60-second interval, not a test override.
+    let cleanup = SessionCleanup::default();
+    let app = router(&pool, &cleanup);
+    let organization = organizations(&pool, &app, &[]).await;
+    seed_cleanup_sessions(&pool, organization, 1).await;
+    let mut holder = block_cleanup(&pool).await;
+    cleanup.trigger(&pool);
+    assert_eq!(cleanup.started(), 1);
+    cleanup.abort();
+    cleanup.finished().await;
+    assert!(!cleanup.running());
+    // Within the interval a restart is refused even though no run is in progress.
+    cleanup.trigger(&pool);
+    assert_eq!(cleanup.started(), 1);
+    assert!(!cleanup.running());
+    sqlx::query("SELECT pg_advisory_unlock(73)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    advance_cleanup_interval().await;
+    cleanup.trigger(&pool);
+    assert_eq!(cleanup.started(), 2);
+    cleanup.finished().await;
+}
+
+#[sqlx::test]
+async fn cancellation_during_delete_keeps_the_advanced_cursor(pool: PgPool) {
+    let cleanup = SessionCleanup::default();
+    let app = router(&pool, &cleanup);
+    let first = Uuid::from_u128(1);
+    let second = Uuid::from_u128(2);
+    // The API-created Organization sorts after both fixed ids.
+    organizations(&pool, &app, &[first, second]).await;
+    for organization in [first, second] {
+        seed_cleanup_sessions(&pool, organization, 1_005).await;
+    }
+    let mut holder = block_cleanup(&pool).await;
+    cleanup.trigger(&pool);
+    // Wait until the first Organization is selected and its DELETE waits on the lock.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'DELETE FROM sessions%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the cleanup DELETE must be blocked");
+    assert_eq!(cleanup.cursor(), Some(first));
+    cleanup.abort();
+    cleanup.finished().await;
+    assert!(!cleanup.running());
+    // Cancellation does not roll the cursor back.
+    assert_eq!(cleanup.cursor(), Some(first));
+    sqlx::query("SELECT pg_advisory_unlock(73)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER block_cleanup ON sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The next permitted run serves the second Organization.
+    advance_cleanup_interval().await;
+    cleanup.trigger(&pool);
+    cleanup.finished().await;
+    assert_eq!(cleanup.cursor(), Some(second));
+    assert_eq!(expired_sessions(&pool, second).await, 5);
+}
+
+#[sqlx::test]
 async fn selection_failure_consumes_the_interval_and_keeps_the_cursor(pool: PgPool) {
     let cleanup = SessionCleanup::default();
     let app = router(&pool, &cleanup);

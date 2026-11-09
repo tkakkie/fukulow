@@ -166,6 +166,10 @@ impl SessionCleanup {
     pub(crate) fn running(&self) -> bool {
         lock(&self.0).running
     }
+
+    pub(crate) fn cursor(&self) -> Option<Uuid> {
+        lock(&self.0).cursor
+    }
 }
 
 #[cfg(test)]
