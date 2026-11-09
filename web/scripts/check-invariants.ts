@@ -1,7 +1,23 @@
-// Verifies that every test named in docs/invariants.md is a real test definition.
+// Verifies that every test named in docs/invariants.md is a real test that CI actually runs.
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
+//
+// A reference is `path::test_name` (path relative to the repository root).
+// What is detected (static analysis only):
+//   - Rust: #[test] / #[tokio::test] / #[sqlx::test] in server/**/*.rs. Not run: #[ignore] and
+//     #[ignore = "..."]. Any #[cfg(...)] other than exactly cfg(test), and cfg_attr, on the test fn is
+//     treated as "cannot be verified" and refused. NOT detected: cfg on an enclosing mod/file,
+//     runtime early returns, --features / env dependent behaviour.
+//     NOT detected: whether the file is in the Rust module tree. Every .rs file under server/ is scanned, so a
+//     test in an unreferenced file (e.g. server/src/unused_guard.rs) is accepted as runnable (see decisions.md).
+//   - Vitest: web/**/*.{test,spec}.ts outside web/e2e (mirrors `test.exclude` in web/vite.config.ts).
+//     Not run: .skip, .todo, .fixme, xit/xtest/xdescribe, and any test inside such a describe.
+//     NOT detected: runtime skips (test.skip(cond), skipIf/runIf, ctx.skip()), and .only: it silently
+//     disables other tests of its file, but vitest refuses .only when CI is set (allowOnly=false), so
+//     CI fails loudly; this check does not look for it.
+//   - web/e2e/** (Playwright) is not run in CI, so references to it are refused until E2E joins CI.
+// A test title that is defined twice in one file counts only if no definition of it is skipped.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import ts from 'typescript'
 
 /** Replace comments, string and char literals with spaces (newlines kept). */
@@ -61,38 +77,73 @@ export function blankRustCommentsAndStrings(src: string): string {
   return out.join('')
 }
 
-const TEST_ATTR = /^#\[\s*(?:test|tokio::test|sqlx::test)\b/
-const ATTRS_THEN_FN = /((?:#\[(?:[^[\]]|\[[^\]]*\])*\]\s*)+)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_]\w*)/g
 
-/** Names of Rust functions carrying #[test], #[tokio::test] or #[sqlx::test]. */
-export function rustTestNames(src: string): string[] {
+const ATTR = /#\[(?:[^[\]]|\[[^\]]*\])*\]/g
+const ATTRS_THEN_FN = /((?:#\[(?:[^[\]]|\[[^\]]*\])*\]\s*)+)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_]\w*)/g
+const TEST_ATTR = /^#\[\s*(?:test|tokio::test|sqlx::test)\b/
+const IGNORE_ATTR = /^#\[\s*ignore\b/
+const PLAIN_CFG_TEST = /^#\[\s*cfg\s*\(\s*test\s*\)\s*\]$/
+
+export type RustTest = { name: string; ignored: boolean; conditional: boolean }
+
+/** Rust functions carrying #[test], #[tokio::test] or #[sqlx::test], with their ignore/cfg state. */
+export function rustTests(src: string): RustTest[] {
   const code = blankRustCommentsAndStrings(src)
-  const names: string[] = []
+  const tests: RustTest[] = []
   for (const m of code.matchAll(ATTRS_THEN_FN)) {
-    const attrs = m[1].match(/#\[(?:[^[\]]|\[[^\]]*\])*\]/g) ?? []
-    if (attrs.some((a) => TEST_ATTR.test(a))) names.push(m[2])
+    const attrs = m[1].match(ATTR) ?? []
+    if (!attrs.some((a) => TEST_ATTR.test(a))) continue
+    tests.push({
+      name: m[2],
+      ignored: attrs.some((a) => IGNORE_ATTR.test(a)),
+      conditional: attrs.some((a) => (/^#\[\s*cfg(?:_attr)?\b/.test(a) && !PLAIN_CFG_TEST.test(a))),
+    })
   }
-  return names
+  return tests
 }
 
-const TEST_MODIFIERS = new Set(['only', 'skip', 'fixme', 'fail', 'fails', 'concurrent', 'sequential', 'todo'])
+const SKIP_WORDS = new Set(['skip', 'fixme', 'todo'])
+const MODIFIERS = new Set(['only', 'fail', 'fails', 'concurrent', 'sequential', 'describe', 'serial', 'parallel', ...SKIP_WORDS])
 
-/** Titles of test(...) / it(...) calls (vitest, Playwright), found in the TypeScript AST. */
-export function tsTestTitles(src: string, fileName = 'x.ts'): string[] {
-  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true)
-  const titles: string[] = []
-  const isTestCallee = (e: ts.Expression): boolean =>
-    (ts.isIdentifier(e) && (e.text === 'test' || e.text === 'it')) ||
-    (ts.isPropertyAccessExpression(e) && TEST_MODIFIERS.has(e.name.text) && isTestCallee(e.expression))
-  const visit = (node: ts.Node) => {
-    if (ts.isCallExpression(node) && isTestCallee(node.expression)) {
-      const a = node.arguments[0]
-      if (a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))) titles.push(a.text)
-    }
-    ts.forEachChild(node, visit)
+type Callee = { root: string; words: string[] } | null
+
+/** `test.describe.skip` -> { root: 'test', words: ['describe', 'skip'] }; null if not a test/describe call. */
+function calleeOf(e: ts.Expression): Callee {
+  const words: string[] = []
+  let cur = e
+  while (ts.isPropertyAccessExpression(cur) && MODIFIERS.has(cur.name.text)) {
+    words.unshift(cur.name.text)
+    cur = cur.expression
   }
-  visit(sf)
-  return titles
+  if (!ts.isIdentifier(cur)) return null
+  const root = cur.text
+  if (!['test', 'it', 'describe', 'suite', 'xit', 'xtest', 'xdescribe'].includes(root)) return null
+  return { root, words }
+}
+
+export type TsTest = { title: string; skipped: boolean }
+
+/** Titles of test(...) / it(...) calls (vitest, Playwright) in the AST; skipped if the call or a parent describe is skipped. */
+export function tsTests(src: string, fileName = 'x.ts'): TsTest[] {
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true)
+  const out: TsTest[] = []
+  const visit = (node: ts.Node, parentSkipped: boolean) => {
+    let skipped = parentSkipped
+    if (ts.isCallExpression(node)) {
+      const c = calleeOf(node.expression)
+      if (c) {
+        const own = c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w))
+        const isSuite = c.root === 'describe' || c.root === 'suite' || c.root === 'xdescribe' || c.words.includes('describe')
+        const a = node.arguments[0]
+        const literal = a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))
+        if (literal && !isSuite) out.push({ title: a.text, skipped: parentSkipped || own })
+        if (isSuite) skipped = parentSkipped || own
+      }
+    }
+    ts.forEachChild(node, (child) => visit(child, skipped))
+  }
+  visit(sf, false)
+  return out
 }
 
 export type Row = { line: number; rule: string; names: string[]; todo: boolean }
@@ -111,17 +162,31 @@ export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
     const todo = /\(todo\)/.test(cell)
     if (cells.length !== 2) errors.push(`line ${line}: expected 2 columns (Rule | Test): ${cells[0]}`)
     else if (names.length === 0 && !todo) errors.push(`line ${line}: Test column names no test and is not (todo): ${cells[0]}`)
+    else if (todo && cell !== '(todo)') errors.push(`line ${line}: (todo) must stand alone in the Test column, not mixed with references: ${cells[0]}`)
     else rows.push({ line, rule: cells[0], names, todo })
   })
   return { rows, errors }
 }
 
-/** Returns one error message per unknown test name (with row and name). */
-export function checkRows(rows: Row[], known: Set<string>): string[] {
+/** What CI does with a defined test: 'runs', or the reason it does not count. */
+export type TestStatus = { runs: true } | { runs: false; reason: string }
+export type Known = Map<string, TestStatus>
+
+/** Returns one error message per reference that is not an executable test (with line, reference and reason). */
+export function checkRows(rows: Row[], known: Known): string[] {
   const errors: string[] = []
   for (const r of rows)
-    for (const name of r.names)
-      if (!known.has(name)) errors.push(`line ${r.line}: \`${name}\` is not a test definition (rule: ${r.rule})`)
+    for (const ref of r.names) {
+      const fail = (reason: string) => errors.push(`line ${r.line}: \`${ref}\` ${reason} (rule: ${r.rule})`)
+      const cut = ref.lastIndexOf('::')
+      if (cut <= 0 || cut === ref.length - 2 || !/\.(rs|ts)$/.test(ref.slice(0, cut))) {
+        fail('is not in path::test_name form, e.g. server/tests/auth.rs::some_test')
+        continue
+      }
+      const status = known.get(ref)
+      if (!status) fail('is not a test definition at that path')
+      else if (!status.runs) fail(`does not count: ${status.reason}`)
+    }
   return errors
 }
 
@@ -135,14 +200,40 @@ function walk(dir: string, skip: Set<string>, out: string[] = []): string[] {
   return out
 }
 
-/** Collects every real test name in the repository. */
-export function collectKnownTests(root: string): Set<string> {
-  const known = new Set<string>()
+function record(known: Known, ref: string, status: TestStatus) {
+  const prev = known.get(ref)
+  // A name defined twice in one file counts only if every definition runs.
+  if (!prev || (prev.runs && !status.runs)) known.set(ref, status)
+}
+
+/** Collects every test definition in the repository, keyed by `path::name`, with whether CI runs it. */
+export function collectKnownTests(root: string): Known {
+  const known: Known = new Map()
   const skip = new Set(['node_modules', 'target', 'dist', '.git'])
-  for (const f of walk(join(root, 'server'), skip))
-    if (f.endsWith('.rs')) for (const n of rustTestNames(readFileSync(f, 'utf8'))) known.add(n)
-  for (const f of walk(join(root, 'web'), skip))
-    if (/\.(test|spec)\.ts$/.test(f)) for (const n of tsTestTitles(readFileSync(f, 'utf8'), f)) known.add(n)
+  const rel = (f: string) => relative(root, f).split(sep).join('/')
+  for (const f of walk(join(root, 'server'), skip)) {
+    if (!f.endsWith('.rs')) continue
+    for (const t of rustTests(readFileSync(f, 'utf8'))) {
+      const status: TestStatus = t.ignored
+        ? { runs: false, reason: '#[ignore] tests are not run by cargo test' }
+        : t.conditional
+          ? { runs: false, reason: 'conditional #[cfg(...)] / cfg_attr cannot be verified statically' }
+          : { runs: true }
+      record(known, `${rel(f)}::${t.name}`, status)
+    }
+  }
+  for (const f of walk(join(root, 'web'), skip)) {
+    if (!/\.(test|spec)\.ts$/.test(f)) continue
+    const e2e = rel(f).startsWith('web/e2e/')
+    for (const t of tsTests(readFileSync(f, 'utf8'), f)) {
+      const status: TestStatus = e2e
+        ? { runs: false, reason: 'web/e2e (Playwright) is not run in CI' }
+        : t.skipped
+          ? { runs: false, reason: 'skipped (skip/fixme/todo, or inside a skipped describe)' }
+          : { runs: true }
+      record(known, `${rel(f)}::${t.title}`, status)
+    }
+  }
   return known
 }
 
@@ -157,5 +248,5 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
   const errors = checkInvariants(root)
   for (const e of errors) console.error(`${relative(process.cwd(), join(root, 'docs/invariants.md'))}: ${e}`)
   if (errors.length > 0) process.exit(1)
-  console.log('invariants: every named test exists')
+  console.log('invariants: every named test exists and runs in CI')
 }
