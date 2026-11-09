@@ -99,8 +99,9 @@ export function createSync(options: SyncOptions) {
                   // The server serializes controls/live delivery: a new subscribed handoff ends that ambiguity.
                   if (confirmed.has(channel) && pending?.length) {
                     if (state.connection === effect.id && state.connected) {
+                      const own = socket?.transport
                       void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
-                      socket?.transport.close()
+                      own?.close()
                     }
                     return
                   }
