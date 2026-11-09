@@ -639,6 +639,11 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
+    // The real app uses the process-global PASSWORD_WORKERS. These saturation tests
+    // need an isolated semaphore so holding every permit cannot stall parallel tests.
+    // This router uses the same handlers and extractors as crate::app, passing only
+    // that semaphore explicitly, and matches its JSON body limit. Other routes and
+    // the static fallback do not participate in setup or sign-in requests.
     fn app_with_workers(state: AppState, workers: &'static tokio::sync::Semaphore) -> axum::Router {
         axum::Router::new()
             .route(
@@ -653,6 +658,7 @@ mod tests {
                     sign_in_with_workers(state, peer, headers, input, workers)
                 }),
             )
+            .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
             .with_state(state)
     }
 

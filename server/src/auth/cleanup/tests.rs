@@ -114,7 +114,7 @@ async fn expired_sessions(pool: &PgPool, organization: Uuid) -> i64 {
     .unwrap()
 }
 
-async fn advance_cleanup_interval() {
+async fn advance_cleanup_interval_and_expire_throttle_window() {
     // Pause only between SQL operations (no cleanup task running); network I/O needs a running clock.
     tokio::time::pause();
     tokio::time::advance(INTERVAL + Duration::from_secs(1)).await;
@@ -233,13 +233,13 @@ async fn sign_in_cleanup_is_scoped_preserves_valid_sessions_and_bounds_rows_and_
     assert_eq!(expired_sessions(&pool, second).await, 1_005);
 
     // A sign-in to the first Organization serves the next Organization in id order.
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     assert_eq!(sign_in(&app, first).await.status(), StatusCode::OK);
     cleanup.finished().await;
     assert_eq!(expired_sessions(&pool, second).await, 5);
     assert_eq!(expired_sessions(&pool, first).await, 5);
     // The cursor wraps to the smallest id.
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     assert_eq!(sign_in(&app, first).await.status(), StatusCode::OK);
     cleanup.finished().await;
     assert_eq!(expired_sessions(&pool, first).await, 0);
@@ -387,7 +387,7 @@ async fn cancelled_cleanup_releases_the_guard_but_consumes_the_interval(pool: Pg
         .execute(&mut *holder)
         .await
         .unwrap();
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     cleanup.trigger(&pool);
     assert_eq!(cleanup.started(), 2);
     cleanup.finished().await;
@@ -423,7 +423,7 @@ async fn cancellation_during_delete_keeps_the_advanced_cursor(pool: PgPool) {
         .await
         .unwrap();
     // The next permitted run serves the second Organization.
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     cleanup.trigger(&pool);
     cleanup.finished().await;
     assert_eq!(cleanup.cursor(), Some(second));
@@ -446,7 +446,7 @@ async fn selection_failure_consumes_the_interval_and_keeps_the_cursor(pool: PgPo
     assert_eq!(expired_sessions(&pool, first).await, 5);
     assert_eq!(expired_sessions(&pool, second).await, 1_005);
 
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     // The selection query hits the 1-second statement timeout.
     let mut locked = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE organizations IN ACCESS EXCLUSIVE MODE")
@@ -464,7 +464,7 @@ async fn selection_failure_consumes_the_interval_and_keeps_the_cursor(pool: PgPo
 
     // The cursor stayed on the first Organization, so the second one is next.
     // This is the exception to the T-attempt guarantee: the failed attempt served nobody.
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     cleanup.trigger(&pool);
     cleanup.finished().await;
     assert_eq!(expired_sessions(&pool, second).await, 5);
@@ -500,12 +500,65 @@ async fn failed_delete_still_moves_the_turn_to_the_next_organization(pool: PgPoo
     assert_eq!(expired_sessions(&pool, second).await, 1_005);
     // The failure is permanent here: a cursor that moved only after a successful
     // DELETE would select the first Organization forever.
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     cleanup.trigger(&pool);
     cleanup.finished().await;
     assert_eq!(cleanup.started(), 2);
     assert_eq!(expired_sessions(&pool, second).await, 5);
     assert_eq!(expired_sessions(&pool, first).await, 1_005);
+}
+
+#[sqlx::test]
+async fn cleanup_timeout_does_not_fail_sign_in_and_consumes_the_interval(pool: PgPool) {
+    let cleanup = SessionCleanup::default();
+    let app = router(&pool, &cleanup);
+    let organization = organizations(&pool, &app, &[]).await;
+    seed_cleanup_sessions(&pool, organization, 1).await;
+
+    // Exhaust a separate pool to reach the outer cleanup deadline before any SQL
+    // can hit the shorter statement timeout. Sign-in keeps its own available pool
+    // but shares the cleanup gate, as concurrent requests in the real app do.
+    let cleanup_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(DEADLINE + Duration::from_secs(10))
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let holder = cleanup_pool.acquire().await.unwrap();
+    let started = Instant::now();
+    cleanup.trigger(&cleanup_pool);
+    assert!(cleanup.running());
+
+    let response = sign_in(&app, organization).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key(header::SET_COOKIE));
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap();
+    let token = body["token"].as_str().unwrap();
+    tokio::time::timeout(DEADLINE + Duration::from_secs(1), cleanup.finished())
+        .await
+        .expect("cleanup must finish before pool acquisition can time out");
+    assert!(started.elapsed() >= DEADLINE);
+    assert!(!cleanup.running());
+    assert_eq!(cleanup.started(), 1);
+    assert_eq!(expired_sessions(&pool, organization).await, 1);
+    assert_eq!(
+        request(&app, "GET", "/api/v1/me", Value::Null, token)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    drop(holder);
+    cleanup_pool.close().await;
+
+    assert_eq!(sign_in(&app, organization).await.status(), StatusCode::OK);
+    cleanup.finished().await;
+    assert_eq!(cleanup.started(), 1);
+    advance_cleanup_interval_and_expire_throttle_window().await;
+    assert_eq!(sign_in(&app, organization).await.status(), StatusCode::OK);
+    cleanup.finished().await;
+    assert_eq!(cleanup.started(), 2);
+    assert_eq!(expired_sessions(&pool, organization).await, 0);
 }
 
 #[sqlx::test]
@@ -546,7 +599,7 @@ async fn cleanup_failure_does_not_fail_sign_in_and_is_frequency_limited(pool: Pg
     cleanup.finished().await;
     assert_eq!(cleanup.started(), 1);
     assert_eq!(expired_sessions(&pool, organization).await, 1);
-    advance_cleanup_interval().await;
+    advance_cleanup_interval_and_expire_throttle_window().await;
     assert_eq!(sign_in(&app, organization).await.status(), StatusCode::OK);
     cleanup.finished().await;
     assert_eq!(cleanup.started(), 2);
