@@ -28,6 +28,22 @@ pub struct AppState {
     pub ws_allowed_origins: realtime::AllowedOrigins,
 }
 
+#[cfg(test)]
+impl AppState {
+    pub(crate) fn for_test(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool,
+            cookie_secure: true,
+            setup_token: None,
+            sign_in_throttle: Default::default(),
+            message_delivery: Default::default(),
+            session_changes: Default::default(),
+            session_cleanup: Default::default(),
+            ws_allowed_origins: Default::default(),
+        }
+    }
+}
+
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
