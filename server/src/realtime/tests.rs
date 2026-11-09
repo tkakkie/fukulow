@@ -217,13 +217,15 @@ async fn send(f: &Fixture, token: &str, channel: Uuid, key: Uuid, body: &str) ->
 async fn post(f: &Fixture, channel: Uuid) -> Value {
     send(f, &f.token, channel, Uuid::new_v4(), "hello").await
 }
-async fn control(client: &mut Client, control: ClientMessage) {
+async fn control(
+    client: &mut (impl futures_util::Sink<tungstenite::Message, Error = tungstenite::Error> + Unpin),
+    control: ClientMessage,
+) -> Result<(), tungstenite::Error> {
     client
         .send(tungstenite::Message::text(
             serde_json::to_string(&control).unwrap(),
         ))
         .await
-        .unwrap();
 }
 async fn subscribe(client: &mut Client, channel: Uuid, after: i64) {
     control(
@@ -233,7 +235,8 @@ async fn subscribe(client: &mut Client, channel: Uuid, after: i64) {
             after_seq: after,
         },
     )
-    .await;
+    .await
+    .unwrap();
 }
 async fn frame(client: &mut Client) -> tungstenite::Message {
     tokio::time::timeout(Duration::from_secs(5), client.next())
@@ -402,7 +405,8 @@ async fn live_delivery_denies_other_organization_and_private_nonmember_with_posi
             channel_id: private,
         },
     )
-    .await;
+    .await
+    .unwrap();
     // A control response acts as a barrier for the unsubscribe.
     subscribe(&mut authorized, f.channel, 1).await;
     ready(&mut authorized, f.channel, 1).await;
