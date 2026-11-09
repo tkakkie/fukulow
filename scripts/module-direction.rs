@@ -11,7 +11,7 @@ extern crate rustc_middle;
 extern crate rustc_span;
 
 use rustc_hir::{
-    Expr, ExprKind, HirId, Item, ItemKind, Node, Path, UseKind, UsePath,
+    Expr, ExprKind, HirId, Item, ItemKind, Node, Pat, PatKind, Path, UseKind, UsePath,
     def::{DefKind, Res},
     intravisit,
 };
@@ -114,6 +114,21 @@ impl<'tcx> Direction<'tcx> {
                     self.tcx.def_path_str(target),
                 ),
             );
+        }
+    }
+
+    fn inferred_type(&mut self, owner: LocalDefId, ty: ty::Ty<'tcx>, span: Span) {
+        if self.rank(owner.to_def_id()).is_none() {
+            return;
+        }
+        // Walk type arguments and structural types, never nominal ADT fields.
+        // AppState and root wrappers stay opaque; generic DI bodies retain T.
+        for argument in ty.walk() {
+            if let Some(ty) = argument.as_type()
+                && let ty::Adt(definition, _) = ty.kind()
+            {
+                self.edge(owner, definition.did(), span);
+            }
         }
     }
 
@@ -380,6 +395,15 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
     fn visit_expr(&mut self, expression: &'tcx Expr<'tcx>) {
         let owner = expression.hir_id.owner.def_id;
         let typeck = self.tcx.typeck(owner);
+        // HIR also visits type-level constants (e.g. signature array lengths)
+        // that have no expression type in this owner's body results.
+        if let Some(ty) = typeck.expr_ty_opt(expression) {
+            self.inferred_type(owner, ty, expression.span);
+            let adjusted = typeck.expr_ty_adjusted(expression);
+            if adjusted != ty {
+                self.inferred_type(owner, adjusted, expression.span);
+            }
+        }
         // Field access has no type-dependent DefId. Use rustc's adjusted
         // receiver and field index, including built-in/custom autoderef.
         if let ExprKind::Field(base, _) = expression.kind
@@ -398,6 +422,14 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
             self.edge(owner, target, expression.span);
         }
         intravisit::walk_expr(self, expression);
+    }
+
+    fn visit_pat(&mut self, pattern: &'tcx Pat<'tcx>) {
+        if let PatKind::Binding(..) = pattern.kind {
+            let owner = pattern.hir_id.owner.def_id;
+            self.inferred_type(owner, self.tcx.typeck(owner).pat_ty(pattern), pattern.span);
+        }
+        intravisit::walk_pat(self, pattern);
     }
 }
 

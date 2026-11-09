@@ -14,14 +14,8 @@ const PASSWORD: &str = "correct horse battery staple";
 
 fn router(pool: &PgPool, cleanup: &SessionCleanup) -> Router {
     crate::app(AppState {
-        pool: pool.clone(),
-        cookie_secure: true,
-        setup_token: None,
-        sign_in_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
         session_cleanup: cleanup.clone(),
-        ws_allowed_origins: Default::default(),
+        ..AppState::for_test(pool.clone())
     })
 }
 
