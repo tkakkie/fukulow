@@ -149,13 +149,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_account_salt_entropy_failure_returns_500_without_fallback() {
+    async fn production_password_hash_salts_vary_per_call() {
+        let password = "correct horse battery staple";
+        let first = hash_password(password.into(), &super::super::PASSWORD_WORKERS)
+            .await
+            .unwrap();
+        let second = hash_password(password.into(), &super::super::PASSWORD_WORKERS)
+            .await
+            .unwrap();
+        let first = PasswordHash::new(&first).unwrap();
+        let second = PasswordHash::new(&second).unwrap();
+        assert_ne!(first.salt.unwrap(), second.salt.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_account_salt_entropy_failure_returns_500_without_spending_failure_budgets() {
         for partial in [false, true] {
             let calls = Arc::new(AtomicUsize::new(0));
             let observed = calls.clone();
             let throttle = super::super::SignInThrottle::default();
             let ip = "192.0.2.1".parse().unwrap();
-            let attempt = throttle.begin(ip).unwrap();
+            let organization = uuid::Uuid::new_v4();
+            let mut attempt = throttle.begin(ip).unwrap();
+            attempt
+                .account(organization, "unknown@example.com".into())
+                .unwrap();
             let error = check_password_with_hash(
                 "correct horse battery staple".into(),
                 None,
@@ -189,6 +207,52 @@ mod tests {
                 json!({"error": "internal error"})
             );
             assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+            // All five ordinary failures must remain available for this account.
+            // Reaching both full limits also proves both reservations were released.
+            for _ in 0..5 {
+                let mut attempt = throttle.begin(ip).unwrap();
+                attempt
+                    .account(organization, "unknown@example.com".into())
+                    .unwrap();
+                assert!(
+                    !check_password(
+                        "incorrect password".into(),
+                        None,
+                        attempt,
+                        &super::super::PASSWORD_WORKERS,
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+            let mut rejected = throttle.begin("192.0.2.2".parse().unwrap()).unwrap();
+            assert!(
+                rejected
+                    .account(organization, "unknown@example.com".into())
+                    .is_err()
+            );
+            drop(rejected);
+
+            // Other accounts isolate the remaining IP budget from the account limit.
+            for n in 5..20 {
+                let mut attempt = throttle.begin(ip).unwrap();
+                attempt
+                    .account(organization, format!("unknown-{n}@example.com"))
+                    .unwrap();
+                assert!(
+                    !check_password(
+                        "incorrect password".into(),
+                        None,
+                        attempt,
+                        &super::super::PASSWORD_WORKERS,
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+            assert!(throttle.begin(ip).is_err());
+            assert!(throttle.begin("192.0.2.2".parse().unwrap()).is_ok());
         }
     }
 
