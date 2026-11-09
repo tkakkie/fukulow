@@ -11,6 +11,13 @@ updates:
     ignore:
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
+  - package-ecosystem: npm
+    directory: /load
+    schedule: { interval: weekly }
+    groups: { npm: { patterns: ["*"] } }
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
