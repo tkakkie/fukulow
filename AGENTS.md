@@ -68,6 +68,12 @@ Also: sending a message is idempotent (client-generated id); reconnect uses per-
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them.
 - Only the maintainer merges (or explicitly tells an AI to).
 
+## AI models and effort
+- Codex implements with `gpt-6.1-sol`, effort `medium`; `high` when any of H1-H6 holds, judged from the whole Issue and the files the change actually touches (not only Done when or Notes): H1 auth, permissions, Organization separation or sessions; H2 DB integrity, migrations, transactions or locks; H3 real-time reconnect, event order, deduplication or delivery; H4 a security, correctness or CI verification gate is added, removed or loosened; H5 a behaviour-preserving conversion without an old/new comparison test; H6 concurrent paths sharing state, caches, or whether a background job runs, retries or stops. Size alone never qualifies. The PR body lists the H numbers that applied (or "none"), so the call can be traced.
+- Effort is fixed at launch: if an H condition first appears during the work, the implementer stops and reports, and the orchestrator restarts at `high`.
+- Codex reviews and checks use `gpt-6-astra`: `high` for round 1 of `risk:needs-review` or gate changes, `medium` for round 2 and delta checks. Astra implements only after two substantive sol attempts at `high` have both failed to meet the Issue's acceptance criteria (a single failing test or CI run is not an attempt; an attempt is a real implementation or fix effort); the orchestrator records why in the Issue. Astra-authored PRs keep the same independent AI review requirements.
+- Record model and effort in the PR (the AI signature line). Antigravity: `agy` (argon) only until a new model ships; effort by difficulty, fixed at launch: `low` for small copy, limit or type fixes; `medium` for new screens or state modules, vitest additions, conflict and CI fixes, browser checks; `high` for browser-side real-time (reconnect, order, deduplication), auth-screen session handling, new E2E suites, multi-screen state design. Size alone does not raise it; if a task proves harder, stop, report and restart higher. Claude: Sonnet by default; Opus only for round 1 of high-risk review or heavy implementation.
+
 ## Languages (keep it small; Tier 2 default)
 - Allowed: Rust (server, server tests), TypeScript (web, vitest, Playwright, small scripts run with Node), SQL, short bash.
 - No Python, Go or other languages. Adding one needs the maintainer's approval and a line in `docs/decisions.md`.
