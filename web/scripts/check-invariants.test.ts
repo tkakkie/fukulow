@@ -326,6 +326,43 @@ describe('reconciliation with the cargo test list', () => {
     }
   })
 
+  it('does not let a same-named test in a/b/c.rs satisfy a reference to a/b.rs (negative)', () => {
+    const r = makeRoot({
+      'server/src/lib.rs': 'mod a;\n',
+      'server/src/a.rs': 'mod b;\n',
+      'server/src/a/b.rs': '#[cfg(test)]\nmod c;\n#[test]\nfn real() {}\n',
+      'server/src/a/b/c.rs': t,
+    })
+    const c = checker(r, [lib('a::b::c::real')])
+    expect(c('server/src/a/b/c.rs::real')).toEqual([])
+    expect(c('server/src/a/b.rs::real')[0]).toContain('a::b::real')
+    expect(c('server/src/a.rs::real')).toHaveLength(1)
+  })
+
+  it('requires a module declared by both lib.rs and main.rs to be listed in both binaries (negative)', () => {
+    const r = makeRoot({
+      'server/src/lib.rs': '#[cfg(test)]\nmod tests {\n#[test]\nfn real() {}\n}\n',
+      'server/src/main.rs': '#[cfg(test)]\nmod tests {\n#[test]\nfn real() {}\n}\n',
+    })
+    const main = (name: string) => ({ binary: 'src/main.rs', name })
+    expect(checker(r, [lib('tests::real'), main('tests::real')])('server/src/lib.rs::real')).toEqual([])
+    expect(checker(r, [lib('tests::real')])('server/src/main.rs::real')[0]).toContain('src/main.rs')
+    expect(checker(r, [main('tests::real')])('server/src/lib.rs::real')[0]).toContain('src/lib.rs')
+  })
+
+  it('parses stdout only: stderr from cargo is never merged into the list (negative)', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'inv-fakecargo-'))
+    writeFileSync(join(bin, 'cargo'), '#!/bin/sh\necho "real: test"\necho "from_stderr: test" >&2\n', { mode: 0o755 })
+    const r = makeRoot({ 'server/Cargo.toml': '[package]\nname = "x"\n', 'server/src/lib.rs': '' })
+    const saved = process.env.PATH
+    process.env.PATH = `${bin}:${saved}`
+    try {
+      expect(cargoList(r)).toEqual([{ binary: 'src/lib.rs', name: 'real' }])
+    } finally {
+      process.env.PATH = saved
+    }
+  })
+
   it('fails an unmappable path', () => {
     expect(check('server/tests/helpers/mod.rs::real')[0]).toContain('cannot be mapped')
   })
