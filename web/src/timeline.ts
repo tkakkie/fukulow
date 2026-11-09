@@ -41,12 +41,12 @@ export function mergeMessages(current: Message[], incoming: Message[]): Message[
  * converges to one entry. Create one instance per selected channel.
  */
 /** One timeline per channel, kept alive across channel switches so pending messages survive. */
-export function createTimelines(api: TimelineApi = defaultApi, newId?: () => string) {
+export function createTimelines(api: TimelineApi = defaultApi, newId?: () => string, selfId?: string) {
   const byChannel = new Map<string, ReturnType<typeof createTimeline>>()
   return {
     get(channelId: string) {
       let t = byChannel.get(channelId)
-      if (!t) byChannel.set(channelId, (t = createTimeline(channelId, api, newId)))
+      if (!t) byChannel.set(channelId, (t = createTimeline(channelId, api, newId, selfId)))
       return t
     },
   }
@@ -56,6 +56,8 @@ export function createTimeline(
   channelId: string,
   api: TimelineApi = defaultApi,
   newId: () => string = () => crypto.randomUUID(),
+  /** The signed-in Member: only their own echo settles a pending message. */
+  selfId?: string,
 ) {
   let state: TimelineState = { status: 'loading', messages: [], pending: [], hasOlder: false, loadingOlder: false }
   let disposed = false
@@ -83,6 +85,16 @@ export function createTimeline(
 
   return {
     get: () => state,
+    /** Highest seq held (0 = none): the exclusive cursor for WebSocket resume. */
+    lastSeq: () => state.messages.reduce((max, m) => Math.max(max, m.seq), 0),
+    /** A live or replayed message. Dedupes by seq; an echo of our own pending send settles it. */
+    receive(m: Message) {
+      const mine = selfId === undefined || m.sender === selfId
+      set({
+        messages: mergeMessages(state.messages, [m]),
+        pending: mine ? state.pending.filter((p) => p.clientMessageId !== m.client_message_id) : state.pending,
+      })
+    },
     dispose() {
       disposed = true
       listeners.clear()
