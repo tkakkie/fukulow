@@ -96,7 +96,10 @@
       <button type="submit" disabled={busy}>ログイン</button>
     </form>
   {:else}
-    <Workspace />
+    <Workspace
+      selfId={view.identity.member.id}
+      onSessionEnded={() => go({ screen: 'signin', notice: 'セッションが終了しました。もう一度ログインしてください。' })}
+    />
     <p>{view.identity.organization.name} / {view.identity.member.name} さん</p>
     {#if error}<p role="alert">{error}</p>{/if}
     <button onclick={doSignOut} disabled={busy}>ログアウト</button>

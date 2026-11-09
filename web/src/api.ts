@@ -81,3 +81,6 @@ export const listMessages = (channelId: string, query: ListMessagesQuery = {}, f
 
 export const sendMessage = (channelId: string, body: SendMessageRequest, f: typeof fetch = fetch) =>
   call<Message>(f, `/api/v1/channels/${encodeURIComponent(channelId)}/messages`, json(body), true)
+
+export type ServerEvent = import('./api-schema').ServerEvent
+export type ClientMessage = import('./api-schema').ClientMessage
