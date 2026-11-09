@@ -108,6 +108,25 @@ describe('web boundary: aliases, computed keys, beacons, workers (#48)', () => {
     expect(uses('<script lang="ts">const w = window</script><button onclick={() => w.fetch("/x")}>x</button>')).toEqual(['fetch'])
   })
 
+  describe('same alias name in different scopes (terminates, fails closed)', () => {
+    const src = 'function a() { const w = window } function b() { const w = document }'
+    it('terminates and reports nothing for harmless uses (.ts)', () => expect(ts(src)).toEqual([]))
+    it('terminates and reports nothing for harmless uses (.svelte)', () => expect(sv(src)).toEqual([]))
+    it('still catches a forbidden use through the ambiguous name (.ts)', () => {
+      expect(ts(src + ' function c() { w.fetch("/x") }')).toEqual(['fetch'])
+      expect(ts(src + ' function c() { w.cookie }')).toEqual(['document.cookie'])
+    })
+    it('still catches a forbidden use through the ambiguous name (.svelte)', () => {
+      expect(sv(src + ' function c() { w.fetch("/x") }')).toEqual(['fetch'])
+      expect(sv(src + ' function c() { w.cookie }')).toEqual(['document.cookie'])
+    })
+    it('three different owners also terminate', () => {
+      const three = 'function a() { const w = window } function b() { const w = document } function c() { const w = navigator }'
+      expect(ts(three)).toEqual([])
+      expect(sv(three)).toEqual([])
+    })
+  })
+
   it('regression: already detected forms', () => {
     expect(ts('const f = fetch; f("/x")')).toEqual(['fetch'])
     expect(ts("globalThis['fetch']('/x')")).toEqual(['fetch'])

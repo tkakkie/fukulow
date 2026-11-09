@@ -12,9 +12,10 @@
 //     and aliases of those objects, document or navigator (`const w = window; w.fetch()`).
 //   - files: .ts .mts .cts .tsx .js .mjs .cjs .jsx and .svelte (instance, module and template).
 //     Out of scope: tests (*.test.* / *.spec.*), .d.ts, non-code files, files outside web/src.
-// Known limits: no dynamic keys (`window[k]`), destructuring (`const { fetch } = window`), aliases through
+// Known limits: no dynamic keys (`window[k]`), destructuring (handled differently in .ts and .svelte, do not rely
+// on it), Vite `?worker` / `?sharedworker` imports (not detected), `top`/`parent`/`frames` roots, aliases through
 // functions, properties, parameters or reassignment, `import()`/`eval`, `Reflect`, other APIs (e.g. service
-// workers, form posts, <img>/<script> loads), and no scoping (an alias name counts for the whole file).
+// workers, form posts, <img>/<script> loads), and no scoping (an alias name counts for the whole file; one name bound to different tracked objects is checked against all of them).
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { parse } from 'svelte/compiler'
@@ -27,12 +28,15 @@ const NETWORK = new Set(['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 
 const STORAGE = new Set(['localStorage', 'sessionStorage', 'indexedDB', 'cookieStore'])
 const GLOBAL_OBJECTS = new Set(['window', 'globalThis', 'self'])
 /** Objects whose members matter, so aliases of them are tracked. */
-const TRACKED = new Set([...GLOBAL_OBJECTS, 'document', 'navigator'])
+const TRACKED = new Set([...GLOBAL_OBJECTS, 'document', 'navigator', '*'])
+/** A name bound to different tracked objects in different scopes: checked against all of them (fails closed). */
+const AMBIGUOUS = '*'
 
 export type Violation = { file: string; line: number; message: string }
 
 /** Classifies a reference to `name` (optionally as a member of `owner`). */
 function classify(name: string, owner?: string): string | undefined {
+  if (owner === AMBIGUOUS) return classify(name, 'document') ?? classify(name, 'navigator') ?? classify(name, 'window')
   if (owner === 'document' && name === 'cookie') return 'document.cookie'
   if (owner === 'navigator' && name === 'sendBeacon') return 'navigator.sendBeacon'
   if (owner !== undefined && !GLOBAL_OBJECTS.has(owner)) return undefined
@@ -87,6 +91,18 @@ function constStrTs(e: ts.Expression): string | undefined {
 
 type Aliases = Map<string, string>
 
+/**
+ * Records `name -> owner`. A second, different owner for the same name (same name in another scope) turns it
+ * AMBIGUOUS. Values only move unbound -> owner -> AMBIGUOUS, so the fixed point always terminates.
+ */
+function bind(aliases: Aliases, name: string, owner: string): boolean {
+  const current = aliases.get(name)
+  const next = current === undefined || current === owner ? owner : AMBIGUOUS
+  if (current === next) return false
+  aliases.set(name, next)
+  return true
+}
+
 function ownerTs(e: ts.Expression, aliases: Aliases): string | undefined {
   e = unwrapTs(e)
   if (ts.isIdentifier(e)) return aliases.get(e.text) ?? e.text
@@ -110,10 +126,7 @@ function aliasesTs(sf: ts.SourceFile): Aliases {
     for (const d of decls) {
       const name = (d.name as ts.Identifier).text
       const owner = ownerTs(d.initializer as ts.Expression, aliases)
-      if (owner && TRACKED.has(owner) && aliases.get(name) !== owner) {
-        aliases.set(name, owner)
-        changed = true
-      }
+      if (owner && TRACKED.has(owner) && bind(aliases, name, owner)) changed = true
     }
   }
   return aliases
@@ -220,10 +233,7 @@ function aliasesSvelte(ast: unknown): Aliases {
     for (const d of decls) {
       const name = (d.id as Node).name as string
       const owner = ownerSvelte(d.init as Node, aliases)
-      if (owner && TRACKED.has(owner) && aliases.get(name) !== owner) {
-        aliases.set(name, owner)
-        changed = true
-      }
+      if (owner && TRACKED.has(owner) && bind(aliases, name, owner)) changed = true
     }
   }
   return aliases
