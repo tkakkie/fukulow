@@ -51,7 +51,7 @@
         "tags": [
           "crate::channels"
         ],
-        "summary": "Create a public or private channel in the caller's organization.\nA private channel includes its creator as a member in the same transaction.",
+        "summary": "Create a public or private channel with an organization-unique name.\nNames are compared with ASCII case folding; non-ASCII characters are unchanged.\nA private channel includes its creator as a member in the same transaction.",
         "operationId": "create_channel",
         "requestBody": {
           "content": {
@@ -86,6 +86,16 @@
           },
           "401": {
             "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Channel name already exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -711,7 +721,9 @@
             "format": "uuid"
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "At most 128 Unicode scalar values.",
+            "maxLength": 128
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"
@@ -766,7 +778,9 @@
         ],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "At most 128 Unicode scalar values.",
+            "maxLength": 128
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"

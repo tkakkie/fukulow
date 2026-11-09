@@ -22,6 +22,7 @@ fn router(pool: &PgPool) -> Router {
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     })
 }
@@ -98,6 +99,7 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
+            session_cleanup: Default::default(),
             ws_allowed_origins: Default::default(),
         });
         let response = app
@@ -198,6 +200,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
+            session_cleanup: Default::default(),
             ws_allowed_origins: Default::default(),
         });
         let valid_input = if path == "/api/v1/setup" {
@@ -291,6 +294,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let expected = json!({"error": "invalid credentials"});
@@ -357,6 +361,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     for token in [None, Some(""), Some("wrong-token-test-only")] {
@@ -949,6 +954,7 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
         .unwrap(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let first = setup(&app).await;
@@ -1023,6 +1029,128 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
             "owner@example.com",
             PASSWORD,
             Some("198.51.100.3"),
+        )
+        .await,
+    )
+    .await;
+}
+
+async fn advance_cleanup_interval() {
+    // Pause only between SQL operations; network I/O needs a running clock.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+}
+
+#[sqlx::test]
+async fn ambiguous_organization_charges_only_ip_budget_and_leaves_other_sign_ins_usable(
+    pool: PgPool,
+) {
+    let app = router(&pool);
+    let (first, second) = two_organizations(&pool, &app).await;
+    let first: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for n in 1..=20 {
+        let response = sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            None,
+            "owner@example.com",
+            PASSWORD,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body(response).await, json!({"error": "invalid input"}));
+        if n == 10 {
+            // More than the account limit of ambiguous failures did not charge either account.
+            for organization in [first, second] {
+                assert_eq!(
+                    sign_in_from(
+                        &app,
+                        "192.0.2.1:1234",
+                        Some(organization),
+                        "owner@example.com",
+                        PASSWORD,
+                        None
+                    )
+                    .await
+                    .status(),
+                    StatusCode::OK
+                );
+            }
+        }
+    }
+    for organization in [None, Some(first), Some(second)] {
+        assert_throttled(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                organization,
+                "owner@example.com",
+                PASSWORD,
+                None,
+            )
+            .await,
+        )
+        .await;
+    }
+    for organization in [first, second] {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.2:1234",
+                Some(organization),
+                "owner@example.com",
+                PASSWORD,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    advance_cleanup_interval().await;
+    // Existing credential failures and ambiguous lookups consume the same IP budget.
+    for _ in 0..19 {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                None,
+                "owner@example.com",
+                PASSWORD,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            Some(first),
+            "owner@example.com",
+            "incorrect password",
+            None
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_throttled(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            Some(first),
+            "owner@example.com",
+            PASSWORD,
+            None,
         )
         .await,
     )

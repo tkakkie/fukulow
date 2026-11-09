@@ -16,6 +16,16 @@ use utoipa::OpenApi;
 use uuid::Uuid;
 
 #[test]
+fn channel_name_schemas_limit_length_to_128() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for schema in ["Channel", "CreateChannelRequest"] {
+        let name = &document["components"]["schemas"][schema]["properties"]["name"];
+        assert_eq!(name["maxLength"], 128);
+        assert!(name.get("minLength").is_none());
+    }
+}
+
+#[test]
 fn sign_in_retry_after_is_at_least_one_second() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let schema = &document["paths"]["/api/v1/session"]["post"]["responses"]["429"]["headers"]["Retry-After"]
@@ -147,6 +157,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     for (method, path) in [("GET", "/api/v1/ws")] {

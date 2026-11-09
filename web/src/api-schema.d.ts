@@ -15,7 +15,8 @@ export interface paths {
         get: operations["list_channels"];
         put?: never;
         /**
-         * Create a public or private channel in the caller's organization.
+         * Create a public or private channel with an organization-unique name.
+         *     Names are compared with ASCII case folding; non-ASCII characters are unchanged.
          *     A private channel includes its creator as a member in the same transaction.
          */
         post: operations["create_channel"];
@@ -167,6 +168,7 @@ export interface components {
         Channel: {
             /** Format: uuid */
             id: string;
+            /** @description At most 128 Unicode scalar values. */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
         };
@@ -179,6 +181,7 @@ export interface components {
         ClientMessage: components["schemas"]["Subscribe"] | components["schemas"]["Unsubscribe"];
         /** @description Identity and organization come from the session, never from request fields. */
         CreateChannelRequest: {
+            /** @description At most 128 Unicode scalar values. */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
         };
@@ -448,6 +451,15 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Channel name already exists */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -41,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sign_in_throttle,
             message_delivery: Default::default(),
             session_changes: Default::default(),
+            session_cleanup: Default::default(),
             ws_allowed_origins,
         })
         .into_make_service_with_connect_info::<std::net::SocketAddr>(),
