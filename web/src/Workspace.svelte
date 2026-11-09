@@ -1,42 +1,15 @@
 <script lang="ts">
-  import { createChannels } from './channels'
-  import { createSync } from './timeline'
+  import type { SessionModel } from './auth.svelte'
   import ChannelList from './ChannelList.svelte'
   import CreateChannelForm from './CreateChannelForm.svelte'
   import Timeline from './Timeline.svelte'
 
-  let { selfId, onSessionEnded }: { selfId: string; onSessionEnded: () => void } = $props()
-
-  const channels = createChannels()
-  // svelte-ignore state_referenced_locally
-  const sync = createSync({ selfId, onSessionEnded })
-  sync.start()
-  let live = $state(sync.get())
-  const stopLive = sync.subscribe(() => (live = sync.get()))
-  $effect(() => () => {
-    stopLive()
-    sync.close()
-  })
-
-  let s = $state(channels.get())
-  const unsubscribe = channels.subscribe(() => (s = channels.get()))
-  channels.load()
-  $effect(() => unsubscribe)
-
-  const selectedId = $derived(s.selectedId)
-  $effect(() => {
-    const id = selectedId
-    if (!id) return
-    sync.watch(id)
-    return () => { sync.unwatch(id) }
-  })
-
+  // The session's controllers outlive this component: unmounting it never closes the connection.
+  let { session }: { session: SessionModel } = $props()
+  const channels = $derived(session.channels)
+  // One adapter read per derived: every read of the adapter registers a listener effect.
+  const s = $derived(channels.state)
   const selected = $derived(s.channels.find((c) => c.id === s.selectedId))
-
-  async function create(name: string, visibility: 'public' | 'private') {
-    const r = await channels.create({ name, visibility })
-    return 'error' in r ? r.error : null
-  }
 </script>
 
 <div class="workspace">
@@ -48,15 +21,17 @@
       <p>読み込み中…</p>
     {/if}
     <ChannelList channels={s.channels} selectedId={s.selectedId} onselect={(id) => channels.select(id)} />
-    <CreateChannelForm oncreate={create} />
+    <CreateChannelForm oncreate={(name, visibility) => channels.create(name, visibility)} />
   </aside>
   <div class="main">
     {#if selected}
+      {@const channel = session.sync.channel(selected.id)}
       <h2>{selected.name}</h2>
-      <small data-testid="live-status" data-live={live.channels[selected.id]?.subscription?.confirmed === true}>
-        {live.channels[selected.id]?.subscription?.confirmed === true ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
+      {@const live = channel.live}
+      <small data-testid="live-status" data-live={live}>
+        {live ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
       </small>
-      {#key selected.id}<Timeline timeline={sync.getTimeline(selected.id)} />{/key}
+      {#key selected.id}<Timeline {channel} />{/key}
     {:else if s.status === 'ready'}
       <p>チャンネルがありません。左のフォームから作成してください。</p>
     {/if}

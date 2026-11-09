@@ -1,6 +1,5 @@
 <script lang="ts">
-  import type { ChannelVisibility } from './api'
-  import { channelNameTooLong } from './channels'
+  import { channelNameTooLong, type ChannelVisibility } from './channels.svelte'
   let { oncreate }: { oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null> } = $props()
 
   let name = $state('')

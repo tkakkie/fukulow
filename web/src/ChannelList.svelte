@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Channel } from './api'
+  import type { Channel } from './channels.svelte'
   let { channels, selectedId, onselect }: { channels: Channel[]; selectedId: string | null; onselect: (id: string) => void } = $props()
 </script>
 
