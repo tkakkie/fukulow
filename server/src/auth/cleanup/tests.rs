@@ -146,6 +146,29 @@ async fn block_cleanup(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgr
     holder
 }
 
+/// Waits until `count` cleanup DELETEs in this test database wait on a lock (an aborted
+/// run's backend keeps waiting until the lock is released, so it still counts).
+async fn wait_for_blocked_deletes(pool: &PgPool, count: i64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                 AND query LIKE 'DELETE FROM sessions%'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting >= count {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the cleanup DELETE must be blocked");
+}
+
 #[sqlx::test]
 async fn sign_in_cleanup_is_scoped_preserves_valid_sessions_and_bounds_rows_and_frequency(
     pool: PgPool,
@@ -316,10 +339,14 @@ async fn a_running_cleanup_blocks_new_runs_until_completion_or_cancellation(pool
     let cleanup = SessionCleanup::with_interval(Duration::ZERO);
     let app = router(&pool, &cleanup);
     let organization = organizations(&pool, &app, &[]).await;
-    seed_cleanup_sessions(&pool, organization, 2).await;
+    // More than one batch, so the second run still finds rows the aborted run did not lock.
+    seed_cleanup_sessions(&pool, organization, 1_005).await;
     let mut holder = block_cleanup(&pool).await;
     cleanup.trigger(&pool);
     assert_eq!(cleanup.started(), 1);
+    // Refuse the duplicate only once the task is really executing its DELETE.
+    wait_for_blocked_deletes(&pool, 1).await;
+    assert!(cleanup.running());
     cleanup.trigger(&pool);
     assert_eq!(cleanup.started(), 1);
     // Cancellation releases the guard.
@@ -328,6 +355,9 @@ async fn a_running_cleanup_blocks_new_runs_until_completion_or_cancellation(pool
     assert!(!cleanup.running());
     cleanup.trigger(&pool);
     assert_eq!(cleanup.started(), 2);
+    // The aborted run's backend still waits too, so wait for two.
+    wait_for_blocked_deletes(&pool, 2).await;
+    assert!(cleanup.running());
     cleanup.trigger(&pool);
     assert_eq!(cleanup.started(), 2);
     sqlx::query("SELECT pg_advisory_unlock(73)")
@@ -383,23 +413,7 @@ async fn cancellation_during_delete_keeps_the_advanced_cursor(pool: PgPool) {
     let mut holder = block_cleanup(&pool).await;
     cleanup.trigger(&pool);
     // Wait until the first Organization is selected and its DELETE waits on the lock.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
-                 WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'DELETE FROM sessions%')",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the cleanup DELETE must be blocked");
+    wait_for_blocked_deletes(&pool, 1).await;
     assert_eq!(cleanup.cursor(), Some(first));
     cleanup.abort();
     cleanup.finished().await;
@@ -462,6 +476,42 @@ async fn selection_failure_consumes_the_interval_and_keeps_the_cursor(pool: PgPo
     assert_eq!(expired_sessions(&pool, second).await, 5);
     assert_eq!(expired_sessions(&pool, first).await, 5);
     assert!(third > second);
+}
+
+#[sqlx::test]
+async fn failed_delete_still_moves_the_turn_to_the_next_organization(pool: PgPool) {
+    // The normal 60-second interval, not a test override.
+    let cleanup = SessionCleanup::default();
+    let app = router(&pool, &cleanup);
+    let first = Uuid::from_u128(1);
+    let second = Uuid::from_u128(2);
+    // The API-created Organization sorts after both fixed ids.
+    organizations(&pool, &app, &[first, second]).await;
+    for organization in [first, second] {
+        seed_cleanup_sessions(&pool, organization, 1_005).await;
+    }
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_first() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+         IF OLD.organization_id = '00000000-0000-0000-0000-000000000001' THEN \
+         RAISE EXCEPTION 'test cleanup failure'; END IF; RETURN OLD; END $$; \
+         CREATE TRIGGER reject_first BEFORE DELETE ON sessions \
+         FOR EACH ROW EXECUTE FUNCTION reject_first();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    cleanup.trigger(&pool);
+    cleanup.finished().await;
+    assert_eq!(expired_sessions(&pool, first).await, 1_005);
+    assert_eq!(expired_sessions(&pool, second).await, 1_005);
+    // The failure is permanent here: a cursor that moved only after a successful
+    // DELETE would select the first Organization forever.
+    advance_cleanup_interval().await;
+    cleanup.trigger(&pool);
+    cleanup.finished().await;
+    assert_eq!(cleanup.started(), 2);
+    assert_eq!(expired_sessions(&pool, second).await, 5);
+    assert_eq!(expired_sessions(&pool, first).await, 1_005);
 }
 
 #[sqlx::test]
