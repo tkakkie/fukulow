@@ -23,7 +23,7 @@ Tier 1, enforced by CI today:
 - No secrets in the repo (gitleaks on PR and main, plus `.gitignore` and review). The repo is public.
 - Every table has `organization_id` (NOT NULL), except the `organizations` root and migration bookkeeping; migrations are append-only: an existing migration file is never edited or deleted (#31, #40).
 - Rust: `unsafe` forbidden; `unwrap()`, `expect()` and `panic!()` denied outside `#[cfg(test)]` (clippy lints, with negative compilation tests). Startup errors propagate as `Result`. An unavoidable exception needs a stated reason and the maintainer's approval; do not add abstractions just to satisfy the lint (#32, #41).
-- Module dependency direction (see Boundaries) is checked using rustc name resolution for production and test targets, including aliases, re-exports and macros, with negative compilation tests; `main`, `openapi` and `lib` are composition exceptions (#46).
+- Module dependency direction (see Boundaries) is checked for resolved paths (including module aliases, local type-alias paths and re-exports), macro invocations/expansions, type-dependent calls and ADT field accesses in production and test targets, with negative compilation tests; `main`, `openapi` and `lib` are composition exceptions. This does not trace inferred values through composition-root fields/functions or inspect nominal wrappers' contents; those indirect dependencies remain review-enforced (#46).
 
 Tier 1, approved, CI check pending (review enforces until the Issue lands):
 - Every row of `docs/invariants.md` names a test that exists (checked against real test definitions, not text search) (#34).

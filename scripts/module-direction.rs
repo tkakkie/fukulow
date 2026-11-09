@@ -11,11 +11,15 @@ extern crate rustc_middle;
 extern crate rustc_span;
 
 use rustc_hir::{
-    Expr, HirId, Item, ItemKind, Node, Path, UseKind, UsePath,
+    Expr, ExprKind, HirId, Item, ItemKind, Node, Path, UseKind, UsePath,
     def::{DefKind, Res},
     intravisit,
 };
-use rustc_middle::{hir::nested_filter, metadata::ModChild, ty::TyCtxt};
+use rustc_middle::{
+    hir::nested_filter,
+    metadata::ModChild,
+    ty::{self, TyCtxt},
+};
 use rustc_span::{
     Span,
     def_id::{CRATE_DEF_ID, CRATE_DEF_INDEX, DefId, LOCAL_CRATE, LocalDefId},
@@ -38,6 +42,7 @@ impl rustc_driver::Callbacks for Check {
             modules: vec![(tcx.hir_root_module().spans.inner_span, CRATE_DEF_ID)],
             reported: HashSet::new(),
             imports: Vec::new(),
+            aliases: HashSet::new(),
         };
         tcx.hir_walk_toplevel_module(&mut visitor);
         visitor.macros();
@@ -50,9 +55,10 @@ struct Direction<'tcx> {
     modules: Vec<(Span, LocalDefId)>,
     reported: HashSet<(Span, usize, usize)>,
     imports: Vec<(Span, String, DefId, bool)>,
+    aliases: HashSet<(LocalDefId, LocalDefId)>,
 }
 
-impl Direction<'_> {
+impl<'tcx> Direction<'tcx> {
     fn rank(&self, mut id: DefId) -> Option<usize> {
         if !id.is_local() {
             return None;
@@ -74,6 +80,23 @@ impl Direction<'_> {
     fn reference(&mut self, owner: LocalDefId, res: Res, span: Span) {
         if let Res::Def(_, target) = res {
             self.edge(owner, target, span);
+            // Type aliases keep their own DefId, unlike use re-exports. Follow
+            // their HIR paths with the caller's owner, retaining intermediate
+            // module references that would disappear from the expanded type.
+            if self.tcx.def_kind(target) == DefKind::TyAlias
+                && let Some(local) = target.as_local()
+                && self.aliases.insert((owner, local))
+                && let Node::Item(item) = self.tcx.hir_node_by_def_id(local)
+            {
+                intravisit::Visitor::visit_item(
+                    &mut AliasPaths {
+                        direction: self,
+                        owner,
+                        span,
+                    },
+                    item,
+                );
+            }
         }
     }
 
@@ -255,6 +278,22 @@ impl Direction<'_> {
     }
 }
 
+struct AliasPaths<'a, 'tcx> {
+    direction: &'a mut Direction<'tcx>,
+    owner: LocalDefId,
+    span: Span,
+}
+
+impl<'tcx> intravisit::Visitor<'tcx> for AliasPaths<'_, 'tcx> {
+    fn visit_path(&mut self, path: &Path<'tcx>, _: HirId) {
+        self.direction.reference(self.owner, path.res, self.span);
+        for segment in path.segments {
+            self.direction.reference(self.owner, segment.res, self.span);
+        }
+        intravisit::walk_path(self, path);
+    }
+}
+
 impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
     type NestedFilter = nested_filter::All;
 
@@ -339,14 +378,24 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
     }
 
     fn visit_expr(&mut self, expression: &'tcx Expr<'tcx>) {
+        let owner = expression.hir_id.owner.def_id;
+        let typeck = self.tcx.typeck(owner);
+        // Field access has no type-dependent DefId. Use rustc's adjusted
+        // receiver and field index, including built-in/custom autoderef.
+        if let ExprKind::Field(base, _) = expression.kind
+            && let ty::Adt(definition, _) = typeck.expr_ty_adjusted(base).kind()
+        {
+            let index = typeck.field_index(expression.hir_id);
+            self.edge(
+                owner,
+                definition.non_enum_variant().fields[index].did,
+                expression.span,
+            );
+        }
         // Associated functions and inferred method/operator calls can resolve to
         // an impl in a higher module even when the receiver type is lower-level.
-        if let Some(target) = self
-            .tcx
-            .typeck(expression.hir_id.owner.def_id)
-            .type_dependent_def_id(expression.hir_id)
-        {
-            self.edge(expression.hir_id.owner.def_id, target, expression.span);
+        if let Some(target) = typeck.type_dependent_def_id(expression.hir_id) {
+            self.edge(owner, target, expression.span);
         }
         intravisit::walk_expr(self, expression);
     }

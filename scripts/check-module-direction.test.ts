@@ -92,6 +92,87 @@ pub mod realtime {}
     })
   }
 
+  function stateFixture(body: string): string {
+    return `
+pub struct AppState {
+    pub hub: realtime::Hub,
+    pub boxed: Box<realtime::Hub>,
+    pub tuple: realtime::Tuple,
+    pub indirect: Handle,
+    pub count: u8,
+}
+pub struct Handle(pub realtime::Hub);
+impl std::ops::Deref for Handle {
+    type Target = realtime::Hub;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+pub type Alias = realtime::Hub;
+pub type Chain = Alias;
+pub type Wrapped = Option<&'static Chain>;
+pub type Generic<T> = (T, Chain);
+pub type ThroughReExport = realtime::Identity;
+pub type Allowed = auth::Identity;
+pub mod auth { pub struct Identity; ${body} }
+pub mod channels {}
+pub mod messages {}
+pub mod realtime {
+    pub struct Hub { pub count: u8 }
+    pub struct Tuple(pub u8);
+    pub use crate::auth::Identity;
+    fn allowed(_: crate::Allowed) {}
+}
+`
+  }
+
+  const stateDenied = {
+    'AppState field read': 'fn f(s: &crate::AppState) -> u8 { s.hub.count }',
+    'AppState field write': 'fn f(s: &mut crate::AppState) { s.hub.count = 1; }',
+    'AppState tuple struct field': 'fn f(s: &crate::AppState) -> u8 { s.tuple.0 }',
+    'AppState built-in autoderef field': 'fn f(s: &crate::AppState) -> u8 { s.boxed.count }',
+    'AppState custom autoderef field': 'fn f(s: &crate::AppState) -> u8 { s.indirect.count }',
+    'macro-generated AppState field': 'macro_rules! emit { () => { fn f(s: &crate::AppState) -> u8 { s.hub.count } }; } emit!();',
+    'root type alias': 'fn f(_: crate::Alias) {}',
+    'root type alias chain': 'fn f(_: crate::Chain) {}',
+    'root type alias inside container': 'fn f(_: crate::Wrapped) {}',
+    'root generic type alias': 'fn f(_: crate::Generic<u8>) {}',
+    'root type alias retaining re-export module': 'fn f(_: crate::ThroughReExport) {}',
+    'imported root type alias': 'use crate::Alias as Local; fn f(_: Local) {}',
+    'macro-generated root type alias use': 'macro_rules! emit { () => { fn f(_: crate::Alias) {} }; } emit!();',
+  }
+
+  for (const [name, body] of Object.entries(stateDenied)) {
+    await t.test(name, () => {
+      for (const tests of [false, true]) {
+        const source = stateFixture(tests ? `#[cfg(test)] mod tests { ${body} }` : body)
+        const baseline = compile(source, false, tests)
+        assert.equal(baseline.status, 0, `invalid negative fixture: ${baseline.stderr}`)
+        const result = compile(source, true, tests)
+        assert.equal(result.status, 1, result.stderr)
+        assert.match(result.stderr, /module direction: auth must not reference realtime/)
+      }
+    })
+  }
+
+  await t.test('permitted fields, tuples and root type aliases pass', () => {
+    const source = stateFixture(`
+fn f(s: &crate::AppState, pair: (u8, u8), _: crate::Allowed) -> u8 { s.count + pair.0 }
+`)
+    const baseline = compile(source, false)
+    assert.equal(baseline.status, 0, baseline.stderr)
+    const result = compile(source, true)
+    assert.equal(result.status, 0, result.stderr)
+  })
+
+  await t.test('composition-root value forwarding remains review-enforced', () => {
+    // Root fields/functions are exempt; merely forwarding an inferred value
+    // does not reference a higher module's path, call or field definition.
+    const source = stateFixture('fn f(s: &crate::AppState) { let _forwarded = &s.hub; }')
+    const baseline = compile(source, false)
+    assert.equal(baseline.status, 0, baseline.stderr)
+    const result = compile(source, true)
+    assert.equal(result.status, 0, result.stderr)
+  })
+
   await t.test('all reverse pairs fail and forward pairs pass', () => {
     const names = ['auth', 'channels', 'messages', 'realtime']
     for (let from = 0; from < names.length; from++) {
