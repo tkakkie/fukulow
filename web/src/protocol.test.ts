@@ -250,3 +250,64 @@ it('async channel_not_found terminates a confirmed generation until explicit res
   expect(d.get().channels.A.subscription!.id).toBe(current)
   expect(d.get().channels.A.state).toBe('loading')
 })
+
+it('clamp preserves failed and unknown sends and invalidates only pre-clamp sending attempts', () => {
+  const d = boot()
+  const send = (key: string) => id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: key, body: key }), 'send')
+  const failed = send('failed')
+  d.feed({ type: 'send_failed', request: failed, status: 413 })
+  const unknown = send('unknown')
+  d.feed({ type: 'send_failed', request: unknown, status: 'timeout' })
+  const old = send('old')
+  d.feed({ type: 'unwatch', channel: 'A' })
+  d.feed({ type: 'watch', channel: 'A' })
+  const subscription = d.get().channels.A.subscription!.id
+  const effects = d.feed({ type: 'event', connection: d.connection, subscription,
+    event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
+  expect(effects).toContainEqual({ type: 'unsubscribe', channel: 'A' })
+  expect(d.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
+    .toEqual([['failed', 'failed'], ['unknown', 'unknown'], ['old', 'unknown']])
+  expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'failed' })).toEqual([])
+  const retry = id(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'unknown' }), 'send')
+  const valid = send('new')
+  const snapshot = d.get()
+  for (const input of [
+    { type: 'ack', request: old, message: { ...record(101), sender: 'me', client_message_id: 'old' } },
+    { type: 'send_failed', request: old, status: 401 },
+    { type: 'event', connection: d.connection, subscription,
+      event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } },
+  ] satisfies Input[]) expect(d.feed(input)).toEqual([])
+  expect(d.get()).toEqual(snapshot)
+  d.feed({ type: 'history_result', request: id(effects, 'fetch_history'), page: { messages: [record(60)], has_more: true } })
+  expect(d.get().channels.A.pending.find(p => p.clientMessageId === 'new')).toMatchObject({ state: 'sending', request: valid })
+  expect(d.get().channels.A.pending.find(p => p.clientMessageId === 'unknown')).toMatchObject({ state: 'sending', request: retry })
+  d.feed({ type: 'ack', request: valid, message: { ...record(61), sender: 'me', client_message_id: 'new', body: 'server' } })
+  d.feed({ type: 'send_failed', request: retry, status: 409 })
+  expect(d.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
+    .toEqual([['failed', 'failed'], ['unknown', 'failed'], ['old', 'unknown']])
+  expect(d.get().channels.A.messages.at(-1)?.body).toBe('server')
+})
+
+it('watch clamp unwatch releases every server slot before the replacement bootstrap completes', () => {
+  const d = boot()
+  const active = new Set<string>(['A'])
+  for (let n = 0; n < 257; n++) {
+    const channel = `clamp-${n}`
+    const apply = (input: Input) => {
+      const effects = d.feed(input)
+      for (const e of effects) {
+        if (e.type === 'subscribe') active.add(e.channel)
+        if (e.type === 'unsubscribe') active.delete(e.channel)
+      }
+      return effects
+    }
+    const latest = id(apply({ type: 'watch', channel }), 'fetch_history')
+    apply({ type: 'history_result', request: latest, page: { messages: [record(100, channel)], has_more: false } })
+    expect(active.size).toBe(2)
+    apply({ type: 'event', connection: d.connection, subscription: d.get().channels[channel].subscription!.id,
+      event: { type: 'subscribed', channel_id: channel, caught_up_seq: 0 } })
+    apply({ type: 'unwatch', channel })
+    expect(active).toEqual(new Set(['A']))
+    expect(d.get().channels[channel]).toMatchObject({ watched: false, cursor: null, subscription: undefined })
+  }
+})

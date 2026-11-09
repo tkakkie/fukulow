@@ -257,8 +257,13 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         if (e.code === 'channel_not_found' || e.code === 'subscription_limit') unavailable(id)
       } else if (e.type === 'subscribed') {
         if (e.caught_up_seq < c.subscription.after) {
+          // The server still owns this slot while the replacement latest request is in flight.
+          effects.push({ type: 'unsubscribe', channel: id })
           invalidate(id, true)
-          const pending = c.pending.map(p => ({ ...p, state: 'unknown' as const }))
+          // Pre-clamp HTTP results may refer to the discarded history generation. Only those
+          // sending attempts become unknown; definite refusals and same-key retries keep their state.
+          // Sends started during the new bootstrap remain valid until completion/timeout or another clamp.
+          const pending = c.pending.map(p => p.state === 'sending' ? { ...p, state: 'unknown' as const } : p)
           state.channels[id] = { ...emptyChannel(), watched: true, pending }
           history(id, 'latest')
         } else {

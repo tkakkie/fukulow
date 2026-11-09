@@ -331,3 +331,83 @@ it('ambiguous async error during rewatch reconnects without attributing it to th
   expect(client.sync.get().channels.A.state).toBe('unavailable')
   await client.sync.close()
 })
+
+it('controller clamp preserves refusals and same-key retries while fencing old send results', async () => {
+  const client = controllerClient({ requestTimeoutMs: 1000 })
+  await ready(client)
+  const send = async (key: string) => (await client.feed({ type: 'user_send', channel: 'A', client_message_id: key }))
+    .find(e => e.type === 'send')!
+  const failed = await send('failed')
+  await client.feed({ type: 'send_failed', respond_to: failed, status: 413 })
+  const unknown = await send('unknown')
+  await client.feed({ type: 'send_failed', respond_to: unknown, status: 'network' })
+  const old = await send('old')
+  await client.sync.unwatch('A')
+  await client.sync.watch('A')
+  const effects = await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+  const latest = effects.find(e => e.type === 'fetch_history')!
+  expect(effects).toContainEqual(expect.objectContaining({ type: 'unsubscribe', channel: 'A' }))
+  expect(client.sync.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
+    .toEqual([['failed', 'failed'], ['unknown', 'unknown'], ['old', 'unknown']])
+  expect(await client.feed({ type: 'user_retry', client_message_id: 'failed' })).toEqual([])
+  const retry = (await client.feed({ type: 'user_retry', client_message_id: 'unknown' })).find(e => e.type === 'send')!
+  expect(retry.client_message_id).toBe(unknown.client_message_id)
+  const valid = await send('new')
+  await client.feed({ type: 'ack', respond_to: old, message: { ...record(101), sender: 'me', client_message_id: 'old' } })
+  expect(client.sync.get().channels.A.messages).toEqual([])
+  expect(client.sync.get().channels.A.pending.find(p => p.clientMessageId === 'new')?.state).toBe('sending')
+  await client.feed({ type: 'ack', respond_to: valid, message: { ...record(61), sender: 'me', client_message_id: 'new' } })
+  await client.feed({ type: 'send_failed', respond_to: retry, status: 409 })
+  await client.feed({ type: 'history_result', respond_to: latest, messages: [record(60)], has_more: true })
+  expect(client.sync.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
+    .toEqual([['failed', 'failed'], ['unknown', 'failed'], ['old', 'unknown']])
+  expect(client.sync.get().channels.A.messages.map(m => m.seq)).toEqual([60, 61])
+  await client.sync.close()
+})
+
+it('controller send failure and timeout during re-bootstrap preserve newer send state', async () => {
+  const client = controllerClient({ requestTimeoutMs: 1000 })
+  await ready(client)
+  const old = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })).find(e => e.type === 'send')!
+  await client.sync.unwatch('A')
+  await client.sync.watch('A')
+  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+  const retry = (await client.feed({ type: 'user_retry', client_message_id: 'c1' })).find(e => e.type === 'send')!
+  await client.feed({ type: 'send_failed', respond_to: old, status: 401 })
+  expect(client.sync.get().session).toBe('signed_in')
+  expect(client.sync.get().channels.A.pending[0].state).toBe('sending')
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(client.sync.get().channels.A.pending[0].state).toBe('unknown')
+  const again = (await client.feed({ type: 'user_retry', client_message_id: 'c1' })).find(e => e.type === 'send')!
+  await client.feed({ type: 'send_failed', respond_to: retry, status: 413 })
+  expect(client.sync.get().channels.A.pending[0].state).toBe('sending')
+  await client.feed({ type: 'send_failed', respond_to: again, status: 403 })
+  expect(client.sync.get().channels.A.pending[0].state).toBe('failed')
+  await client.sync.close()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('controller repeated watch clamp unwatch stays below the 256 server subscription limit', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const active = new Set(['A'])
+  const socket = client.sockets[0].connection
+  const write = socket.send
+  socket.send = message => {
+    if (message.type === 'subscribe') active.add(message.channel_id)
+    else active.delete(message.channel_id)
+    expect(active.size).toBeLessThanOrEqual(256)
+    write(message)
+  }
+  for (let n = 0; n < 257; n++) {
+    const channel = `clamp-${n}`
+    const latest = (await client.feed({ type: 'watch', channel })).find(e => e.type === 'fetch_history')!
+    await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100, channel)], has_more: false })
+    expect(active.size).toBe(2)
+    await client.feed({ type: 'subscribed', channel, caught_up_seq: 0 })
+    await client.sync.unwatch(channel)
+    expect(active).toEqual(new Set(['A']))
+  }
+  await client.sync.close()
+  expect(vi.getTimerCount()).toBe(0)
+})
