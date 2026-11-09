@@ -1,5 +1,7 @@
 import * as defaultApi from './api'
-import type { Channel, CreateChannelRequest, Result } from './api'
+import type { Channel, ChannelVisibility, CreateChannelRequest, Result } from './api'
+
+export type { Channel, ChannelVisibility }
 
 export type ChannelsApi = {
   listChannels: () => Promise<Result<{ channels: Channel[] }>>
@@ -20,12 +22,16 @@ export function channelError(r: Extract<Result<unknown>, { ok: false }>): string
   return 'エラーが発生しました。もう一度お試しください。'
 }
 
-/** Channel list, selection and creation. `subscribe` fires after every state change. */
+const sessionEndedError = 'セッションが終了しました。'
+
+/** Channel list, selection and creation. `subscribe` fires after every state change. `close` ends the session's list: later async results are dropped. */
 export function createChannels(api: ChannelsApi = defaultApi) {
   let state: ChannelsState = { status: 'loading', channels: [], selectedId: null }
   let generation = 0 // bumped by create(): a load that started earlier is stale
+  let closed = false // the session ended: nothing from an earlier call may reach this state
   const listeners = new Set<() => void>()
   const set = (patch: Partial<ChannelsState>) => {
+    if (closed) return
     state = { ...state, ...patch }
     listeners.forEach((l) => l())
   }
@@ -40,6 +46,7 @@ export function createChannels(api: ChannelsApi = defaultApi) {
       const mine = generation
       set({ status: 'loading' })
       const r = await api.listChannels()
+      if (closed) return
       if (!r.ok) return set({ status: mine !== generation ? 'ready' : 'error' })
       if (mine !== generation) {
         // stale: read before a create committed; merge so neither side is lost
@@ -50,12 +57,17 @@ export function createChannels(api: ChannelsApi = defaultApi) {
       const keep = r.data.channels.some((c) => c.id === state.selectedId)
       set({ status: 'ready', channels: r.data.channels, selectedId: keep ? state.selectedId : (r.data.channels[0]?.id ?? null) })
     },
+    close() {
+      closed = true
+      listeners.clear()
+    },
     select(id: string) {
       if (state.channels.some((c) => c.id === id)) set({ selectedId: id })
     },
     /** Creates the channel and selects it; returns an error message on failure. The name is sent unchanged (#72: the server rejects surrounding whitespace; never trim here). */
     async create(req: CreateChannelRequest): Promise<{ error: string } | { channel: Channel }> {
       const r = await api.createChannel(req)
+      if (closed) return { error: sessionEndedError }
       if (!r.ok) return { error: channelError(r) }
       generation++
       set({ channels: [...state.channels, r.data], selectedId: r.data.id })

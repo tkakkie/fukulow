@@ -1,14 +1,13 @@
 <script lang="ts">
-  import { sendErrorMessage, type Timeline } from './timeline'
+  import type { ChannelSync } from './sync.svelte'
   import Composer from './Composer.svelte'
 
-  // The parent keys this component by channel and owns the instance (it outlives this component).
-  let { timeline: given }: { timeline: Timeline } = $props()
-  // svelte-ignore state_referenced_locally
-  const timeline = given
-  let s = $state(timeline.get())
-  const unsubscribe = timeline.subscribe(() => (s = timeline.get()))
-  $effect(() => unsubscribe)
+  // The session owns the sync controller and outlives this component; this only displays its state.
+  let { channel }: { channel: ChannelSync } = $props()
+  const s = $derived(channel.timeline)
+
+  const sendErrorMessage = (retryable: boolean) =>
+    retryable ? '送信できませんでした。再送できます。' : '送信できませんでした。内容を確認してください。'
 </script>
 
 <section aria-label="タイムライン">
@@ -16,10 +15,10 @@
     <p>読み込み中…</p>
   {:else if s.status === 'error'}
     <p role="alert">メッセージを読み込めませんでした。</p>
-    <button type="button" onclick={() => timeline.loadLatest()}>再試行</button>
+    <button type="button" onclick={() => channel.loadLatest()}>再試行</button>
   {:else}
     {#if s.hasOlder}
-      <button type="button" disabled={s.loadingOlder} onclick={() => timeline.loadOlder()}>以前のメッセージを読み込む</button>
+      <button type="button" disabled={s.loadingOlder} onclick={() => channel.loadOlder()}>以前のメッセージを読み込む</button>
     {/if}
     <ul>
       {#each s.messages as m (m.id)}
@@ -32,13 +31,13 @@
             <small>送信中…</small>
           {:else}
             <small role="alert">{sendErrorMessage(p.retryable)}</small>
-            {#if p.retryable}<button type="button" onclick={() => timeline.retry(p.clientMessageId)}>再送</button>{/if}
-            <button type="button" onclick={() => timeline.discard(p.clientMessageId)}>削除</button>
+            {#if p.retryable}<button type="button" onclick={() => channel.retry(p.clientMessageId)}>再送</button>{/if}
+            <button type="button" onclick={() => channel.discard(p.clientMessageId)}>削除</button>
           {/if}
         </li>
       {/each}
     </ul>
     {#if s.messages.length === 0 && s.pending.length === 0}<p>まだメッセージがありません。</p>{/if}
   {/if}
-  <Composer onsend={(b) => timeline.send(b)} />
+  <Composer onsend={(b) => channel.send(b)} />
 </section>

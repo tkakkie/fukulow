@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { createSync } from './timeline'
+import { createSync } from './sync'
 import type { Message, Result } from './api'
 import { record } from './protocol-test-helpers'
 
