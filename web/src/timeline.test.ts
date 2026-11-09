@@ -146,3 +146,60 @@ describe('timelines per channel', () => {
     expect(back.get().messages).toHaveLength(1)
   })
 })
+
+describe('real-time receive', () => {
+  const me = 'me'
+  const mine = (seq: number, cid: string) => ({ ...msg(seq, cid), sender: me })
+
+  it('echo before the acknowledgement settles the pending message; the late ack adds nothing', async () => {
+    let ack!: (r: Result<Message>) => void
+    const sendMessage = vi.fn(() => new Promise<Result<Message>>((res) => (ack = res)))
+    const t = createTimeline('ch', { listMessages: vi.fn(), sendMessage }, ids(), me)
+    const sending = t.send('hi')
+    expect(t.get().pending).toHaveLength(1)
+    t.receive(mine(5, 'cid1'))
+    expect(t.get().pending).toEqual([])
+    ack(ok(mine(5, 'cid1')))
+    await sending
+    expect(t.get().messages.map((m) => m.seq)).toEqual([5])
+  })
+
+  it('lost acknowledgement: retry with the same id, then replay and late echo converge to one entry', async () => {
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce(fail('network'))
+      .mockResolvedValueOnce(ok(mine(5, 'cid1')))
+    const t = createTimeline('ch', { listMessages: vi.fn(), sendMessage }, ids(), me)
+    await t.send('hi')
+    expect(t.get().pending[0]).toMatchObject({ status: 'failed', retryable: true })
+    await t.retry('cid1')
+    expect(sendMessage.mock.calls.map((c: any[]) => c[1].client_message_id)).toEqual(['cid1', 'cid1'])
+    t.receive(mine(5, 'cid1')) // replay after reconnect
+    t.receive(mine(5, 'cid1'))
+    expect(t.get().messages).toHaveLength(1)
+    expect(t.get().pending).toEqual([])
+  })
+
+  it('replay settles a failed pending message that was in fact committed', async () => {
+    const t = createTimeline('ch', { listMessages: vi.fn(), sendMessage: vi.fn().mockResolvedValue(fail('network')) }, ids(), me)
+    await t.send('hi')
+    t.receive(mine(8, 'cid1'))
+    expect(t.get().pending).toEqual([])
+    expect(t.get().messages.map((m) => m.seq)).toEqual([8])
+  })
+
+  it("another member's message with the same client id does not settle my pending", async () => {
+    const t = createTimeline('ch', { listMessages: vi.fn(), sendMessage: vi.fn().mockResolvedValue(fail('network')) }, ids(), me)
+    await t.send('hi')
+    t.receive({ ...msg(9, 'cid1'), sender: 'other' })
+    expect(t.get().pending).toHaveLength(1)
+    expect(t.get().messages).toHaveLength(1)
+  })
+
+  it('lastSeq is the resume cursor', () => {
+    const t = createTimeline('ch', { listMessages: vi.fn(), sendMessage: vi.fn() })
+    expect(t.lastSeq()).toBe(0)
+    t.receive(msg(4))
+    t.receive(msg(2))
+    expect(t.lastSeq()).toBe(4)
+  })
+})
