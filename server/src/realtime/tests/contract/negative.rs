@@ -302,3 +302,100 @@ async fn silence_barrier_rejects_late_wrong_delivery_and_close() {
         task.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn silence_barrier_returns_typed_failure_for_each_closed_socket_write() {
+    for fail_at in [0, 1] {
+        // Inject the close at each write, after the initial read could have polled
+        // Pending. TCP timing cannot deterministically exercise both write errors.
+        let sink = futures_util::sink::unfold(0, move |sent, frame| async move {
+            if sent == 0 {
+                assert!(matches!(frame, tungstenite::Message::Text(_)));
+            } else {
+                assert!(matches!(frame, tungstenite::Message::Ping(_)));
+            }
+            if sent == fail_at {
+                Err(tungstenite::Error::ConnectionClosed)
+            } else {
+                Ok(sent + 1)
+            }
+        });
+        let mut sink = Box::pin(sink);
+        assert_eq!(
+            assertions::barrier_controls(&mut sink, Uuid::new_v4(), 0).await,
+            Err(Assertion::Silence),
+            "write {fail_at}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn silence_barrier_returns_typed_failure_after_server_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.close(None).await.unwrap();
+    });
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        frame(&mut client).await,
+        tungstenite::Message::Close(_)
+    ));
+    assert_eq!(
+        assertions::barrier_controls(&mut client, Uuid::new_v4(), 0).await,
+        Err(Assertion::Silence)
+    );
+    assert_eq!(
+        assertions::silence(&mut client, Uuid::new_v4(), 0).await,
+        Err(Assertion::Read)
+    );
+    task.await.unwrap();
+}
+
+#[sqlx::test]
+async fn delivery_contract_rejects_empty_channel_ranges(pool: PgPool) {
+    for kind in ["message", "subscribed", "error"] {
+        let (scenario, step, event) = scenarios()
+            .into_iter()
+            .find_map(|mut scenario| {
+                for (step, item) in scenario.steps.iter_mut().enumerate() {
+                    if let Step::Expect { events, .. } = item {
+                        for (event, expectation) in events.iter_mut().enumerate() {
+                            let channel = match expectation {
+                                Event::Message { channel, .. } if kind == "message" => channel,
+                                Event::Subscribed { channel, .. } if kind == "subscribed" => {
+                                    channel
+                                }
+                                Event::Error {
+                                    channel: Some(channel),
+                                    ..
+                                } if kind == "error" => channel,
+                                _ => continue,
+                            };
+                            *channel = ChannelRef::Range {
+                                group: "unused".into(),
+                                from: 2,
+                                to: 1,
+                            };
+                            return Some((scenario, step, event));
+                        }
+                    }
+                }
+                None
+            })
+            .unwrap();
+        assert_eq!(
+            Runner::run(pool.clone(), scenario).await,
+            Err(Failure::Expectation {
+                step,
+                event,
+                assertion: Assertion::EmptyChannel
+            }),
+            "{kind}"
+        );
+    }
+}

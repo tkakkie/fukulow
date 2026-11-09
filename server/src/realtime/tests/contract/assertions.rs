@@ -15,6 +15,7 @@ pub(super) enum Failure {
 pub(super) enum Assertion {
     Message,
     EmptyMessage,
+    EmptyChannel,
     Subscribed,
     Error,
     Closed,
@@ -84,14 +85,12 @@ pub(super) async fn silence(
     // TCP preserves frame order. Thus any earlier wrong send, even if live() takes
     // >100 ms, precedes this response and fails here. A cross-Channel live Message or
     // an error response alone would not drain the queue and is not a valid barrier.
+    // Close paths are covered too: connected() polls session end (4001) and overflow
+    // (4008) before connection.run() in a biased select. Overflow is signalled before
+    // the POST response, so a pending close wins over processing this barrier.
     // Use the fixture's authorized Channel/current watermark: no new replay, and do
     // not restore the subscription/access whose absence is being checked.
-    subscribe(client, channel, caught_up_seq).await;
-    let nonce = Uuid::new_v4().as_bytes().to_vec();
-    client
-        .send(tungstenite::Message::Ping(nonce.clone().into()))
-        .await
-        .unwrap();
+    let nonce = barrier_controls(client, channel, caught_up_seq).await?;
     json(
         client,
         json!({"type":"subscribed","channel_id":channel,"caught_up_seq":caught_up_seq}),
@@ -104,4 +103,27 @@ pub(super) async fn silence(
         return Err(Assertion::Silence);
     }
     Ok(())
+}
+
+// Keep both writes fallible: a close can race after silence's initial read poll.
+pub(super) async fn barrier_controls(
+    client: &mut (impl futures_util::Sink<tungstenite::Message, Error = tungstenite::Error> + Unpin),
+    channel: Uuid,
+    caught_up_seq: i64,
+) -> Result<Vec<u8>, Assertion> {
+    control(
+        client,
+        ClientMessage::Subscribe {
+            channel_id: channel,
+            after_seq: caught_up_seq,
+        },
+    )
+    .await
+    .map_err(|_| Assertion::Silence)?;
+    let nonce = Uuid::new_v4().as_bytes().to_vec();
+    client
+        .send(tungstenite::Message::Ping(nonce.clone().into()))
+        .await
+        .map_err(|_| Assertion::Silence)?;
+    Ok(nonce)
 }

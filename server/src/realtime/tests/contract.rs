@@ -180,7 +180,8 @@ impl Runner {
                             channel_id: self.channels[&label],
                         },
                     )
-                    .await;
+                    .await
+                    .unwrap();
                 }
             }
             Step::Post(spec) => self.posts(spec).await,
@@ -335,6 +336,17 @@ impl Runner {
     }
 
     async fn expect(&mut self, socket: &str, expected: Event) -> Result<(), Assertion> {
+        match &expected {
+            Event::Message { channel, .. }
+            | Event::Subscribed { channel, .. }
+            | Event::Error {
+                channel: Some(channel),
+                ..
+            } if channel.labels().is_empty() => {
+                return Err(Assertion::EmptyChannel);
+            }
+            _ => {}
+        }
         let client = self.sockets.get_mut(socket).unwrap();
         match expected {
             Event::Silent { barrier } => {
