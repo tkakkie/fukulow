@@ -15,8 +15,10 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+mod cleanup;
 mod session;
 mod throttle;
+pub use cleanup::SessionCleanup;
 pub use session::SessionChanges;
 pub use throttle::SignInThrottle;
 
@@ -192,8 +194,11 @@ fn email(value: &str) -> Result<String, ApiError> {
     Ok(value)
 }
 
-async fn hash_password(password: String) -> Result<String, ApiError> {
-    let permit = PASSWORD_WORKERS
+async fn hash_password(
+    password: String,
+    workers: &'static tokio::sync::Semaphore,
+) -> Result<String, ApiError> {
+    let permit = workers
         .acquire()
         .await
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
@@ -212,8 +217,9 @@ async fn check_password(
     password: String,
     stored: Option<String>,
     attempt: throttle::Attempt,
+    workers: &'static tokio::sync::Semaphore,
 ) -> Result<bool, ApiError> {
-    let permit = PASSWORD_WORKERS
+    let permit = workers
         .acquire()
         .await
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
@@ -284,6 +290,14 @@ pub async fn setup(
     State(state): State<AppState>,
     ApiJson(input): ApiJson<SetupRequest>,
 ) -> Result<Response, ApiError> {
+    setup_with_workers(state, input, &PASSWORD_WORKERS).await
+}
+
+async fn setup_with_workers(
+    state: AppState,
+    input: SetupRequest,
+    workers: &'static tokio::sync::Semaphore,
+) -> Result<Response, ApiError> {
     if let Some(expected) = &state.setup_token {
         let supplied = input
             .setup_token
@@ -317,7 +331,7 @@ pub async fn setup(
             None,
         ));
     }
-    let password_hash = hash_password(input.password).await?;
+    let password_hash = hash_password(input.password, workers).await?;
     let mut tx = state.pool.begin().await?;
     // Global bootstrap is a tenant-scope exception. The table lock also
     // serializes setup across processes and concurrent first requests.
@@ -416,6 +430,16 @@ pub async fn sign_in(
     headers: HeaderMap,
     ApiJson(input): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
+    sign_in_with_workers(state, peer, headers, input, &PASSWORD_WORKERS).await
+}
+
+async fn sign_in_with_workers(
+    state: AppState,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    input: SignInRequest,
+    workers: &'static tokio::sync::Semaphore,
+) -> Result<Response, ApiError> {
     let email = email(&input.email)?;
     if input.password.is_empty() || input.password.len() > 1024 {
         return Err(ApiError::bad_request());
@@ -434,6 +458,7 @@ pub async fn sign_in(
                     .fetch_all(&state.pool)
                     .await?;
             let [id] = organizations.as_slice() else {
+                attempt.failed();
                 return Err(ApiError::bad_request());
             };
             *id
@@ -450,7 +475,7 @@ pub async fn sign_in(
     .fetch_optional(&state.pool)
     .await?;
     let (user_id, password_hash) = stored.unzip();
-    if !check_password(input.password, password_hash, attempt).await? {
+    if !check_password(input.password, password_hash, attempt, workers).await? {
         return Err(ApiError::unauthorized());
     }
     let user_id = user_id.ok_or_else(ApiError::unauthorized)?;
@@ -466,6 +491,10 @@ pub async fn sign_in(
         .execute(&state.pool)
         .await?;
     let identity = identity(&state, organization_id, &token_hash).await?;
+    state
+        .session_cleanup
+        .run(&state.pool, organization_id)
+        .await;
     Ok((
         [
             (header::SET_COOKIE, cookie(&state, &token, SESSION_SECONDS)),
@@ -613,10 +642,29 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
+    fn app_with_workers(state: AppState, workers: &'static tokio::sync::Semaphore) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/api/v1/setup",
+                axum::routing::post(move |State(state), ApiJson(input)| {
+                    setup_with_workers(state, input, workers)
+                }),
+            )
+            .route(
+                "/api/v1/session",
+                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
+                    sign_in_with_workers(state, peer, headers, input, workers)
+                }),
+            )
+            .with_state(state)
+    }
+
     #[tokio::test]
     async fn password_verification_records_failures_for_known_and_unknown_accounts() {
         let password = "correct horse battery staple";
-        let stored = hash_password(password.into()).await.unwrap();
+        let stored = hash_password(password.into(), &crate::auth::PASSWORD_WORKERS)
+            .await
+            .unwrap();
         for stored in [Some(stored), None] {
             let throttle = SignInThrottle::default();
             let organization = Uuid::new_v4();
@@ -629,7 +677,7 @@ mod tests {
                         .account(organization, "owner@example.com".into())
                         .unwrap();
                     assert!(
-                        check_password(password.into(), stored.clone(), attempt)
+                        check_password(password.into(), stored.clone(), attempt, &PASSWORD_WORKERS)
                             .await
                             .unwrap()
                     );
@@ -641,9 +689,14 @@ mod tests {
                     .account(organization, "owner@example.com".into())
                     .unwrap();
                 assert!(
-                    !check_password("incorrect password".into(), stored.clone(), attempt)
-                        .await
-                        .unwrap()
+                    !check_password(
+                        "incorrect password".into(),
+                        stored.clone(),
+                        attempt,
+                        &PASSWORD_WORKERS
+                    )
+                    .await
+                    .unwrap()
                 );
             }
             let mut rejected = throttle.begin(ip).unwrap();
@@ -662,7 +715,8 @@ mod tests {
             .unwrap();
         let organization = Uuid::new_v4();
         let peer: std::net::SocketAddr = "192.0.2.1:1234".parse().unwrap();
-        let _workers = PASSWORD_WORKERS.acquire_many(4).await.unwrap();
+        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+        let _workers = WORKERS.acquire_many(4).await.unwrap();
         for by_ip in [false, true] {
             let throttle = SignInThrottle::default();
             for _ in 0..if by_ip { 20 } else { 5 } {
@@ -674,15 +728,19 @@ mod tests {
                 }
                 attempt.failed();
             }
-            let app = crate::app(AppState {
-                pool: pool.clone(),
-                cookie_secure: true,
-                setup_token: None,
-                sign_in_throttle: throttle,
-                message_delivery: Default::default(),
-                session_changes: Default::default(),
-                ws_allowed_origins: Default::default(),
-            });
+            let app = app_with_workers(
+                AppState {
+                    pool: pool.clone(),
+                    cookie_secure: true,
+                    setup_token: None,
+                    sign_in_throttle: throttle,
+                    message_delivery: Default::default(),
+                    session_changes: Default::default(),
+                    session_cleanup: Default::default(),
+                    ws_allowed_origins: Default::default(),
+                },
+                &WORKERS,
+            );
             for forwarded in ["198.51.100.1", "198.51.100.2"] {
                 let request = Request::post("/api/v1/session")
                     .extension(ConnectInfo(peer))
@@ -746,6 +804,7 @@ mod tests {
             sign_in_throttle: throttle,
             message_delivery: Default::default(),
             session_changes: Default::default(),
+            session_cleanup: Default::default(),
             ws_allowed_origins: Default::default(),
         });
         let request = Request::post("/api/v1/session")
@@ -784,7 +843,8 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let _workers = PASSWORD_WORKERS.acquire_many(4).await.unwrap();
+        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+        let _workers = WORKERS.acquire_many(4).await.unwrap();
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
             .execute(&mut *tx)
@@ -792,15 +852,19 @@ mod tests {
             .unwrap();
 
         for setup_token in [None, Some("test-only-token".to_owned())] {
-            let app = crate::app(AppState {
-                pool: pool.clone(),
-                cookie_secure: true,
-                setup_token: setup_token.clone(),
-                sign_in_throttle: Default::default(),
-                message_delivery: Default::default(),
-                session_changes: Default::default(),
-                ws_allowed_origins: Default::default(),
-            });
+            let app = app_with_workers(
+                AppState {
+                    pool: pool.clone(),
+                    cookie_secure: true,
+                    setup_token: setup_token.clone(),
+                    sign_in_throttle: Default::default(),
+                    message_delivery: Default::default(),
+                    session_changes: Default::default(),
+                    session_cleanup: Default::default(),
+                    ws_allowed_origins: Default::default(),
+                },
+                &WORKERS,
+            );
             let request = Request::post("/api/v1/setup")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(

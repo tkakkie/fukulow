@@ -113,6 +113,7 @@ fn state(pool: &PgPool) -> AppState {
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     }
 }

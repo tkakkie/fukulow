@@ -375,7 +375,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn full_ip_map_allows_successful_password_verification_and_stays_bounded() {
         let password = "correct horse battery staple";
-        let stored = crate::auth::hash_password(password.into()).await.unwrap();
+        let stored = crate::auth::hash_password(password.into(), &crate::auth::PASSWORD_WORKERS)
+            .await
+            .unwrap();
         let throttle = SignInThrottle::default();
         // Successful/cancelled attempts leave no idle IP bucket.
         for n in 0..MAX_KEYS as u32 {
@@ -396,9 +398,14 @@ mod tests {
             .unwrap();
         assert_eq!(throttle.lock().ips.len(), MAX_KEYS);
         assert!(
-            crate::auth::check_password(password.into(), Some(stored), attempt)
-                .await
-                .unwrap()
+            crate::auth::check_password(
+                password.into(),
+                Some(stored),
+                attempt,
+                &crate::auth::PASSWORD_WORKERS
+            )
+            .await
+            .unwrap()
         );
         let buckets = throttle.lock();
         assert_eq!(buckets.ips.len(), MAX_KEYS - 1);

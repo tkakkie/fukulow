@@ -22,6 +22,7 @@ fn router(pool: &PgPool) -> Router {
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     })
 }
@@ -98,6 +99,7 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
+            session_cleanup: Default::default(),
             ws_allowed_origins: Default::default(),
         });
         let response = app
@@ -198,6 +200,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
+            session_cleanup: Default::default(),
             ws_allowed_origins: Default::default(),
         });
         let valid_input = if path == "/api/v1/setup" {
@@ -291,6 +294,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let expected = json!({"error": "invalid credentials"});
@@ -357,6 +361,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     for token in [None, Some(""), Some("wrong-token-test-only")] {
@@ -949,6 +954,7 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
         .unwrap(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let first = setup(&app).await;
@@ -1023,6 +1029,304 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
             "owner@example.com",
             PASSWORD,
             Some("198.51.100.3"),
+        )
+        .await,
+    )
+    .await;
+}
+
+async fn seed_cleanup_sessions(pool: &PgPool, organization: Uuid, expired: i32) {
+    sqlx::query(
+        "INSERT INTO sessions (organization_id, token_hash, user_id, expires_at) \
+         SELECT organization_id, sha256(convert_to(n::text, 'UTF8')), id, \
+         now() + CASE WHEN n = 0 THEN interval '1 day' ELSE interval '-1 day' END \
+         FROM users CROSS JOIN generate_series(0, $2) n WHERE organization_id = $1",
+    )
+    .bind(organization)
+    .bind(expired)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn expired_sessions(pool: &PgPool, organization: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM sessions WHERE organization_id = $1 AND expires_at <= now()",
+    )
+    .bind(organization)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn advance_cleanup_interval() {
+    // Pause only between SQL operations; network I/O needs a running clock.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+}
+
+#[sqlx::test]
+async fn sign_in_cleanup_is_scoped_preserves_valid_sessions_and_bounds_rows_and_frequency(
+    pool: PgPool,
+) {
+    let app = router(&pool);
+    let (first, second) = two_organizations(&pool, &app).await;
+    let first: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for organization in [first, second] {
+        // Equal token hashes across tenants catch a missing outer DELETE scope.
+        seed_cleanup_sessions(&pool, organization, 1_005).await;
+    }
+    let valid_before: Vec<(Uuid, Vec<u8>, String)> = sqlx::query_as(
+        "SELECT organization_id, token_hash, expires_at::text FROM sessions \
+         WHERE expires_at > now() ORDER BY organization_id, token_hash",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    let mut locked = pool.begin().await.unwrap();
+    let locked_hash: Vec<u8> = sqlx::query_scalar(
+        "SELECT token_hash FROM sessions WHERE organization_id = $1 AND expires_at <= now() \
+         ORDER BY expires_at, token_hash LIMIT 1 FOR UPDATE",
+    )
+    .bind(first)
+    .fetch_one(&mut *locked)
+    .await
+    .unwrap();
+    // Race the first successful sign-ins while an expired row is locked elsewhere.
+    let first_id = first.to_string();
+    let second_id = second.to_string();
+    let (a, b, c) = tokio::join!(
+        sign_in(&app, &first_id, PASSWORD),
+        sign_in(&app, &first_id, PASSWORD),
+        sign_in(&app, &first_id, PASSWORD),
+    );
+    for response in [a, b, c] {
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(expired_sessions(&pool, first).await, 5);
+    assert_eq!(expired_sessions(&pool, second).await, 1_005);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE organization_id = $1 AND token_hash = $2)",
+        )
+        .bind(first)
+        .bind(locked_hash)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+    locked.rollback().await.unwrap();
+
+    // Concurrent successful sign-ins in either tenant share the process gate.
+    let (a, b, c) = tokio::join!(
+        sign_in(&app, &first_id, PASSWORD),
+        sign_in(&app, &first_id, PASSWORD),
+        sign_in(&app, &second_id, PASSWORD),
+    );
+    for response in [a, b, c] {
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(expired_sessions(&pool, first).await, 5);
+    assert_eq!(expired_sessions(&pool, second).await, 1_005);
+
+    advance_cleanup_interval().await;
+    assert_eq!(
+        sign_in(&app, &second.to_string(), PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(expired_sessions(&pool, second).await, 5);
+    assert_eq!(expired_sessions(&pool, first).await, 5);
+    advance_cleanup_interval().await;
+    assert_eq!(
+        sign_in(&app, &first.to_string(), PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(expired_sessions(&pool, first).await, 0);
+    for (organization, hash, expiry) in valid_before {
+        let retained: String = sqlx::query_scalar(
+            "SELECT expires_at::text FROM sessions WHERE organization_id = $1 AND token_hash = $2",
+        )
+        .bind(organization)
+        .bind(hash)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, expiry);
+    }
+}
+
+#[sqlx::test]
+async fn cleanup_failure_does_not_fail_sign_in_and_is_frequency_limited(pool: PgPool) {
+    let app = router(&pool);
+    let first = setup(&app).await;
+    let organization: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    seed_cleanup_sessions(&pool, organization, 1).await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'test cleanup failure'; END $$; \
+         CREATE TRIGGER reject_cleanup BEFORE DELETE ON sessions \
+         FOR EACH ROW EXECUTE FUNCTION reject_cleanup();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let response = sign_in(&app, &organization.to_string(), PASSWORD).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key(header::SET_COOKIE));
+    let token = body(response).await["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("authorization", &format!("Bearer {token}"))]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(expired_sessions(&pool, organization).await, 1);
+    sqlx::query("DROP TRIGGER reject_cleanup ON sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sign_in(&app, &organization.to_string(), PASSWORD)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(expired_sessions(&pool, organization).await, 1);
+    advance_cleanup_interval().await;
+    assert_eq!(
+        sign_in(&app, &organization.to_string(), PASSWORD)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(expired_sessions(&pool, organization).await, 0);
+}
+
+#[sqlx::test]
+async fn ambiguous_organization_charges_only_ip_budget_and_leaves_other_sign_ins_usable(
+    pool: PgPool,
+) {
+    let app = router(&pool);
+    let (first, second) = two_organizations(&pool, &app).await;
+    let first: Uuid = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for n in 1..=20 {
+        let response = sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            None,
+            "owner@example.com",
+            PASSWORD,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body(response).await, json!({"error": "invalid input"}));
+        if n == 10 {
+            // More than the account limit of ambiguous failures did not charge either account.
+            for organization in [first, second] {
+                assert_eq!(
+                    sign_in_from(
+                        &app,
+                        "192.0.2.1:1234",
+                        Some(organization),
+                        "owner@example.com",
+                        PASSWORD,
+                        None
+                    )
+                    .await
+                    .status(),
+                    StatusCode::OK
+                );
+            }
+        }
+    }
+    for organization in [None, Some(first), Some(second)] {
+        assert_throttled(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                organization,
+                "owner@example.com",
+                PASSWORD,
+                None,
+            )
+            .await,
+        )
+        .await;
+    }
+    for organization in [first, second] {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.2:1234",
+                Some(organization),
+                "owner@example.com",
+                PASSWORD,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    advance_cleanup_interval().await;
+    // Existing credential failures and ambiguous lookups consume the same IP budget.
+    for _ in 0..19 {
+        assert_eq!(
+            sign_in_from(
+                &app,
+                "192.0.2.1:1234",
+                None,
+                "owner@example.com",
+                PASSWORD,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            Some(first),
+            "owner@example.com",
+            "incorrect password",
+            None
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_throttled(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            Some(first),
+            "owner@example.com",
+            PASSWORD,
+            None,
         )
         .await,
     )
