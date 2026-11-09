@@ -5,6 +5,10 @@ on:
     branches: [main]
 permissions:
   contents: read
+concurrency:
+  # PRs: one group per PR, so a newer push cancels the older run. main: unique group per run, so no push is cancelled or queued.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   migrations:
     runs-on: ubuntu-latest
@@ -30,6 +34,24 @@ jobs:
       - run: npm --prefix web run build
       - uses: actions/upload-artifact@v7
         with: { name: web-dist, path: web/dist }
+  # fmt and clippy only compile (no DB, no real SPA): an empty web/dist satisfies rust-embed, so they run alongside `web`.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
+      - uses: Swatinem/rust-cache@v2
+      - run: mkdir -p web/dist
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+  load:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version, cache: npm, cache-dependency-path: load/package-lock.json }
+      - run: npm --prefix load ci --ignore-scripts
+      - run: npm --prefix load run check && npm --prefix load test
   server:
     needs: web
     runs-on: ubuntu-latest
@@ -52,8 +74,6 @@ jobs:
         with: { name: web-dist, path: web/dist }
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
@@ -64,8 +84,19 @@ jobs:
       - run: node --test scripts/check-module-direction.test.ts
       - run: node scripts/check-module-direction.ts
       - run: make api && git diff --exit-code -- openapi.json web/src/api-schema.d.ts
-      - run: npm --prefix load ci --ignore-scripts
-      - run: npm --prefix load run check && npm --prefix load test
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Versions agree (rust-toolchain.toml, .node-version, engines, Dockerfile)
+        run: |
+          set -euo pipefail
+          rust=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          node=$(tr -d '[:space:]' < .node-version)
+          grep -q "^FROM rust:${rust}-slim " Dockerfile
+          grep -q "^FROM node:${node}-slim " Dockerfile
+          [ "$(node -p "require('./web/package.json').engines.node")" = "$node" ]
+          [ "$(node -p "require('./load/package.json').engines.node")" = "$node" ]
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -91,12 +122,3 @@ jobs:
         run: docker compose --profile caddy down -v --remove-orphans
         env:
           POSTGRES_PASSWORD: ci-compose-only
-      - name: Versions agree (rust-toolchain.toml, .node-version, engines, Dockerfile)
-        run: |
-          set -euo pipefail
-          rust=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
-          node=$(tr -d '[:space:]' < .node-version)
-          grep -q "^FROM rust:${rust}-slim " Dockerfile
-          grep -q "^FROM node:${node}-slim " Dockerfile
-          [ "$(node -p "require('./web/package.json').engines.node")" = "$node" ]
-          [ "$(node -p "require('./load/package.json').engines.node")" = "$node" ]
