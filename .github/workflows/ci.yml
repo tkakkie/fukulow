@@ -63,6 +63,8 @@ jobs:
       - run: node --test scripts/check-module-direction.test.ts
       - run: node scripts/check-module-direction.ts
       - run: make api && git diff --exit-code -- openapi.json web/src/api-schema.d.ts
+      - run: npm --prefix load ci --ignore-scripts
+      - run: npm --prefix load run check && npm --prefix load test
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -71,6 +73,12 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci-compose-only
       - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
+      - name: Light k6 run (10 seconds; hard limit 55 seconds)
+        env:
+          LOAD_BOOTSTRAP: '1'
+          LOAD_EMAIL: load@example.test
+          LOAD_PASSWORD: ci-load-test-only-password
+        run: timeout 55s make load
       - if: failure()
         run: docker compose --profile caddy logs
         env:
@@ -87,3 +95,4 @@ jobs:
           grep -q "^FROM rust:${rust}-slim " Dockerfile
           grep -q "^FROM node:${node}-slim " Dockerfile
           [ "$(node -p "require('./web/package.json').engines.node")" = "$node" ]
+          [ "$(node -p "require('./load/package.json').engines.node")" = "$node" ]

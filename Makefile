@@ -1,4 +1,17 @@
-.PHONY: api
+.PHONY: api load
 api:
 	cargo run --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
+
+K6_IMAGE := grafana/k6:1.8.2
+LOAD_DOCKER_NETWORK ?= host
+BASE_URL ?= http://127.0.0.1:8080
+
+# Linux uses host networking; on macOS use LOAD_DOCKER_NETWORK=bridge BASE_URL=http://host.docker.internal:8080.
+# Credentials/settings are passed from the environment, never put in the image or result artifacts.
+load:
+	docker run --rm --network $(LOAD_DOCKER_NETWORK) -v "$(CURDIR):/work:ro" -w /work \
+		-e BASE_URL=$(BASE_URL) -e LOAD_EMAIL -e LOAD_PASSWORD -e LOAD_ORGANIZATION_ID \
+		-e LOAD_BOOTSTRAP -e LOAD_SETUP_TOKEN -e CHANNELS -e SUBSCRIBERS -e PUBLISHERS \
+		-e DURATION_SECONDS -e PUBLISH_INTERVAL_MS -e READY_TIMEOUT_SECONDS -e DRAIN_TIMEOUT_SECONDS \
+		-e CHANNEL_VISIBILITY $(K6_IMAGE) run load/scenario.ts
