@@ -144,6 +144,10 @@ it('rejects stale connection readiness, events, closes and subscription completi
   expect(d.get()).toEqual(snapshot)
 })
 
+// A stale request stays recorded until its late result arrives, so a late 401 can still mean Sign in (C6/C8).
+const live = (state: ReturnType<ReturnType<typeof boot>['get']>) =>
+  ({ ...state, requests: Object.fromEntries(Object.entries(state.requests).filter(([, r]) => !r.stale)) })
+
 it('channel reset fences old latest, send completion, reorder timer and fill backoff', () => {
   const d = boot()
   const latest = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
@@ -159,10 +163,9 @@ it('channel reset fences old latest, send completion, reorder timer and fill bac
   for (const input of [
     { type: 'history_result', request: latest, page: { messages: [record(200)], has_more: false } },
     { type: 'ack', request: sending, message: { ...record(101), sender: 'me', client_message_id: 'c1' } },
-    { type: 'send_failed', request: sending, status: 401 },
     { type: 'timer_elapsed', id: grace }, { type: 'timer_elapsed', id: backoff },
   ] satisfies Input[]) expect(d.feed(input)).toEqual([])
-  expect(d.get()).toEqual(snapshot)
+  expect(live(d.get())).toEqual(live(snapshot))
   expect(d.get().channels.A.messages).toEqual([])
   expect(d.get().channels.A.pending[0].state).toBe('unknown')
 })
@@ -273,11 +276,11 @@ it('clamp preserves failed and unknown sends and invalidates only pre-clamp send
   const snapshot = d.get()
   for (const input of [
     { type: 'ack', request: old, message: { ...record(101), sender: 'me', client_message_id: 'old' } },
-    { type: 'send_failed', request: old, status: 401 },
+    { type: 'send_failed', request: old, status: 403 },
     { type: 'event', connection: d.connection, subscription,
       event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } },
   ] satisfies Input[]) expect(d.feed(input)).toEqual([])
-  expect(d.get()).toEqual(snapshot)
+  expect(live(d.get())).toEqual(live(snapshot))
   d.feed({ type: 'history_result', request: id(effects, 'fetch_history'), page: { messages: [record(60)], has_more: true } })
   expect(d.get().channels.A.pending.find(p => p.clientMessageId === 'new')).toMatchObject({ state: 'sending', request: valid })
   expect(d.get().channels.A.pending.find(p => p.clientMessageId === 'unknown')).toMatchObject({ state: 'sending', request: retry })
@@ -400,4 +403,38 @@ it('incremental merge matches a full-window reference across deterministic overl
     expect(d.get().channels.A.messages).toEqual([...expected.values()].sort((a, b) => a.seq - b.seq))
     expect(d.get().channels.A.cursor).toBe(100)
   }
+})
+
+it.each(['send', 'history'] as const)('a late 401 from a stale %s request in the same session means Sign in', kind => {
+  const d = boot()
+  let late: Input
+  if (kind === 'send') {
+    const sending = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+    late = { type: 'send_failed', request: sending, status: 401 }
+  } else {
+    const fetch = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
+    late = { type: 'history_failed', request: fetch, status: 401 }
+  }
+  if (kind === 'send') {
+    // Clamp (C8) is the generation change that invalidates sends.
+    d.feed({ type: 'unwatch', channel: 'A' })
+    d.feed({ type: 'watch', channel: 'A' })
+    const subscription = d.get().channels.A.subscription!.id
+    d.feed({ type: 'event', connection: d.connection, subscription,
+      event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } })
+  } else d.feed({ type: 'unwatch', channel: 'A' })
+  expect(Object.values(d.get().requests).some(r => r.stale)).toBe(true)
+  expect(d.feed(late)).toEqual([{ type: 'close' }, { type: 'sign_in' }])
+  expect(d.get().session).toBe('sign_in_required')
+})
+
+it('a late non-401 result of a stale request is ignored and a 401 from a replaced session never signs in', () => {
+  const d = boot()
+  const old = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+  const other = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c2', body: 'again' }), 'send')
+  d.feed({ type: 'unwatch', channel: 'A' })
+  expect(d.feed({ type: 'send_failed', request: old, status: 403 })).toEqual([])
+  d.feed({ type: 'session_replaced', selfId: 'other' })
+  expect(d.feed({ type: 'send_failed', request: other, status: 401 })).toEqual([])
+  expect(d.get().session).toBe('signed_in')
 })

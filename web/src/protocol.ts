@@ -22,9 +22,11 @@ export type ChannelState = {
   fillAttempt: number
   subscription?: { id: number; after: number; confirmed: boolean; watermark: number }
 }
+/** `stale`: invalidated by a history-generation change (unwatch, unavailable, clamp). Its late result never changes
+ *  Channel state, but a 401 still means Sign in because the session is the same (C6/C8). */
 type Request =
-  | { type: 'history'; channel: string; page: 'latest' | 'before' | 'after'; seq?: number }
-  | { type: 'send'; channel: string; clientMessageId: string }
+  | { type: 'history'; channel: string; page: 'latest' | 'before' | 'after'; seq?: number; stale?: true }
+  | { type: 'send'; channel: string; clientMessageId: string; stale?: true }
 type Timer = { purpose: Purpose; channel?: string }
 export type State = {
   selfId: string
@@ -123,7 +125,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     cancel(c.wait)
     c.wait = c.fill = c.latest = c.older = undefined
     for (const [key, r] of Object.entries(state.requests)) {
-      if (r.channel === id && (sends || r.type === 'history')) delete state.requests[Number(key)]
+      if (r.channel === id && (sends || r.type === 'history')) state.requests[Number(key)] = { ...r, stale: true }
     }
   }
   const stop = (signIn: boolean) => {
@@ -332,6 +334,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const r = state.requests[input.request]
       if (!r || r.type !== 'history') break
       delete state.requests[input.request]
+      if (r.stale) { if (input.type === 'history_failed' && input.status === 401) stop(true); break }
       const c = channel(r.channel)
       c[r.page === 'latest' ? 'latest' : r.page === 'before' ? 'older' : 'fill'] = undefined
       if (input.type === 'history_failed') {
@@ -365,6 +368,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const r = state.requests[input.request]
       if (!r || r.type !== 'send') break
       delete state.requests[input.request]
+      if (r.stale) { if (input.type === 'send_failed' && input.status === 401) stop(true); break }
       const c = channel(r.channel)
       if (input.type === 'ack') { merge(r.channel, [input.message], 'ack'); reconcile(r.channel) }
       else {

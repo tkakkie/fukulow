@@ -373,7 +373,7 @@ it('controller send failure and timeout during re-bootstrap preserve newer send 
   await client.sync.watch('A')
   await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
   const retry = (await client.feed({ type: 'user_retry', client_message_id: 'c1' })).find(e => e.type === 'send')!
-  await client.feed({ type: 'send_failed', respond_to: old, status: 401 })
+  await client.feed({ type: 'send_failed', respond_to: old, status: 403 })
   expect(client.sync.get().session).toBe('signed_in')
   expect(client.sync.get().channels.A.pending[0].state).toBe('sending')
   await vi.advanceTimersByTimeAsync(1000)
@@ -471,5 +471,17 @@ it('controller incremental history merge preserves canonical records and pending
   expect(client.sync.get().channels.A.cursor).toBe(103)
   expect(client.sync.get().channels.A.messages.map(m => m.seq)).toEqual([97, 98, 99, 100, 101, 102, 103])
   expect(client.sync.get().channels.A.pending[0]).toBe(keep)
+  await client.sync.close()
+})
+
+it('controller: a late 401 from a pre-clamp send in the same session means Sign in', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const old = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })).find(e => e.type === 'send')!
+  await client.sync.unwatch('A')
+  await client.sync.watch('A')
+  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+  await client.feed({ type: 'send_failed', respond_to: old, status: 401 })
+  expect(client.sync.get().session).toBe('sign_in_required')
   await client.sync.close()
 })
