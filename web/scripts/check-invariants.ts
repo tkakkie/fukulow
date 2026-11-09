@@ -4,6 +4,8 @@
 // A reference is `path::test_name` (path relative to the repository root).
 // What is detected (static analysis only):
 //   - Rust: #[test] / #[tokio::test] / #[sqlx::test] in server/**/*.rs. Not run: #[ignore] and
+//     NOT detected: whether the file is in the Rust module tree. Every .rs file under server/ is scanned, so a
+//     test in an unreferenced file (e.g. server/src/unused_guard.rs) is accepted as runnable (see decisions.md).
 //     #[ignore = "..."]. Any #[cfg(...)] other than exactly cfg(test), and cfg_attr, on the test fn is
 //     treated as "cannot be verified" and refused. NOT detected: cfg on an enclosing mod/file,
 //     runtime early returns, --features / env dependent behaviour.
