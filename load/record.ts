@@ -1,4 +1,4 @@
-import { spawn, execFile, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { cpus, totalmem, platform, arch } from 'node:os';
@@ -44,6 +44,18 @@ let summary: unknown;
 let rate: { startedAt: number; offered: number; [key: string]: unknown } | undefined;
 let measurementError: unknown;
 let exitCode = 1;
+let primaryError: unknown;
+let child: ChildProcess | undefined;
+const cleanupErrors: unknown[] = [];
+const onSignal = (signal: NodeJS.Signals) => {
+  primaryError ??= new Error(`Measurement interrupted by ${signal}`);
+  // Stop our make/shell/docker CLI group; finally removes the named container itself.
+  if (child?.pid && child.exitCode === null && child.signalCode === null) {
+    try { process.kill(-child.pid, 'SIGTERM'); } catch (error) { cleanupErrors.push(error); }
+  }
+};
+process.on('SIGINT', onSignal);
+process.on('SIGTERM', onSignal);
 try {
   console.log(`Measurement project: ${project}; artifacts: ${output}`);
   // Build with this checkout; never retag the shared fukulow-app image.
@@ -54,7 +66,8 @@ try {
   const metadata = {
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     project, port, started: new Date().toISOString(), platform: platform(), arch: arch(),
-    hostCpuModel: cpus()[0]?.model, hostCpus: cpus().length, hostMemory: totalmem(), docker: JSON.parse(docker('info', '--format', '{{json .}}')),
+    hostCpuModel: cpus()[0]?.model, hostCpus: cpus().length, hostMemory: totalmem(),
+    docker: JSON.parse(docker('info', '--format', '{"ServerVersion":{{json .ServerVersion}},"NCPU":{{json .NCPU}},"MemTotal":{{json .MemTotal}},"OperatingSystem":{{json .OperatingSystem}}}')),
     appImage: docker('inspect', '--format', '{{.Image}}', app), dbImage: docker('inspect', '--format', '{{.Image}}', db),
     nofile: process.env.LOAD_NOFILE || '65536', network: env.LOAD_DOCKER_NETWORK, baseUrl: env.BASE_URL,
     k6Image: command('make', ['-s', 'load-image']),
@@ -77,7 +90,8 @@ try {
       throw new Error('SQL snapshot exceeded the measurement boundary pause');
     }
   };
-  const child = spawn('make', ['load'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const generator = spawn('make', ['load'], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = generator;
   let buffered = '';
   const consume = (chunk: Buffer) => {
     const value = chunk.toString();
@@ -98,13 +112,14 @@ try {
       } catch (error) { measurementError = String(error); }
     }
   };
-  child.stdout.on('data', consume);
-  child.stderr.on('data', consume);
+  generator.stdout.on('data', consume);
+  generator.stderr.on('data', consume);
   timer = setInterval(sample, 1000);
   exitCode = await new Promise<number>((done, reject) => {
-    child.on('error', reject);
-    child.on('exit', (code) => done(code ?? 1));
+    generator.on('error', reject);
+    generator.on('close', (code) => done(code ?? 1));
   });
+  if (primaryError) throw primaryError;
   if (timer) clearInterval(timer);
   await sampling;
   if (rate && snapshots.before?.completedAt >= rate.startedAt) {
@@ -116,30 +131,47 @@ try {
 } catch (error) {
   exitCode = 1;
   measurementError = String(error);
-  throw error;
+  primaryError ??= error;
 } finally {
   if (timer) clearInterval(timer);
-  writeFileSync(`${output}/k6.log`, log);
-  const previous = new Map(snapshots.before?.statements.map((s) => [s.queryid + ':' + s.toplevel, s]));
-  const statementDeltas = snapshots.after?.statements.map((s) => ({ ...s,
-    calls: s.calls - (previous.get(s.queryid + ':' + s.toplevel)?.calls ?? 0),
-    total_exec_time: s.total_exec_time - (previous.get(s.queryid + ':' + s.toplevel)?.total_exec_time ?? 0),
-  })).filter((s) => s.calls > 0);
-  const calls = statementDeltas?.reduce((sum, s) => sum + s.calls, 0);
-  const topLevelCalls = statementDeltas?.filter((s) => s.toplevel).reduce((sum, s) => sum + s.calls, 0);
-  const queries = statementDeltas?.filter((s) => s.toplevel && !/^(BEGIN|COMMIT|ROLLBACK)\b/.test(s.query))
-    .reduce((sum, s) => sum + s.calls, 0);
-  const sqlPerSend = rate && { calls, topLevelCalls, queries,
-    allStatementsPerSend: (calls ?? 0) / rate.offered,
-    topLevelStatementsPerSend: (topLevelCalls ?? 0) / rate.offered,
-    topLevelQueriesPerSend: (queries ?? 0) / rate.offered };
-  writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, summary, snapshots, statementDeltas, sqlPerSend,
-    resources, measurementError }, null, 2));
+  try { await sampling; } catch (error) { cleanupErrors.push(error); }
+  const attempt = (action: () => void) => {
+    try { action(); } catch (error) { cleanupErrors.push(error); }
+  };
+  attempt(() => writeFileSync(`${output}/k6.log`, log));
+  attempt(() => {
+    const previous = new Map(snapshots.before?.statements.map((s) => [s.queryid + ':' + s.toplevel, s]));
+    const statementDeltas = snapshots.after?.statements.map((s) => ({ ...s,
+      calls: s.calls - (previous.get(s.queryid + ':' + s.toplevel)?.calls ?? 0),
+      total_exec_time: s.total_exec_time - (previous.get(s.queryid + ':' + s.toplevel)?.total_exec_time ?? 0),
+    })).filter((s) => s.calls > 0);
+    const calls = statementDeltas?.reduce((sum, s) => sum + s.calls, 0);
+    const topLevelCalls = statementDeltas?.filter((s) => s.toplevel).reduce((sum, s) => sum + s.calls, 0);
+    const queries = statementDeltas?.filter((s) => s.toplevel && !/^(BEGIN|COMMIT|ROLLBACK)\b/.test(s.query))
+      .reduce((sum, s) => sum + s.calls, 0);
+    const sqlPerSend = rate && { calls, topLevelCalls, queries,
+      allStatementsPerSend: (calls ?? 0) / rate.offered,
+      topLevelStatementsPerSend: (topLevelCalls ?? 0) / rate.offered,
+      topLevelQueriesPerSend: (queries ?? 0) / rate.offered };
+    writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, summary, snapshots, statementDeltas, sqlPerSend,
+      resources, measurementError }, null, 2));
+  });
   // These exact names/project were created above; never prune or touch other projects.
-  if (docker('ps', '-aq', '--filter', 'name=^/' + env.LOAD_CONTAINER_NAME + '$')) {
-    docker('rm', '-f', env.LOAD_CONTAINER_NAME);
-  }
-  docker(...compose, 'down', '--volumes');
+  attempt(() => {
+    if (docker('ps', '-aq', '--filter', 'name=^/' + env.LOAD_CONTAINER_NAME + '$')) {
+      docker('rm', '-f', env.LOAD_CONTAINER_NAME);
+    }
+  });
+  attempt(() => { docker(...compose, 'down', '--volumes'); });
+  // Compose --rmi local excludes our explicitly tagged image; remove its unique tag only.
+  attempt(() => {
+    if (docker('image', 'ls', '-q', `${project}-app`)) docker('image', 'rm', `${project}-app`);
+  });
+  process.off('SIGINT', onSignal);
+  process.off('SIGTERM', onSignal);
   console.log('Results: ' + output);
 }
+if (cleanupErrors.length) console.error(new AggregateError(cleanupErrors, 'Measurement cleanup failed'));
+if (primaryError) throw primaryError;
+if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'Measurement cleanup failed');
 process.exitCode = exitCode;

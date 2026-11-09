@@ -11,11 +11,13 @@ import type {
 } from '../web/src/api-schema.d.ts';
 import { Deliveries, positiveInteger } from './delivery.ts';
 import { schedule, sessionIndex } from './scheduler.ts';
+import { revokeSessions } from './sessions.ts';
 import { summaryForReport } from './summary.ts';
 
 const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const channels = positiveInteger(__ENV.CHANNELS, 1);
 const subscribers = positiveInteger(__ENV.SUBSCRIBERS, 5);
+// Sends per batch, formerly in-flight workers; offered sends/s = publishers * 1000 / interval.
 const publishers = positiveInteger(__ENV.PUBLISHERS, 2);
 const duration = positiveInteger(__ENV.DURATION_SECONDS, 10);
 const interval = positiveInteger(__ENV.PUBLISH_INTERVAL_MS, 250);
@@ -47,8 +49,9 @@ export const options: Options = {
     chat: { executor: 'shared-iterations', vus: 1, iterations: 1,
       maxDuration: `${readyTimeout + duration + drainTimeout + 10}s`, gracefulStop: '0s' },
   },
-  setupTimeout: `${Math.ceil(channels * subscribers / socketsPerSession) * 5 + 10}s`,
-  teardownTimeout: '5s',
+  // Reserve time for provisioning and revoking every session if setup fails.
+  setupTimeout: `${Math.max(1, Math.ceil(channels * subscribers / socketsPerSession)) * 10 + channels * 5 + 25}s`,
+  teardownTimeout: `${Math.max(1, Math.ceil(channels * subscribers / socketsPerSession)) * 5 + 10}s`,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   systemTags: ['status', 'method', 'name', 'scenario', 'expected_response'],
   thresholds: {
@@ -242,7 +245,7 @@ export default async function (data: Setup): Promise<void> {
     console.log('LOAD_MEASUREMENT_START');
     await pause(measurementPause);
     const result = await schedule(duration * 1000, interval, publishers, Date.now, pause, publish);
-    console.log('LOAD_RATE ' + JSON.stringify({ ...result, achievedSendRate: result.offered / (result.elapsedMs / 1000),
+    console.log('LOAD_RATE ' + JSON.stringify({ ...result, offeredSendRate: result.offered / (result.elapsedMs / 1000),
       configuredSendRate: publishers * 1000 / interval, peakConnections, peakPublishes,
       channels, subscribers, publishers, duration, interval, socketsPerSession, sessions: data.tokens.length, visibility,
       readyTimeout, drainTimeout }));
@@ -262,9 +265,9 @@ export default async function (data: Setup): Promise<void> {
 }
 
 export function teardown(data: Setup): void {
-  for (const token of data?.tokens ?? []) {
+  revokeSessions(data?.tokens ?? [], (token) => {
     requireStatus(http.del(`${baseUrl}/api/v1/session`, null, params('sign_out', token)), 204, 'sign_out');
-  }
+  });
 }
 
 export function handleSummary(data: unknown): Record<string, string> {
