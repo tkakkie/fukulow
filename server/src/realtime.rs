@@ -139,6 +139,7 @@ async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
         LIVE_QUEUE_CAPACITY,
     );
     let mut overflow = queue.overflow.clone();
+    let mut notification_failed = queue.notification_failed.clone();
     let mut connection = connection::Connection {
         state: &state,
         auth: &auth,
@@ -149,6 +150,7 @@ async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
         biased;
         _ = session.ended() => Some(CLOSE_SESSION_ENDED),
         _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
+        _ = notification_failed.wait_for(|failed| *failed) => Some(1011),
         result = connection.run(&mut socket) => result.err(),
     };
     if let Some(code) = code {

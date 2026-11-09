@@ -155,6 +155,19 @@ pub async fn create_channel(
         .into_response())
 }
 
+// Always resolve the Organization/Channel boundary from current database state.
+async fn visibility(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    channel_id: Uuid,
+) -> Result<Option<ChannelVisibility>, sqlx::Error> {
+    sqlx::query_scalar("SELECT visibility FROM channels WHERE organization_id = $1 AND id = $2")
+        .bind(organization_id)
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+}
+
 // Keep channel visibility SQL here for message reads and sends.
 pub(crate) async fn is_visible(
     pool: &sqlx::PgPool,
@@ -162,6 +175,11 @@ pub(crate) async fn is_visible(
     member_id: Uuid,
     channel_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
+    match visibility(pool, organization_id, channel_id).await? {
+        Some(ChannelVisibility::Public) => return Ok(true),
+        None => return Ok(false),
+        Some(ChannelVisibility::Private) => {}
+    }
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM channels c \
          WHERE c.organization_id = $1 AND c.id = $3 \
@@ -177,13 +195,18 @@ pub(crate) async fn is_visible(
     .await
 }
 
-// Resolve all live recipients in one query, using the same rule as REST and replay.
+// Public delivery needs only the boundary read; private delivery checks all candidates.
 pub(crate) async fn visible_members(
     pool: &sqlx::PgPool,
     organization_id: Uuid,
     channel_id: Uuid,
     members: &[Uuid],
 ) -> Result<Vec<Uuid>, sqlx::Error> {
+    match visibility(pool, organization_id, channel_id).await? {
+        Some(ChannelVisibility::Public) => return Ok(members.to_vec()),
+        None => return Ok(Vec::new()),
+        Some(ChannelVisibility::Private) => {}
+    }
     sqlx::query_scalar(
         "SELECT member_id FROM UNNEST($3::uuid[]) AS candidate(member_id) \
          WHERE EXISTS (SELECT 1 FROM channels c WHERE c.organization_id = $1 AND c.id = $2 \

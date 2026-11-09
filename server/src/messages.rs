@@ -20,7 +20,7 @@ use crate::{
 mod delivery;
 pub use delivery::Delivery;
 #[cfg(test)]
-pub(crate) use delivery::pause_publication;
+pub(crate) use delivery::{PublicationGate, pause_publication};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct Message {
@@ -183,7 +183,7 @@ pub async fn send_message(
     let organization_id = auth.identity.organization.organization_id;
     let sender = auth.identity.member.id;
     require_visible(&state.pool, organization_id, sender, channel_id).await?;
-    // Finish persistence + fan-out even if the HTTP caller disconnects.
+    // Finish persistence even if the HTTP caller disconnects; notification is detached.
     let message = tokio::spawn(async move {
         persist(
             &state.pool,
@@ -339,8 +339,11 @@ async fn persist(
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
         .bind(input.client_message_id).bind(&input.body).fetch_optional(&mut *tx).await?;
     if let Some(message) = message {
+        // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
+        // connected subscribers silently missing a possibly committed message.
+        let notification = delivery.notification(organization_id, channel_id);
         tx.commit().await?;
-        delivery.publish(pool, organization_id, &message).await;
+        notification.spawn(pool.clone(), message.clone());
         return Ok(message);
     }
     tx.rollback().await?;
