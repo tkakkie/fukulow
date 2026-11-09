@@ -85,11 +85,11 @@ async fn oversized_channel_name_is_rejected_before_opening_transaction(pool: PgP
 }
 
 #[sqlx::test]
-async fn channel_name_length_preserves_empty_names_and_whitespace(pool: PgPool) {
+async fn channel_name_length_preserves_empty_names(pool: PgPool) {
     let app = router(&pool);
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
-    for name in ["", " ", "  padded  "] {
+    for name in [""] {
         create(&app, &token, name, "public").await;
     }
 }

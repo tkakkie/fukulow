@@ -24,6 +24,7 @@ pub struct AppState {
     pub sign_in_throttle: auth::SignInThrottle,
     pub message_delivery: messages::Delivery,
     pub session_changes: auth::SessionChanges,
+    pub session_cleanup: auth::SessionCleanup,
     pub ws_allowed_origins: realtime::AllowedOrigins,
 }
 
@@ -101,6 +102,7 @@ mod tests {
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
+            session_cleanup: Default::default(),
             ws_allowed_origins: Default::default(),
         })
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
