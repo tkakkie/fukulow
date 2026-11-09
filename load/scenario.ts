@@ -10,15 +10,21 @@ import type {
   SendMessageRequest, SessionResponse, SetupRequest, SignInRequest,
 } from '../web/src/api-schema.d.ts';
 import { Deliveries, positiveInteger } from './delivery.ts';
+import { schedule, sessionIndex } from './scheduler.ts';
+import { revokeSessions } from './sessions.ts';
+import { summaryForReport } from './summary.ts';
 
 const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const channels = positiveInteger(__ENV.CHANNELS, 1);
 const subscribers = positiveInteger(__ENV.SUBSCRIBERS, 5);
+// Sends per batch, formerly in-flight workers; offered sends/s = publishers * 1000 / interval.
 const publishers = positiveInteger(__ENV.PUBLISHERS, 2);
 const duration = positiveInteger(__ENV.DURATION_SECONDS, 10);
 const interval = positiveInteger(__ENV.PUBLISH_INTERVAL_MS, 250);
 const readyTimeout = positiveInteger(__ENV.READY_TIMEOUT_SECONDS, 5);
 const drainTimeout = positiveInteger(__ENV.DRAIN_TIMEOUT_SECONDS, 5);
+const socketsPerSession = positiveInteger(__ENV.SOCKETS_PER_SESSION, 1);
+const measurementPause = __ENV.LOAD_MEASURE === '1' ? 1000 : 0;
 const visibility: Channel['visibility'] = channelVisibility();
 
 function channelVisibility(): Channel['visibility'] {
@@ -43,8 +49,9 @@ export const options: Options = {
     chat: { executor: 'shared-iterations', vus: 1, iterations: 1,
       maxDuration: `${readyTimeout + duration + drainTimeout + 10}s`, gracefulStop: '0s' },
   },
-  setupTimeout: '10s',
-  teardownTimeout: '5s',
+  // Reserve time for provisioning and revoking every session if setup fails.
+  setupTimeout: `${Math.max(1, Math.ceil(channels * subscribers / socketsPerSession)) * 10 + channels * 5 + 25}s`,
+  teardownTimeout: `${Math.max(1, Math.ceil(channels * subscribers / socketsPerSession)) * 5 + 10}s`,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   systemTags: ['status', 'method', 'name', 'scenario', 'expected_response'],
   thresholds: {
@@ -62,7 +69,7 @@ export const options: Options = {
   },
 };
 
-type Setup = { token: string; channelIds: string[] };
+type Setup = { token: string; tokens: string[]; channelIds: string[] };
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function params(operation: string, token?: string): Params {
@@ -91,18 +98,24 @@ export function setup(): Setup {
   const response = http.post(`${baseUrl}/api/v1/session`, JSON.stringify(body), params('sign_in'));
   requireStatus(response, 200, 'sign_in');
   const { token } = response.json() as SessionResponse;
+  const tokens = [token];
   try {
+    for (let i = 1; i < Math.ceil(channels * subscribers / socketsPerSession); i++) {
+      const session = http.post(`${baseUrl}/api/v1/session`, JSON.stringify(body), params('sign_in'));
+      requireStatus(session, 200, 'sign_in');
+      tokens.push((session.json() as SessionResponse).token);
+    }
     const channelIds = Array.from({ length: channels }, (_, index) => {
       const body: CreateChannelRequest = { name: `load-${Date.now()}-${index}`, visibility };
       const response = http.post(`${baseUrl}/api/v1/channels`, JSON.stringify(body), params('create_channel', token));
       requireStatus(response, 201, 'create_channel');
       return (response.json() as Channel).id;
     });
-    return { token, channelIds };
+    return { token, tokens, channelIds };
   } catch (error) {
     // k6 skips teardown when setup fails; retain the provisioning error if sign-out also fails.
     try {
-      teardown({ token, channelIds: [] });
+      teardown({ token, tokens, channelIds: [] });
     } catch {
       console.error('Failed to revoke session after setup failure');
     }
@@ -125,6 +138,7 @@ export default async function (data: Setup): Promise<void> {
   let activeConnections = 0;
   let activePublishes = 0;
   let peakPublishes = 0;
+  let peakConnections = 0;
   let closing = false;
   let failed = false;
   errors.add(0);
@@ -143,7 +157,7 @@ export default async function (data: Setup): Promise<void> {
     const tags = { channel: String(channel) };
     subscriptions.add(0, tags);
     const socket = new WebSocket(`${baseUrl.replace(/^http/, 'ws')}/api/v1/ws`, null,
-      { headers: { Authorization: `Bearer ${data.token}` }, tags: { name: 'subscribe' } });
+      { headers: { Authorization: `Bearer ${data.tokens[sessionIndex(sockets.length, socketsPerSession)]}` }, tags: { name: 'subscribe' } });
     sockets.push(socket);
     let opened = false;
     let subscribed = false;
@@ -151,6 +165,7 @@ export default async function (data: Setup): Promise<void> {
     socket.onopen = () => {
       opened = true;
       connections.add(++activeConnections);
+      peakConnections = Math.max(peakConnections, activeConnections);
       const body: ClientMessage = { type: 'subscribe', channel_id: channelId, after_seq: 0 };
       socket.send(JSON.stringify(body));
     };
@@ -190,33 +205,29 @@ export default async function (data: Setup): Promise<void> {
     };
   }
 
-  async function publish(worker: number, deadline: number): Promise<void> {
-    let iteration = worker;
-    while (!failed && Date.now() < deadline) {
-      const channel = iteration++ % channels;
-      const channelId = data.channelIds[channel];
-      const body: SendMessageRequest = { client_message_id: uuid(), body: 'Load test message' };
-      deliveries.start(body.client_message_id, Date.now(), subscribers);
-      publishes.add(++activePublishes);
-      peakPublishes = Math.max(peakPublishes, activePublishes);
-      const started = Date.now();
-      try {
-        const response = await http.asyncRequest('POST', `${baseUrl}/api/v1/channels/${channelId}/messages`,
-          JSON.stringify(body), params('publish', data.token));
-        publishResponseTime.add(Date.now() - started, { channel: String(channel) });
-        requireStatus(response, 201, 'send_message');
-        const message = response.json() as Message;
-        if (!check(message, { 'canonical send': (m) => m.channel_id === channelId &&
-          m.client_message_id === body.client_message_id && m.body === body.body && m.seq > 0 })) {
-          throw new Error('Unexpected send response');
-        }
-        published.add(1, { channel: String(channel) });
-      } catch (error) {
-        recordError(String(error));
-      } finally {
-        publishes.add(--activePublishes);
+  async function publish(index: number): Promise<void> {
+    const channel = index % channels;
+    const channelId = data.channelIds[channel];
+    const body: SendMessageRequest = { client_message_id: uuid(), body: 'Load test message' };
+    deliveries.start(body.client_message_id, Date.now(), subscribers);
+    publishes.add(++activePublishes);
+    peakPublishes = Math.max(peakPublishes, activePublishes);
+    const started = Date.now();
+    try {
+      const response = await http.asyncRequest('POST', `${baseUrl}/api/v1/channels/${channelId}/messages`,
+        JSON.stringify(body), params('publish', data.token));
+      publishResponseTime.add(Date.now() - started, { channel: String(channel) });
+      requireStatus(response, 201, 'send_message');
+      const message = response.json() as Message;
+      if (!check(message, { 'canonical send': (m) => m.channel_id === channelId &&
+        m.client_message_id === body.client_message_id && m.body === body.body && m.seq > 0 })) {
+        throw new Error('Unexpected send response');
       }
-      if (!failed && Date.now() < deadline) await pause(interval);
+      published.add(1, { channel: String(channel) });
+    } catch (error) {
+      recordError(String(error));
+    } finally {
+      publishes.add(--activePublishes);
     }
   }
 
@@ -231,13 +242,19 @@ export default async function (data: Setup): Promise<void> {
     if (failed || perChannel.some((count) => count !== subscribers)) {
       throw new Error('Not all WebSockets subscribed before the deadline');
     }
-    const deadline = Date.now() + duration * 1000;
-    await Promise.all(Array.from({ length: publishers }, (_, worker) => publish(worker, deadline)));
-    check(peakPublishes, { 'all publishers overlapped': (count) => count === publishers });
+    console.log('LOAD_MEASUREMENT_START');
+    await pause(measurementPause);
+    const result = await schedule(duration * 1000, interval, publishers, Date.now, pause, publish);
+    console.log('LOAD_RATE ' + JSON.stringify({ ...result, offeredSendRate: result.offered / (result.elapsedMs / 1000),
+      configuredSendRate: publishers * 1000 / interval, peakConnections, peakPublishes,
+      channels, subscribers, publishers, duration, interval, socketsPerSession, sessions: data.tokens.length, visibility,
+      readyTimeout, drainTimeout }));
     const drainDeadline = Date.now() + drainTimeout * 1000;
     while (!failed && deliveries.missing > 0 && Date.now() < drainDeadline) await pause(10);
     missing.add(deliveries.missing);
     check(deliveries.missing, { 'every subscriber received every send': (count) => count === 0 });
+    console.log('LOAD_MEASUREMENT_END');
+    await pause(measurementPause);
   } catch (error) {
     recordError(String(error));
     throw error;
@@ -248,7 +265,11 @@ export default async function (data: Setup): Promise<void> {
 }
 
 export function teardown(data: Setup): void {
-  if (data?.token) {
-    requireStatus(http.del(`${baseUrl}/api/v1/session`, null, params('sign_out', data.token)), 204, 'sign_out');
-  }
+  revokeSessions(data?.tokens ?? [], (token) => {
+    requireStatus(http.del(`${baseUrl}/api/v1/session`, null, params('sign_out', token)), 204, 'sign_out');
+  });
+}
+
+export function handleSummary(data: unknown): Record<string, string> {
+  return { stdout: 'LOAD_SUMMARY ' + JSON.stringify(summaryForReport(data)) + '\n' };
 }
