@@ -76,8 +76,9 @@ async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expir
         ]
     );
     let primary_key: String = sqlx::query_scalar(
-        "SELECT conname FROM pg_constraint \
-         WHERE conrelid = 'public.sessions'::regclass AND contype = 'p'",
+        "SELECT i.relname::text FROM pg_constraint c \
+         JOIN pg_class i ON i.oid = c.conindid \
+         WHERE c.conrelid = 'public.sessions'::regclass AND c.contype = 'p'",
     )
     .fetch_one(&pool)
     .await
