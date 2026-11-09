@@ -1,0 +1,552 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fukulow/contract/realtime/schema.json",
+  "title": "Real-time sync contract fixtures",
+  "description": "Language-neutral fixtures for the real-time sync contract in docs/spec.md (S1-S5 server, C1-C9 client; design: #91, scope: #95). A fixture file is {kind, scenarios[]} and lives in delivery/ (kind=delivery, satisfied by the Rust server) or client/ (kind=client, satisfied by the TypeScript client and a future Kotlin client). Fixtures name behaviour only: no implementation state, function names, timer values or algorithms. Names such as Channel ids, Members and message ids are fixture-local labels; a runner maps them to real ids. Validation uses only the JSON Schema keywords type, enum, const, required, properties, additionalProperties, items, minItems, minimum, maxItems, pattern, oneOf and $ref (to #/$defs); web/scripts/realtime-fixtures.ts adds the cross-reference checks listed in each $comment marked 'semantic'.",
+  "type": "object",
+  "required": ["kind", "scenarios"],
+  "properties": {
+    "kind": { "enum": ["delivery", "client"] },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "oneOf": [{ "$ref": "#/$defs/DeliveryScenario" }, { "$ref": "#/$defs/ClientScenario" }] }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Label": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$" },
+    "Name": { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$" },
+    "Seq": { "type": "integer", "minimum": 1 },
+    "Cursor": { "type": "integer", "minimum": 0 },
+    "Rule": {
+      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet.",
+      "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]
+    },
+    "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
+    "SeqList": {
+      "$comment": "Ascending seqs: integers and inclusive ranges {from,to}. [{from:1,to:3}, 7] means 1,2,3,7. [] is the empty list. Semantic: strictly ascending.",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/Seq" },
+          {
+            "type": "object",
+            "required": ["from", "to"],
+            "properties": { "from": { "$ref": "#/$defs/Seq" }, "to": { "$ref": "#/$defs/Seq" } },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "HttpStatus": { "type": "integer", "minimum": 100 },
+
+    "DeliveryScenario": {
+      "$comment": "A scenario the Rust server satisfies. The runner builds the world in 'setup', then runs 'steps' in order. Members have one session each; a Member's sockets all use that session. Sockets are WebSockets opened by a 'connect' step; events on one socket are observed in arrival order. Semantic: labels are declared before use; sockets are connected before use; 'expect' events reference declared Channels.",
+      "type": "object",
+      "required": ["id", "title", "covers", "rust", "setup", "steps"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Name" },
+        "title": { "type": "string" },
+        "covers": { "$ref": "#/$defs/Covers" },
+        "rust": {
+          "$comment": "Which Rust tests relate to this scenario. existing_tests lists tests (path::name) that stay and cover the same behaviour; the scenario does not replace them. An empty list means the runner is the first test of this behaviour. note may say how the scenario differs or what the runner needs (for example a test hook).",
+          "type": "object",
+          "required": ["existing_tests"],
+          "properties": {
+            "existing_tests": { "type": "array", "items": { "type": "string" } },
+            "note": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "setup": { "$ref": "#/$defs/DeliverySetup" },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/DeliveryStep" } }
+      },
+      "additionalProperties": false
+    },
+    "DeliverySetup": {
+      "type": "object",
+      "required": ["organizations", "members", "channels"],
+      "properties": {
+        "organizations": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Label" } },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "organization"],
+            "properties": { "id": { "$ref": "#/$defs/Label" }, "organization": { "$ref": "#/$defs/Label" } },
+            "additionalProperties": false
+          }
+        },
+        "channels": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$comment": "creator is a Member of the Channel's Organization and, for a private Channel, its first member. members adds further members of a private Channel (ignored for public). messages = number of Messages committed before the steps start, seq 1..n, sent by creator (a runner may insert them directly). count = N makes N Channels named '<id>#1'..'<id>#N' with identical settings (for subscription limit scenarios); refer to one as '<id>#k' or to a range with {group, from, to}.",
+            "type": "object",
+            "required": ["id", "organization", "visibility", "creator"],
+            "properties": {
+              "id": { "$ref": "#/$defs/Label" },
+              "organization": { "$ref": "#/$defs/Label" },
+              "visibility": { "enum": ["public", "private"] },
+              "creator": { "$ref": "#/$defs/Label" },
+              "members": { "type": "array", "items": { "$ref": "#/$defs/Label" } },
+              "messages": { "$ref": "#/$defs/Cursor" },
+              "count": { "type": "integer", "minimum": 2 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "unknown_channels": {
+          "$comment": "Labels of Channel ids that exist nowhere (a well-formed id of no Channel).",
+          "type": "array",
+          "items": { "$ref": "#/$defs/Label" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelRef": {
+      "$comment": "A declared Channel label, '<group>#<k>' for one Channel of a counted group, or a range of a counted group (expands in ascending k, one step or one event per Channel).",
+      "oneOf": [
+        { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*(#[0-9]+)?$" },
+        {
+          "type": "object",
+          "required": ["group", "from", "to"],
+          "properties": { "group": { "$ref": "#/$defs/Label" }, "from": { "$ref": "#/$defs/Seq" }, "to": { "$ref": "#/$defs/Seq" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DeliveryStep": {
+      "$comment": "Steps run strictly in order; the runner waits for each step to complete (an HTTP response, a control message written to the socket) before the next, except where a step says it is concurrent. Control messages on one socket are processed by the server in order, so an event produced by a later control message (a 'subscribed' or an 'error') is a barrier showing every earlier control message on that socket has been handled.",
+      "oneOf": [
+        {
+          "$comment": "Open a WebSocket authenticated as Member 'as'. expect_handshake: the upgrade must be refused with this HTTP status (no socket exists afterwards).",
+          "type": "object",
+          "required": ["do", "socket", "as"],
+          "properties": {
+            "do": { "const": "connect" },
+            "socket": { "$ref": "#/$defs/Label" },
+            "as": { "$ref": "#/$defs/Label" },
+            "expect_handshake": { "$ref": "#/$defs/HttpStatus" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "The client drops the socket (no close handshake required).",
+          "type": "object",
+          "required": ["do", "socket"],
+          "properties": { "do": { "const": "close_socket" }, "socket": { "$ref": "#/$defs/Label" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "Send {type:subscribe, channel_id, after_seq} on the socket. With a range, one control message per Channel in ascending order.",
+          "type": "object",
+          "required": ["do", "socket", "channel", "after_seq"],
+          "properties": {
+            "do": { "const": "subscribe" },
+            "socket": { "$ref": "#/$defs/Label" },
+            "channel": { "$ref": "#/$defs/ChannelRef" },
+            "after_seq": { "$ref": "#/$defs/Cursor" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "Send {type:unsubscribe, channel_id}. The server sends no response.",
+          "type": "object",
+          "required": ["do", "socket", "channel"],
+          "properties": {
+            "do": { "const": "unsubscribe" },
+            "socket": { "$ref": "#/$defs/Label" },
+            "channel": { "$ref": "#/$defs/ChannelRef" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "POST /api/v1/channels/{channel}/messages as Member 'as' with a fresh body. count: number of sends (default 1), each with a fresh client_message_id unless 'key' is given; with 'key' every send reuses that client_message_id and body. concurrent: issue the count sends at the same time instead of one after another. label: names the canonical Message the first response returned, for from_post. The runner asserts the status (default 201).",
+          "type": "object",
+          "required": ["do", "as", "channel"],
+          "properties": {
+            "do": { "const": "post" },
+            "as": { "$ref": "#/$defs/Label" },
+            "channel": { "$ref": "#/$defs/ChannelRef" },
+            "count": { "type": "integer", "minimum": 1 },
+            "concurrent": { "type": "boolean" },
+            "key": { "$ref": "#/$defs/Label" },
+            "label": { "$ref": "#/$defs/Label" },
+            "expect_status": { "$ref": "#/$defs/HttpStatus" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "REPLAY GATE (needs a test hook, as the existing in-crate harness has): arm the gate so the next replay on the Channel stops after the server has taken its history high-water snapshot and before it sends anything. Messages committed after that point must still be delivered after the replay (handoff). Used with await_replay_held and release_replay.",
+          "type": "object",
+          "required": ["do", "channel"],
+          "properties": { "do": { "const": "hold_replay" }, "channel": { "$ref": "#/$defs/ChannelRef" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "Wait until a replay on the Channel is held at the gate.",
+          "type": "object",
+          "required": ["do", "channel"],
+          "properties": { "do": { "const": "await_replay_held" }, "channel": { "$ref": "#/$defs/ChannelRef" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "Let the held replay continue.",
+          "type": "object",
+          "required": ["do", "channel"],
+          "properties": { "do": { "const": "release_replay" }, "channel": { "$ref": "#/$defs/ChannelRef" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "Remove a Member from a private Channel (database level), as a membership change does.",
+          "type": "object",
+          "required": ["do", "member", "channel"],
+          "properties": {
+            "do": { "const": "remove_membership" },
+            "member": { "$ref": "#/$defs/Label" },
+            "channel": { "$ref": "#/$defs/ChannelRef" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "DELETE /api/v1/session as Member 'member' (Sign out), ending that Member's session.",
+          "type": "object",
+          "required": ["do", "member"],
+          "properties": { "do": { "const": "sign_out" }, "member": { "$ref": "#/$defs/Label" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "GET /api/v1/channels/{channel}/messages as Member 'as' with the given query parameters (absent = omitted; values are not range-checked here, a scenario may send invalid ones). expect.status is required. When status is 200, seqs (the page's seqs, ascending) and has_more (the queried direction: older for latest/before_seq, newer for after_seq) are compared if present.",
+          "type": "object",
+          "required": ["do", "as", "channel", "query", "expect"],
+          "properties": {
+            "do": { "const": "history" },
+            "as": { "$ref": "#/$defs/Label" },
+            "channel": { "$ref": "#/$defs/ChannelRef" },
+            "query": {
+              "type": "object",
+              "properties": {
+                "after_seq": { "type": "integer" },
+                "before_seq": { "type": "integer" },
+                "limit": { "type": "integer" }
+              },
+              "additionalProperties": false
+            },
+            "expect": {
+              "type": "object",
+              "required": ["status"],
+              "properties": {
+                "status": { "$ref": "#/$defs/HttpStatus" },
+                "seqs": { "$ref": "#/$defs/SeqList" },
+                "has_more": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "The next events on the socket, in arrival order, match 'events' exactly one for one (a runner waits a few seconds for each). Events not listed are not allowed to come before the listed ones; whatever follows is only constrained by a later 'silent' item.",
+          "type": "object",
+          "required": ["do", "socket", "events"],
+          "properties": {
+            "do": { "const": "expect" },
+            "socket": { "$ref": "#/$defs/Label" },
+            "events": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/DeliveryEvent" } }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DeliveryEvent": {
+      "oneOf": [
+        {
+          "$comment": "A {type:message} event. seqs = the Channel's Messages with these seqs, one event per seq in the listed order (a range expands ascending). from_post = the event's message equals the canonical Message the labelled post returned. At least one of seqs / from_post (semantic). A range ChannelRef expands per Channel.",
+          "type": "object",
+          "required": ["type", "channel"],
+          "properties": {
+            "type": { "const": "message" },
+            "channel": { "$ref": "#/$defs/ChannelRef" },
+            "seqs": { "$ref": "#/$defs/SeqList" },
+            "from_post": { "$ref": "#/$defs/Label" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A {type:subscribed, channel_id, caught_up_seq} event. With a range ChannelRef: one event per Channel, each with this caught_up_seq.",
+          "type": "object",
+          "required": ["type", "channel", "caught_up_seq"],
+          "properties": {
+            "type": { "const": "subscribed" },
+            "channel": { "$ref": "#/$defs/ChannelRef" },
+            "caught_up_seq": { "$ref": "#/$defs/Cursor" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A {type:error, code} event; channel is the event's channel_id (omit when the event has none).",
+          "type": "object",
+          "required": ["type", "code"],
+          "properties": {
+            "type": { "const": "error" },
+            "channel": { "$ref": "#/$defs/ChannelRef" },
+            "code": { "enum": ["channel_not_found", "subscription_limit", "invalid_input"] }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "The server closes the socket with this WebSocket close code (4001 session ended, 4008 queue overflow, 1011 internal).",
+          "type": "object",
+          "required": ["type", "code"],
+          "properties": { "type": { "const": "closed" }, "code": { "type": "integer", "minimum": 1000 } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "Nothing arrives on the socket for a short quiet period chosen by the runner (the existing harness uses 100 ms). Only meaningful after a barrier (see DeliveryStep) and as the last item of an 'expect'.",
+          "type": "object",
+          "required": ["type"],
+          "properties": { "type": { "const": "silent" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "ClientScenario": {
+      "$comment": "A scenario a client satisfies. The harness starts a client with no state and feeds 'steps' in order. Each step delivers one input (what happened outside the client: an event, a response, a user action) and then checks what the client did in response: 'effects' are the external requests the client emitted while handling this step's input (an effect emitted earlier is never re-checked), and 'observe' is what the client shows afterwards. Only what a step lists is checked. 'never' effects must not be emitted in any step. Semantic: every respond_to refers to a label bound by 'as' in an earlier step's required effects; labels are unique; an 'ack'/'send_failed' respond_to names a 'send' effect, 'history_result'/'history_failed' a 'fetch_history', 'subscribed' a 'subscribe', 'timer_elapsed' a 'wait'.",
+      "type": "object",
+      "required": ["id", "title", "covers", "steps"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Name" },
+        "title": { "type": "string" },
+        "covers": { "$ref": "#/$defs/Covers" },
+        "note": { "type": "string" },
+        "never": { "type": "array", "items": { "$ref": "#/$defs/EffectPattern" } },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/ClientStep" } }
+      },
+      "additionalProperties": false
+    },
+    "ClientStep": {
+      "type": "object",
+      "required": ["input"],
+      "properties": {
+        "input": { "$ref": "#/$defs/Input" },
+        "only_if": {
+          "$comment": "Deliver this step only when the condition holds, else skip it (its checks are skipped too). connect_pending: the client emitted a 'connect' effect and the harness has not yet delivered connection_ready for it. socket_open: connection_ready was delivered and no socket_closed since. Lets one scenario drive a loop whose length depends on the client's retry policy.",
+          "enum": ["connect_pending", "socket_open"]
+        },
+        "effects": {
+          "type": "object",
+          "properties": {
+            "required": { "type": "array", "items": { "$ref": "#/$defs/EffectRequirement" } },
+            "forbidden": { "type": "array", "items": { "$ref": "#/$defs/EffectPattern" } },
+            "ordered": { "$ref": "#/$defs/OrderedFlag" }
+          },
+          "additionalProperties": false
+        },
+        "observe": { "$ref": "#/$defs/Observation" },
+        "note": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "OrderedFlag": {
+      "$comment": "true: the required effects must be emitted in the listed order. Default false (a set). Use only where order is part of correctness.",
+      "type": "boolean"
+    },
+    "EffectRequirement": {
+      "oneOf": [
+        { "$ref": "#/$defs/EffectPattern" },
+        {
+          "$comment": "At least one of the patterns is emitted.",
+          "type": "object",
+          "required": ["any_of"],
+          "properties": { "any_of": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/EffectPattern" } } },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "EffectPattern": {
+      "$comment": "Matches an emitted effect when every field given here equals the effect's field (extra fields of the effect are ignored). Effect types: connect (open a socket); subscribe(channel, after_seq); unsubscribe(channel); fetch_history(channel, page=latest|after|before, seq for after/before); send(channel, client_message_id) = the HTTP send, a resend is another send with the same id; wait(purpose, channel?) = the client asks to be woken later (exact durations are not part of the contract; the harness decides when to deliver timer_elapsed). as: binds a label to the matched effect so a later input can respond_to it. times: exactly this many emitted effects match in this step (default: at least one when required, none when forbidden).",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["connect", "subscribe", "unsubscribe", "fetch_history", "send", "wait"] },
+        "channel": { "$ref": "#/$defs/Label" },
+        "after_seq": { "$ref": "#/$defs/Cursor" },
+        "page": { "enum": ["latest", "after", "before"] },
+        "seq": { "$ref": "#/$defs/Cursor" },
+        "client_message_id": { "$ref": "#/$defs/Label" },
+        "purpose": { "enum": ["reorder_grace", "fill_backoff", "reconnect_backoff"] },
+        "as": { "$ref": "#/$defs/Label" },
+        "times": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "MessageSpec": {
+      "$comment": "A confirmed Message as the server record. Give seq, or from+to for consecutive Messages (each gets its own seq). Defaults: sender 'other', body 'm<seq>', id 'id<seq>', created_at fixed per seq, client_message_id absent (a distinct one per Message, never equal to any fixture label). Semantic: seq XOR (from and to).",
+      "type": "object",
+      "properties": {
+        "seq": { "$ref": "#/$defs/Seq" },
+        "from": { "$ref": "#/$defs/Seq" },
+        "to": { "$ref": "#/$defs/Seq" },
+        "sender": { "$ref": "#/$defs/Label" },
+        "client_message_id": { "$ref": "#/$defs/Label" },
+        "body": { "type": "string" },
+        "id": { "$ref": "#/$defs/Label" },
+        "created_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "Status": {
+      "$comment": "How an HTTP request ended: a status code, or no response (network) / no answer in time (timeout).",
+      "oneOf": [{ "$ref": "#/$defs/HttpStatus" }, { "enum": ["network", "timeout"] }]
+    },
+    "Input": {
+      "$comment": "What happened outside the client. 'me' is the signed-in Member; other labels are other Members. Request/response pairing is by respond_to (see ClientScenario); a response delivered after the client has moved on (timer already obsolete, session replaced, Channel reset) is a stale completion and must change nothing.",
+      "oneOf": [
+        { "$comment": "A session starts (Sign in): the client begins its connection.", "type": "object", "required": ["type"], "properties": { "type": { "const": "session_start" } }, "additionalProperties": false },
+        { "$comment": "The session is replaced by another one (sign out and in, or another Member): all state of the previous session is discarded and its in-flight work fenced. A new connection is needed.", "type": "object", "required": ["type"], "properties": { "type": { "const": "session_replaced" } }, "additionalProperties": false },
+        { "$comment": "A socket opened and authenticated.", "type": "object", "required": ["type"], "properties": { "type": { "const": "connection_ready" } }, "additionalProperties": false },
+        { "$comment": "The socket closed with this WebSocket close code (1006 = abnormal).", "type": "object", "required": ["type", "code"], "properties": { "type": { "const": "socket_closed" }, "code": { "type": "integer", "minimum": 1000 } }, "additionalProperties": false },
+        { "$comment": "The UI starts showing the Channel (selects it).", "type": "object", "required": ["type", "channel"], "properties": { "type": { "const": "watch" }, "channel": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        { "$comment": "The UI stops showing the Channel.", "type": "object", "required": ["type", "channel"], "properties": { "type": { "const": "unwatch" }, "channel": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        { "$comment": "The application re-reads the Channel's latest page (for example when the user reopens it); C2 'a refreshed latest page'.", "type": "object", "required": ["type", "channel"], "properties": { "type": { "const": "refresh" }, "channel": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        { "$comment": "The user asks for older Messages.", "type": "object", "required": ["type", "channel"], "properties": { "type": { "const": "load_older" }, "channel": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        {
+          "$comment": "A subscribed event arrived (caught_up_seq). respond_to optionally names the subscribe effect it answers.",
+          "type": "object",
+          "required": ["type", "channel", "caught_up_seq"],
+          "properties": {
+            "type": { "const": "subscribed" },
+            "channel": { "$ref": "#/$defs/Label" },
+            "caught_up_seq": { "$ref": "#/$defs/Cursor" },
+            "respond_to": { "$ref": "#/$defs/Label" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A message event arrived (live, replayed or echo).",
+          "type": "object",
+          "required": ["type", "channel", "message"],
+          "properties": { "type": { "const": "message" }, "channel": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "An error event arrived (code of ErrorEvent).",
+          "type": "object",
+          "required": ["type", "code"],
+          "properties": { "type": { "const": "error_event" }, "channel": { "$ref": "#/$defs/Label" }, "code": { "enum": ["channel_not_found", "subscription_limit", "invalid_input"] } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A history page arrived. messages are ascending; has_more is in the requested direction.",
+          "type": "object",
+          "required": ["type", "respond_to", "messages", "has_more"],
+          "properties": {
+            "type": { "const": "history_result" },
+            "respond_to": { "$ref": "#/$defs/Label" },
+            "messages": { "type": "array", "items": { "$ref": "#/$defs/MessageSpec" } },
+            "has_more": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A history request failed.",
+          "type": "object",
+          "required": ["type", "respond_to", "status"],
+          "properties": { "type": { "const": "history_failed" }, "respond_to": { "$ref": "#/$defs/Label" }, "status": { "$ref": "#/$defs/Status" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "The user sends a Message. client_message_id is chosen by the fixture (the client is given it).",
+          "type": "object",
+          "required": ["type", "channel", "client_message_id"],
+          "properties": {
+            "type": { "const": "user_send" },
+            "channel": { "$ref": "#/$defs/Label" },
+            "client_message_id": { "$ref": "#/$defs/Label" },
+            "body": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A send succeeded (HTTP 201 with the canonical Message).",
+          "type": "object",
+          "required": ["type", "respond_to", "message"],
+          "properties": { "type": { "const": "ack" }, "respond_to": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A send ended without a Message.",
+          "type": "object",
+          "required": ["type", "respond_to", "status"],
+          "properties": { "type": { "const": "send_failed" }, "respond_to": { "$ref": "#/$defs/Label" }, "status": { "$ref": "#/$defs/Status" } },
+          "additionalProperties": false
+        },
+        { "$comment": "The user retries a send.", "type": "object", "required": ["type", "client_message_id"], "properties": { "type": { "const": "user_retry" }, "client_message_id": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        { "$comment": "The user discards a failed send.", "type": "object", "required": ["type", "client_message_id"], "properties": { "type": { "const": "user_discard" }, "client_message_id": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        { "$comment": "A wait the client asked for ended.", "type": "object", "required": ["type", "respond_to"], "properties": { "type": { "const": "timer_elapsed" }, "respond_to": { "$ref": "#/$defs/Label" } }, "additionalProperties": false }
+      ]
+    },
+    "Observation": {
+      "$comment": "What the client shows after the step; only listed fields are compared. session: sign_in_required after a 401 or 4001. channels: per Channel label.",
+      "type": "object",
+      "properties": {
+        "session": { "enum": ["signed_in", "sign_in_required"] },
+        "channels": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ChannelObservation" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelObservation": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$comment": "loading = no trusted base yet; ready = base established; unavailable = terminal for this Channel until the user acts (C9).",
+          "enum": ["loading", "ready", "unavailable"]
+        },
+        "cursor": {
+          "$comment": "The resume cursor (C2); null while there is no trusted base.",
+          "oneOf": [{ "$ref": "#/$defs/Cursor" }, { "type": "null" }]
+        },
+        "visible": {
+          "$comment": "Every confirmed Message the client holds for the Channel, ascending, including ones held above a gap.",
+          "$ref": "#/$defs/SeqList"
+        },
+        "pending": {
+          "$comment": "Sends not yet settled, as a set (order is not compared). sending = request in flight; unknown = outcome unknown (network error, timeout, lost ack); failed = definite refusal (not retryable). A settled or discarded send is absent. Listing [] asserts there is none.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["client_message_id", "state"],
+            "properties": { "client_message_id": { "$ref": "#/$defs/Label" }, "state": { "enum": ["sending", "unknown", "failed"] } },
+            "additionalProperties": false
+          }
+        },
+        "records": {
+          "$comment": "Partial field checks on held Messages (canonical server fields win).",
+          "type": "array",
+          "items": { "$ref": "#/$defs/RecordCheck" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RecordCheck": {
+      "type": "object",
+      "required": ["seq"],
+      "properties": {
+        "seq": { "$ref": "#/$defs/Seq" },
+        "id": { "$ref": "#/$defs/Label" },
+        "body": { "type": "string" },
+        "sender": { "$ref": "#/$defs/Label" },
+        "client_message_id": { "$ref": "#/$defs/Label" },
+        "created_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

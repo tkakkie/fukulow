@@ -1,0 +1,87 @@
+{
+  "kind": "delivery",
+  "scenarios": [
+    {
+      "id": "refused-subscription-does-not-close-the-socket",
+      "title": "A subscription to a Channel that does not exist is refused with channel_not_found; the socket stays open and a valid subscription works",
+      "covers": ["S4"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::live_delivery_denies_other_organization_and_private_nonmember_with_positive_controls"],"note":"The existing test refuses private/foreign Channels; this adds a Channel id that exists nowhere."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":1}],"unknown_channels":["ghost"]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"ghost","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"error","channel":"ghost","code":"channel_not_found"}]},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[1]},{"type":"subscribed","channel":"general","caught_up_seq":1}]},
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[2]},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "subscription-limit-is-refused-then-recovers-after-unsubscribe",
+      "title": "256 Channel subscriptions succeed; the 257th is refused with subscription_limit without closing; delivery on existing subscriptions continues; after one unsubscribe a different Channel can be subscribed",
+      "covers": ["S4"],
+      "rust": {"existing_tests":[],"note":"No existing test for the limit (MAX_SUBSCRIPTIONS = 256 in server/src/realtime/connection.rs). New in the runner."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"bulk","organization":"o1","visibility":"public","creator":"alice","count":257}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":{"group":"bulk","from":1,"to":256},"after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":{"group":"bulk","from":1,"to":256},"caught_up_seq":0}]},
+        {"do":"subscribe","socket":"s1","channel":"bulk#257","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"error","channel":"bulk#257","code":"subscription_limit"}]},
+        {"do":"post","as":"alice","channel":"bulk#1","label":"live"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"bulk#1","from_post":"live"}]},
+        {"do":"unsubscribe","socket":"s1","channel":"bulk#2"},
+        {"do":"subscribe","socket":"s1","channel":"bulk#257","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"bulk#257","caught_up_seq":0}]},
+        {"do":"post","as":"alice","channel":"bulk#257","label":"new"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"bulk#257","from_post":"new"},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "queue-overflow-closes-with-4008-and-replay-recovers-every-message",
+      "title": "A subscriber that cannot keep up is closed with 4008 (never silently dropped); reconnecting and subscribing from the old cursor replays every committed Message",
+      "covers": ["S2","S4"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::overflow_closes_socket_and_reconnect_replays_every_committed_message"],"note":"Needs the replay gate. 257 sends exceed the per-connection queue of 256 (server/src/realtime.rs); the number is coupled to that capacity."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":1}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"hold_replay","channel":"general"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
+        {"do":"await_replay_held","channel":"general"},
+        {"do":"post","as":"alice","channel":"general","count":257},
+        {"do":"expect","socket":"s1","events":[{"type":"closed","code":4008}]},
+        {"do":"release_replay","channel":"general"},
+        {"do":"connect","socket":"s2","as":"alice"},
+        {"do":"subscribe","socket":"s2","channel":"general","after_seq":0},
+        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":258}]},{"type":"subscribed","channel":"general","caught_up_seq":258},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "session-end-closes-with-4001-and-leaves-other-sessions-usable",
+      "title": "Sign out closes an idle socket and a replaying socket of that session with 4001; a new upgrade with the ended session is refused with 401; another Member's socket keeps receiving",
+      "covers": ["S4"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_usable","server/src/realtime/tests.rs::session_expiry_closes_idle_and_replaying_sockets"],"note":"Needs the replay gate. Session expiry is covered by the existing test only (it needs clock control)."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"},{"id":"bob","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"connect","socket":"idle","as":"alice"},
+        {"do":"subscribe","socket":"idle","channel":"general","after_seq":0},
+        {"do":"expect","socket":"idle","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
+        {"do":"connect","socket":"replaying","as":"alice"},
+        {"do":"hold_replay","channel":"general"},
+        {"do":"subscribe","socket":"replaying","channel":"general","after_seq":0},
+        {"do":"await_replay_held","channel":"general"},
+        {"do":"connect","socket":"other","as":"bob"},
+        {"do":"subscribe","socket":"other","channel":"general","after_seq":0},
+        {"do":"expect","socket":"other","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
+        {"do":"sign_out","member":"alice"},
+        {"do":"expect","socket":"idle","events":[{"type":"closed","code":4001}]},
+        {"do":"expect","socket":"replaying","events":[{"type":"closed","code":4001}]},
+        {"do":"release_replay","channel":"general"},
+        {"do":"post","as":"bob","channel":"general","label":"still"},
+        {"do":"expect","socket":"other","events":[{"type":"message","channel":"general","from_post":"still"}]},
+        {"do":"connect","socket":"refused","as":"alice","expect_handshake":401}
+      ]
+    }
+  ]
+}

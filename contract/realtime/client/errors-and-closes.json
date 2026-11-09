@@ -1,0 +1,243 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "refused-subscription-channel-not-found-is-terminal",
+      "title": "channel_not_found on subscribe makes the Channel unavailable; it is not a gap, never retried in a loop, not retried after a reconnect",
+      "covers": ["C9"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"error_event","channel":"A","code":"channel_not_found"},"effects":{"forbidden":[{"type":"subscribe","channel":"A"},{"type":"fetch_history","channel":"A"},{"type":"wait"}]},"observe":{"channels":{"A":{"state":"unavailable"}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"forbidden":[{"type":"subscribe","channel":"A"},{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"state":"unavailable"}}}},
+        {"input":{"type":"unwatch","channel":"A"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"any_of":[{"type":"fetch_history","channel":"A","page":"latest"},{"type":"subscribe","channel":"A"}]}]},"note":"The user selects the Channel again: only now may the client try again."}
+      ]
+    },
+    {
+      "id": "refused-subscription-limit-is-terminal-for-that-channel-only",
+      "title": "subscription_limit makes only that Channel unavailable; subscribed Channels keep working and the refusal is not retried",
+      "covers": ["C9"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"B_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"B_f0","messages":[{"from":1,"to":5}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":5,"as":"B_s0"}]}},
+        {"input":{"type":"error_event","channel":"B","code":"subscription_limit"},"effects":{"forbidden":[{"type":"subscribe","channel":"B"},{"type":"fetch_history","channel":"B"},{"type":"wait"}]},"observe":{"channels":{"B":{"state":"unavailable"},"A":{"state":"ready","cursor":100}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":101}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]},"B":{"state":"unavailable"}}}}
+      ]
+    },
+    {
+      "id": "history-403-on-bootstrap-is-terminal",
+      "title": "403 on the first latest page makes the Channel unavailable: no subscribe, no retry loop",
+      "covers": ["C9"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_failed","respond_to":"A_f0","status":403},"effects":{"forbidden":[{"type":"subscribe"},{"type":"fetch_history","channel":"A"},{"type":"wait"}]},"observe":{"channels":{"A":{"state":"unavailable"}}}}
+      ]
+    },
+    {
+      "id": "history-404-on-bootstrap-is-terminal",
+      "title": "404 on the first latest page makes the Channel unavailable: no subscribe, no retry loop",
+      "covers": ["C9"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_failed","respond_to":"A_f0","status":404},"effects":{"forbidden":[{"type":"subscribe"},{"type":"fetch_history","channel":"A"},{"type":"wait"}]},"observe":{"channels":{"A":{"state":"unavailable"}}}}
+      ]
+    },
+    {
+      "id": "history-404-on-a-fill-is-terminal-not-a-gap-to-retry",
+      "title": "A fill answered 404 ends recovery for the Channel (unavailable); it is not retried with backoff",
+      "covers": ["C3","C9"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"history_failed","respond_to":"g_f","status":404},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"},{"type":"wait"}]},"observe":{"channels":{"A":{"state":"unavailable"}}}}
+      ]
+    },
+    {
+      "id": "send-401-means-sign-in-and-is-not-resent",
+      "title": "A 401 on send ends the session for the client: Sign in is required and the send is not repeated",
+      "covers": ["C6"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
+        {"input":{"type":"send_failed","respond_to":"c1_s1","status":401},"effects":{"forbidden":[{"type":"send"}]},"observe":{"session":"sign_in_required"}}
+      ]
+    },
+    {
+      "id": "send-413-is-definite-and-not-resent",
+      "title": "413 on send fails the pending send for good: no resend, retry does nothing, discard removes it",
+      "covers": ["C6"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
+        {"input":{"type":"send_failed","respond_to":"c1_s1","status":413},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"failed"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"failed"}]}}}},
+        {"input":{"type":"user_discard","client_message_id":"c1"},"observe":{"channels":{"A":{"pending":[]}}}}
+      ]
+    },
+    {
+      "id": "send-415-is-definite-and-not-resent",
+      "title": "415 on send fails the pending send for good: no resend, retry does nothing, discard removes it",
+      "covers": ["C6"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
+        {"input":{"type":"send_failed","respond_to":"c1_s1","status":415},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"failed"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"failed"}]}}}},
+        {"input":{"type":"user_discard","client_message_id":"c1"},"observe":{"channels":{"A":{"pending":[]}}}}
+      ]
+    },
+    {
+      "id": "send-400-403-404-409-are-definite-and-not-resent",
+      "title": "Other definite refusals (400, 403, 404, 409) are not resent either",
+      "covers": ["C6"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
+        {"input":{"type":"send_failed","respond_to":"c1_s1","status":400},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"failed"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"failed"}]}}}},
+        {"input":{"type":"user_discard","client_message_id":"c1"},"observe":{"channels":{"A":{"pending":[]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c2","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c2","as":"c2_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c2","state":"sending"}]}}}},
+        {"input":{"type":"send_failed","respond_to":"c2_s1","status":403},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c2","state":"failed"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c2"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c2","state":"failed"}]}}}},
+        {"input":{"type":"user_discard","client_message_id":"c2"},"observe":{"channels":{"A":{"pending":[]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c3","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c3","as":"c3_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c3","state":"sending"}]}}}},
+        {"input":{"type":"send_failed","respond_to":"c3_s1","status":404},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c3","state":"failed"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c3"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c3","state":"failed"}]}}}},
+        {"input":{"type":"user_discard","client_message_id":"c3"},"observe":{"channels":{"A":{"pending":[]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c4","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c4","as":"c4_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c4","state":"sending"}]}}}},
+        {"input":{"type":"send_failed","respond_to":"c4_s1","status":409},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c4","state":"failed"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c4"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c4","state":"failed"}]}}}},
+        {"input":{"type":"user_discard","client_message_id":"c4"},"observe":{"channels":{"A":{"pending":[]}}}}
+      ]
+    },
+    {
+      "id": "close-4001-means-sign-in-and-does-not-reconnect",
+      "title": "4001 (session ended) requires Sign in: the client does not reconnect",
+      "covers": ["C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"socket_closed","code":4001},"effects":{"forbidden":[{"type":"connect"},{"type":"wait"},{"type":"subscribe"}]},"observe":{"session":"sign_in_required"}}
+      ]
+    },
+    {
+      "id": "close-1006-backs-off-then-resubscribes-from-the-cursor",
+      "title": "An abnormal close is treated like other non-4001 closes: back off, reconnect, resubscribe from the cursor",
+      "covers": ["C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"r_s"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}}
+      ]
+    },
+    {
+      "id": "close-1011-backs-off-then-resubscribes-from-the-cursor",
+      "title": "An internal-error close (1011) is treated like other non-4001 closes: back off, reconnect, resubscribe from the cursor",
+      "covers": ["C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"socket_closed","code":1011},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"r_s"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}}
+      ]
+    },
+    {
+      "id": "close-4008-reconnects-first-then-resubscribes",
+      "title": "After 4008 (queue overflow) the client reconnects first and only then resubscribes from the cursor",
+      "covers": ["C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"socket_closed","code":4008},"effects":{"required":[{"type":"connect"}],"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"r_s"},"observe":{"channels":{"A":{"state":"ready","cursor":100}}}}
+      ]
+    },
+    {
+      "id": "repeated-4008-has-bounded-immediate-retries",
+      "title": "Repeated 4008 without progress: the client may retry at once for a while, but not forever (bounded retries)",
+      "covers": ["C4"],
+      "note": "Steps with only_if run only while the client keeps connecting. A client that backs off or gives up earlier skips them and passes; a client that reconnects at once every time fails the last step. The bound itself is a controller policy; ten is only a number every bounded policy has reached.",
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"socket_closed","code":4008},"effects":{"required":[{"type":"connect"}],"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r1_s"}]}},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
+        {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"connect"}]},"note":"After ten overflows in a row with no subscribed in between, an immediate reconnect would be an unbounded loop."}
+      ]
+    }
+  ]
+}

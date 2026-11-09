@@ -1,0 +1,92 @@
+{
+  "kind": "delivery",
+  "scenarios": [
+    {
+      "id": "live-delivery-denies-other-organization-and-private-nonmember",
+      "title": "Live delivery: another Organization and a same-Organization non-member of a private Channel get channel_not_found and no events; authorized subscribers still receive (positive controls)",
+      "covers": ["S2","S4"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::live_delivery_denies_other_organization_and_private_nonmember_with_positive_controls"]},
+      "setup": {"organizations":["o1","o2"],"members":[{"id":"alice","organization":"o1"},{"id":"bob","organization":"o1"},{"id":"carol","organization":"o2"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"},{"id":"secret","organization":"o1","visibility":"private","creator":"alice"},{"id":"carolpub","organization":"o2","visibility":"public","creator":"carol"}]},
+      "steps": [
+        {"do":"connect","socket":"sa","as":"alice"},
+        {"do":"connect","socket":"sb","as":"bob"},
+        {"do":"connect","socket":"sc","as":"carol"},
+        {"do":"subscribe","socket":"sa","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sa","events":[{"type":"subscribed","channel":"secret","caught_up_seq":0}]},
+        {"do":"subscribe","socket":"sb","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sb","events":[{"type":"error","channel":"secret","code":"channel_not_found"}]},
+        {"do":"subscribe","socket":"sc","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sc","events":[{"type":"error","channel":"secret","code":"channel_not_found"}]},
+        {"do":"subscribe","socket":"sc","channel":"general","after_seq":0},
+        {"do":"expect","socket":"sc","events":[{"type":"error","channel":"general","code":"channel_not_found"}]},
+        {"do":"subscribe","socket":"sb","channel":"general","after_seq":0},
+        {"do":"expect","socket":"sb","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
+        {"do":"subscribe","socket":"sc","channel":"carolpub","after_seq":0},
+        {"do":"expect","socket":"sc","events":[{"type":"subscribed","channel":"carolpub","caught_up_seq":0}]},
+        {"do":"post","as":"alice","channel":"secret","label":"p_secret"},
+        {"do":"expect","socket":"sa","events":[{"type":"message","channel":"secret","from_post":"p_secret"}]},
+        {"do":"post","as":"alice","channel":"general","label":"p_general"},
+        {"do":"expect","socket":"sb","events":[{"type":"message","channel":"general","from_post":"p_general"}]},
+        {"do":"post","as":"carol","channel":"carolpub","label":"p_carol"},
+        {"do":"expect","socket":"sc","events":[{"type":"message","channel":"carolpub","from_post":"p_carol"}]},
+        {"do":"expect","socket":"sb","events":[{"type":"silent"}]},
+        {"do":"expect","socket":"sc","events":[{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "replay-denies-other-organization-and-private-nonmember",
+      "title": "Replay: the same denials hold when history already exists; authorized subscribers replay it (positive controls); REST history is denied with 404 as well",
+      "covers": ["S2","S4"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::replay_denies_other_organization_and_private_nonmember_with_positive_controls","server/src/messages/tests.rs::messages_deny_private_channel_nonmember_send_and_list","server/src/messages/tests.rs::messages_deny_cross_organization_send_and_list"]},
+      "setup": {"organizations":["o1","o2"],"members":[{"id":"alice","organization":"o1"},{"id":"bob","organization":"o1"},{"id":"carol","organization":"o2"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":1},{"id":"secret","organization":"o1","visibility":"private","creator":"alice","messages":1},{"id":"carolpub","organization":"o2","visibility":"public","creator":"carol","messages":1}]},
+      "steps": [
+        {"do":"connect","socket":"sa","as":"alice"},
+        {"do":"connect","socket":"sb","as":"bob"},
+        {"do":"connect","socket":"sc","as":"carol"},
+        {"do":"subscribe","socket":"sa","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sa","events":[{"type":"message","channel":"secret","seqs":[1]},{"type":"subscribed","channel":"secret","caught_up_seq":1}]},
+        {"do":"subscribe","socket":"sb","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sb","events":[{"type":"error","channel":"secret","code":"channel_not_found"}]},
+        {"do":"subscribe","socket":"sb","channel":"general","after_seq":0},
+        {"do":"expect","socket":"sb","events":[{"type":"message","channel":"general","seqs":[1]},{"type":"subscribed","channel":"general","caught_up_seq":1}]},
+        {"do":"subscribe","socket":"sc","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sc","events":[{"type":"error","channel":"secret","code":"channel_not_found"}]},
+        {"do":"subscribe","socket":"sc","channel":"general","after_seq":0},
+        {"do":"expect","socket":"sc","events":[{"type":"error","channel":"general","code":"channel_not_found"}]},
+        {"do":"subscribe","socket":"sc","channel":"carolpub","after_seq":0},
+        {"do":"expect","socket":"sc","events":[{"type":"message","channel":"carolpub","seqs":[1]},{"type":"subscribed","channel":"carolpub","caught_up_seq":1}]},
+        {"do":"expect","socket":"sb","events":[{"type":"silent"}]},
+        {"do":"expect","socket":"sc","events":[{"type":"silent"}]},
+        {"do":"history","as":"alice","channel":"secret","query":{},"expect":{"status":200,"seqs":[1],"has_more":false}},
+        {"do":"history","as":"bob","channel":"secret","query":{},"expect":{"status":404}},
+        {"do":"history","as":"carol","channel":"secret","query":{},"expect":{"status":404}},
+        {"do":"history","as":"carol","channel":"general","query":{},"expect":{"status":404}},
+        {"do":"history","as":"bob","channel":"general","query":{},"expect":{"status":200,"seqs":[1],"has_more":false}}
+      ]
+    },
+    {
+      "id": "losing-private-membership-stops-delivery-but-keeps-the-socket-open",
+      "title": "A Member removed from a private Channel after subscribing receives nothing more and the socket stays open; a new subscribe is refused with channel_not_found; other subscribers are unaffected",
+      "covers": ["S2","S4"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::live_delivery_rechecks_private_membership_after_subscription"]},
+      "setup": {"organizations":["o1","o2"],"members":[{"id":"alice","organization":"o1"},{"id":"bob","organization":"o1"},{"id":"carol","organization":"o2"}],"channels":[{"id":"secret","organization":"o1","visibility":"private","creator":"alice","members":["bob"]}]},
+      "steps": [
+        {"do":"connect","socket":"sb","as":"bob"},
+        {"do":"connect","socket":"sa","as":"alice"},
+        {"do":"subscribe","socket":"sb","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sb","events":[{"type":"subscribed","channel":"secret","caught_up_seq":0}]},
+        {"do":"subscribe","socket":"sa","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sa","events":[{"type":"subscribed","channel":"secret","caught_up_seq":0}]},
+        {"do":"post","as":"alice","channel":"secret","label":"before"},
+        {"do":"expect","socket":"sb","events":[{"type":"message","channel":"secret","from_post":"before"}]},
+        {"do":"expect","socket":"sa","events":[{"type":"message","channel":"secret","from_post":"before"}]},
+        {"do":"remove_membership","member":"bob","channel":"secret"},
+        {"do":"post","as":"alice","channel":"secret","label":"after"},
+        {"do":"expect","socket":"sa","events":[{"type":"message","channel":"secret","from_post":"after"}]},
+        {"do":"expect","socket":"sb","events":[{"type":"silent"}]},
+        {"do":"subscribe","socket":"sb","channel":"secret","after_seq":0},
+        {"do":"expect","socket":"sb","events":[{"type":"error","channel":"secret","code":"channel_not_found"}]}
+      ]
+    }
+  ]
+}
