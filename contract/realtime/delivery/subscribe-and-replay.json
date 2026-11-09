@@ -10,16 +10,16 @@
       "steps": [
         {"do":"connect","socket":"s1","as":"alice"},
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":10}]},{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent"}]},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":10}]},{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent","barrier":{"channel":"general","caught_up_seq":10}}]},
         {"do":"connect","socket":"s2","as":"alice"},
         {"do":"subscribe","socket":"s2","channel":"general","after_seq":4},
-        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[{"from":5,"to":10}]},{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent"}]},
+        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[{"from":5,"to":10}]},{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent","barrier":{"channel":"general","caught_up_seq":10}}]},
         {"do":"connect","socket":"s3","as":"alice"},
         {"do":"subscribe","socket":"s3","channel":"general","after_seq":10},
-        {"do":"expect","socket":"s3","events":[{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent"}]},
+        {"do":"expect","socket":"s3","events":[{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent","barrier":{"channel":"general","caught_up_seq":10}}]},
         {"do":"connect","socket":"s4","as":"alice"},
         {"do":"subscribe","socket":"s4","channel":"quiet","after_seq":0},
-        {"do":"expect","socket":"s4","events":[{"type":"subscribed","channel":"quiet","caught_up_seq":0},{"type":"silent"}]}
+        {"do":"expect","socket":"s4","events":[{"type":"subscribed","channel":"quiet","caught_up_seq":0},{"type":"silent","barrier":{"channel":"quiet","caught_up_seq":0}}]}
       ]
     },
     {
@@ -31,14 +31,14 @@
       "steps": [
         {"do":"connect","socket":"s1","as":"alice"},
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":7},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":8,"to":120}]},{"type":"subscribed","channel":"general","caught_up_seq":120},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":8,"to":120}]},{"type":"subscribed","channel":"general","caught_up_seq":120},{"type":"silent","barrier":{"channel":"general","caught_up_seq":120}}]}
       ]
     },
     {
       "id": "handoff-with-concurrent-sends-keeps-order-and-omits-nothing",
       "title": "Messages committed after the replay snapshot but before the handoff are delivered after the replay, ascending, with nothing omitted",
       "covers": ["S2","S3"],
-      "rust": {"existing_tests":["server/src/realtime/tests.rs::replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps"],"note":"Needs the replay gate (hold_replay) the in-crate harness already has."},
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps"],"note":"The replay gate makes the race deterministic: all five sends commit after the history snapshot and before release. Exact seq 8..125 and the handoff watermark still check no loss or reorder; sends overlapping release are covered by out_of_order_publication_fills_committed_gaps_without_duplicate_delivery."},
       "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":120}]},
       "steps": [
         {"do":"connect","socket":"s1","as":"alice"},
@@ -47,7 +47,7 @@
         {"do":"await_replay_held","channel":"general"},
         {"do":"post","as":"alice","channel":"general","count":5},
         {"do":"release_replay","channel":"general"},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":8,"to":125}]},{"type":"subscribed","channel":"general","caught_up_seq":125},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":8,"to":125}]},{"type":"subscribed","channel":"general","caught_up_seq":125},{"type":"silent","barrier":{"channel":"general","caught_up_seq":125}}]}
       ]
     },
     {
@@ -61,7 +61,7 @@
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
         {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
         {"do":"post","as":"alice","channel":"general","count":32,"concurrent":true},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":32}]},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":32}]},{"type":"silent","barrier":{"channel":"general","caught_up_seq":32}}]}
       ]
     },
     {
@@ -75,11 +75,11 @@
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":4000000000},
         {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
         {"do":"post","as":"alice","channel":"general","count":2},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[1,2]},{"type":"silent"}]},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[1,2]},{"type":"silent","barrier":{"channel":"general","caught_up_seq":2}}]},
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":4000000000},
         {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":2}]},
         {"do":"post","as":"alice","channel":"general"},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[3]},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[3]},{"type":"silent","barrier":{"channel":"general","caught_up_seq":3}}]}
       ]
     },
     {
@@ -101,7 +101,7 @@
         {"do":"subscribe","socket":"s2","channel":"general","after_seq":12},
         {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[13]},{"type":"subscribed","channel":"general","caught_up_seq":13}]},
         {"do":"subscribe","socket":"s2","channel":"random","after_seq":9},
-        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"random","seqs":[10]},{"type":"subscribed","channel":"random","caught_up_seq":10},{"type":"silent"}]}
+        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"random","seqs":[10]},{"type":"subscribed","channel":"random","caught_up_seq":10},{"type":"silent","barrier":{"channel":"general","caught_up_seq":13}}]}
       ]
     },
     {
@@ -118,11 +118,11 @@
         {"do":"subscribe","socket":"s1","channel":"random","after_seq":0},
         {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"random","caught_up_seq":0}]},
         {"do":"post","as":"alice","channel":"general"},
-        {"do":"expect","socket":"s1","events":[{"type":"silent"}]},
+        {"do":"expect","socket":"s1","events":[{"type":"silent","barrier":{"channel":"random","caught_up_seq":0}}]},
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":3},
         {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[4]},{"type":"subscribed","channel":"general","caught_up_seq":4}]},
         {"do":"post","as":"alice","channel":"general"},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[5]},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[5]},{"type":"silent","barrier":{"channel":"random","caught_up_seq":0}}]}
       ]
     },
     {
@@ -139,7 +139,7 @@
         {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","from_post":"first"}]},
         {"do":"post","as":"alice","channel":"general","key":"k1","expect_status":201},
         {"do":"post","as":"alice","channel":"general"},
-        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[2]},{"type":"silent"}]}
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[2]},{"type":"silent","barrier":{"channel":"general","caught_up_seq":2}}]}
       ]
     }
   ]

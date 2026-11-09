@@ -163,9 +163,50 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => (f.delivery.scenarios[0].steps[1].channel = 'nowhere'))).toContain('undeclared channel nowhere')
     expect(problemsOf((f) => (f.delivery.scenarios[0].steps[0].as = 'mallory'))).toContain('undeclared member mallory')
     expect(problemsOf((f) => (f.delivery.scenarios[0].steps[2].events[0].seqs = [2, 1]))).toContain('strictly ascending')
-    expect(problemsOf((f) => (f.delivery.scenarios[0].steps[2].events.unshift({ type: 'silent' })))).toContain('silent must be the last')
+    expect(problemsOf((f) => (f.delivery.scenarios[0].steps[2].events.unshift({ type: 'silent', barrier: { channel: 'general', caught_up_seq: 2 } })))).toContain('silent must be the last')
     expect(problemsOf((f) => (f.delivery.scenarios[0].steps[2].events[0] = { type: 'message', channel: 'general', from_post: 'p9' }))).toContain('from_post p9')
     expect(problemsOf((f) => f.delivery.scenarios[0].steps.splice(1, 0, { do: 'hold_replay', channel: 'general' }))).toContain('never released')
+  })
+
+  it('rejects empty message seqs, including with from_post, while preserving other empty lists', () => {
+    for (const withPost of [false, true]) {
+      expect(problemsOf((f) => {
+        const d = f.delivery.scenarios[0]
+        d.steps.splice(2, 0, { do: 'post', as: 'alice', channel: 'general', label: 'p1' })
+        d.steps[3].events[0] = { type: 'message', channel: 'general', seqs: [], ...(withPost ? { from_post: 'p1' } : {}) }
+      })).toContain('message needs at least one seq when seqs is specified')
+    }
+    expect(problemsOf((f) => {
+      const d = f.delivery.scenarios[0]
+      d.steps.push(
+        { do: 'post', as: 'alice', channel: 'general', label: 'p1' },
+        { do: 'expect', socket: 's1', events: [{ type: 'message', channel: 'general', from_post: 'p1' }] },
+        { do: 'history', as: 'alice', channel: 'general', query: { after_seq: 3 }, expect: { status: 200, seqs: [], has_more: false } },
+      )
+      f.client.scenarios[0].steps[1].observe.channels.A.cursor = 0
+      f.client.scenarios[0].steps[1].observe.channels.A.visible = []
+      f.client.scenarios[0].steps[1].input.messages = []
+    })).toBe('')
+  })
+
+  it('rejects members on a public Channel, even an empty list; accepts private members', () => {
+    for (const members of [[], ['alice']]) {
+      expect(problemsOf((f) => (f.delivery.scenarios[0].setup.channels[0].members = members))).toContain('public channel general cannot specify members')
+    }
+    expect(problemsOf((f) => {
+      const c = f.delivery.scenarios[0].setup.channels[0]
+      c.visibility = 'private'
+      c.members = []
+    })).toBe('')
+  })
+
+  it('requires a declared concrete Channel and watermark for every silence barrier', () => {
+    const silent = (barrier?: unknown) => (f: any) => f.delivery.scenarios[0].steps[2].events.push({ type: 'silent', ...(barrier === undefined ? {} : { barrier }) })
+    expect(problemsOf(silent())).toContain('missing required property "barrier"')
+    expect(problemsOf(silent({ channel: 'ghost', caught_up_seq: 2 }))).toContain('undeclared channel ghost')
+    expect(problemsOf(silent({ channel: 'general' }))).toContain('missing required property "caught_up_seq"')
+    expect(problemsOf(silent({ channel: { group: 'g', from: 1, to: 2 }, caught_up_seq: 0 }))).toContain('expected string')
+    expect(problemsOf(silent({ channel: 'general', caught_up_seq: 2 }))).toBe('')
   })
 
   it('expands seq lists and rejects descending ones', () => {

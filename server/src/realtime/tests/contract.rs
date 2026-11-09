@@ -1,9 +1,12 @@
 use super::*;
 use serde::Deserialize;
 
+mod assertions;
+mod capacity;
 mod http;
 mod model;
 mod negative;
+use assertions::{Assertion, Failure};
 use model::*;
 
 struct Member {
@@ -34,7 +37,12 @@ impl Drop for Runner {
 }
 
 impl Runner {
-    async fn setup(pool: PgPool, setup: Setup) -> Self {
+    async fn setup(pool: PgPool, setup: Setup) -> Result<Self, Failure> {
+        for channel in &setup.channels {
+            if channel.visibility == "public" && channel.members.is_some() {
+                return Err(Failure::PublicMembers(channel.id.clone()));
+            }
+        }
         let server = Server::start(crate::app(state(&pool))).await;
         let mut runner = Self {
             pool,
@@ -77,7 +85,7 @@ impl Runner {
                 .await;
                 runner.channels.insert(label.clone(), id);
                 if spec.visibility == "private" {
-                    for label in &spec.members {
+                    for label in spec.members.as_deref().unwrap_or_default() {
                         sqlx::query("INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $2, $3)")
                             .bind(organization).bind(id).bind(runner.members[label].id)
                             .execute(&runner.pool).await.unwrap();
@@ -92,7 +100,7 @@ impl Runner {
         for label in setup.unknown_channels {
             runner.channels.insert(label, Uuid::new_v4());
         }
-        runner
+        Ok(runner)
     }
 
     fn post_input(&mut self, key: Option<&str>) -> Value {
@@ -117,19 +125,20 @@ impl Runner {
         record
     }
 
-    async fn run(pool: PgPool, scenario: Scenario) {
+    async fn run(pool: PgPool, scenario: Scenario) -> Result<(), Failure> {
         eprintln!(
             "contract scenario: {} (existing tests retained: {:?})",
             scenario.id, scenario.rust.existing_tests
         );
-        let mut runner = Self::setup(pool, scenario.setup).await;
+        let mut runner = Self::setup(pool, scenario.setup).await?;
         for (index, step) in scenario.steps.into_iter().enumerate() {
             eprintln!("  {} step {}: {step:?}", scenario.id, index + 1);
-            runner.step(step).await;
+            runner.step(index, step).await?;
         }
+        Ok(())
     }
 
-    async fn step(&mut self, step: Step) {
+    async fn step(&mut self, index: usize, step: Step) -> Result<(), Failure> {
         match step {
             Step::Connect {
                 socket,
@@ -217,11 +226,18 @@ impl Runner {
             }
             Step::History(spec) => self.history(spec).await,
             Step::Expect { socket, events } => {
-                for expected in events {
-                    self.expect(&socket, expected).await;
+                for (event, expected) in events.into_iter().enumerate() {
+                    self.expect(&socket, expected).await.map_err(|assertion| {
+                        Failure::Expectation {
+                            step: index,
+                            event,
+                            assertion,
+                        }
+                    })?;
                 }
             }
         }
+        Ok(())
     }
 
     async fn posts(&mut self, spec: PostSpec) {
@@ -318,17 +334,24 @@ impl Runner {
         }
     }
 
-    async fn expect(&mut self, socket: &str, expected: Event) {
+    async fn expect(&mut self, socket: &str, expected: Event) -> Result<(), Assertion> {
         let client = self.sockets.get_mut(socket).unwrap();
         match expected {
-            Event::Silent => silent(client).await,
-            Event::Closed { code } => closed(client, code).await,
+            Event::Silent { barrier } => {
+                assertions::silence(
+                    client,
+                    self.channels[&barrier.channel],
+                    barrier.caught_up_seq,
+                )
+                .await?;
+            }
+            Event::Closed { code } => assertions::closed(client, code).await?,
             Event::Subscribed {
                 channel,
                 caught_up_seq,
             } => {
                 for label in channel.labels() {
-                    ready(client, self.channels[&label], caught_up_seq).await;
+                    assertions::json(client, json!({"type":"subscribed","channel_id":self.channels[&label],"caught_up_seq":caught_up_seq}), Assertion::Subscribed).await?;
                 }
             }
             Event::Error { channel, code } => {
@@ -347,7 +370,7 @@ impl Runner {
                     if let Some(id) = id {
                         expected["channel_id"] = json!(id);
                     }
-                    assert_eq!(event(client).await, expected);
+                    assertions::json(client, expected, Assertion::Error).await?;
                 }
             }
             Event::Message {
@@ -355,6 +378,11 @@ impl Runner {
                 seqs,
                 from_post,
             } => {
+                if seqs.as_ref().is_some_and(Vec::is_empty)
+                    || (seqs.is_none() && from_post.is_none())
+                {
+                    return Err(Assertion::EmptyMessage);
+                }
                 for label in channel.labels() {
                     let channel = self.channels[&label];
                     let records = if let Some(seqs) = &seqs {
@@ -365,19 +393,25 @@ impl Runner {
                     } else {
                         vec![&self.posts[from_post.as_ref().unwrap()]]
                     };
+                    if records.is_empty() {
+                        return Err(Assertion::EmptyMessage);
+                    }
                     for record in records {
                         if let Some(post) = &from_post {
                             assert_eq!(*record, self.posts[post]);
                         }
                         assert_eq!(record["channel_id"], json!(channel));
-                        assert_eq!(
-                            event(client).await,
-                            json!({"type":"message","message":record})
-                        );
+                        assertions::json(
+                            client,
+                            json!({"type":"message","message":record}),
+                            Assertion::Message,
+                        )
+                        .await?;
                     }
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -412,6 +446,6 @@ async fn delivery_contract_scenarios(pool: PgPool) {
         .collect::<Vec<_>>();
     assert!(!scenarios.is_empty(), "no matching delivery scenario");
     for scenario in scenarios {
-        Runner::run(pool.clone(), scenario).await;
+        Runner::run(pool.clone(), scenario).await.unwrap();
     }
 }
