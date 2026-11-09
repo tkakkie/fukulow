@@ -721,7 +721,9 @@
             "format": "uuid"
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "At most 128 Unicode scalar values.",
+            "maxLength": 128
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"
@@ -776,7 +778,9 @@
         ],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "At most 128 Unicode scalar values.",
+            "maxLength": 128
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"

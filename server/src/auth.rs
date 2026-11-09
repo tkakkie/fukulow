@@ -491,10 +491,7 @@ async fn sign_in_with_workers(
         .execute(&state.pool)
         .await?;
     let identity = identity(&state, organization_id, &token_hash).await?;
-    state
-        .session_cleanup
-        .run(&state.pool, organization_id)
-        .await;
+    state.session_cleanup.trigger(&state.pool);
     Ok((
         [
             (header::SET_COOKIE, cookie(&state, &token, SESSION_SECONDS)),
@@ -730,14 +727,8 @@ mod tests {
             }
             let app = app_with_workers(
                 AppState {
-                    pool: pool.clone(),
-                    cookie_secure: true,
-                    setup_token: None,
                     sign_in_throttle: throttle,
-                    message_delivery: Default::default(),
-                    session_changes: Default::default(),
-                    session_cleanup: Default::default(),
-                    ws_allowed_origins: Default::default(),
+                    ..AppState::for_test(pool.clone())
                 },
                 &WORKERS,
             );
@@ -798,14 +789,8 @@ mod tests {
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
         let app = crate::app(AppState {
-            pool,
-            cookie_secure: true,
-            setup_token: None,
             sign_in_throttle: throttle,
-            message_delivery: Default::default(),
-            session_changes: Default::default(),
-            session_cleanup: Default::default(),
-            ws_allowed_origins: Default::default(),
+            ..AppState::for_test(pool)
         });
         let request = Request::post("/api/v1/session")
             .extension(ConnectInfo(
@@ -854,14 +839,8 @@ mod tests {
         for setup_token in [None, Some("test-only-token".to_owned())] {
             let app = app_with_workers(
                 AppState {
-                    pool: pool.clone(),
-                    cookie_secure: true,
                     setup_token: setup_token.clone(),
-                    sign_in_throttle: Default::default(),
-                    message_delivery: Default::default(),
-                    session_changes: Default::default(),
-                    session_cleanup: Default::default(),
-                    ws_allowed_origins: Default::default(),
+                    ..AppState::for_test(pool.clone())
                 },
                 &WORKERS,
             );

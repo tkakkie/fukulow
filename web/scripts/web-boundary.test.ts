@@ -182,3 +182,178 @@ describe('web boundary: file extensions', () => {
     expect(scanWeb(root)).toEqual([])
   })
 })
+
+describe('web boundary: Vite worker imports (#60)', () => {
+  const ts = (src: string, file = 'src/x.ts') => uses(src, file)
+  const sv = (src: string, file = 'src/App.svelte') => uses(`<script lang="ts">${src}</script>`, file)
+  const cases: [string, string, string][] = [
+    ['?worker import', 'import W from "./w.ts?worker"', '?worker'],
+    ['?sharedworker import', 'import W from "./w.ts?sharedworker"', '?sharedworker'],
+    ['?worker&inline', 'import W from "./w.ts?worker&inline"', '?worker'],
+    ['?worker&url', 'import u from "./w.ts?worker&url"', '?worker'],
+    ['query in any order', 'import W from "./w.ts?inline&worker"', '?worker'],
+    ['?sharedworker&inline', 'import W from "./w.ts?sharedworker&inline"', '?sharedworker'],
+    ['side-effect import', 'import "./w.ts?worker"', '?worker'],
+    ['re-export', 'export { default } from "./w.ts?worker"', '?worker'],
+    ['export all', 'export * from "./w.ts?worker"', '?worker'],
+    ['dynamic import', 'const m = import("./w.ts?worker")', '?worker'],
+  ]
+  for (const [name, src, use] of cases) {
+    it(`${name} is flagged in .ts`, () => expect(ts(src)).toEqual([use]))
+    it(`${name} is flagged in .svelte`, () => expect(sv(src)).toEqual([use]))
+    it(`${name} passes in the API layer (.ts)`, () => {
+      expect(ts(src, 'src/api.ts')).toEqual([])
+      expect(ts(src, 'src/realtime.ts')).toEqual([])
+    })
+  }
+  const ordinary = [
+    'import a from "./worker.ts"',
+    'import a from "./w.ts?raw"',
+    'import a from "./w.ts?url&inline"',
+    'import a from "./w.ts?workers"',
+    'import a from "./w.ts?x=worker"',
+    'import a from "./w.ts#worker"',
+    'import("./w.ts")',
+    'export { a } from "./a"',
+    'const s = "./w.ts?worker"',
+  ]
+  for (const src of ordinary) {
+    it(`does not flag \`${src}\``, () => {
+      expect(ts(src)).toEqual([])
+      expect(sv(src)).toEqual([])
+    })
+  }
+})
+
+describe('web boundary: destructuring (#60)', () => {
+  const ts = (src: string, file = 'src/x.ts') => uses(src, file)
+  const sv = (src: string, file = 'src/App.svelte') => uses(`<script lang="ts">${src}</script>`, file)
+  const cases: [string, string, string[]][] = [
+    ['shorthand from window', 'const { fetch } = window', ['fetch']],
+    ['renamed from globalThis', 'const { fetch: f } = globalThis', ['fetch']],
+    ['storage renamed', 'const { localStorage: s } = globalThis', ['localStorage']],
+    ['from self', 'const { sessionStorage } = self', ['sessionStorage']],
+    ['cast source', 'const { fetch: f } = window as any', ['fetch']],
+    ['alias source', 'const w = window; const { fetch: f } = w', ['fetch']],
+    ['string key', 'const { "fetch": f } = window', ['fetch']],
+    ['computed constant key', 'const { ["fe" + "tch"]: f } = window', ['fetch']],
+    ['default value', 'const { fetch: f = undefined } = window', ['fetch']],
+    ['nested', 'const { document: { cookie } } = window', ['document.cookie']],
+    ['document cookie', 'const { cookie } = document', ['document.cookie']],
+    ['navigator sendBeacon', 'const { sendBeacon: b } = navigator', ['navigator.sendBeacon']],
+    ['Worker', 'const { Worker: W } = window', ['Worker']],
+    ['assignment shorthand', 'let fetch; ({ fetch } = window)', ['fetch']],
+    ['assignment renamed', 'let f; ({ fetch: f } = window)', ['fetch']],
+    ['alias via destructuring', 'const { document: d } = window; d.cookie', ['document.cookie']],
+    ['from top', 'const { fetch: f } = top', ['fetch']],
+    ['from parent', 'const { localStorage: s } = parent', ['localStorage']],
+  ]
+  for (const [name, src, use] of cases) {
+    it(`${name} is flagged in .ts`, () => expect(ts(src)).toEqual(use))
+    it(`${name} is flagged in .svelte`, () => expect(sv(src)).toEqual(use))
+  }
+  it('network destructuring passes in the API layer', () => {
+    expect(ts('const { fetch: f } = window; const { sendBeacon } = navigator', 'src/api.ts')).toEqual([])
+  })
+  it('storage destructuring is flagged even in the API layer', () => {
+    expect(ts('const { localStorage: s } = window', 'src/api.ts')).toEqual(['localStorage'])
+    expect(sv('const { localStorage: s } = window')).toEqual(['localStorage'])
+  })
+  it('does not flag destructuring from ordinary objects', () => {
+    const src = [
+      'const obj = { fetch: 1, localStorage: 2, Worker: 3, cookie: 4 }',
+      'const { fetch: a, localStorage: b } = obj',
+      'const { Worker: w, cookie } = { Worker: 1, cookie: 2 }',
+      'const { x: { fetch: nested } } = { x: obj }',
+      'const o = window; const { innerWidth: iw, location: { href } } = o',
+      'const { addEventListener, document: dd } = window',
+      'const { language, userAgent: ua } = navigator',
+      'const { title } = document',
+      'let q; ({ fetch: q } = obj)',
+      'const { [key]: dyn } = window',
+      'const { ...rest } = window',
+    ].join('\n')
+    expect(ts(src, 'src/auth.ts')).toEqual([])
+    expect(sv(src)).toEqual([])
+  })
+  it('does not flag variables that merely share a forbidden name when destructuring a plain object', () => {
+    const src = 'const obj = { fetch: 1, localStorage: 2 }; const { fetch, localStorage } = obj'
+    expect(ts(src, 'src/auth.ts')).toEqual([])
+    expect(sv(src)).toEqual([])
+    const withDefault = 'const obj = { fetch: 1 }; const { fetch = 2, Worker = 3 } = obj'
+    expect(ts(withDefault, 'src/auth.ts')).toEqual([])
+    expect(sv(withDefault)).toEqual([])
+  })
+  it('still flags real uses next to such declarations (negative)', () => {
+    const real = 'const obj = { fetch: 1 }; const { fetch } = obj; fetch("/x")'
+    expect(ts(real, 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv(real)).toEqual(['fetch'])
+    const shorthand = 'const o = { fetch }'
+    expect(ts(shorthand, 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv(shorthand)).toEqual(['fetch'])
+    const dflt = 'const { a = fetch } = {}'
+    expect(ts(dflt, 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv(dflt)).toEqual(['fetch'])
+    expect(ts('const { fetch } = window', 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv('const { fetch } = window')).toEqual(['fetch'])
+    expect(sv('window.fetch("/x")')).toEqual(['fetch'])
+  })
+  it('does not flag parameter or $props destructuring', () => {
+    const src = 'function f({ fetch: g }: { fetch: () => void }) {} const h = ({ Worker: W }: any) => W'
+    expect(ts(src)).toEqual([])
+    expect(sv(src)).toEqual([])
+    expect(uses('<script lang="ts">let { fetch: f }: { fetch: () => void } = $props()</script>')).toEqual([])
+  })
+  it('flags destructuring in a .svelte template handler', () => {
+    expect(uses('<script lang="ts"></script><button onclick={() => { const { fetch: f } = window }}>x</button>')).toEqual(['fetch'])
+  })
+})
+
+describe('web boundary: top and parent roots (#60)', () => {
+  const ts = (src: string, file = 'src/x.ts') => uses(src, file)
+  const sv = (src: string, file = 'src/App.svelte') => uses(`<script lang="ts">${src}</script>`, file)
+  const cases: [string, string, string][] = [
+    ['top.fetch', 'top.fetch("/x")', 'fetch'],
+    ['parent.fetch', 'parent.fetch("/x")', 'fetch'],
+    ['top.localStorage', 'top.localStorage.x = 1', 'localStorage'],
+    ['parent computed', 'parent["fetch"]("/x")', 'fetch'],
+    ['window.parent', 'window.parent.fetch("/x")', 'fetch'],
+    ['window.top storage', 'window.top.sessionStorage.x = 1', 'sessionStorage'],
+    ['globalThis.parent.parent', 'globalThis.parent.parent.fetch("/x")', 'fetch'],
+    ['parent.document.cookie', 'parent.document.cookie', 'document.cookie'],
+    ['alias of top', 'const t = top; t.fetch("/x")', 'fetch'],
+    ['alias of window.parent', 'const p = window.parent; p.indexedDB', 'indexedDB'],
+    ['cast', '(window.parent as any).fetch("/x")', 'fetch'],
+  ]
+  for (const [name, src, use] of cases) {
+    it(`${name} in .ts`, () => expect(ts(src)).toEqual([use]))
+    it(`${name} in .svelte`, () => expect(sv(src)).toEqual([use]))
+  }
+  it('passes network use via top/parent in the API layer', () => {
+    expect(ts('top.fetch("/x"); window.parent.fetch("/y")', 'src/api.ts')).toEqual([])
+  })
+  it('does not flag ordinary uses', () => {
+    const src = 'window.parent.postMessage("x", "*"); top.location.href; const p = window.parent; p.document.title; parent.length; window.top === window'
+    expect(ts(src)).toEqual([])
+    expect(sv(src)).toEqual([])
+  })
+  it('states the known limits: frames[n] is not tracked', () => {
+    expect(ts('frames[0].fetch("/x")')).toEqual([])
+    expect(sv('frames[0].fetch("/x")')).toEqual([])
+  })
+})
+
+describe('web boundary: alias scope limit (#60)', () => {
+  const src = 'const w = window; function f(w: { fetch(u: string): void }) { w.fetch("/x") }'
+  it('pins the false positive: a parameter shadowing an alias name is flagged (.ts)', () => {
+    expect(uses(src, 'src/x.ts')).toEqual(['fetch'])
+  })
+  it('pins the false positive: a parameter shadowing an alias name is flagged (.svelte)', () => {
+    expect(uses(`<script lang="ts">${src}</script>`)).toEqual(['fetch'])
+  })
+  it('does not flag the same parameter without the alias', () => {
+    const plain = 'function f(w: { fetch(u: string): void }) { w.fetch("/x") }'
+    expect(uses(plain, 'src/x.ts')).toEqual([])
+    expect(uses(`<script lang="ts">${plain}</script>`)).toEqual([])
+  })
+})
