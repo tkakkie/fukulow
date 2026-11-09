@@ -24,6 +24,10 @@
 // `import()`/`eval` of non-literal specifiers, `Reflect`; other APIs (e.g. service workers, form posts, <img>/<script>
 // loads). No scope analysis (#60): an alias name counts for the whole file, so a function parameter that shadows an
 // alias name is a false positive (pinned by a test), and one name bound to different tracked objects is checked against all of them.
+// Not handled (#60): object rest (`const { ...rest } = window`), array destructuring, destructuring in for-of heads and in
+// function parameter defaults. Worker import detection (`?worker`) is separate from checking the worker script itself: a
+// worker file is only scanned by the normal per-file scan, so being importable from the API layer does not allow network
+// operations inside the worker.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { parse } from 'svelte/compiler'
@@ -410,6 +414,18 @@ function scanSvelte(src: string, file: string): Violation[] {
       }
       visit(obj, n, 'object')
       if (n.computed) visit(prop, n, 'property')
+      return
+    }
+    // `{ fetch }` / `{ a: fetch }` / `{ fetch = 1 }` in an object pattern declares (or assigns) a variable; only
+    // the default value of such an element is an expression. Object expressions are Property under ObjectExpression.
+    if (n.type === 'Property' && parent?.type === 'ObjectPattern') {
+      if (n.computed) visit(n.key, n, 'key')
+      const value = n.value as Node
+      if (value.type === 'AssignmentPattern') {
+        visit(value.right, value, 'right')
+        const left = value.left as Node
+        if (left.type !== 'Identifier') visit(left, value, 'left')
+      } else if (value.type !== 'Identifier') visit(value, n, 'value')
       return
     }
     if (n.type === 'Identifier') {

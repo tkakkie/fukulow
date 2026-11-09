@@ -276,6 +276,28 @@ describe('web boundary: destructuring (#60)', () => {
     expect(ts(src, 'src/auth.ts')).toEqual([])
     expect(sv(src)).toEqual([])
   })
+  it('does not flag variables that merely share a forbidden name when destructuring a plain object', () => {
+    const src = 'const obj = { fetch: 1, localStorage: 2 }; const { fetch, localStorage } = obj'
+    expect(ts(src, 'src/auth.ts')).toEqual([])
+    expect(sv(src)).toEqual([])
+    const withDefault = 'const obj = { fetch: 1 }; const { fetch = 2, Worker = 3 } = obj'
+    expect(ts(withDefault, 'src/auth.ts')).toEqual([])
+    expect(sv(withDefault)).toEqual([])
+  })
+  it('still flags real uses next to such declarations (negative)', () => {
+    const real = 'const obj = { fetch: 1 }; const { fetch } = obj; fetch("/x")'
+    expect(ts(real, 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv(real)).toEqual(['fetch'])
+    const shorthand = 'const o = { fetch }'
+    expect(ts(shorthand, 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv(shorthand)).toEqual(['fetch'])
+    const dflt = 'const { a = fetch } = {}'
+    expect(ts(dflt, 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv(dflt)).toEqual(['fetch'])
+    expect(ts('const { fetch } = window', 'src/auth.ts')).toEqual(['fetch'])
+    expect(sv('const { fetch } = window')).toEqual(['fetch'])
+    expect(sv('window.fetch("/x")')).toEqual(['fetch'])
+  })
   it('does not flag parameter or $props destructuring', () => {
     const src = 'function f({ fetch: g }: { fetch: () => void }) {} const h = ({ Worker: W }: any) => W'
     expect(ts(src)).toEqual([])
