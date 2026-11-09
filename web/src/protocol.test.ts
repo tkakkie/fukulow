@@ -85,6 +85,24 @@ it('an adjacent live predecessor closes the gap and drains the buffered ack succ
   expect(d.get().channels.A.cursor).toBe(102)
 })
 
+it('a live predecessor before the ack leaves the cursor at the live seq, never past a gap, and reconnect replay converges', () => {
+  const d = boot()
+  const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+  d.event(101)
+  d.feed({ type: 'ack', request: send, message: { ...record(102), sender: 'me', client_message_id: 'c1' } })
+  expect(d.get().channels.A.cursor).toBe(101)
+  expect(d.get().channels.A.messages.map(m => m.seq)).toEqual([100, 101, 102])
+  const wait = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1006 }), 'wait')
+  const connection = id(d.feed({ type: 'timer_elapsed', id: wait }), 'connect')
+  expect(d.feed({ type: 'connection_ready', connection })).toContainEqual(
+    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 101 }),
+  )
+  d.feed({ type: 'event', connection, event: { type: 'message', message: { ...record(102), sender: 'me', client_message_id: 'c1' } } })
+  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 102 } })
+  expect(d.get().channels.A.cursor).toBe(102)
+  expect(d.get().channels.A.messages.map(m => m.seq)).toEqual([100, 101, 102])
+})
+
 it.each([101, 102])('a gap above ack seq %s is detected and filled from the unchanged cursor', ackSeq => {
   const d = boot()
   const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
