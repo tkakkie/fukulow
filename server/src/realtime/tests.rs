@@ -810,3 +810,5 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
     assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
     silent(&mut socket).await;
 }
+
+mod contract;
