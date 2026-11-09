@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ChannelVisibility } from './api'
+  import { channelNameTooLong } from './channels'
   let { oncreate }: { oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null> } = $props()
 
   let name = $state('')
@@ -8,6 +9,11 @@
 
   async function submit(e: Event) {
     e.preventDefault()
+    const tooLong = channelNameTooLong(name)
+    if (tooLong) {
+      error = tooLong
+      return
+    }
     busy = true
     const err = await oncreate(name, 'public')
     busy = false
@@ -17,7 +23,7 @@
 </script>
 
 <form onsubmit={submit}>
-  <label>チャンネル名 <input name="channel_name" required maxlength="80" bind:value={name} /></label>
+  <label>チャンネル名 <input name="channel_name" required bind:value={name} /></label>
   {#if error}<p role="alert">{error}</p>{/if}
   <button type="submit" disabled={busy || !name.trim()}>チャンネルを作成</button>
 </form>

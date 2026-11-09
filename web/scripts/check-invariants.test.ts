@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, type Known } from './check-invariants.ts'
+import { checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,12 +27,12 @@ fn e() {}
 fn f() {}
 `
     expect(rustTests(src)).toEqual([
-      { name: 'a', ignored: false, conditional: false },
-      { name: 'b', ignored: true, conditional: false },
-      { name: 'c', ignored: true, conditional: false },
-      { name: 'd', ignored: false, conditional: false },
-      { name: 'e', ignored: false, conditional: true },
-      { name: 'f', ignored: false, conditional: true },
+      { name: 'a', ignored: false, conditional: false, inline: [] },
+      { name: 'b', ignored: true, conditional: false, inline: [] },
+      { name: 'c', ignored: true, conditional: false, inline: [] },
+      { name: 'd', ignored: false, conditional: false, inline: [] },
+      { name: 'e', ignored: false, conditional: true, inline: [] },
+      { name: 'f', ignored: false, conditional: true, inline: [] },
     ])
   })
 
@@ -179,7 +179,164 @@ describe('reference checking against a fixture repository', () => {
 })
 
 describe('the real docs/invariants.md', () => {
-  it('names only existing, executable tests', () => {
+  it('names only existing, executable tests (static scan; the CLI also reconciles with cargo)', () => {
     expect(checkInvariants(resolve(import.meta.dirname, '../..'))).toEqual([])
+  })
+})
+
+describe('module scan', () => {
+  it('finds file mods and inline mod bodies, ignoring comments and strings', () => {
+    const src = `
+// mod commented;
+const S: &str = "mod in_string;";
+pub mod a;
+pub(crate) mod b;
+#[cfg(test)]
+mod tests {
+    mod deep;
+    #[test]
+    fn t() {}
+}
+#[cfg(feature = "x")]
+mod gated;
+`
+    const scan = scanModules(blankRustCommentsAndStrings(src))
+    expect(scan.decls).toEqual([
+      { name: 'a', inline: [], conditional: false },
+      { name: 'b', inline: [], conditional: false },
+      { name: 'deep', inline: ['tests'], conditional: false },
+      { name: 'gated', inline: [], conditional: true },
+    ])
+    expect(scan.inlines.map((i) => i.path)).toEqual([['tests']])
+    expect(scan.balanced).toBe(true)
+    expect(rustTests(src)).toEqual([{ name: 't', ignored: false, conditional: false, inline: ['tests'] }])
+  })
+
+  it('marks tests inside a conditionally compiled inline mod as conditional, and flags unscannable constructs', () => {
+    expect(rustTests('#[cfg(feature = "x")]\nmod m {\n#[test]\nfn t() {}\n}\n')[0]).toMatchObject({ conditional: true, inline: ['m'] })
+    expect(scanModules('#[path = "x.rs"]\nmod a;').opaque).toContain('#[path]')
+    expect(scanModules('include!("x.rs");').opaque).toContain('include!')
+    expect(scanModules('macro_rules! m { () => {} }').opaque).toContain('macro_rules!')
+    expect(scanModules('fn f() { }}').balanced).toBe(false)
+    expect(scanModules('fn f() {').balanced).toBe(false)
+  })
+})
+
+describe('reconciliation with the cargo test list', () => {
+  const makeRoot = (files: Record<string, string>) => {
+    const root = mkdtempSync(join(tmpdir(), 'inv-list-'))
+    mkdirSync(join(root, 'web'))
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(join(root, path, '..'), { recursive: true })
+      writeFileSync(join(root, path), text)
+    }
+    return root
+  }
+  const t = '#[test]\nfn real() {}\n'
+  const lib = (name: string) => ({ binary: 'src/lib.rs', name })
+  const checker = (root: string, listed: ListedTest[]) => {
+    const known = reconcileWithCargoList(collectKnownTests(root), listed)
+    return (ref: string) => checkRows(parseInvariants(`| Rule | Test |\n|---|---|\n| r | \`${ref}\` |`).rows, known)
+  }
+
+  const root = makeRoot({
+    'server/Cargo.toml': '[package]\nname = "x"\n',
+    'server/src/lib.rs': 'pub mod channels;\npub mod auth;\n#[cfg(test)]\nmod tests {\n#[test]\nfn real() {}\n}\n',
+    'server/src/main.rs': '#[cfg(test)]\nmod tests {\n#[test]\nfn real() {}\n}\n',
+    'server/src/channels.rs': '#[cfg(test)]\nmod tests;\n',
+    'server/src/channels/tests.rs': 'mod names;\n#[test]\nfn real() {}\n',
+    'server/src/channels/tests/names.rs': t,
+    'server/src/auth.rs': 'mod throttle;\nmod sub;\n',
+    'server/src/auth/throttle.rs': '#[cfg(test)]\nmod tests {\n#[test]\nfn real() {}\n}\n',
+    'server/src/auth/sub/mod.rs': t,
+    'server/src/unused_guard.rs': t,
+    'server/src/orphan/mod.rs': t,
+    'server/tests/auth.rs': t,
+    'server/tests/helpers/mod.rs': t,
+  })
+  const listed = [
+    lib('channels::tests::names::real'),
+    lib('channels::tests::real'),
+    lib('auth::throttle::tests::real'),
+    lib('auth::sub::real'),
+    lib('tests::real'),
+    { binary: 'src/main.rs', name: 'tests::real' },
+    { binary: 'tests/auth.rs', name: 'real' },
+  ]
+  const check = checker(root, listed)
+
+  it('parses one binary stdout and ignores everything else', () => {
+    const out = ['', 'a::real: test', 'b: benchmark', 'noise', '2 tests, 0 benchmarks'].join('\r\n')
+    expect(parseTestList(out, 'src/lib.rs')).toEqual([{ binary: 'src/lib.rs', name: 'a::real' }])
+  })
+
+  it('passes real tests: integration binary, nested module files, mod.rs, inline mods (positive)', () => {
+    expect(check('server/tests/auth.rs::real')).toEqual([])
+    expect(check('server/src/channels/tests/names.rs::real')).toEqual([])
+    expect(check('server/src/channels/tests.rs::real')).toEqual([])
+    expect(check('server/src/auth/throttle.rs::real')).toEqual([])
+    expect(check('server/src/auth/sub/mod.rs::real')).toEqual([])
+    expect(check('server/src/lib.rs::real')).toEqual([])
+    expect(check('server/src/main.rs::real')).toEqual([])
+  })
+
+  it('fails a referenced test in a file outside the module tree (negative)', () => {
+    expect(check('server/src/unused_guard.rs::real')[0]).toContain('module tree')
+    expect(check('server/src/orphan/mod.rs::real')[0]).toContain('module tree')
+  })
+
+  it('refuses an unreferenced file whose test name collides with an inline mod test in lib.rs (negative)', () => {
+    const r = makeRoot({
+      'server/src/lib.rs': '#[cfg(test)]\nmod unused_guard {\n#[test]\nfn real() {}\n}\n',
+      'server/src/unused_guard.rs': t,
+    })
+    const c = checker(r, [lib('unused_guard::real')])
+    expect(c('server/src/lib.rs::real')).toEqual([])
+    const errors = c('server/src/unused_guard.rs::real')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('not in the Rust module tree')
+  })
+
+  it('matches exact names: a child module test does not satisfy its parent file, and the wrong binary does not count', () => {
+    const r = makeRoot({
+      'server/src/lib.rs': 'mod a;\n',
+      'server/src/a.rs': '#[cfg(test)]\nmod b;\n#[test]\nfn real() {}\n',
+      'server/src/a/b.rs': t,
+      'server/src/main.rs': '',
+    })
+    const onlyChild = checker(r, [lib('a::b::real')])
+    expect(onlyChild('server/src/a/b.rs::real')).toEqual([])
+    expect(onlyChild('server/src/a.rs::real')[0]).toContain('cargo test -- --list')
+    const wrongBinary = checker(r, [{ binary: 'src/main.rs', name: 'a::real' }, lib('a::b::real')])
+    expect(wrongBinary('server/src/a.rs::real')[0]).toContain('src/lib.rs')
+  })
+
+  it('refuses ambiguous module trees (fail closed)', () => {
+    const cases: [string, Record<string, string>, string, string][] = [
+      ['conditional mod declaration', { 'server/src/lib.rs': '#[cfg(feature = "x")]\nmod a;\n', 'server/src/a.rs': t }, 'server/src/a.rs', 'a::real'],
+      ['declared twice', { 'server/src/lib.rs': 'mod a;\nmod a;\n', 'server/src/a.rs': t }, 'server/src/a.rs', 'a::real'],
+      ['x.rs and x/mod.rs both exist', { 'server/src/lib.rs': 'mod a;\n', 'server/src/a.rs': t, 'server/src/a/mod.rs': t }, 'server/src/a.rs', 'a::real'],
+      ['#[path]', { 'server/src/lib.rs': '#[path = "elsewhere.rs"]\nmod a;\nmod b;\n', 'server/src/b.rs': t }, 'server/src/b.rs', 'b::real'],
+      ['include!', { 'server/src/lib.rs': 'include!("gen.rs");\nmod b;\n', 'server/src/b.rs': t }, 'server/src/b.rs', 'b::real'],
+      ['unbalanced braces', { 'server/src/lib.rs': 'mod b;\nfn f() {\n', 'server/src/b.rs': t }, 'server/src/b.rs', 'b::real'],
+    ]
+    for (const [label, files, file, listedName] of cases) {
+      const errors = checker(makeRoot(files), [lib(listedName)])(`${file}::real`)
+      expect(errors, label).toHaveLength(1)
+    }
+  })
+
+  it('fails an unmappable path', () => {
+    expect(check('server/tests/helpers/mod.rs::real')[0]).toContain('cannot be mapped')
+  })
+
+  it('fails when cargo is unavailable instead of skipping', () => {
+    const saved = process.env.PATH
+    process.env.PATH = ''
+    try {
+      expect(() => cargoList(root)).toThrow(/cargo is required/)
+    } finally {
+      process.env.PATH = saved
+    }
   })
 })

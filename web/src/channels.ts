@@ -63,3 +63,13 @@ export function createChannels(api: ChannelsApi = defaultApi) {
     },
   }
 }
+
+/** Max Channel name length in Unicode scalar values (API rule; a test compares it to openapi.json). */
+export const CHANNEL_NAME_MAX = 128
+
+/** Japanese message when the name is too long, else null. Counts scalar values (not UTF-16 units), like the server's `chars().count()`. */
+export function channelNameTooLong(name: string): string | null {
+  return [...name].length > CHANNEL_NAME_MAX
+    ? `チャンネル名は${CHANNEL_NAME_MAX}文字以内にしてください。`
+    : null
+}
