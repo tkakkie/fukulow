@@ -195,7 +195,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       state.connection = null; state.connected = false
       for (const c of Object.values(state.channels)) c.subscription = undefined
       if (input.code === 4001) { stop(true); break }
-      // One immediate overflow retry; opening a socket alone is not progress.
+      // One immediate overflow retry per session; overflows is intentionally never reset within a session.
       if (input.code === 4008 && state.overflows++ === 0) connect()
       else state.reconnectWait = wait('reconnect_backoff', undefined, state.reconnectAttempt++)
       break
@@ -263,6 +263,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
           history(id, 'latest')
         } else {
           c.subscription.confirmed = true; c.subscription.watermark = e.caught_up_seq
+          // Only a confirmed subscription resets backoff; with no watched Channel it may stay at the cap.
           c.state = 'ready'; c.historyError = false; state.reconnectAttempt = 0
           reconcile(id)
         }
@@ -313,7 +314,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       else {
         if (input.status === 401) { stop(true); break }
         const p = c.pending.find(p => p.clientMessageId === r.clientMessageId && p.request === input.request)
-        if (p) p.state = typeof input.status === 'number' && input.status >= 400 && input.status < 500 ? 'failed' : 'unknown'
+        if (p) p.state = typeof input.status === 'number' && [400, 403, 404, 409, 413, 415].includes(input.status) ? 'failed' : 'unknown'
       }
       break
     }

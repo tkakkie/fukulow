@@ -57,9 +57,13 @@ it('controller fences prior Organization/session HTTP, socket and timer work inc
   const history = (await client.feed({ type: 'refresh', channel: 'A' })).find(e => e.type === 'fetch_history')!
   await client.sync.replaceSession('new-member')
   await flush()
+  expect(send.completed).toBe(false)
+  expect(history.completed).toBe(false)
   old.onClose(4001); old.onReady(); old.onEvent({ type: 'message', message: record(999) })
   await client.feed({ type: 'send_failed', respond_to: send, status: 401 })
   await client.feed({ type: 'history_result', respond_to: history, messages: [record(999)], has_more: false })
+  expect(send.completed).toBe(true)
+  expect(history.completed).toBe(true)
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
   expect(client.sync.get().selfId).toBe('new-member')
   expect(client.sync.get().channels).toEqual({})
@@ -77,12 +81,30 @@ it('request timeout becomes unknown and same-key retry settles; late completion 
   const retry = (await client.feed({ type: 'user_retry', client_message_id: 'c1' })).find(e => e.type === 'send')!
   expect(retry.client_message_id).toBe(first.client_message_id)
   await client.feed({ type: 'ack', respond_to: retry, message: { ...record(101), sender: 'me', client_message_id: 'c1' } })
+  expect(first.completed).toBe(false)
   await client.feed({ type: 'send_failed', respond_to: first, status: 413 })
+  expect(first.completed).toBe(true)
   expect(client.sync.get().channels.A.pending).toEqual([])
   expect(client.sync.get().channels.A.messages.at(-1)?.seq).toBe(101)
   await client.sync.close()
   expect(vi.getTimerCount()).toBe(0)
 })
+
+it.each([400, 403, 404, 409, 413, 415, 402, 408, 422, 429, 499, 500])(
+  'only C6 definite refusals prevent delegate resend after HTTP %s', async status => {
+    const client = controllerClient()
+    await ready(client)
+    const t = client.sync.getTimeline('A')
+    const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })).find(e => e.type === 'send')!
+    await client.feed({ type: 'send_failed', respond_to: send, status })
+    const retryable = ![400, 403, 404, 409, 413, 415].includes(status)
+    expect(t.get().pending).toMatchObject([{ clientMessageId: 'c1', status: 'failed', retryable }])
+    const effects = await client.feed({ type: 'user_retry', client_message_id: 'c1' })
+    expect(effects.filter(e => e.type === 'send')).toHaveLength(retryable ? 1 : 0)
+    if (retryable) expect(effects.find(e => e.type === 'send')?.client_message_id).toBe(send.client_message_id)
+    await client.sync.close()
+  },
+)
 
 it('scheduled grace and fill backoff execute with fake time, without overlap or tight retries', async () => {
   const client = controllerClient({ graceMs: 40, delay: n => 80 * (n + 1) })
@@ -180,7 +202,7 @@ it('an explicit retry after a terminal refusal fetches and subscribes again thro
   expect(t.get().status).toBe('error')
   const history = (await client.feed({ type: 'refresh', channel: 'A' })).find(e => e.type === 'fetch_history')!
   await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
-  expect(t.get().status).toBe('loading')
+  expect(t.get().status).toBe('ready')
   await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(t.get().status).toBe('ready')
   await client.sync.close()

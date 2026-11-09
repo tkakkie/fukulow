@@ -1,6 +1,16 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import ts from 'typescript'
 import { checkProtocolImports } from './protocol-imports.ts'
+
+const generatedTypes = [{ path: './api-schema', typeOnly: true }]
+function imports(source: string) {
+  return ts.createSourceFile('protocol.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    .statements.filter(ts.isImportDeclaration).map(node => ({
+      path: ts.isStringLiteralLike(node.moduleSpecifier) ? node.moduleSpecifier.text : null,
+      typeOnly: node.importClause?.isTypeOnly === true,
+    }))
+}
 
 describe('protocol direct-import scan (not transitive purity)', () => {
   it('rejects svelte and every svelte subpath with negative controls', () => {
@@ -18,7 +28,23 @@ describe('protocol direct-import scan (not transitive purity)', () => {
   it('the production protocol passes the direct-import scan and imports generated types only', () => {
     const source = readFileSync(new URL('../src/protocol.ts', import.meta.url), 'utf8')
     expect(checkProtocolImports(source)).toEqual([])
-    expect(source.match(/^import .* from .+$/gm)).toEqual(["import type { components, ServerEvent } from './api-schema'"])
+    expect(imports(source)).toEqual(generatedTypes)
     expect(source).not.toMatch(/\b(?:Date|performance|crypto|fetch|WebSocket|setTimeout|setInterval)\b|Math\.random/)
+  })
+  it('generated-types-only assertion rejects additional multiline imports with negative controls', () => {
+    const allowed = `import type {
+      components, ServerEvent,
+    } from './api-schema'`
+    expect(imports(allowed)).toEqual(generatedTypes)
+    for (const extra of [`import {
+      step,
+    } from './other'`, `import type {
+      Other,
+    } from './other'`, `import './side-effect'`]) {
+      expect(imports(`${allowed}\n${extra}`)).not.toEqual(generatedTypes)
+    }
+    expect(imports(`import {
+      components,
+    } from './api-schema'`)).not.toEqual(generatedTypes)
   })
 })

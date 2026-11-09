@@ -12,16 +12,23 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
   const sockets: (RealtimeHandlers & { closed: boolean; connection: Connection })[] = []
   const allEffects: FixtureEffect[] = []
   const emit = (e: FixtureEffect) => { emitted.push(e); allEffects.push(e) }
+  const request = <T>(effect: FixtureEffect): Promise<Result<T>> => {
+    effect.completed = false
+    return new Promise<Result<T>>(resolve => {
+      effect.resolve = (result: Result<T>) => { effect.completed = true; resolve(result) }
+      emit(effect)
+    })
+  }
   const sync = createSync({
     selfId: 'me', newId: () => nextId,
     api: {
       listMessages(channel, query) {
-        return new Promise(resolve => emit({ type: 'fetch_history', channel,
+        return request({ type: 'fetch_history', channel,
           page: query?.after_seq !== undefined ? 'after' : query?.before_seq !== undefined ? 'before' : 'latest',
-          seq: query?.after_seq ?? query?.before_seq, resolve }))
+          seq: query?.after_seq ?? query?.before_seq })
       },
       sendMessage(channel, body) {
-        return new Promise(resolve => emit({ type: 'send', channel, ...body, resolve }))
+        return request({ type: 'send', channel, ...body })
       },
     },
     connect(handlers) {

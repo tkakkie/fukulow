@@ -51,6 +51,7 @@ export function createSync(options: SyncOptions) {
   }
 
   // A transport that never answers is an unknown outcome, rather than a permanently sending entry.
+  // Deadlines/cancellation fence results but do not abort HTTP; a retry may overlap the underlying request.
   async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T>> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
@@ -145,7 +146,8 @@ export function createSync(options: SyncOptions) {
         last = state
         const c = state.channels[channel]
         snapshot = {
-          status: c?.state === 'unavailable' || c?.historyError ? 'error' : c?.state === 'ready' ? 'ready' : 'loading',
+          // Content visibility depends on the base; subscription confirmation drives the separate live indicator.
+          status: c?.state === 'unavailable' || c?.historyError ? 'error' : c && c.cursor !== null ? 'ready' : 'loading',
           messages: c?.messages ?? [],
           pending: (c?.pending ?? []).map(p => ({ clientMessageId: p.clientMessageId, body: p.body,
             status: p.state === 'sending' ? 'sending' : 'failed', retryable: p.state !== 'failed' })),
