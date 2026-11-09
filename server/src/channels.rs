@@ -56,7 +56,7 @@ pub async fn list_channels(
              SELECT 1 FROM channel_members cm \
              WHERE cm.organization_id = c.organization_id \
                AND cm.channel_id = c.id AND cm.member_id = $2\
-         )) ORDER BY c.name, c.id",
+         )) ORDER BY lower(c.name COLLATE \"C\"), c.id",
     )
     .bind(auth.identity.organization.organization_id)
     .bind(auth.identity.member.id)
@@ -69,12 +69,14 @@ pub async fn list_channels(
         .into_response())
 }
 
-/// Create a public or private channel in the caller's organization.
+/// Create a public or private channel with an organization-unique name.
+/// Names are compared with ASCII case folding; non-ASCII characters are unchanged.
 /// A private channel includes its creator as a member in the same transaction.
 #[utoipa::path(post, path = "/api/v1/channels", request_body = CreateChannelRequest,
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, body = Channel),
         (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
+        (status = 409, description = "Channel name already exists", body = ErrorBody),
         (status = 413, body = ErrorBody), (status = 415, body = ErrorBody)))]
 pub async fn create_channel(
     State(state): State<AppState>,
@@ -83,7 +85,7 @@ pub async fn create_channel(
 ) -> Result<Response, ApiError> {
     let organization_id = auth.identity.organization.organization_id;
     let mut tx = state.pool.begin().await?;
-    let channel = sqlx::query_as::<_, Channel>(
+    let channel = match sqlx::query_as::<_, Channel>(
         "INSERT INTO channels (organization_id, id, name, visibility) \
          VALUES ($1, $2, $3, $4) RETURNING id, name, visibility",
     )
@@ -92,7 +94,27 @@ pub async fn create_channel(
     .bind(input.name)
     .bind(input.visibility)
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    {
+        Ok(channel) => channel,
+        Err(error)
+            if error.as_database_error().is_some_and(|error| {
+                error.is_unique_violation()
+                    && error.constraint() == Some("channels_organization_name_unique")
+            }) =>
+        {
+            tx.rollback().await?;
+            return Ok((
+                StatusCode::CONFLICT,
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(ErrorBody {
+                    error: "channel name already exists".into(),
+                }),
+            )
+                .into_response());
+        }
+        Err(error) => return Err(error.into()),
+    };
     if matches!(channel.visibility, ChannelVisibility::Private) {
         sqlx::query(
             "INSERT INTO channel_members (organization_id, channel_id, member_id) \
