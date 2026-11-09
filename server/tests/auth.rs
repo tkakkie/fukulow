@@ -68,6 +68,126 @@ async fn sign_in(app: &Router, organization_id: &str, password: &str) -> Respons
     request(app, "POST", "/api/v1/session", json!({"organization_id": organization_id, "email": "owner@example.com", "password": password}), &[]).await
 }
 
+async fn assert_internal_error(response: Response) {
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    // Exact equality excludes SQL, table/column names, credentials and worker details.
+    assert_eq!(body(response).await, json!({"error": "internal error"}));
+}
+
+#[sqlx::test]
+async fn auth_extractor_database_failures_return_generic_500_on_all_protected_endpoints(
+    pool: PgPool,
+) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let session = body(
+        sign_in(
+            &app,
+            identity["organization"]["organization_id"]
+                .as_str()
+                .unwrap(),
+            PASSWORD,
+        )
+        .await,
+    )
+    .await;
+    let authorization = format!("Bearer {}", session["token"].as_str().unwrap());
+    let headers = [
+        ("authorization", authorization.as_str()),
+        ("host", "chat.example"),
+        ("origin", "https://chat.example"),
+    ];
+    assert_eq!(
+        request(&app, "GET", "/api/v1/me", Value::Null, &headers)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // Break identity resolution after establishing a valid session, without changing handlers.
+    sqlx::query("ALTER TABLE users RENAME COLUMN role TO injected_unavailable_role")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let messages = format!("/api/v1/channels/{}/messages", Uuid::new_v4());
+    for (method, path, input) in [
+        ("GET", "/api/v1/me", Value::Null),
+        ("DELETE", "/api/v1/session", Value::Null),
+        ("GET", "/api/v1/channels", Value::Null),
+        (
+            "POST",
+            "/api/v1/channels",
+            json!({"name": "Channel", "visibility": "public"}),
+        ),
+        ("GET", messages.as_str(), Value::Null),
+        (
+            "POST",
+            messages.as_str(),
+            json!({"client_message_id": Uuid::new_v4(), "body": "Message"}),
+        ),
+        ("GET", "/api/v1/ws", Value::Null),
+    ] {
+        assert_internal_error(request(&app, method, path, input, &headers).await).await;
+    }
+    assert_eq!(
+        request(&app, "GET", "/api/v1/me", Value::Null, &[])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn public_endpoint_database_failures_return_generic_500(pool: PgPool) {
+    let app = router(&pool);
+    sqlx::query("ALTER TABLE organizations RENAME TO injected_unavailable_organizations")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (method, path, input) in [
+        ("GET", "/api/v1/setup", Value::Null),
+        ("POST", "/api/v1/setup", setup_input()),
+        (
+            "POST",
+            "/api/v1/session",
+            json!({"email": "owner@example.com", "password": PASSWORD}),
+        ),
+    ] {
+        assert_internal_error(request(&app, method, path, input, &[]).await).await;
+    }
+}
+
+#[sqlx::test]
+async fn sign_out_database_failure_returns_generic_500_and_preserves_session(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let session = body(
+        sign_in(
+            &app,
+            identity["organization"]["organization_id"]
+                .as_str()
+                .unwrap(),
+            PASSWORD,
+        )
+        .await,
+    )
+    .await;
+    let authorization = format!("Bearer {}", session["token"].as_str().unwrap());
+    let headers = [("authorization", authorization.as_str())];
+    sqlx::raw_sql("CREATE FUNCTION fail_session_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected session deletion failure'; END $$; CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION fail_session_delete();")
+        .execute(&pool).await.unwrap();
+    assert_internal_error(request(&app, "DELETE", "/api/v1/session", Value::Null, &headers).await)
+        .await;
+    assert_eq!(
+        request(&app, "GET", "/api/v1/me", Value::Null, &headers)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
 // Reusable fixture for later tenant denial tests. The production setup API is
 // deliberately single-use; insert the second organization only through test SQL.
 async fn two_organizations(pool: &PgPool, app: &Router) -> (Value, Uuid) {

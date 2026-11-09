@@ -425,6 +425,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Database failure while resolving the session or listing visible Channels */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     create_channel: {
@@ -494,6 +503,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Database failure while resolving the session or creating the Channel and its membership */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     list_messages: {
@@ -544,6 +562,15 @@ export interface operations {
             };
             /** @description Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure while resolving the session, checking Channel visibility, or listing Messages */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -632,6 +659,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     health: {
@@ -674,6 +710,15 @@ export interface operations {
             };
             /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure while resolving the session identity */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -754,6 +799,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Database, password verification, or credential generation failure while signing in */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     sign_out: {
@@ -775,6 +829,15 @@ export interface operations {
             };
             /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or worker failure while resolving or revoking the session */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -882,6 +945,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Database or password hashing failure while creating the first Organization and Owner */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     upgrade: {
@@ -900,6 +972,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Invalid WebSocket upgrade request after successful authentication and Origin validation */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade */
             401: {
                 headers: {
@@ -911,6 +992,15 @@ export interface operations {
             };
             /** @description Cookie Origin missing or not allowed */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure while resolving the session before WebSocket upgrade */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

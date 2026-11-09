@@ -306,6 +306,46 @@ async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_token
 }
 
 #[sqlx::test]
+async fn invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_returns_400(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let mut request = format!("ws://{}/api/v1/ws", f.server.address)
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::COOKIE,
+        format!("fukulow_session={}", f.token).parse().unwrap(),
+    );
+    request.headers_mut().insert(
+        header::ORIGIN,
+        format!("http://{}", f.server.address).parse().unwrap(),
+    );
+    // Keep the client's required headers present so the malformed handshake reaches the server.
+    request
+        .headers_mut()
+        .insert(header::SEC_WEBSOCKET_VERSION, "12".parse().unwrap());
+    let Err(tungstenite::Error::Http(response)) = tokio_tungstenite::connect_async(request).await
+    else {
+        panic!("expected HTTP 400 for invalid upgrade");
+    };
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let body: Value = serde_json::from_slice(response.body().as_ref().unwrap()).unwrap();
+    assert_eq!(body, json!({"error": "invalid websocket upgrade"}));
+    // The same credential and Origin upgrade successfully with valid headers.
+    f.server
+        .handshake(
+            None,
+            Some(&f.token),
+            Some(&format!("http://{}", f.server.address)),
+        )
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
 async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(pool: PgPool) {
     let f = fixture(&pool).await;
     rejected(f.server.handshake(None, None, None).await, 401);

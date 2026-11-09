@@ -129,6 +129,23 @@ async fn channels_require_authentication_without_database_access() {
     }
 }
 
+#[sqlx::test]
+async fn channel_list_database_failure_returns_generic_500(pool: PgPool) {
+    let app = router(&pool);
+    let organization_id = organization(&pool).await;
+    let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
+    assert_eq!(list(&app, &token).await, json!({"channels": []}));
+    sqlx::query("ALTER TABLE channels RENAME COLUMN name TO injected_unavailable_name")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = request(&app, "GET", "/api/v1/channels", &token, Value::Null).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(body(response).await, json!({"error": "internal error"}));
+}
+
 #[tokio::test]
 async fn channel_json_rejections_use_error_body() {
     for (content_type, input, status) in [
