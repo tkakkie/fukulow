@@ -292,14 +292,15 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
       if (Array.isArray(requirement.any_of) && alternatives.some((p) => p.times !== undefined)) {
         errors.push(`${at}.effects.required[${r}]: times is not allowed inside any_of (count the alternatives separately)`)
       }
-      for (const p of alternatives) {
-        if (typeof p.as !== 'string') continue
-        if (declared.has(p.as)) errors.push(`${at}.effects.required: duplicate label ${p.as}`)
-        declared.add(p.as)
+      // Alternatives of one requirement may share a label (only one binds); duplicates are checked across requirements.
+      const own = new Set(alternatives.flatMap((p) => (typeof p.as === 'string' ? [p.as] : [])))
+      for (const label of own) {
+        if (declared.has(label)) errors.push(`${at}.effects.required: duplicate label ${label}`)
+        declared.add(label)
       }
       // Only the matched alternative binds at run time: a label is usable when every alternative binds it to the same effect type.
       const first = alternatives[0]
-      if (typeof first.as === 'string' && alternatives.every((p) => p.as === first.as && p.type === first.type)) newlyBound.set(first.as, first.type as string)
+      if (typeof first.as === 'string' && first.times !== 0 && alternatives.every((p) => p.as === first.as && p.type === first.type)) newlyBound.set(first.as, first.type as string)
     }
     for (const [label, effectType] of newlyBound) labels.set(label, effectType)
     const channels = ((step.observe ?? {}) as { channels?: Record<string, Record<string, Json>> }).channels ?? {}

@@ -124,7 +124,11 @@ describe('realtime fixtures: validation', () => {
     }
     expect(problemsOf(withAnyOf([{ type: 'send', as: 'x' }, { type: 'wait' }]))).toContain('respond_to x is not bound')
     expect(problemsOf(withAnyOf([{ type: 'send', as: 'x' }, { type: 'wait', as: 'x' }]))).toContain('respond_to x is not bound')
-    expect(problemsOf(withAnyOf([{ type: 'send', as: 'x', channel: 'A' }, { type: 'send', as: 'x', channel: 'B' }]))).not.toContain('not bound')
+    expect(problemsOf(withAnyOf([{ type: 'send', as: 'x', channel: 'A' }, { type: 'send', as: 'x', channel: 'B' }]))).toBe('')
+    expect(problemsOf((f: any) => {
+      f.client.scenarios[0].steps[0].effects.required = [{ type: 'send', times: 0, as: 'x' }]
+      respond(f)
+    })).toContain('respond_to x is not bound')
   })
 
   it('rejects times inside any_of and a range for the singular message', () => {
