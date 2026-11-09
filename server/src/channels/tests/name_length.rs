@@ -60,6 +60,7 @@ async fn oversized_channel_name_is_rejected_before_opening_transaction(pool: PgP
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
+        session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     };
     let (mut parts, _) = Request::post("/api/v1/channels")
