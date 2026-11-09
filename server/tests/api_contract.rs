@@ -15,6 +15,11 @@ use tower::ServiceExt;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
+const HTTP_METHODS: [&str; 8] = [
+    "get", "put", "post", "delete", "options", "head", "patch", "trace",
+];
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 41;
+
 #[test]
 fn generated_openapi_matches_committed_contract() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
@@ -30,12 +35,15 @@ fn check_response_descriptions(responses: &Value, location: &str) -> Result<(), 
         if status.starts_with("x-") || response.get("$ref").is_some() {
             continue;
         }
+        // Non-blank descriptions are a fukulow quality rule, not an OpenAPI 3.1 rule.
         if response
             .get("description")
             .and_then(Value::as_str)
-            .is_none()
+            .is_none_or(|description| description.trim().is_empty())
         {
-            return Err(format!("{location}/{status}: missing string description"));
+            return Err(format!(
+                "{location}/{status}: missing non-blank description"
+            ));
         }
     }
     Ok(())
@@ -51,9 +59,7 @@ fn check_callback_descriptions(callback: &Value, location: &str) -> Result<(), S
 }
 
 fn check_path_item_descriptions(path_item: &Value, location: &str) -> Result<(), String> {
-    for method in [
-        "get", "put", "post", "delete", "options", "head", "patch", "trace",
-    ] {
+    for method in HTTP_METHODS {
         if let Some(operation) = path_item.get(method) {
             let location = format!("{location}/{method}");
             if let Some(responses) = operation.get("responses") {
@@ -112,9 +118,21 @@ fn openapi_response_objects_require_descriptions() {
 #[test]
 fn response_description_check_rejects_removed_descriptions() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    assert_removed_descriptions_are_rejected(&committed);
+}
+
+fn assert_removed_descriptions_are_rejected(committed: &Value) {
+    let mut response_count = 0;
     for (path, item) in committed["paths"].as_object().unwrap() {
-        for (method, operation) in item.as_object().unwrap() {
-            for status in operation["responses"].as_object().unwrap().keys() {
+        for method in HTTP_METHODS {
+            let Some(operation) = item.get(method) else {
+                continue;
+            };
+            for (status, response) in operation["responses"].as_object().unwrap() {
+                if status.starts_with("x-") || response.get("$ref").is_some() {
+                    continue;
+                }
+                response_count += 1;
                 let mut missing = committed.clone();
                 missing["paths"][path][method]["responses"][status]
                     .as_object_mut()
@@ -124,12 +142,59 @@ fn response_description_check_rejects_removed_descriptions() {
                 assert_eq!(
                     check_document_response_descriptions(&missing),
                     Err(format!(
-                        "/paths/{path}/{method}/responses/{status}: missing string description"
+                        "/paths/{path}/{method}/responses/{status}: missing non-blank description"
                     ))
                 );
             }
         }
     }
+    assert_eq!(
+        response_count, EXPECTED_RESPONSE_OBJECT_COUNT,
+        "Response Object count changed; update the expected count explicitly"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Response Object count changed")]
+fn response_description_count_rejects_changed_contract() {
+    let mut committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    committed["paths"]["/api/v1/channels/{id}/messages"]["post"]["responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("400")
+        .unwrap();
+    assert_removed_descriptions_are_rejected(&committed);
+}
+
+#[test]
+fn response_description_check_ignores_path_item_metadata() {
+    let mut path_item = json!({
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "summary": "Example Path Item",
+        "description": "Path Item description",
+        "servers": [{"url": "https://example.com"}],
+        "$ref": "#/components/pathItems/Example",
+        "x-note": {"responses": {"200": {}}}
+    });
+    for method in HTTP_METHODS {
+        path_item[method] = json!({"responses": {"200": {"description": " Success "}}});
+    }
+    let document = json!({"paths": {"/example": path_item}});
+    check_document_response_descriptions(&document).unwrap();
+    for method in HTTP_METHODS {
+        let mut missing = document.clone();
+        missing["paths"]["/example"][method]["responses"]["200"] = json!({});
+        assert_eq!(
+            check_document_response_descriptions(&missing),
+            Err(format!(
+                "/paths//example/{method}/responses/200: missing non-blank description"
+            ))
+        );
+    }
+
+    let mut committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    committed["paths"]["/example"] = json!({"parameters": [], "summary": "No operations"});
+    assert_removed_descriptions_are_rejected(&committed);
 }
 
 #[test]
@@ -145,14 +210,14 @@ fn response_description_check_covers_reusable_and_nested_responses() {
         }
     });
     let path_item = json!({"post": {"responses": {
-        "default": {"description": ""},
+        "default": {"description": "Success"},
         "2XX": {"$ref": "#/components/responses/Success"},
         "x-note": "Not a Response Object"
     }}});
     for (location, value, response_location) in [
         (
             "/components/responses",
-            json!({"Success": {"description": ""}}),
+            json!({"Success": {"description": "Success"}}),
             "/components/responses/Success",
         ),
         (
@@ -178,7 +243,14 @@ fn response_description_check_covers_reusable_and_nested_responses() {
     ] {
         *document.pointer_mut(location).unwrap() = value;
         check_document_response_descriptions(&document).unwrap();
-        for invalid in [None, Some(Value::Null), Some(json!(42))] {
+        let whitespace = ["", "   ", "\t\r\n", "\u{00a0}\u{3000}"];
+        for blank in whitespace {
+            assert!(blank.trim().is_empty(), "fixture must be Rust whitespace");
+        }
+        for invalid in [None, Some(Value::Null), Some(json!(42))]
+            .into_iter()
+            .chain(whitespace.map(|blank| Some(json!(blank))))
+        {
             let mut missing = document.clone();
             let response = missing
                 .pointer_mut(response_location)
