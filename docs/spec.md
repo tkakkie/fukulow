@@ -53,6 +53,12 @@ The existing `timeline.ts` partly implements some of these (dedup by seq, resolv
 - C8. Cursor clamp recovery: compare `caught_up_seq` with the `after_seq` **sent for that subscription**. If K < sent after_seq, the server's history is older than the client's (database restore): invalidate that Channel's confirmed window and cursor, fence stale async results by generation, and re-bootstrap (C2). Lowering the cursor alone is not enough. **Scope limit:** only a restored Channel that is behind the cursor is detected. A restored history that has already grown past the old cursor cannot be detected with today's API; a history-generation identifier in history/subscription responses is deferred until needed, and the end-to-end "convergent after reconnect" property excludes that case.
 - C9. A refused subscription (`channel_not_found`, `subscription_limit`) or a 403/404 on history is terminal for that Channel until the user acts (select again, Sign in again): it is not a sequence gap, is never retried in a loop, and the UI shows the Channel as unavailable.
 
+### Observable vocabulary (used by `contract/realtime` fixtures)
+Fixtures assert only what a client shows or emits to the outside; they do not name internal state, functions or timers. Any implementation (Rust, TypeScript, a future Kotlin client) with different internals satisfies the contract if these observations hold.
+- **Channel state** (what the client shows for a watched Channel): `loading` = no trusted base yet (C2 bootstrap not finished); `ready` = a base is established and the cursor is trusted; `unavailable` = terminal for that Channel until the user acts (C9).
+- **Session state**: `signed_in`, or `sign_in_required` after a 401 or a 4001 close (C6, S4).
+- **Effect categories** (what a client emits outward, as classified by contract tests): HTTP requests, WebSocket connect/subscribe/unsubscribe, and `wait` effects classified as `reorder_grace` (C3 grace before filling a gap), `fill_backoff` (pause after a failed fill, C3) and `reconnect_backoff` (pause before reconnecting, C4). These are categories of observable behaviour only: how long a wait is, how it is scheduled, and whether the implementation has a timer at all are not part of the contract.
+
 Capabilities (per-operation `{allowed, reason?}` on resources) are not part of this contract; they are added only when the UI must show whether an operation is possible in advance (see `docs/decisions.md`).
 
 ## Performance targets (first)
