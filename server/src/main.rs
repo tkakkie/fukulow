@@ -64,7 +64,11 @@ async fn migrate(pool: &sqlx::PgPool) -> Result<(), sqlx::migrate::MigrateError>
 #[cfg(test)]
 mod tests {
     use super::migrate;
-    use sqlx::{PgPool, migrate::MigrateError, postgres::PgPoolOptions};
+    use sqlx::{
+        PgPool,
+        migrate::{Migrate, MigrateError},
+        postgres::PgPoolOptions,
+    };
     use std::time::{Duration, Instant};
 
     async fn startup_pool(pool: &PgPool) -> PgPool {
@@ -97,6 +101,51 @@ mod tests {
                 .unwrap();
         assert_eq!(applied, sqlx::migrate!().iter().count() as i64);
         pool.close().await;
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn startup_migrations_timeout_on_advisory_lock_and_can_retry(pool: PgPool) {
+        let startup = startup_pool(&pool).await;
+        let original_timeout = lock_timeout(&startup).await;
+        let mut holder = pool.acquire().await.unwrap();
+        holder.close_on_drop();
+        // Use SQLx's own lock API so the holder and startup use the same lock key.
+        holder.lock().await.unwrap();
+
+        let started = Instant::now();
+        let error = tokio::time::timeout(Duration::from_secs(15), migrate(&startup))
+            .await
+            .expect("startup migration must not wait indefinitely for the advisory lock")
+            .unwrap_err();
+        assert!(started.elapsed() >= Duration::from_secs(4));
+        match error {
+            MigrateError::Execute(error) => assert_eq!(
+                error.as_database_error().unwrap().code().as_deref(),
+                Some("55P03")
+            ),
+            error => panic!("expected advisory lock timeout, got {error:?}"),
+        }
+        assert_eq!(lock_timeout(&startup).await, original_timeout);
+        let history: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations')::text")
+                .fetch_one(&startup)
+                .await
+                .unwrap();
+        assert_eq!(history, None);
+
+        holder.unlock().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(15), migrate(&startup))
+            .await
+            .expect("startup migration must succeed after releasing the advisory lock")
+            .unwrap();
+        assert_eq!(lock_timeout(&startup).await, original_timeout);
+        let applied: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&startup)
+                .await
+                .unwrap();
+        assert_eq!(applied, sqlx::migrate!().iter().count() as i64);
+        startup.close().await;
     }
 
     #[sqlx::test(migrations = false)]
