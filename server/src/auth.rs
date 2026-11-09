@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
-use rand::{RngCore, rngs::OsRng};
+use rand::{TryRngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
@@ -15,6 +15,8 @@ use uuid::Uuid;
 use crate::AppState;
 
 mod cleanup;
+#[cfg(test)]
+mod credential_tests;
 mod password;
 use password::{check_password, hash_password};
 mod session;
@@ -384,6 +386,17 @@ async fn sign_in_with_workers(
     input: SignInRequest,
     workers: &'static tokio::sync::Semaphore,
 ) -> Result<Response, ApiError> {
+    sign_in_with_entropy(state, peer, headers, input, workers, fill_random).await
+}
+
+async fn sign_in_with_entropy(
+    state: AppState,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    input: SignInRequest,
+    workers: &'static tokio::sync::Semaphore,
+    entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
+) -> Result<Response, ApiError> {
     let email = email(&input.email)?;
     if input.password.is_empty() || input.password.len() > 1024 {
         return Err(ApiError::bad_request());
@@ -424,7 +437,7 @@ async fn sign_in_with_workers(
     }
     let user_id = user_id.ok_or_else(ApiError::unauthorized)?;
     let mut random = [0u8; 32];
-    OsRng.fill_bytes(&mut random);
+    entropy(&mut random)?;
     let secret: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let token = format!("{organization_id}.{secret}");
     let token_hash = Sha256::digest(token.as_bytes()).to_vec();
@@ -448,6 +461,12 @@ async fn sign_in_with_workers(
         }),
     )
         .into_response())
+}
+
+fn fill_random(bytes: &mut [u8]) -> Result<(), ApiError> {
+    OsRng
+        .try_fill_bytes(bytes)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))
 }
 
 fn cookie(state: &AppState, token: &str, seconds: u32) -> String {

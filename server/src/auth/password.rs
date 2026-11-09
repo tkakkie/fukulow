@@ -1,7 +1,6 @@
-use super::{ApiError, throttle};
+use super::{ApiError, fill_random, throttle};
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use axum::http::StatusCode;
-use rand::{RngCore, rngs::OsRng};
 
 pub(super) async fn hash_password(
     password: String,
@@ -66,9 +65,7 @@ async fn check_password_with_hash(
 
 fn hash_password_sync(password: &[u8]) -> Result<String, ApiError> {
     let mut salt = [0u8; 16];
-    OsRng
-        .try_fill_bytes(&mut salt)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
+    fill_random(&mut salt)?;
     password_hasher()?
         .hash_password_with_salt(password, &salt)
         .map(|hash| hash.to_string())

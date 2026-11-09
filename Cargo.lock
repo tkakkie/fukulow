@@ -416,7 +416,7 @@ dependencies = [
  "axum",
  "futures-util",
  "mime_guess",
- "rand 0.8.8",
+ "rand 0.9.5",
  "rust-embed",
  "serde",
  "serde_json",
