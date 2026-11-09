@@ -244,6 +244,14 @@ async fn setup_with_workers(
     input: SetupRequest,
     workers: &'static tokio::sync::Semaphore,
 ) -> Result<Response, ApiError> {
+    setup_with_hash(state, input, |password| hash_password(password, workers)).await
+}
+
+async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiError>>>(
+    state: AppState,
+    input: SetupRequest,
+    hash_password: impl FnOnce(String) -> Hash,
+) -> Result<Response, ApiError> {
     if let Some(expected) = &state.setup_token {
         let supplied = input
             .setup_token
@@ -277,7 +285,7 @@ async fn setup_with_workers(
             None,
         ));
     }
-    let password_hash = hash_password(input.password, workers).await?;
+    let password_hash = hash_password(input.password).await?;
     let mut tx = state.pool.begin().await?;
     // Global bootstrap is a tenant-scope exception. The table lock also
     // serializes setup across processes and concurrent first requests.
@@ -626,6 +634,88 @@ mod tests {
             )
             .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
             .with_state(state)
+    }
+
+    #[sqlx::test]
+    async fn setup_salt_entropy_failure_returns_500_without_writes_or_fallback(pool: sqlx::PgPool) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        for partial in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let app = axum::Router::new()
+                .route(
+                    "/api/v1/setup",
+                    axum::routing::post(move |State(state), ApiJson(input)| {
+                        let observed = observed.clone();
+                        setup_with_hash(state, input, move |password| {
+                            password::hash_password_with_entropy(
+                                password,
+                                &PASSWORD_WORKERS,
+                                move |bytes| {
+                                    observed.fetch_add(1, Ordering::SeqCst);
+                                    assert_eq!(bytes.len(), 16);
+                                    if partial {
+                                        bytes[..8].fill(0xab);
+                                    }
+                                    Err(ApiError(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        "internal error",
+                                        None,
+                                    ))
+                                },
+                            )
+                        })
+                    }),
+                )
+                .with_state(AppState::for_test(pool.clone()));
+            let request = Request::post("/api/v1/setup")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "organization_name": "Entropy test", "name": "Owner",
+                        "email": "owner@example.com", "password": "correct horse battery staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"error": "internal error"})
+            );
+            let counts: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM sessions)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(counts, (0, 0, 0));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        // Entropy failure must leave bootstrap available to a subsequent request.
+        let response = setup_with_workers(
+            AppState::for_test(pool),
+            SetupRequest {
+                setup_token: None,
+                organization_name: "Entropy test".into(),
+                name: "Owner".into(),
+                email: "owner@example.com".into(),
+                password: "correct horse battery staple".into(),
+            },
+            &PASSWORD_WORKERS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
