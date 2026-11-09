@@ -598,6 +598,10 @@ async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(po
 async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_usable(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, other_token) = member(&pool, f.organization).await;
+    let same_member_token = session::another_session(&pool, f.organization, f.member).await;
+    let foreign_organization = organization(&pool).await;
+    let (foreign_member, foreign_token) = member(&pool, foreign_organization).await;
+    let foreign_channel = channel(&pool, foreign_organization, foreign_member, false).await;
     let mut idle = f.server.connect(&f.token).await;
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
@@ -608,6 +612,12 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
     let mut other = f.server.connect(&other_token).await;
     subscribe(&mut other, f.channel, 0).await;
     ready(&mut other, f.channel, 0).await;
+    let mut same_member = f.server.connect(&same_member_token).await;
+    subscribe(&mut same_member, f.channel, 0).await;
+    ready(&mut same_member, f.channel, 0).await;
+    let mut foreign = f.server.connect(&foreign_token).await;
+    subscribe(&mut foreign, foreign_channel, 0).await;
+    ready(&mut foreign, foreign_channel, 0).await;
     assert_eq!(
         request(&f.app, "DELETE", "/api/v1/session", &f.token, Value::Null)
             .await
@@ -625,6 +635,26 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
     )
     .await;
     assert_eq!(event(&mut other).await["message"], own);
+    assert_eq!(event(&mut same_member).await["message"], own);
+    let own = send(
+        &f,
+        &same_member_token,
+        f.channel,
+        Uuid::new_v4(),
+        "same Member, another session",
+    )
+    .await;
+    assert_eq!(event(&mut same_member).await["message"], own);
+    assert_eq!(event(&mut other).await["message"], own);
+    let own = send(
+        &f,
+        &foreign_token,
+        foreign_channel,
+        Uuid::new_v4(),
+        "another Organization",
+    )
+    .await;
+    assert_eq!(event(&mut foreign).await["message"], own);
     rejected(f.server.handshake(Some(&f.token), None, None).await, 401);
 }
 
@@ -858,3 +888,4 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 
 mod contract;
 mod notification;
+mod session;
