@@ -1,0 +1,145 @@
+import { spawn, execFile, execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { cpus, totalmem, platform, arch } from 'node:os';
+import { resolve } from 'node:path';
+import { promisify } from 'node:util';
+const execAsync = promisify(execFile);
+
+// Artifacts belong outside the checkout: they contain machine-specific measurements.
+const project = `fukulow-load-${Date.now()}-${randomUUID().slice(0, 8)}`;
+const port = process.env.LOAD_PORT || '18057';
+if (!/^\d+$/.test(port) || Number(port) < 1024 || Number(port) > 65535 || ['8080', '55432'].includes(port)) {
+  throw new Error('LOAD_PORT must be a non-default unprivileged host port');
+}
+const output = resolve(process.env.LOAD_RESULT_DIR || `/private/tmp/${project}`);
+mkdirSync(output, { recursive: true });
+const inherited = { ...process.env };
+delete inherited.LOAD_ORGANIZATION_ID;
+delete inherited.LOAD_SETUP_TOKEN;
+const env = { ...inherited, LOAD_PROJECT: project, LOAD_PORT: port, LOAD_DB_PASSWORD: randomUUID(),
+  LOAD_CONTAINER_NAME: `${project}-generator`, LOAD_DOCKER_NETWORK: 'bridge',
+  BASE_URL: `http://host.docker.internal:${port}`, LOAD_BOOTSTRAP: '1',
+  LOAD_EMAIL: 'baseline@example.invalid', LOAD_PASSWORD: randomUUID(), LOAD_MEASURE: '1' };
+const compose = ['compose', '-p', project, '-f', 'load/compose.yml'];
+const command = (file: string, args: string[]) => execFileSync(file, args, { env, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).trim();
+const docker = (...args: string[]) => command('docker', args);
+const sql = (query: string) => docker(...compose, 'exec', '-T', 'db', 'psql', '-U', 'fukulow', '-d', 'fukulow', '-Atc', query);
+const statsQuery = `SELECT coalesce(json_agg(t), '[]') FROM (
+  SELECT queryid::text, toplevel, query, calls, total_exec_time, rows FROM pg_stat_statements
+  WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND query NOT LIKE '%pg_stat_statements%' AND query NOT LIKE '%pg_stat_database%'
+  ORDER BY queryid) t`;
+const databaseQuery = `SELECT row_to_json(t) FROM (SELECT numbackends, xact_commit, xact_rollback,
+  blks_read, blks_hit, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted,
+  temp_bytes, deadlocks FROM pg_stat_database WHERE datname = current_database()) t`;
+const resources: unknown[] = [];
+type Statement = { queryid: string; toplevel: boolean; query: string; calls: number; total_exec_time: number };
+type Snapshot = { at: string; completedAt: number; statements: Statement[]; database: unknown };
+const snapshots: Record<string, Snapshot> = {};
+let timer: ReturnType<typeof setInterval> | undefined;
+let sampling: Promise<void> | undefined;
+let log = '';
+let summary: unknown;
+let rate: { startedAt: number; offered: number; [key: string]: unknown } | undefined;
+let measurementError: unknown;
+let exitCode = 1;
+try {
+  console.log(`Measurement project: ${project}; artifacts: ${output}`);
+  // Build with this checkout; never retag the shared fukulow-app image.
+  docker(...compose, 'up', '-d', '--build', '--wait');
+  sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
+  const app = docker(...compose, 'ps', '-q', 'app');
+  const db = docker(...compose, 'ps', '-q', 'db');
+  const metadata = {
+    commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
+    project, port, started: new Date().toISOString(), platform: platform(), arch: arch(),
+    hostCpuModel: cpus()[0]?.model, hostCpus: cpus().length, hostMemory: totalmem(), docker: JSON.parse(docker('info', '--format', '{{json .}}')),
+    appImage: docker('inspect', '--format', '{{.Image}}', app), dbImage: docker('inspect', '--format', '{{.Image}}', db),
+    nofile: process.env.LOAD_NOFILE || '65536', network: env.LOAD_DOCKER_NETWORK, baseUrl: env.BASE_URL,
+    k6Image: command('make', ['-s', 'load-image']),
+    k6ImageId: docker('image', 'inspect', '--format', '{{.Id}}', command('make', ['-s', 'load-image'])),
+  };
+  writeFileSync(`${output}/metadata.json`, JSON.stringify(metadata, null, 2));
+  const sample = () => {
+    if (sampling) return;
+    sampling = execAsync('docker', ['stats', '--no-stream', '--format', '{{json .}}', app, db, env.LOAD_CONTAINER_NAME], { env })
+      .then(({ stdout }) => {
+        const rows = stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        resources.push({ at: new Date().toISOString(), rows });
+      }, () => { /* generator may not exist yet, or may already have exited */ })
+      .finally(() => { sampling = undefined; });
+  };
+  const capture = (phase: string) => {
+    snapshots[phase] = { at: new Date().toISOString(), statements: JSON.parse(sql(statsQuery)),
+      database: JSON.parse(sql(databaseQuery)), completedAt: Date.now() };
+    if (snapshots[phase].completedAt - Date.parse(snapshots[phase].at) >= 1000) {
+      throw new Error('SQL snapshot exceeded the measurement boundary pause');
+    }
+  };
+  const child = spawn('make', ['load'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let buffered = '';
+  const consume = (chunk: Buffer) => {
+    const value = chunk.toString();
+    log += value;
+    process.stdout.write(value);
+    buffered += value;
+    let end: number;
+    while ((end = buffered.indexOf('\n')) >= 0) {
+      const line = buffered.slice(0, end);
+      buffered = buffered.slice(end + 1);
+      try {
+        if (line.includes('LOAD_MEASUREMENT_START')) capture('before');
+        if (line.includes('LOAD_MEASUREMENT_END')) capture('after');
+        // console.log messages are JSON-quoted in k6's text log output.
+        const message = line.includes('msg=') ? JSON.parse(line.match(/msg=("(?:[^"\\]|\\.)*")/)?.[1] || 'null') : line;
+        if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
+        if (line.startsWith('LOAD_SUMMARY ')) summary = JSON.parse(line.slice(13));
+      } catch (error) { measurementError = String(error); }
+    }
+  };
+  child.stdout.on('data', consume);
+  child.stderr.on('data', consume);
+  timer = setInterval(sample, 1000);
+  exitCode = await new Promise<number>((done, reject) => {
+    child.on('error', reject);
+    child.on('exit', (code) => done(code ?? 1));
+  });
+  if (timer) clearInterval(timer);
+  await sampling;
+  if (rate && snapshots.before?.completedAt >= rate.startedAt) {
+    throw new Error('SQL baseline snapshot missed the start of publishing');
+  }
+  if (!summary || !rate || !snapshots.before || !snapshots.after || !resources.length || measurementError) {
+    throw new Error(`Incomplete measurement: ${String(measurementError ?? 'missing artifact')}`);
+  }
+} catch (error) {
+  exitCode = 1;
+  measurementError = String(error);
+  throw error;
+} finally {
+  if (timer) clearInterval(timer);
+  writeFileSync(`${output}/k6.log`, log);
+  const previous = new Map(snapshots.before?.statements.map((s) => [s.queryid + ':' + s.toplevel, s]));
+  const statementDeltas = snapshots.after?.statements.map((s) => ({ ...s,
+    calls: s.calls - (previous.get(s.queryid + ':' + s.toplevel)?.calls ?? 0),
+    total_exec_time: s.total_exec_time - (previous.get(s.queryid + ':' + s.toplevel)?.total_exec_time ?? 0),
+  })).filter((s) => s.calls > 0);
+  const calls = statementDeltas?.reduce((sum, s) => sum + s.calls, 0);
+  const topLevelCalls = statementDeltas?.filter((s) => s.toplevel).reduce((sum, s) => sum + s.calls, 0);
+  const queries = statementDeltas?.filter((s) => s.toplevel && !/^(BEGIN|COMMIT|ROLLBACK)\b/.test(s.query))
+    .reduce((sum, s) => sum + s.calls, 0);
+  const sqlPerSend = rate && { calls, topLevelCalls, queries,
+    allStatementsPerSend: (calls ?? 0) / rate.offered,
+    topLevelStatementsPerSend: (topLevelCalls ?? 0) / rate.offered,
+    topLevelQueriesPerSend: (queries ?? 0) / rate.offered };
+  writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, summary, snapshots, statementDeltas, sqlPerSend,
+    resources, measurementError }, null, 2));
+  // These exact names/project were created above; never prune or touch other projects.
+  if (docker('ps', '-aq', '--filter', 'name=^/' + env.LOAD_CONTAINER_NAME + '$')) {
+    docker('rm', '-f', env.LOAD_CONTAINER_NAME);
+  }
+  docker(...compose, 'down', '--volumes');
+  console.log('Results: ' + output);
+}
+process.exitCode = exitCode;
