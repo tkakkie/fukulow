@@ -15,7 +15,7 @@ export type ChannelsState = {
 /** Japanese message for a failed channel call. */
 export function channelError(r: Extract<Result<unknown>, { ok: false }>): string {
   if (r.kind === 'network') return 'サーバーに接続できません。しばらくしてからもう一度お試しください。'
-  if (r.status === 400) return 'チャンネル名を確認してください。'
+  if (r.status === 400) return 'チャンネル名の前後に空白を入れず、128文字以内にしてください。'
   if (r.status === 409) return '同じ名前のチャンネルがすでにあります。'
   return 'エラーが発生しました。もう一度お試しください。'
 }
@@ -53,9 +53,9 @@ export function createChannels(api: ChannelsApi = defaultApi) {
     select(id: string) {
       if (state.channels.some((c) => c.id === id)) set({ selectedId: id })
     },
-    /** Creates the channel and selects it; returns an error message on failure. */
+    /** Creates the channel and selects it; returns an error message on failure. The name is sent unchanged (#72: the server rejects surrounding whitespace; never trim here). */
     async create(req: CreateChannelRequest): Promise<{ error: string } | { channel: Channel }> {
-      const r = await api.createChannel({ ...req, name: req.name.trim() })
+      const r = await api.createChannel(req)
       if (!r.ok) return { error: channelError(r) }
       generation++
       set({ channels: [...state.channels, r.data], selectedId: r.data.id })

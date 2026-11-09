@@ -25,5 +25,5 @@
 <form onsubmit={submit}>
   <label>チャンネル名 <input name="channel_name" required bind:value={name} /></label>
   {#if error}<p role="alert">{error}</p>{/if}
-  <button type="submit" disabled={busy || !name.trim()}>チャンネルを作成</button>
+  <button type="submit" disabled={busy || name === ''}>チャンネルを作成</button>
 </form>
