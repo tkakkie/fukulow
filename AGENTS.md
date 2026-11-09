@@ -68,6 +68,12 @@ Also: sending a message is idempotent (client-generated id); reconnect uses per-
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them.
 - Only the maintainer merges (or explicitly tells an AI to).
 
+## AI models and effort
+- Codex implements with `gpt-6.1-sol`, effort `medium`; `high` when the Issue's Done when or Notes cites one of H1-H6: H1 auth, permissions, Organization separation or sessions; H2 DB integrity, migrations, transactions or locks; H3 real-time reconnect, event order, deduplication or delivery; H4 a security, correctness or CI verification gate is added, removed or loosened; H5 a behaviour-preserving conversion without an old/new comparison test; H6 concurrent paths sharing state, caches, or whether a background job runs, retries or stops. Size alone never qualifies.
+- Effort is fixed at launch: if an H condition first appears during the work, the implementer stops and reports, and the orchestrator restarts at `high`.
+- Codex reviews and checks use `gpt-6-astra`: `high` for round 1 of `risk:needs-review` or gate changes, `medium` for round 2 and delta checks. Astra also implements when sol failed twice at `high`.
+- Record model and effort in the PR (the AI signature line). Antigravity: `agy` (argon), effort by task level. Claude: Sonnet by default; Opus only for round 1 of high-risk review or heavy implementation.
+
 ## Languages (keep it small; Tier 2 default)
 - Allowed: Rust (server, server tests), TypeScript (web, vitest, Playwright, small scripts run with Node), SQL, short bash.
 - No Python, Go or other languages. Adding one needs the maintainer's approval and a line in `docs/decisions.md`.
