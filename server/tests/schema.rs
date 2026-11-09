@@ -52,6 +52,40 @@ async fn migrated_tables_have_not_null_organization_id(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = false)]
+async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expiry(pool: PgPool) {
+    migrate(&pool).await.unwrap();
+    let indexes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT indexname, indexdef FROM pg_indexes \
+         WHERE schemaname = 'public' AND tablename = 'sessions' ORDER BY indexname",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        indexes,
+        vec![
+            (
+                "sessions_organization_expiry".into(),
+                "CREATE INDEX sessions_organization_expiry ON public.sessions USING btree (organization_id, expires_at, token_hash)".into(),
+            ),
+            (
+                "sessions_pkey".into(),
+                "CREATE UNIQUE INDEX sessions_pkey ON public.sessions USING btree (organization_id, token_hash)".into(),
+            ),
+        ]
+    );
+    let primary_key: String = sqlx::query_scalar(
+        "SELECT conname FROM pg_constraint \
+         WHERE conrelid = 'public.sessions'::regclass AND contype = 'p'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(primary_key, "sessions_pkey");
+}
+
+#[sqlx::test(migrations = false)]
 async fn schema_guard_rejects_missing_and_nullable_organization_id(pool: PgPool) {
     migrate(&pool).await.unwrap();
     check_organization_ids(&pool).await.unwrap();
