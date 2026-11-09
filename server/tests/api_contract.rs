@@ -16,6 +16,15 @@ use utoipa::OpenApi;
 use uuid::Uuid;
 
 #[test]
+fn generated_openapi_matches_committed_contract() {
+    let baseline: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+
+    // Compare JSON values so formatting and object-key order do not hide contract drift.
+    assert_eq!(generated, baseline);
+}
+
+#[test]
 fn channel_name_schemas_limit_length_to_128() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     for schema in ["Channel", "CreateChannelRequest"] {
