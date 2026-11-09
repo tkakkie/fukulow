@@ -18,7 +18,50 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 41;
+// 41 existing responses, nine previously undocumented 500s, and the WS 400.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 51;
+
+#[test]
+fn added_error_responses_have_error_body_and_meaningful_descriptions() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        for (method, path, status, reason) in [
+            ("post", "/api/v1/setup", "500", "creating"),
+            ("post", "/api/v1/session", "500", "signing in"),
+            ("delete", "/api/v1/session", "500", "revoking"),
+            ("get", "/api/v1/me", "500", "session identity"),
+            ("get", "/api/v1/channels", "500", "listing visible Channels"),
+            ("post", "/api/v1/channels", "500", "creating the Channel"),
+            (
+                "get",
+                "/api/v1/channels/{id}/messages",
+                "500",
+                "listing Messages",
+            ),
+            (
+                "post",
+                "/api/v1/channels/{id}/messages",
+                "500",
+                "persisting the Message",
+            ),
+            ("get", "/api/v1/ws", "500", "before WebSocket upgrade"),
+            ("get", "/api/v1/ws", "400", "Invalid WebSocket upgrade"),
+        ] {
+            let response = &document["paths"][path][method]["responses"][status];
+            assert_eq!(
+                response["content"]["application/json"]["schema"],
+                json!({"$ref": "#/components/schemas/ErrorBody"}),
+                "{method} {path} {status}"
+            );
+            let description = response["description"].as_str().unwrap();
+            assert!(
+                description.contains(reason),
+                "{method} {path} {status}: {description}"
+            );
+        }
+    }
+}
 
 #[test]
 fn generated_openapi_matches_committed_contract() {

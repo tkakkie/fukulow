@@ -231,7 +231,8 @@ pub async fn setup_status(State(state): State<AppState>) -> Result<Response, Api
     (status = 401, description = "Missing or invalid setup token after successful body extraction", body = ErrorBody),
     (status = 409, description = "Setup already completed", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
-    (status = 415, description = "Expected application/json", body = ErrorBody)))]
+    (status = 415, description = "Expected application/json", body = ErrorBody),
+    (status = 500, description = "Database or password hashing failure while creating the first Organization and Owner", body = ErrorBody)))]
 pub async fn setup(
     State(state): State<AppState>,
     ApiJson(input): ApiJson<SetupRequest>,
@@ -378,7 +379,8 @@ impl ToSchema for RetryAfterSeconds {}
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts", body = ErrorBody,
-        headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1")))))]
+        headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
+    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody)))]
 pub async fn sign_in(
     State(state): State<AppState>,
     peer: ConnectInfo<std::net::SocketAddr>,
@@ -572,14 +574,16 @@ fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
 
 #[utoipa::path(get, path = "/api/v1/me", security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Current session's Member and Organization identity", body = Identity),
-    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody)))]
+    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+    (status = 500, description = "Database failure while resolving the session identity", body = ErrorBody)))]
 pub async fn me(auth: Auth) -> impl IntoResponse {
     ([(header::CACHE_CONTROL, "no-store")], Json(auth.identity))
 }
 
 #[utoipa::path(delete, path = "/api/v1/session", security(("cookie" = []), ("bearer" = [])),
     responses((status = 204, description = "Session revoked and cookie cleared", headers(("Set-Cookie" = String))),
-    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody)))]
+    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+    (status = 500, description = "Database or worker failure while resolving or revoking the session", body = ErrorBody)))]
 pub async fn sign_out(State(state): State<AppState>, auth: Auth) -> Result<Response, ApiError> {
     let pool = state.pool.clone();
     let changes = state.session_changes.clone();

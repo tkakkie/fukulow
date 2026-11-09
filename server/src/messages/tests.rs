@@ -195,6 +195,31 @@ fn message_query_validation_matches_contract() {
     }
 }
 
+#[sqlx::test]
+async fn message_list_database_failure_returns_generic_500(pool: PgPool) {
+    let (app, _, _, channel_id, token) = fixture(&pool).await;
+    assert_eq!(
+        list(&app, &token, channel_id, "").await,
+        json!({"messages": [], "has_more": false})
+    );
+    sqlx::query("ALTER TABLE messages RENAME COLUMN body TO injected_unavailable_body")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = request(
+        &app,
+        "GET",
+        &format!("/api/v1/channels/{channel_id}/messages"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(body(response).await, json!({"error": "internal error"}));
+}
+
 #[tokio::test]
 async fn message_json_rejections_use_error_body() {
     for (content_type, input, status) in [
@@ -658,17 +683,17 @@ async fn failed_send_after_sequence_allocation_leaves_no_gap(pool: PgPool) {
     ).execute(&pool).await.unwrap();
     let key = Uuid::new_v4();
     for expected in [1, 2] {
-        assert_error(
-            send(
-                &app,
-                &token,
-                channel_id,
-                input(key, "fail-after-allocation"),
-            )
-            .await,
-            StatusCode::INTERNAL_SERVER_ERROR,
+        let response = send(
+            &app,
+            &token,
+            channel_id,
+            input(key, "fail-after-allocation"),
         )
         .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(body(response).await, json!({"error": "internal error"}));
         let allocated: Option<i64> = sqlx::query_scalar("SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2")
             .bind(organization_id).bind(channel_id).fetch_optional(&pool).await.unwrap();
         assert_eq!(allocated, if expected == 1 { None } else { Some(1) });

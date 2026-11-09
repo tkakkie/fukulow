@@ -36,6 +36,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Database failure while resolving the session or listing visible Channels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -116,6 +126,16 @@
           },
           "415": {
             "description": "Channel creation requires an application/json content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure while resolving the session or creating the Channel and its membership",
             "content": {
               "application/json": {
                 "schema": {
@@ -222,6 +242,16 @@
           },
           "404": {
             "description": "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure while resolving the session, checking Channel visibility, or listing Messages",
             "content": {
               "application/json": {
                 "schema": {
@@ -338,6 +368,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -389,6 +429,16 @@
           },
           "401": {
             "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure while resolving the session identity",
             "content": {
               "application/json": {
                 "schema": {
@@ -502,6 +552,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Database, password verification, or credential generation failure while signing in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -523,6 +583,16 @@
           },
           "401": {
             "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database or worker failure while resolving or revoking the session",
             "content": {
               "application/json": {
                 "schema": {
@@ -658,6 +728,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Database or password hashing failure while creating the first Organization and Owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -674,6 +754,16 @@
           "101": {
             "description": "WebSocket upgrade; frames use ClientMessage / ServerEvent"
           },
+          "400": {
+            "description": "Invalid WebSocket upgrade request after successful authentication and Origin validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade",
             "content": {
@@ -686,6 +776,16 @@
           },
           "403": {
             "description": "Cookie Origin missing or not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure while resolving the session before WebSocket upgrade",
             "content": {
               "application/json": {
                 "schema": {
