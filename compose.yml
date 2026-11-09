@@ -1,6 +1,7 @@
 # Default: `docker compose --profile caddy up -d`  (or `--profile nginx`)
 services:
   app:
+    image: fukulow-app
     build: .
     restart: unless-stopped
     environment:
