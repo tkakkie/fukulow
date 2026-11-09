@@ -7,8 +7,13 @@
 //     #[ignore = "..."]. Any #[cfg(...)] other than exactly cfg(test), and cfg_attr, on the test fn is
 //     treated as "cannot be verified" and refused. NOT detected: cfg on an enclosing mod/file,
 //     runtime early returns, --features / env dependent behaviour.
-//     NOT detected: whether the file is in the Rust module tree. Every .rs file under server/ is scanned, so a
-//     test in an unreferenced file (e.g. server/src/unused_guard.rs) is accepted as runnable (see decisions.md).
+//     Reconciled with `cargo test -- --list` (CLI only): a Rust reference must also appear in the real list, so a
+//     test in a file outside the module tree (e.g. an unreferenced server/src/unused_guard.rs) is refused.
+//     Mapping: server/tests/<x>.rs is the integration binary tests/<x>.rs, listed as `name`; server/src/<a>/<b>.rs
+//     (or <a>/<b>/mod.rs) is listed in a unit-test binary (src/lib.rs or src/main.rs) as `a::b::[inline mods::]name`.
+//     Other server/tests/** paths and server/src/bin/** cannot be mapped and are refused. Without cargo, the CLI fails.
+//     CI runs the CLI in the server job right after `cargo test` (already compiled: no extra cold build).
+//     The vitest "real docs" test uses the static scan only (the web job has no Rust build).
 //   - Vitest: web/**/*.{test,spec}.ts outside web/e2e (mirrors `test.exclude` in web/vite.config.ts).
 //     Not run: .skip, .todo, .fixme, xit/xtest/xdescribe, and any test inside such a describe.
 //     NOT detected: runtime skips (test.skip(cond), skipIf/runIf, ctx.skip()), and .only: it silently
@@ -17,6 +22,7 @@
 //   - web/e2e/** (Playwright) is not run in CI, so references to it are refused until E2E joins CI.
 // A test title that is defined twice in one file counts only if no definition of it is skipped.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join, relative, resolve, sep } from 'node:path'
 import ts from 'typescript'
 
@@ -237,15 +243,92 @@ export function collectKnownTests(root: string): Known {
   return known
 }
 
-export function checkInvariants(root: string): string[] {
+/** One test printed by `cargo test -- --list`: the binary it belongs to and its full module path + name. */
+export type ListedTest = { binary: string; name: string }
+
+/** Parses `cargo test -- --list` output (stdout and stderr merged): "Running <kind> <src> (...)" then "name: test" lines. */
+export function parseCargoList(output: string): ListedTest[] {
+  const out: ListedTest[] = []
+  let binary: string | null = null
+  for (const raw of output.split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    const run = /^\s*Running (?:unittests )?(\S+)/.exec(line)
+    if (run) binary = run[1]
+    else if (/^\s*Doc-tests\b/.test(line)) binary = null
+    else if (binary) {
+      const t = /^(\S+): test$/.exec(line)
+      if (t) out.push({ binary, name: t[1] })
+    }
+  }
+  return out
+}
+
+/** Maps `server/...rs::name` to the listed binaries and module path it must appear under; null if unmappable. */
+function rustTarget(file: string): { binaries: string[]; prefix: string } | null {
+  let m = /^server\/tests\/([^/]+\.rs)$/.exec(file)
+  if (m) return { binaries: [`tests/${m[1]}`], prefix: '' }
+  m = /^server\/src\/(.+)\.rs$/.exec(file)
+  if (!m || m[1].startsWith('bin/')) return null
+  const segs = m[1].replace(/\/mod$/, '').split('/')
+  if (segs.length === 1 && (segs[0] === 'lib' || segs[0] === 'main')) segs.length = 0
+  return { binaries: ['src/lib.rs', 'src/main.rs'], prefix: segs.length ? segs.join('::') + '::' : '' }
+}
+
+/** Downgrades Rust tests that the real list does not contain (not compiled, or file path cannot be mapped). */
+export function reconcileWithCargoList(known: Known, listed: ListedTest[]): Known {
+  const out: Known = new Map(known)
+  for (const [ref, status] of known) {
+    if (!status.runs || !ref.startsWith('server/')) continue
+    const cut = ref.lastIndexOf('::')
+    const target = rustTarget(ref.slice(0, cut))
+    const name = ref.slice(cut + 2)
+    const found =
+      target !== null &&
+      listed.some(
+        (t) =>
+          target.binaries.includes(t.binary) &&
+          (target.binaries[0].startsWith('tests/')
+            ? t.name === name
+            : t.name.startsWith(target.prefix) && (t.name === target.prefix + name || t.name.endsWith('::' + name))),
+      )
+    if (!found)
+      out.set(ref, {
+        runs: false,
+        reason: target
+          ? 'is not in `cargo test -- --list` (file not in the Rust module tree, or cfg-excluded)'
+          : 'path cannot be mapped to a cargo test binary (only server/tests/*.rs and server/src/**.rs are supported)',
+      })
+  }
+  return out
+}
+
+/** Runs `cargo test -- --list`; throws (never skips) if cargo is unavailable or fails. */
+export function cargoList(root: string): ListedTest[] {
+  const r = spawnSync('cargo test -- --list 2>&1', { cwd: root, shell: true, encoding: 'utf8', maxBuffer: 64 << 20, env: { ...process.env, CARGO_TERM_COLOR: 'never' } })
+  if (r.error || r.status !== 0) throw new Error(`\`cargo test -- --list\` failed (cargo is required; this check does not skip):\n${r.error ?? ''}${r.stdout ?? ''}`)
+  const listed = parseCargoList(r.stdout)
+  if (listed.length === 0) throw new Error('`cargo test -- --list` printed no tests; cannot reconcile')
+  return listed
+}
+
+/** Static scan only, or reconciled with the real cargo list when `listed` is given. */
+export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
   const { rows, errors } = parseInvariants(readFileSync(join(root, 'docs/invariants.md'), 'utf8'))
   if (rows.length === 0) errors.push('docs/invariants.md: no rows found')
-  return [...errors, ...checkRows(rows, collectKnownTests(root))]
+  const known = collectKnownTests(root)
+  return [...errors, ...checkRows(rows, listed ? reconcileWithCargoList(known, listed) : known)]
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
   const root = resolve(import.meta.dirname, '../..')
-  const errors = checkInvariants(root)
+  let listed: ListedTest[]
+  try {
+    listed = cargoList(root)
+  } catch (e) {
+    console.error((e as Error).message)
+    process.exit(1)
+  }
+  const errors = checkInvariants(root, listed)
   for (const e of errors) console.error(`${relative(process.cwd(), join(root, 'docs/invariants.md'))}: ${e}`)
   if (errors.length > 0) process.exit(1)
   console.log('invariants: every named test exists and runs in CI')

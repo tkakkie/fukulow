@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, type Known } from './check-invariants.ts'
+import { checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, parseCargoList, reconcileWithCargoList, cargoList, type Known } from './check-invariants.ts'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -179,7 +179,70 @@ describe('reference checking against a fixture repository', () => {
 })
 
 describe('the real docs/invariants.md', () => {
-  it('names only existing, executable tests', () => {
+  it('names only existing, executable tests (static scan; the CLI also reconciles with cargo)', () => {
     expect(checkInvariants(resolve(import.meta.dirname, '../..'))).toEqual([])
+  })
+})
+
+describe('reconciliation with the cargo test list', () => {
+  const root = mkdtempSync(join(tmpdir(), 'inv-list-'))
+  const put = (path: string, text: string) => {
+    mkdirSync(join(root, path, '..'), { recursive: true })
+    writeFileSync(join(root, path), text)
+  }
+  const t = '#[test]\nfn real() {}\n'
+  mkdirSync(join(root, 'web'))
+  put('server/tests/auth.rs', t)
+  put('server/tests/helpers/mod.rs', t)
+  put('server/src/channels/tests/names.rs', t)
+  put('server/src/auth/throttle.rs', t)
+  put('server/src/unused_guard.rs', t)
+  put('server/src/orphan/mod.rs', t)
+  const output = [
+    '   Compiling x v0.1.0',
+    '     Running unittests src/lib.rs (target/debug/deps/x-1)',
+    'channels::tests::names::real: test',
+    'auth::throttle::tests::real: test',
+    '2 tests, 0 benchmarks',
+    '     Running tests/auth.rs (target/debug/deps/auth-2)',
+    'real: test',
+    '   Doc-tests x',
+    'src/lib.rs - doc (line 1): test',
+  ].join('\n')
+  const listed = parseCargoList(output)
+  const known = reconcileWithCargoList(collectKnownTests(root), listed)
+  const check = (ref: string) => checkRows(parseInvariants(`| Rule | Test |\n|---|---|\n| r | \`${ref}\` |`).rows, known)
+
+  it('parses binaries and ignores doc-tests', () => {
+    expect(listed).toEqual([
+      { binary: 'src/lib.rs', name: 'channels::tests::names::real' },
+      { binary: 'src/lib.rs', name: 'auth::throttle::tests::real' },
+      { binary: 'tests/auth.rs', name: 'real' },
+    ])
+  })
+
+  it('passes real tests: integration binary, nested module file, inline tests mod (positive)', () => {
+    expect(check('server/tests/auth.rs::real')).toEqual([])
+    expect(check('server/src/channels/tests/names.rs::real')).toEqual([])
+    expect(check('server/src/auth/throttle.rs::real')).toEqual([])
+  })
+
+  it('fails a referenced test in a file outside the module tree (negative)', () => {
+    expect(check('server/src/unused_guard.rs::real')[0]).toContain('cargo test -- --list')
+    expect(check('server/src/orphan/mod.rs::real')[0]).toContain('cargo test -- --list')
+  })
+
+  it('fails an unmappable path', () => {
+    expect(check('server/tests/helpers/mod.rs::real')[0]).toContain('cannot be mapped')
+  })
+
+  it('fails when cargo is unavailable instead of skipping', () => {
+    const saved = process.env.PATH
+    process.env.PATH = ''
+    try {
+      expect(() => cargoList(root)).toThrow(/cargo is required/)
+    } finally {
+      process.env.PATH = saved
+    }
   })
 })
