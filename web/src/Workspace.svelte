@@ -26,19 +26,27 @@
     realtime.close()
   })
 
-  // Watch a channel once its history is loaded, so the resume cursor is a real seq.
-  $effect(() => {
-    const id = s.selectedId
-    if (!id) return
-    const t = timelines.get(id)
-    const watch = () => t.get().status === 'ready' && realtime.watch(id)
-    watch()
-    return t.subscribe(watch)
-  })
   let s = $state(channels.get())
   const unsubscribe = channels.subscribe(() => (s = channels.get()))
   channels.load()
   $effect(() => unsubscribe)
+
+  // Watch the selected channel once its history is loaded, so the resume cursor is a real seq.
+  // Only the selected channel stays watched: the server caps subscriptions per connection.
+  // `selectedId` is derived so the effect re-runs only when the selection itself changes.
+  const selectedId = $derived(s.selectedId)
+  $effect(() => {
+    const id = selectedId
+    if (!id) return
+    const t = timelines.get(id)
+    const watch = () => t.get().status === 'ready' && realtime.watch(id)
+    watch()
+    const stop = t.subscribe(watch)
+    return () => {
+      stop()
+      realtime.unwatch(id)
+    }
+  })
 
   const selected = $derived(s.channels.find((c) => c.id === s.selectedId))
 

@@ -110,4 +110,56 @@ describe('realtime', () => {
     sockets[1].open()
     expect(sockets[1].sent).toEqual([])
   })
+
+  // Mirrors the Workspace effect: select = run the new effect after the previous cleanup.
+  function selecting(rt: ReturnType<typeof setup>['rt']) {
+    let cleanup = () => {}
+    return (id: string) => {
+      cleanup()
+      rt.watch(id)
+      cleanup = () => rt.unwatch(id)
+    }
+  }
+  const unsub = (channel_id: string) => ({ type: 'unsubscribe', channel_id })
+
+  it('switching A -> B -> A keeps only the selected channel subscribed', () => {
+    const { rt, sockets } = setup()
+    sockets[0].open()
+    const select = selecting(rt)
+    select('a')
+    select('b')
+    select('a')
+    expect(sockets[0].sent).toEqual([sub('a', 0), unsub('a'), sub('b', 0), unsub('b'), sub('a', 0)])
+    // Every subscribe is paired with an unsubscribe except the current one.
+    const open = new Set<string>()
+    for (const m of sockets[0].sent as { type: string; channel_id: string }[])
+      m.type === 'subscribe' ? open.add(m.channel_id) : open.delete(m.channel_id)
+    expect([...open]).toEqual(['a'])
+  })
+
+  it('never holds more than one subscription while visiting many channels', () => {
+    const { rt, sockets } = setup()
+    sockets[0].open()
+    const select = selecting(rt)
+    let live = 0
+    let peak = 0
+    for (let i = 0; i < 300; i++) {
+      select(`c${i}`)
+      live = (sockets[0].sent as { type: string }[]).reduce((n, m) => n + (m.type === 'subscribe' ? 1 : -1), 0)
+      peak = Math.max(peak, live)
+    }
+    expect(peak).toBe(1)
+  })
+
+  it('after reconnect only the currently selected channel is resubscribed', () => {
+    const { rt, sockets, timers } = setup({ b: 4 })
+    sockets[0].open()
+    const select = selecting(rt)
+    select('a')
+    select('b')
+    sockets[0].drop(1006)
+    timers[0].fn()
+    sockets[1].open()
+    expect(sockets[1].sent).toEqual([sub('b', 4)])
+  })
 })
