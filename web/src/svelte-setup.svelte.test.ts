@@ -1,7 +1,7 @@
 import { flushSync, tick } from 'svelte'
 import { expect, it } from 'vitest'
 
-// Proves the vitest setup (vite.config.ts + test/client-environment.ts): runes compile in `.svelte.test.ts`
+// Proves the vitest setup (vite.config.ts): runes compile in `.svelte.test.ts`
 // files, and effects really run in Node without a DOM.
 it('runs runes outside components: $state, $derived and $effect.root with flushSync', async () => {
   let count = $state(0)

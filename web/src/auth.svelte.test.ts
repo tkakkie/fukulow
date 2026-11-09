@@ -145,7 +145,7 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     net.event({ type: 'message', message: record(101) }) // a late event of the ended session
     await settle()
     expect(view.last.messages.map((m) => m.seq)).not.toContain(101)
-    expect(view.values.length).toBeGreaterThanOrEqual(runs)
+    expect(view.values.length).toBe(runs)
     await view.unmount()
   })
 
