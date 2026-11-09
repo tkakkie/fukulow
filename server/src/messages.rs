@@ -20,7 +20,9 @@ use crate::{
 mod delivery;
 pub use delivery::Delivery;
 #[cfg(test)]
-pub(crate) use delivery::{PublicationGate, pause_publication};
+pub(crate) use delivery::{
+    MAX_IN_FLIGHT_NOTIFICATIONS, NOTIFICATION_TIMEOUT, PublicationGate, pause_publication,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct Message {

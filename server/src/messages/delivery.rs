@@ -3,12 +3,17 @@ use crate::channels;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use uuid::Uuid;
 
 type ChannelKey = (Uuid, Uuid);
 type Recipients = HashMap<Uuid, Sender>;
+
+// Twice the production pool's 20 connections; bound backlog without waiting on sends.
+pub(crate) const MAX_IN_FLIGHT_NOTIFICATIONS: usize = 40;
+pub(crate) const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct Sender {
@@ -26,11 +31,23 @@ impl Sender {
 }
 
 /// Process-local fan-out of canonical committed messages, with one shared payload per send.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Delivery {
     recipients: Arc<Mutex<HashMap<ChannelKey, Recipients>>>,
+    notifications: Arc<Semaphore>,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl Default for Delivery {
+    fn default() -> Self {
+        Self {
+            recipients: Default::default(),
+            notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
+            #[cfg(test)]
+            tasks: Default::default(),
+        }
+    }
 }
 
 pub(super) struct Notification {
@@ -41,6 +58,11 @@ pub(super) struct Notification {
 
 impl Notification {
     pub(super) fn spawn(mut self, pool: sqlx::PgPool, message: Message) {
+        let Ok(permit) = self.delivery.notifications.clone().try_acquire_owned() else {
+            // The message is committed: signal reconnect/replay instead of queuing work.
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + NOTIFICATION_TIMEOUT;
         #[cfg(test)]
         let delivery = self.delivery.clone();
         #[cfg(test)]
@@ -50,8 +72,13 @@ impl Notification {
             .get(&message.client_message_id)
             .cloned();
         let task = tokio::spawn(async move {
-            self.delivery.publish(&pool, self.key.0, &message).await;
-            self.completed = true;
+            let _permit = permit;
+            self.completed = tokio::time::timeout_at(
+                deadline,
+                self.delivery.publish(&pool, self.key.0, &message),
+            )
+            .await
+            .is_ok();
             drop(self);
         });
         #[cfg(test)]
@@ -241,6 +268,50 @@ impl Drop for LiveQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn notification_timeout_signals_and_releases_capacity() {
+        let delivery = Delivery::default();
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut affected = delivery.queue(organization, Uuid::new_v4(), 1);
+        affected.subscribe(channel);
+        let key = Uuid::new_v4();
+        let gate = pause_publication(key);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        delivery.notification(organization, channel).spawn(
+            pool,
+            Message {
+                id: Uuid::new_v4(),
+                channel_id: channel,
+                seq: 1,
+                client_message_id: key,
+                sender: Uuid::new_v4(),
+                body: "committed".into(),
+                created_at: "now".into(),
+                topic_id: (),
+            },
+        );
+        gate.entered.acquire().await.unwrap().forget();
+        assert_eq!(
+            delivery.notifications.available_permits(),
+            MAX_IN_FLIGHT_NOTIFICATIONS - 1
+        );
+        tokio::time::advance(NOTIFICATION_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(!*affected.notification_failed.borrow());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        delivery.flush().await;
+        assert!(*affected.notification_failed.borrow());
+        assert!(!*affected.overflow.borrow());
+        assert!(affected.events.try_recv().is_err());
+        assert_eq!(
+            delivery.notifications.available_permits(),
+            MAX_IN_FLIGHT_NOTIFICATIONS
+        );
+    }
+
     #[tokio::test]
     async fn notification_cancelled_before_first_poll_signals_only_its_organization_channel() {
         let delivery = Delivery::default();

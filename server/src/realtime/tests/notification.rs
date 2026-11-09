@@ -55,14 +55,78 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
     }
     gate.release.add_permits(1);
     f.state.message_delivery.flush().await;
+    let next = post(&f, f.channel).await;
+    assert_eq!(event(&mut socket).await["message"], next);
+    f.state.message_delivery.flush().await;
     silent(&mut socket).await;
 }
 
 #[sqlx::test]
-async fn stopped_notification_after_response_closes_affected_sockets_and_reconnect_replays(
+async fn saturated_notifications_close_only_affected_sockets_and_reconnect_replays(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let other_channel = channel(&pool, f.organization, f.member, false).await;
+    let foreign = fixture(&pool).await;
+    // The same Channel UUID in another Organization, on the same Delivery registry.
+    sqlx::query("INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $2, 'Foreign', 'public')")
+        .bind(foreign.organization).bind(f.channel).execute(&pool).await.unwrap();
+    let mut affected = f.server.connect(&f.token).await;
+    subscribe(&mut affected, f.channel, 0).await;
+    ready(&mut affected, f.channel, 0).await;
+    let mut unrelated = f.server.connect(&f.token).await;
+    subscribe(&mut unrelated, other_channel, 0).await;
+    ready(&mut unrelated, other_channel, 0).await;
+    let mut other_org = f.server.connect(&foreign.token).await;
+    subscribe(&mut other_org, f.channel, 0).await;
+    ready(&mut other_org, f.channel, 0).await;
+
+    let mut gates = Vec::new();
+    let mut committed = Vec::new();
+    for _ in 0..messages::MAX_IN_FLIGHT_NOTIFICATIONS {
+        let key = Uuid::new_v4();
+        let gate = messages::pause_publication(key);
+        committed.push(send(&f, &f.token, f.channel, key, "held notification").await);
+        publication_entered(&gate).await;
+        gates.push(gate);
+    }
+    // All slots are occupied, but there is no failure or HTTP backpressure yet.
+    silent(&mut affected).await;
+    let key = Uuid::new_v4();
+    committed.push(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            send(&f, &f.token, f.channel, key, "saturated notification"),
+        )
+        .await
+        .unwrap(),
+    );
+    closed(&mut affected, 1011).await;
+    silent(&mut unrelated).await;
+    silent(&mut other_org).await;
+
+    let mut reconnect = f.server.connect(&f.token).await;
+    subscribe(&mut reconnect, f.channel, 0).await;
+    for message in &committed {
+        assert_eq!(event(&mut reconnect).await["message"], *message);
+    }
+    ready(&mut reconnect, f.channel, committed.len() as i64).await;
+    for gate in gates {
+        gate.release.add_permits(1);
+    }
+    f.state.message_delivery.flush().await;
+    let next = post(&f, f.channel).await;
+    assert_eq!(event(&mut reconnect).await["message"], next);
+    let own = post(&f, other_channel).await;
+    assert_eq!(event(&mut unrelated).await["message"], own);
+    let own = send(&f, &foreign.token, f.channel, Uuid::new_v4(), "foreign").await;
+    assert_eq!(event(&mut other_org).await["message"], own);
+    f.state.message_delivery.flush().await;
+}
+
+#[sqlx::test]
+async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_reconnect_replays(
     pool: PgPool,
 ) {
-    for abort in [true, false] {
+    for failure in ["abort", "panic", "timeout"] {
         let f = fixture(&pool).await;
         let other_channel = channel(&pool, f.organization, f.member, false).await;
         let foreign = fixture(&pool).await;
@@ -84,11 +148,15 @@ async fn stopped_notification_after_response_closes_affected_sockets_and_reconne
         let gate = messages::pause_publication(key);
         let committed = send(&f, &f.token, f.channel, key, "response before failure").await;
         publication_entered(&gate).await;
-        if abort {
-            gate.task.lock().unwrap().as_ref().unwrap().abort();
-        } else {
+        match failure {
+            "abort" => gate.task.lock().unwrap().as_ref().unwrap().abort(),
+            "timeout" => {
+                tokio::time::pause();
+                tokio::time::advance(messages::NOTIFICATION_TIMEOUT).await;
+                tokio::time::resume();
+            }
             // Fail inside the notification future, rather than the HTTP worker.
-            gate.release.close();
+            _ => gate.release.close(),
         }
         // No later publication is needed to expose this missing notification.
         closed(&mut live, 1011).await;
@@ -99,6 +167,8 @@ async fn stopped_notification_after_response_closes_affected_sockets_and_reconne
         subscribe(&mut reconnect, f.channel, 0).await;
         assert_eq!(event(&mut reconnect).await["message"], committed);
         ready(&mut reconnect, f.channel, 1).await;
+        let next = post(&f, f.channel).await;
+        assert_eq!(event(&mut reconnect).await["message"], next);
         let own = post(&f, other_channel).await;
         assert_eq!(event(&mut unrelated).await["message"], own);
         let own = post(&foreign, foreign.channel).await;
