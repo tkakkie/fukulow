@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { connectRealtime, type SocketLike } from './realtime'
+import { record } from './protocol-test-helpers'
 
 it('transports generated controls and events without owning reconnection policy', () => {
   const socket: SocketLike = { send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null, onclose: null }
@@ -24,4 +25,46 @@ it('transports generated controls and events without owning reconnection policy'
   expect(socket.onmessage).toBeNull()
   // Any saved callback still carries its controller generation.
   expect(lateMessage).not.toBeNull()
+})
+
+it('ignores malformed payloads for every forwarded event without throwing or closing the socket', () => {
+  const socket: SocketLike = { send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null, onclose: null }
+  const handlers = { onReady: vi.fn(), onEvent: vi.fn(), onClose: vi.fn() }
+  const connection = connectRealtime(handlers, () => socket)
+  const message = record(101)
+  const malformed: unknown[] = [null, [], true, 123, 'message', {}, { type: 'unknown' },
+    { type: 'message' }, { type: 'message', message: null }, { type: 'message', message: [] },
+    { type: 'message', message: 'message' },
+    { type: 'subscribed' }, { type: 'subscribed', channel_id: 'A' },
+    { type: 'subscribed', channel_id: 1, caught_up_seq: 100 },
+    ...['100', null, -1, 1.5, Infinity].map(caught_up_seq => ({ type: 'subscribed', channel_id: 'A', caught_up_seq })),
+    { type: 'error' }, { type: 'error', code: 404 }, { type: 'error', code: 'channel_not_found', channel_id: {} },
+  ]
+  for (const field of Object.keys(message)) {
+    const missing: Record<string, unknown> = { ...message }
+    delete missing[field]
+    malformed.push({ type: 'message', message: missing })
+    malformed.push({ type: 'message', message: { ...message, [field]: field === 'seq' ? '101' : 123 } })
+  }
+  for (const seq of [null, 0, -1, 1.5, Infinity]) malformed.push({ type: 'message', message: { ...message, seq } })
+  for (const data of [undefined, 1, {}, 'bad json', ...malformed.map(value => JSON.stringify(value)),
+    '{"type":"message","message":{"seq":1e999}}',
+    '{"type":"subscribed","channel_id":"A","caught_up_seq":1e999}']) {
+    expect(() => socket.onmessage?.({ data }), String(data)).not.toThrow()
+  }
+  expect(handlers.onEvent).not.toHaveBeenCalled()
+  expect(handlers.onClose).not.toHaveBeenCalled()
+  expect(socket.close).not.toHaveBeenCalled()
+  for (const event of [
+    { type: 'message', message },
+    { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 },
+    { type: 'error', code: 'invalid_control' },
+    { type: 'error', code: 'invalid_control', channel_id: null },
+    { type: 'error', code: 'channel_not_found', channel_id: 'A' },
+  ]) {
+    socket.onmessage?.({ data: JSON.stringify(event) })
+    expect(handlers.onEvent).toHaveBeenLastCalledWith(event)
+  }
+  expect(handlers.onEvent).toHaveBeenCalledTimes(5)
+  connection.close()
 })

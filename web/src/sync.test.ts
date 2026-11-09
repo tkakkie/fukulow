@@ -22,6 +22,7 @@ describe('controller shared client fixtures with fake transport and timers', () 
 })
 
 import { flush, record } from './sync-test-helpers'
+import { connectRealtime, type SocketLike } from './realtime'
 
 async function ready(client: ReturnType<typeof controllerClient>) {
   await client.feed({ type: 'session_start' })
@@ -30,6 +31,61 @@ async function ready(client: ReturnType<typeof controllerClient>) {
   await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
   await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
 }
+
+it('controller resumes from the pre-ack cursor after a lost echo and replay converges to one Message', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'optimistic' }))
+    .find(e => e.type === 'send')!
+  const message = { ...record(101), sender: 'me', client_message_id: 'c1', body: 'canonical' }
+  await client.feed({ type: 'ack', respond_to: send, message })
+  expect(client.sync.get().channels.A).toMatchObject({ cursor: 100, pending: [] })
+  const timeline = client.sync.getTimeline('A')
+  expect(timeline.get()).toMatchObject({ status: 'ready', messages: [record(100), message], pending: [] })
+  const wait = (await client.feed({ type: 'socket_closed', code: 1006 })).find(e => e.type === 'wait')!
+  await client.feed({ type: 'timer_elapsed', respond_to: wait })
+  expect(await client.feed({ type: 'connection_ready' })).toContainEqual(
+    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }),
+  )
+  await client.feed({ type: 'message', channel: 'A', message })
+  await client.feed({ type: 'message', channel: 'A', message })
+  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 101 })
+  expect(client.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, pending: [] })
+  expect(timeline.get()).toMatchObject({ status: 'ready', messages: [record(100), message], pending: [] })
+  await client.sync.close()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('controller ignores malformed wire events and processes later valid events on the same socket', async () => {
+  const socket: SocketLike = { send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null, onclose: null }
+  const client = controllerClient({ connect: handlers => connectRealtime(handlers, () => socket) })
+  await client.sync.start()
+  socket.onopen?.()
+  const latest = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: true })
+  const snapshot = client.sync.get()
+  for (const event of [
+    { type: 'message' }, { type: 'message', message: null }, { type: 'message', message: {} },
+    { type: 'message', message: { ...record(101), seq: '101' } },
+    { type: 'subscribed', channel_id: 'A' },
+    { type: 'subscribed', channel_id: 'A', caught_up_seq: '100' },
+    { type: 'error', channel_id: 'A' },
+    { type: 'error', channel_id: {}, code: 'channel_not_found' },
+  ]) {
+    expect(() => socket.onmessage?.({ data: JSON.stringify(event) })).not.toThrow()
+    await flush()
+    expect(client.sync.get()).toEqual(snapshot)
+  }
+  expect(socket.close).not.toHaveBeenCalled()
+  socket.onmessage?.({ data: JSON.stringify({ type: 'subscribed', channel_id: 'A', caught_up_seq: 100 }) })
+  socket.onmessage?.({ data: JSON.stringify({ type: 'message', message: record(101) }) })
+  await flush()
+  expect(client.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, messages: [record(100), record(101)] })
+  expect(client.sync.get().connected).toBe(true)
+  await client.sync.close()
+  expect(socket.close).toHaveBeenCalledOnce()
+  expect(vi.getTimerCount()).toBe(0)
+})
 
 it('controller rejects saved callbacks from closed connections and cancelled reconnect timers', async () => {
   const client = controllerClient()

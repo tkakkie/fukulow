@@ -10,7 +10,7 @@ export type ChannelState = {
   watched: boolean
   cursor: number | null
   messages: Message[]
-  /** Only live/ack/after records may extend an established cursor. */
+  /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
   advancing: number[]
   pending: Pending[]
   hasOlder: boolean
@@ -145,7 +145,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       history(id, 'after', c.cursor)
     } else if (c.wait === undefined) c.wait = wait('reorder_grace', id)
   }
-  const merge = (id: string, records: Message[], advance: boolean) => {
+  const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream') => {
     const c = channel(id)
     const valid = records.filter(m => m.channel_id === id)
     const bySeq = new Map(c.messages.map(m => [m.seq, m]))
@@ -154,8 +154,8 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (m.sender === state.selfId) c.pending = c.pending.filter(p => p.clientMessageId !== m.client_message_id)
     }
     c.messages = [...bySeq.values()].sort((a, b) => a.seq - b.seq)
-    if (advance) c.advancing = [...new Set([...c.advancing, ...valid.map(m => m.seq)])]
-    if (advance && c.cursor !== null) {
+    if (source !== 'window') c.advancing = [...new Set([...c.advancing, ...valid.map(m => m.seq)])]
+    if (source === 'stream' && c.cursor !== null && valid.some(m => m.seq === c.cursor! + 1)) {
       const eligible = new Set(c.advancing)
       while (eligible.has(c.cursor + 1)) c.cursor++
       c.advancing = c.advancing.filter(n => n > c.cursor!)
@@ -252,7 +252,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const c = state.channels[id]
       if (!c?.watched || c.state === 'unavailable' || !c.subscription) break
       if (e.type !== 'message' && input.subscription !== undefined && input.subscription !== c.subscription.id) break
-      if (e.type === 'message') { merge(id, [e.message], true); reconcile(id) }
+      if (e.type === 'message') { merge(id, [e.message], 'stream'); reconcile(id) }
       else if (e.type === 'error') {
         if (e.code === 'channel_not_found' || e.code === 'subscription_limit') unavailable(id)
       } else if (e.type === 'subscribed') {
@@ -288,15 +288,14 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const before = c.cursor
       const bootstrap = c.cursor === null && r.page === 'latest'
       if (bootstrap) c.cursor = input.page.messages.at(-1)?.seq ?? 0
-      merge(r.channel, input.page.messages, r.page === 'after')
+      merge(r.channel, input.page.messages, r.page === 'after' ? 'stream' : 'window')
       // Latest/before has_more is older; after has_more must never overwrite it.
       if (r.page !== 'after') {
         if (r.page === 'before' || bootstrap || !c.messages[0] ||
           (input.page.messages[0]?.seq ?? Infinity) <= c.messages[0].seq) c.hasOlder = input.page.has_more
       }
       if (bootstrap) {
-        subscribe(r.channel) // The sent base comes from this page, before buffered acknowledgements.
-        merge(r.channel, [], true)
+        subscribe(r.channel) // The sent base comes from this page, never buffered ack/echo records.
       }
       if (r.page === 'after') {
         if (c.cursor === before && gap(c)) c.wait = wait('fill_backoff', r.channel, c.fillAttempt++)
@@ -310,7 +309,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (!r || r.type !== 'send') break
       delete state.requests[input.request]
       const c = channel(r.channel)
-      if (input.type === 'ack') { merge(r.channel, [input.message], true); reconcile(r.channel) }
+      if (input.type === 'ack') { merge(r.channel, [input.message], 'ack'); reconcile(r.channel) }
       else {
         if (input.status === 401) { stop(true); break }
         const p = c.pending.find(p => p.clientMessageId === r.clientMessageId && p.request === input.request)

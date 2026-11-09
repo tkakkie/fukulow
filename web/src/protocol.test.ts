@@ -37,6 +37,71 @@ function id(effects: Effect[], type: 'fetch_history' | 'wait' | 'send' | 'connec
   return effect.id
 }
 
+it('ack without an echo keeps the cursor and reconnect replay converges to one canonical Message', () => {
+  const d = boot()
+  const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'optimistic' }), 'send')
+  const message = { ...record(101), sender: 'me', client_message_id: 'c1', body: 'canonical' }
+  d.feed({ type: 'ack', request: send, message })
+  expect(d.get().channels.A).toMatchObject({ cursor: 100, pending: [] })
+  expect(d.get().channels.A.messages).toEqual([record(100), message])
+  const wait = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1006 }), 'wait')
+  const connection = id(d.feed({ type: 'timer_elapsed', id: wait }), 'connect')
+  expect(d.feed({ type: 'connection_ready', connection })).toContainEqual(
+    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }),
+  )
+  d.feed({ type: 'event', connection, event: { type: 'message', message } })
+  d.feed({ type: 'event', connection, event: { type: 'message', message } })
+  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 101 } })
+  expect(d.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, pending: [] })
+  expect(d.get().channels.A.messages).toEqual([record(100), message])
+})
+
+it('an ack buffered before bootstrap neither establishes nor extends the history base', () => {
+  const d = protocolClient()
+  d.feed({ type: 'session_start' })
+  d.feed({ type: 'connection_ready' })
+  const latest = d.feed({ type: 'watch', channel: 'A' }).find(e => e.type === 'fetch_history')!
+  const send = d.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' }).find(e => e.type === 'send')!
+  const message = { ...record(101), sender: 'me', client_message_id: 'c1' }
+  d.feed({ type: 'ack', respond_to: send, message })
+  expect(d.get().channels.A).toMatchObject({ cursor: null, pending: [], messages: [message] })
+  expect(d.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: true }))
+    .toContainEqual(expect.objectContaining({ type: 'subscribe', after_seq: 100 }))
+  expect(d.get().channels.A.cursor).toBe(100)
+  expect(d.get().channels.A.messages).toEqual([record(100), message])
+  d.feed({ type: 'message', channel: 'A', message })
+  expect(d.get().channels.A.cursor).toBe(101)
+  expect(d.get().channels.A.messages).toEqual([record(100), message])
+})
+
+it('an adjacent live predecessor closes the gap and drains the buffered ack successor', () => {
+  const d = boot()
+  const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+  d.feed({ type: 'ack', request: send, message: { ...record(102), sender: 'me', client_message_id: 'c1' } })
+  expect(d.get().channels.A.cursor).toBe(100)
+  d.event(101)
+  expect(d.get().channels.A.cursor).toBe(102)
+  d.event(102)
+  expect(d.get().channels.A.cursor).toBe(102)
+})
+
+it.each([101, 102])('a gap above ack seq %s is detected and filled from the unchanged cursor', ackSeq => {
+  const d = boot()
+  const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+  const message = { ...record(ackSeq), sender: 'me', client_message_id: 'c1' }
+  d.feed({ type: 'ack', request: send, message })
+  d.event(103)
+  expect(d.get().channels.A.cursor).toBe(100)
+  const effects = d.feed({ type: 'timer_elapsed', id: d.get().channels.A.wait! })
+  expect(effects).toContainEqual(expect.objectContaining({ type: 'fetch_history', page: 'after', seq: 100 }))
+  d.feed({ type: 'history_result', request: id(effects, 'fetch_history'), page: {
+    messages: [101, 102, 103].map(seq => seq === ackSeq ? message : record(seq)), has_more: false,
+  } })
+  expect(d.get().channels.A).toMatchObject({ cursor: 103, pending: [], wait: undefined, fill: undefined })
+  expect(d.get().channels.A.messages.map(m => m.seq)).toEqual([100, 101, 102, 103])
+  expect(d.get().channels.A.messages.find(m => m.seq === ackSeq)).toEqual(message)
+})
+
 it('directional has_more never lets an after page erase older pagination', () => {
   const d = boot()
   const timer = id(d.event(103), 'wait')

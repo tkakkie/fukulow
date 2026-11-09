@@ -42,7 +42,7 @@
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
-        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"visible":[{"from":51,"to":101}],"pending":[]}}}},
+        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":101}],"pending":[]}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[]}}}}
       ]
     },

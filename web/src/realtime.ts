@@ -1,4 +1,4 @@
-import type { ClientMessage, ServerEvent } from './api'
+import type { ClientMessage, Message, ServerEvent } from './api'
 
 /** The transport has no reconnect, subscription or cursor policy; sync owns its lifetime. */
 export type SocketLike = {
@@ -24,6 +24,29 @@ function defaultOpen(): SocketLike {
   return socket
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+const isSequence = (value: unknown, minimum: number): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= minimum
+
+function isMessage(value: unknown): value is Message {
+  return isObject(value) && typeof value.channel_id === 'string' && isSequence(value.seq, 1) &&
+    typeof value.id === 'string' && typeof value.sender === 'string' &&
+    typeof value.client_message_id === 'string' && typeof value.body === 'string' &&
+    typeof value.created_at === 'string' && value.topic_id === null
+}
+
+function isServerEvent(value: unknown): value is ServerEvent {
+  if (!isObject(value)) return false
+  switch (value.type) {
+    case 'message': return isMessage(value.message)
+    case 'subscribed': return typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
+    case 'error': return typeof value.code === 'string' &&
+      (value.channel_id === undefined || value.channel_id === null || typeof value.channel_id === 'string')
+    default: return false
+  }
+}
+
 /** Delivery can repeat; the protocol establishes gap-free resume cursors across HTTP/socket races. */
 export function connectRealtime(handlers: RealtimeHandlers, open = defaultOpen): Connection {
   const socket = open()
@@ -31,9 +54,9 @@ export function connectRealtime(handlers: RealtimeHandlers, open = defaultOpen):
   socket.onclose = e => handlers.onClose(e.code)
   socket.onmessage = e => {
     if (typeof e.data !== 'string') return
-    let event: ServerEvent
-    try { event = JSON.parse(e.data) as ServerEvent } catch { return }
-    if (event && ['message', 'subscribed', 'error'].includes(event.type)) handlers.onEvent(event)
+    let event: unknown
+    try { event = JSON.parse(e.data) } catch { return }
+    if (isServerEvent(event)) handlers.onEvent(event)
   }
   return {
     send: message => socket.send(JSON.stringify(message)),
