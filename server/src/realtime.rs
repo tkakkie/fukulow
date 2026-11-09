@@ -80,7 +80,7 @@ pub enum ServerEvent {
 #[utoipa::path(get, path = "/api/v1/ws",
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 101, description = "WebSocket upgrade; frames use ClientMessage / ServerEvent"),
-        (status = 401, body = ErrorBody),
+        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade", body = ErrorBody),
         (status = 403, description = "Cookie Origin missing or not allowed", body = ErrorBody)))]
 pub async fn upgrade(
     State(state): State<AppState>,

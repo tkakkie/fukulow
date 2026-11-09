@@ -207,9 +207,9 @@ async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<
 /// Report whether the first organization still needs to be created.
 /// Accessible without authentication or a setup token; reveals only setup_required.
 #[utoipa::path(get, path = "/api/v1/setup", security(),
-    responses((status = 200, body = SetupStatus,
+    responses((status = 200, description = "Whether the first Organization still needs to be created", body = SetupStatus,
         headers(("Cache-Control" = String, description = "no-store"))),
-    (status = 500, body = ErrorBody)))]
+    (status = 500, description = "Database failure while checking whether an Organization exists", body = ErrorBody)))]
 pub async fn setup_status(State(state): State<AppState>) -> Result<Response, ApiError> {
     let setup_required = !organization_exists(&state.pool).await?;
     Ok((
@@ -226,7 +226,7 @@ pub async fn setup_status(State(state): State<AppState>) -> Result<Response, Api
 /// 415 even when the setup token is missing or invalid. After extraction, the token is
 /// checked before semantic input validation, password hashing, or database access.
 #[utoipa::path(post, path = "/api/v1/setup", request_body = SetupRequest,
-    responses((status = 201, body = Identity),
+    responses((status = 201, description = "Created the first Organization and Owner; returns their identity", body = Identity),
     (status = 400, description = "Invalid JSON, fields, or input; body extraction precedes setup-token verification", body = ErrorBody),
     (status = 401, description = "Missing or invalid setup token after successful body extraction", body = ErrorBody),
     (status = 409, description = "Setup already completed", body = ErrorBody),
@@ -364,8 +364,9 @@ impl utoipa::PartialSchema for RetryAfterSeconds {
 impl ToSchema for RetryAfterSeconds {}
 
 #[utoipa::path(post, path = "/api/v1/session", request_body = SignInRequest,
-    responses((status = 200, body = SessionResponse, headers(("Set-Cookie" = String, description = "HttpOnly; SameSite=Strict; Path=/; Secure by default"))),
-    (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
+    responses((status = 200, description = "Signed in; returns identity, session token and expiry, and sets the session cookie", body = SessionResponse, headers(("Set-Cookie" = String, description = "HttpOnly; SameSite=Strict; Path=/; Secure by default"))),
+    (status = 400, description = "Invalid sign-in JSON, fields, email or password length, or omitted Organization when no sole Organization exists", body = ErrorBody),
+    (status = 401, description = "Email or password does not match an account in the selected Organization", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts", body = ErrorBody,
@@ -562,13 +563,15 @@ fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 #[utoipa::path(get, path = "/api/v1/me", security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, body = Identity), (status = 401, body = ErrorBody)))]
+    responses((status = 200, description = "Current session's Member and Organization identity", body = Identity),
+    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody)))]
 pub async fn me(auth: Auth) -> impl IntoResponse {
     ([(header::CACHE_CONTROL, "no-store")], Json(auth.identity))
 }
 
 #[utoipa::path(delete, path = "/api/v1/session", security(("cookie" = []), ("bearer" = [])),
-    responses((status = 204, description = "Session revoked and cookie cleared", headers(("Set-Cookie" = String))), (status = 401, body = ErrorBody)))]
+    responses((status = 204, description = "Session revoked and cookie cleared", headers(("Set-Cookie" = String))),
+    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody)))]
 pub async fn sign_out(State(state): State<AppState>, auth: Auth) -> Result<Response, ApiError> {
     let pool = state.pool.clone();
     let changes = state.session_changes.clone();

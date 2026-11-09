@@ -98,8 +98,9 @@ pub struct MessagePage {
 #[utoipa::path(get, path = "/api/v1/channels/{id}/messages",
     params(("id" = Uuid, Path, description = "Channel id"), ListMessagesQuery),
     security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, body = MessagePage),
-        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
+    responses((status = 200, description = "Page of Channel Messages in ascending sequence order with directional has_more", body = MessagePage),
+        (status = 400, description = "Invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
         (status = 404, description = "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody)))]
 pub async fn list_messages(
     State(state): State<AppState>,
@@ -162,11 +163,13 @@ pub async fn list_messages(
 #[utoipa::path(post, path = "/api/v1/channels/{id}/messages", request_body = SendMessageRequest,
     params(("id" = Uuid, Path, description = "Channel id")),
     security(("cookie" = []), ("bearer" = [])),
-    responses((status = 201, body = Message),
-        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
+    responses((status = 201, description = "Confirmed Message; an idempotent retry returns the same Message and sequence", body = Message),
+        (status = 400, description = "Invalid Channel id, Message JSON or fields, or body that is whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
         (status = 404, description = "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
         (status = 409, description = "Client message id reused with different body or channel", body = ErrorBody),
-        (status = 413, body = ErrorBody), (status = 415, body = ErrorBody)))]
+        (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
+        (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody)))]
 pub async fn send_message(
     State(state): State<AppState>,
     auth: Auth,

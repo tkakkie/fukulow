@@ -50,8 +50,8 @@ pub struct ChannelList {
 /// List public channels of the caller's organization and private channels they belong to.
 #[utoipa::path(get, path = "/api/v1/channels",
     security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, body = ChannelList),
-        (status = 401, body = ErrorBody)))]
+    responses((status = 200, description = "Public Channels and private Channels the Member belongs to in their Organization", body = ChannelList),
+        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody)))]
 pub async fn list_channels(
     State(state): State<AppState>,
     auth: Auth,
@@ -80,10 +80,12 @@ pub async fn list_channels(
 /// A private channel includes its creator as a member in the same transaction.
 #[utoipa::path(post, path = "/api/v1/channels", request_body = CreateChannelRequest,
     security(("cookie" = []), ("bearer" = [])),
-    responses((status = 201, body = Channel),
-        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody),
+    responses((status = 201, description = "Created Channel; a private Channel includes its creator as a Member", body = Channel),
+        (status = 400, description = "Invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
         (status = 409, description = "Channel name already exists", body = ErrorBody),
-        (status = 413, body = ErrorBody), (status = 415, body = ErrorBody)))]
+        (status = 413, description = "Channel creation request body exceeds the size limit", body = ErrorBody),
+        (status = 415, description = "Channel creation requires an application/json content type", body = ErrorBody)))]
 pub async fn create_channel(
     State(state): State<AppState>,
     auth: Auth,
