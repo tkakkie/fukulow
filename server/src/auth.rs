@@ -491,10 +491,7 @@ async fn sign_in_with_workers(
         .execute(&state.pool)
         .await?;
     let identity = identity(&state, organization_id, &token_hash).await?;
-    state
-        .session_cleanup
-        .run(&state.pool, organization_id)
-        .await;
+    state.session_cleanup.trigger(&state.pool);
     Ok((
         [
             (header::SET_COOKIE, cookie(&state, &token, SESSION_SECONDS)),
