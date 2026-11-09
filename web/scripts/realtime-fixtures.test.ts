@@ -116,6 +116,36 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => (f.client.scenarios[0].id = 'valid-delivery'))).toContain('id also used in')
   })
 
+  it('only treats an any_of label as bound when every alternative binds it to the same effect type', () => {
+    const respond = (f: any) => (f.client.scenarios[0].steps[1].input = { type: 'ack', respond_to: 'x', message: { seq: 1 } })
+    const withAnyOf = (alternatives: unknown[]) => (f: any) => {
+      f.client.scenarios[0].steps[0].effects.required = [{ any_of: alternatives }]
+      respond(f)
+    }
+    expect(problemsOf(withAnyOf([{ type: 'send', as: 'x' }, { type: 'wait' }]))).toContain('respond_to x is not bound')
+    expect(problemsOf(withAnyOf([{ type: 'send', as: 'x' }, { type: 'wait', as: 'x' }]))).toContain('respond_to x is not bound')
+    expect(problemsOf(withAnyOf([{ type: 'send', as: 'x', channel: 'A' }, { type: 'send', as: 'x', channel: 'B' }]))).not.toContain('not bound')
+  })
+
+  it('rejects times inside any_of and a range for the singular message', () => {
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[0].effects.required = [{ any_of: [{ type: 'send', times: 1 }, { type: 'wait' }] }]))).toContain('times is not allowed inside any_of')
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'message', channel: 'A', message: { from: 1, to: 2 } }))).toContain('a single message cannot be a range')
+  })
+
+  it('compares replay gate channels independent of JSON property order', () => {
+    const ref = (order: 'a' | 'b') => (order === 'a' ? { group: 'g', from: 1, to: 2 } : { to: 2, group: 'g', from: 1 })
+    const gate = (f: any) => {
+      const d = f.delivery.scenarios[0]
+      d.setup.channels.push({ id: 'g', organization: 'o1', visibility: 'public', creator: 'alice', count: 2, messages: 1 })
+      d.steps.push({ do: 'hold_replay', channel: ref('a') }, { do: 'release_replay', channel: ref('b') })
+    }
+    expect(problemsOf(gate)).not.toContain('no hold_replay')
+  })
+
+  it('names the channel_not_found rule correctly', () => {
+    expect(problemsOf((f) => f.delivery.scenarios[0].steps[2].events.push({ type: 'error', code: 'channel_not_found' }))).toContain('channel_not_found needs a channel')
+  })
+
   it('rejects dangling references in client scenarios', () => {
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input.respond_to = 'nope'))).toContain('not bound by an earlier step')
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'ack', respond_to: 'f0', message: { seq: 1 } }))).toContain('answers a send effect')
@@ -257,6 +287,19 @@ describe('realtime fixtures: runner semantics', () => {
     expect(runClientScenario(scenario(steps), scripted(() => [{ type: 'fetch_history' }])).join()).toContain('missing required effect')
     expect(runClientScenario(scenario(steps), scripted(() => [{ type: 'wait' }, { type: 'fetch_history' }])).join()).toContain('expected 2')
     expect(runClientScenario(scenario(steps), scripted(() => [{ type: 'fetch_history' }, { type: 'fetch_history' }, { type: 'wait' }])).join()).toContain('listed order')
+  })
+
+  it('accepts times: 0 when nothing is emitted and fails when something is', () => {
+    const steps = [{ input: { type: 'watch', channel: 'A' }, effects: { required: [{ type: 'fetch_history', times: 0 }] } }]
+    expect(runClientScenario(scenario(steps), scripted(() => []))).toEqual([])
+    expect(runClientScenario(scenario(steps), scripted(() => [{ type: 'fetch_history' }])).join()).toContain('expected 0')
+  })
+
+  it('does not truncate a range given as the singular message', () => {
+    const steps = [{ input: { type: 'message', channel: 'A', message: { from: 1, to: 3 } } }]
+    let fed = false
+    expect(runClientScenario(scenario(steps), scripted(() => ((fed = true), []))).join()).toContain('not a range')
+    expect(fed).toBe(false)
   })
 
   it('checks never-effects in every step and respond_to binding', () => {

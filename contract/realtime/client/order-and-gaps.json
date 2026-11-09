@@ -3,7 +3,7 @@
   "scenarios": [
     {
       "id": "out-of-order-ack-and-websocket",
-      "title": "PILOT. Cursor 100: the ack for 102 arrives before WebSocket 101; the cursor moves 100 to 102 without a fill",
+      "title": "PILOT. Cursor 100: the ack for 102 arrives before WebSocket 101; the cursor stays at 100 until 101 arrives, then moves to 102 without a fill",
       "covers": ["C1","C2","C3","C5"],
       "note": "Not a Rust delivery trace: the server orders one socket. Mixed HTTP and WebSocket arrival is a client-only case.",
       "steps": [

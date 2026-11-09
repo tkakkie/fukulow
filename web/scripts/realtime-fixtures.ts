@@ -113,16 +113,21 @@ export function expandSeqs(list: SeqItem[]): number[] | null {
   return out.every((n, i) => i === 0 || n > out[i - 1]) ? out : null
 }
 
+/** A stable key for a ChannelRef: object properties are sorted, so the key does not depend on JSON property order. */
+const channelKey = (ref: Json): string =>
+  isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
+
 function checkSeqList(list: Json, where: string, errors: string[]) {
   if (!Array.isArray(list)) return
   if (expandSeqs(list as SeqItem[]) === null) errors.push(`${where}: seq list must be strictly ascending (ranges from <= to)`)
 }
 
-function checkMessageSpec(m: Record<string, Json>, where: string, errors: string[]) {
+function checkMessageSpec(m: Record<string, Json>, where: string, errors: string[], singular = false) {
   const single = 'seq' in m
   const range = 'from' in m && 'to' in m
   if (single === range) errors.push(`${where}: give seq, or from and to`)
   if (single && ('from' in m || 'to' in m)) errors.push(`${where}: seq cannot be combined with from/to`)
+  if (singular && range) errors.push(`${where}: a single message cannot be a range (use seq, or messages for a range)`)
   if (range && (m.to as number) < (m.from as number)) errors.push(`${where}: from must be <= to`)
 }
 
@@ -205,13 +210,13 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
         break
       case 'hold_replay':
         checkChannel(step.channel, at, false)
-        held.add(JSON.stringify(step.channel))
+        held.add(channelKey(step.channel))
         break
       case 'await_replay_held':
       case 'release_replay':
         checkChannel(step.channel, at, false)
-        if (!held.has(JSON.stringify(step.channel))) errors.push(`${at}: no hold_replay for this channel before`)
-        if (step.do === 'release_replay') held.delete(JSON.stringify(step.channel))
+        if (!held.has(channelKey(step.channel))) errors.push(`${at}: no hold_replay for this channel before`)
+        if (step.do === 'release_replay') held.delete(channelKey(step.channel))
         break
       case 'remove_membership':
         member(step.member)
@@ -237,7 +242,7 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
             checkSeqList(e.seqs, `${ea}.seqs`, errors)
           }
           if (e.channel !== undefined) checkChannel(e.channel, ea)
-          if (e.type === 'error' && e.code === 'channel_not_found' && e.channel === undefined) errors.push(`${ea}: channel_not_found has a channel`)
+          if (e.type === 'error' && e.code === 'channel_not_found' && e.channel === undefined) errors.push(`${ea}: channel_not_found needs a channel`)
         })
         break
       }
@@ -256,7 +261,8 @@ const respondsTo: Record<string, string> = {
 }
 
 function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
-  const labels = new Map<string, string>() // label -> effect type
+  const labels = new Map<string, string>() // label -> effect type, for labels that are surely bound
+  const declared = new Set<string>() // every label some pattern may bind (a label of one any_of alternative may stay unbound)
   const steps = s.steps as Record<string, Json>[]
   const patterns = (list: Json): Record<string, Json>[] =>
     ((list ?? []) as Record<string, Json>[]).flatMap((p) => (Array.isArray(p.any_of) ? (p.any_of as Record<string, Json>[]) : [p]))
@@ -272,7 +278,7 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
       if (bound === undefined) errors.push(`${at}.input: respond_to ${input.respond_to} is not bound by an earlier step`)
       else if (bound !== respondsTo[type]) errors.push(`${at}.input: ${type} answers a ${respondsTo[type]} effect, but ${input.respond_to} is a ${bound} effect`)
     }
-    for (const key of ['message']) if (isObject(input[key])) checkMessageSpec(input[key] as Record<string, Json>, `${at}.input.${key}`, errors)
+    if (isObject(input.message)) checkMessageSpec(input.message, `${at}.input.message`, errors, true)
     if (Array.isArray(input.messages)) {
       (input.messages as Record<string, Json>[]).forEach((m, j) => checkMessageSpec(m, `${at}.input.messages[${j}]`, errors))
       const flat = (input.messages as Record<string, Json>[]).flatMap((m) => ('seq' in m ? [m.seq as number] : 'to' in m ? [m.from as number, m.to as number] : []))
@@ -280,11 +286,22 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
     }
     const effects = (step.effects ?? {}) as Record<string, Json[]>
     for (const p of patterns(effects.forbidden)) if (p.as !== undefined) errors.push(`${at}.effects.forbidden: a forbidden pattern cannot bind a label`)
-    for (const p of patterns(effects.required)) {
-      if (typeof p.as !== 'string') continue
-      if (labels.has(p.as)) errors.push(`${at}.effects.required: duplicate label ${p.as}`)
-      labels.set(p.as, p.type as string)
+    const newlyBound = new Map<string, string>()
+    for (const [r, requirement] of ((effects.required ?? []) as Record<string, Json>[]).entries()) {
+      const alternatives = Array.isArray(requirement.any_of) ? (requirement.any_of as Record<string, Json>[]) : [requirement]
+      if (Array.isArray(requirement.any_of) && alternatives.some((p) => p.times !== undefined)) {
+        errors.push(`${at}.effects.required[${r}]: times is not allowed inside any_of (count the alternatives separately)`)
+      }
+      for (const p of alternatives) {
+        if (typeof p.as !== 'string') continue
+        if (declared.has(p.as)) errors.push(`${at}.effects.required: duplicate label ${p.as}`)
+        declared.add(p.as)
+      }
+      // Only the matched alternative binds at run time: a label is usable when every alternative binds it to the same effect type.
+      const first = alternatives[0]
+      if (typeof first.as === 'string' && alternatives.every((p) => p.as === first.as && p.type === first.type)) newlyBound.set(first.as, first.type as string)
     }
+    for (const [label, effectType] of newlyBound) labels.set(label, effectType)
     const channels = ((step.observe ?? {}) as { channels?: Record<string, Record<string, Json>> }).channels ?? {}
     for (const [name, observed] of Object.entries(channels)) {
       checkSeqList(observed.visible, `${at}.observe.channels.${name}.visible`, errors)
@@ -410,7 +427,14 @@ export function runClientScenario(scenario: ClientScenario, client: ClientUnderT
       input.respond_to = effect
     }
     const channelOf = (effect?: Effect) => (effect?.channel as string | undefined) ?? (step.input.channel as string | undefined)
-    if (isObject(step.input.message)) input.message = expandMessage(step.input.message, channelOf(input.respond_to))[0]
+    if (isObject(step.input.message)) {
+      const expanded = expandMessage(step.input.message, channelOf(input.respond_to))
+      if (expanded.length !== 1) {
+        failures.push(`${at}: input.message must be one Message, not a range`)
+        return
+      }
+      input.message = expanded[0]
+    }
     if (Array.isArray(step.input.messages)) {
       input.messages = (step.input.messages as Record<string, Json>[]).flatMap((m) => expandMessage(m, channelOf(input.respond_to)))
     }
@@ -434,6 +458,10 @@ function checkEffects(step: ClientStep, emitted: Effect[], bound: Map<string, Ef
     const anyOf = Array.isArray(requirement.any_of)
     const options = anyOf ? (requirement.any_of as Pattern[]) : [requirement]
     const found = options.flatMap((p) => emitted.filter((e) => matches(e, p)).map((e) => ({ e, p })))
+    if (!anyOf && requirement.times === 0) {
+      if (found.length > 0) failures.push(`${at}: expected 0 of ${JSON.stringify(requirement)}, got ${found.length}`)
+      continue
+    }
     if (found.length === 0) {
       failures.push(`${at}: missing required effect ${JSON.stringify(requirement)}; emitted ${JSON.stringify(emitted)}`)
       continue
