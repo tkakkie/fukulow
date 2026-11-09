@@ -1,21 +1,39 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkInvariants, checkRows, parseInvariants, rustTestNames, tsTestTitles } from './check-invariants.ts'
+import { checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, type Known } from './check-invariants.ts'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-describe('rustTestNames', () => {
-  it('finds #[test], #[tokio::test] and #[sqlx::test] functions', () => {
+describe('rustTests', () => {
+  it('finds test attributes and reports #[ignore] and cfg state', () => {
     const src = `
 #[test]
 fn a() {}
 #[tokio::test]
-async fn b() {}
-#[sqlx::test(migrations = "./m")]
-async fn c(pool: PgPool) {}
-#[tokio::test]
 #[ignore]
-pub async fn d() {}
+async fn b() {}
+#[tokio::test]
+#[ignore = "needs a database"]
+pub async fn c() {}
+#[sqlx::test(migrations = "./m")]
+#[cfg(test)]
+async fn d(pool: PgPool) {}
+#[test]
+#[cfg(feature = "slow")]
+fn e() {}
+#[cfg_attr(windows, ignore)]
+#[test]
+fn f() {}
 `
-    expect(rustTestNames(src)).toEqual(['a', 'b', 'c', 'd'])
+    expect(rustTests(src)).toEqual([
+      { name: 'a', ignored: false, conditional: false },
+      { name: 'b', ignored: true, conditional: false },
+      { name: 'c', ignored: true, conditional: false },
+      { name: 'd', ignored: false, conditional: false },
+      { name: 'e', ignored: false, conditional: true },
+      { name: 'f', ignored: false, conditional: true },
+    ])
   })
 
   it('ignores comments, strings and plain functions (negative)', () => {
@@ -35,19 +53,44 @@ fn lifetimes<'a>(x: &'a str) -> char { '"' }
 #[test]
 fn after_char_literal() {}
 `
-    expect(rustTestNames(src)).toEqual(['after_char_literal'])
+    expect(rustTests(src).map((t) => t.name)).toEqual(['after_char_literal'])
   })
 })
 
-describe('tsTestTitles', () => {
-  it('finds test( and it( titles, including modifiers', () => {
+describe('tsTests', () => {
+  it('finds test( and it( titles and marks skipped ones', () => {
     const src = `
-import { test, it } from 'x'
 test('first', async () => {})
 it("second", () => {})
 test.skip(\`third\`, () => {})
+it.todo('fourth')
+test.fixme('fifth', () => {})
+xit('sixth', () => {})
+test.only('seventh', () => {})
 `
-    expect(tsTestTitles(src)).toEqual(['first', 'second', 'third'])
+    expect(tsTests(src)).toEqual([
+      { title: 'first', skipped: false },
+      { title: 'second', skipped: false },
+      { title: 'third', skipped: true },
+      { title: 'fourth', skipped: true },
+      { title: 'fifth', skipped: true },
+      { title: 'sixth', skipped: true },
+      { title: 'seventh', skipped: false },
+    ])
+  })
+
+  it('marks every test inside a skipped describe, nested too (negative)', () => {
+    const src = `
+describe.skip('a', () => { it('in skipped', () => {}); describe('inner', () => { it('deep', () => {}) }) })
+test.describe.skip('b', () => { test('pw in skipped', () => {}) })
+describe('c', () => { it('fine', () => {}) })
+`
+    expect(tsTests(src)).toEqual([
+      { title: 'in skipped', skipped: true },
+      { title: 'deep', skipped: true },
+      { title: 'pw in skipped', skipped: true },
+      { title: 'fine', skipped: false },
+    ])
   })
 
   it('ignores titles in comments and strings (negative)', () => {
@@ -58,40 +101,85 @@ const t = \`it('in template', () => {})\`
 describe('only a group', () => {})
 other('not a test', () => {})
 `
-    expect(tsTestTitles(src)).toEqual([])
+    expect(tsTests(src)).toEqual([])
   })
 })
 
-describe('docs/invariants.md rows', () => {
-  const md = [
-    '| Rule | Test |',
-    '|---|---|',
-    '| real | `exists_one` , `exists_two` (note) |',
-    '| later | (todo) |',
-  ].join('\n')
+describe('docs/invariants.md parsing', () => {
+  const table = (cell: string) => `| Rule | Test |\n|---|---|\n| r | ${cell} |`
 
-  it('accepts known names and (todo) rows', () => {
-    const { rows, errors } = parseInvariants(md)
-    expect(errors).toEqual([])
-    expect(checkRows(rows, new Set(['exists_one', 'exists_two']))).toEqual([])
-  })
-
-  it('fails an unknown name, naming the row and the name (negative)', () => {
-    const { rows } = parseInvariants(md)
-    const errors = checkRows(rows, new Set(['exists_one']))
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('line 3')
-    expect(errors[0]).toContain('exists_two')
+  it('accepts references and a lone (todo)', () => {
+    expect(parseInvariants(table('`a.rs::x`, `b.ts::y` (note)')).errors).toEqual([])
+    expect(parseInvariants(table('(todo)')).errors).toEqual([])
   })
 
   it('fails a row that names nothing and is not (todo) (negative)', () => {
-    const { errors } = parseInvariants('| Rule | Test |\n|---|---|\n| r | nothing here |')
+    expect(parseInvariants(table('nothing here')).errors).toHaveLength(1)
+  })
+
+  it('fails (todo) mixed with references, naming the line (negative)', () => {
+    const { errors } = parseInvariants(table('(todo) `a.rs::x`'))
     expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('line 3')
+    expect(errors[0]).toContain('(todo)')
+  })
+})
+
+describe('reference checking against a fixture repository', () => {
+  const root = mkdtempSync(join(tmpdir(), 'inv-'))
+  const put = (path: string, text: string) => {
+    mkdirSync(join(root, path, '..'), { recursive: true })
+    writeFileSync(join(root, path), text)
+  }
+  put('server/tests/a.rs', '#[test]\nfn ok_test() {}\n#[test]\n#[ignore]\nfn ignored_test() {}\n#[test]\nfn same_name() {}\n')
+  put('server/tests/b.rs', '#[test]\nfn same_name() {}\n')
+  put('web/src/x.test.ts', "it('runs', () => {})\nit.skip('skipped', () => {})\ndescribe.skip('g', () => { it('in parent', () => {}) })\ntest('dup', () => {})\ntest.skip('dup', () => {})\n")
+  put('web/e2e/y.spec.ts', "test('e2e one', () => {})\n")
+  const known: Known = collectKnownTests(root)
+  const check = (...refs: string[]) =>
+    checkRows(parseInvariants(`| Rule | Test |\n|---|---|\n| r | ${refs.map((r) => '`' + r + '`').join(', ')} |`).rows, known)
+
+  it('passes valid references (rust and vitest)', () => {
+    expect(check('server/tests/a.rs::ok_test', 'web/src/x.test.ts::runs')).toEqual([])
+  })
+
+  it('fails an ignored Rust test', () => {
+    expect(check('server/tests/a.rs::ignored_test')[0]).toContain('#[ignore]')
+  })
+
+  it('fails a skipped Vitest test and a test inside a skipped describe', () => {
+    expect(check('web/src/x.test.ts::skipped')[0]).toContain('skipped')
+    expect(check('web/src/x.test.ts::in parent')[0]).toContain('skipped')
+  })
+
+  it('fails the skipped part of a mixed cell only, with its line', () => {
+    const errors = check('server/tests/a.rs::ok_test', 'web/src/x.test.ts::skipped')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('line 3')
+    expect(errors[0]).toContain('web/src/x.test.ts::skipped')
+  })
+
+  it('fails a title defined twice when one definition is skipped', () => {
+    expect(check('web/src/x.test.ts::dup')).toHaveLength(1)
+  })
+
+  it('tells equal names in different files apart', () => {
+    expect(check('server/tests/a.rs::same_name', 'server/tests/b.rs::same_name')).toEqual([])
+    expect(check('server/tests/c.rs::same_name')[0]).toContain('not a test definition')
+    expect(check('same_name')[0]).toContain('path::test_name')
+  })
+
+  it('fails a test CI does not run (Playwright e2e)', () => {
+    expect(check('web/e2e/y.spec.ts::e2e one')[0]).toContain('not run in CI')
+  })
+
+  it('fails a nonexistent name', () => {
+    expect(check('server/tests/a.rs::nope')[0]).toContain('not a test definition')
   })
 })
 
 describe('the real docs/invariants.md', () => {
-  it('names only existing tests', () => {
+  it('names only existing, executable tests', () => {
     expect(checkInvariants(resolve(import.meta.dirname, '../..'))).toEqual([])
   })
 })
