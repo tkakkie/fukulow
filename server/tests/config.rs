@@ -70,3 +70,26 @@ fn startup_rejects_partial_or_invalid_proxy_configuration_before_database_access
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn startup_rejects_invalid_websocket_origins_before_database_access() {
+    for origins in [
+        "",
+        "*",
+        "https://chat.example/path",
+        "https://chat.example:99999",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+            .env("DATABASE_URL", "invalid-test-url")
+            .env_remove("FUKULOW_SETUP_TOKEN")
+            .env("FUKULOW_WS_ALLOWED_ORIGINS", origins)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("FUKULOW_WS_ALLOWED_ORIGINS")
+        );
+    }
+}

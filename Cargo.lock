@@ -398,6 +398,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
+ "futures-util",
  "mime_guess",
  "rand 0.8.8",
  "rust-embed",
@@ -407,6 +408,7 @@ dependencies = [
  "sqlx",
  "subtle",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "utoipa",
  "uuid",
