@@ -85,7 +85,7 @@ it('an adjacent live predecessor closes the gap and drains the buffered ack succ
   expect(d.get().channels.A.cursor).toBe(102)
 })
 
-it('a live predecessor before the ack leaves the cursor at the live seq, never past a gap, and replay converges', () => {
+it('a live predecessor before the ack leaves the cursor at the live seq, never past a gap, and the next contiguous event advances it', () => {
   const d = boot()
   const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
   d.event(101)
