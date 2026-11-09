@@ -1,7 +1,7 @@
 import * as api from './api'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
-import { initialState, step, type Effect, type Input, type State } from './protocol'
+import { initialState, step, type ChannelState, type Effect, type Input } from './protocol'
 
 export type TimelineApi = {
   listMessages(channel: string, query?: ListMessagesQuery): Promise<Result<MessagePage>>
@@ -41,12 +41,19 @@ export function createSync(options: SyncOptions) {
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
   const listeners = new Set<() => void>()
+  const channelListeners = new Map<string, Set<() => void>>()
   const timelines = new Map<string, ReturnType<typeof timeline>>()
 
   function dispatch(input: Input): Promise<void> {
+    const previous = state
     const result = step(state, input)
     state = result.state
-    listeners.forEach(l => l())
+    if (state !== previous) {
+      listeners.forEach(l => l())
+      channelListeners.forEach((listeners, channel) => {
+        if (state.channels[channel] !== previous.channels[channel]) listeners.forEach(l => l())
+      })
+    }
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 
@@ -163,12 +170,14 @@ export function createSync(options: SyncOptions) {
 
   function timeline(channel: string) {
     let snapshot: TimelineState
-    let last: State | undefined
+    let last: ChannelState | undefined | null = null
+    const listeners = new Set<() => void>()
+    channelListeners.set(channel, listeners)
     return {
       get(): TimelineState {
-        if (last === state) return snapshot
-        last = state
         const c = state.channels[channel]
+        if (last === c) return snapshot
+        last = c
         snapshot = {
           // Content visibility depends on the base; subscription confirmation drives the separate live indicator.
           status: c?.state === 'unavailable' || c?.historyError ? 'error' : c && c.cursor !== null ? 'ready' : 'loading',

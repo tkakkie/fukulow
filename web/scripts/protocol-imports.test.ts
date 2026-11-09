@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import ts from 'typescript'
 import { checkProtocolImports } from './protocol-imports.ts'
 
-const generatedTypes = [{ path: './api-schema', typeOnly: true }]
+const generatedTypes = [{ path: './api-schema.d.ts', typeOnly: true }]
 function imports(source: string) {
   return ts.createSourceFile('protocol.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
     .statements.filter(ts.isImportDeclaration).map(node => ({
@@ -21,7 +21,7 @@ describe('protocol direct-import scan (not transitive purity)', () => {
     }
   })
   it('allows generated types and ignores comments and unrelated string literals', () => {
-    expect(checkProtocolImports(`import type { components } from './api-schema';
+    expect(checkProtocolImports(`import type { components } from './api-schema.d.ts';
       // import 'svelte'
       const text = "import 'svelte/store'"`)).toEqual([])
   })
@@ -34,7 +34,7 @@ describe('protocol direct-import scan (not transitive purity)', () => {
   it('generated-types-only assertion rejects additional multiline imports with negative controls', () => {
     const allowed = `import type {
       components, ServerEvent,
-    } from './api-schema'`
+    } from './api-schema.d.ts'`
     expect(imports(allowed)).toEqual(generatedTypes)
     for (const extra of [`import {
       step,
@@ -45,6 +45,6 @@ describe('protocol direct-import scan (not transitive purity)', () => {
     }
     expect(imports(`import {
       components,
-    } from './api-schema'`)).not.toEqual(generatedTypes)
+    } from './api-schema.d.ts'`)).not.toEqual(generatedTypes)
   })
 })

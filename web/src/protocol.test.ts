@@ -311,3 +311,93 @@ it('watch clamp unwatch releases every server slot before the replacement bootst
     expect(d.get().channels[channel]).toMatchObject({ watched: false, cursor: null, subscription: undefined })
   }
 })
+
+it('one Channel update shares untouched Channels and unrelated message and pending arrays', () => {
+  const d = boot()
+  const history = id(d.feed({ type: 'watch', channel: 'B' }), 'fetch_history')
+  d.feed({ type: 'history_result', request: history, page: { messages: [record(1, 'B')], has_more: false } })
+  d.feed({ type: 'user_send', channel: 'B', clientMessageId: 'b', body: 'b' })
+  const before = d.get()
+  // An unrelated window/pending queue must not even be traversed, regardless of its size.
+  for (const key of ['messages', 'pending', 'advancing'] as const) {
+    Object.defineProperty(before.channels.B, key, { get: () => { throw new Error(`read unrelated ${key}`) } })
+  }
+  const after = step(before, { type: 'event', connection: d.connection, event: { type: 'message', message: record(101) } }).state
+  expect(after.channels.B).toBe(before.channels.B)
+  expect(after.channels.A).not.toBe(before.channels.A)
+  expect(after.channels.A.messages[0]).toBe(before.channels.A.messages[0])
+  expect(after.channels.A.pending).toBe(before.channels.A.pending)
+  expect(after.channels.A.subscription).toBe(before.channels.A.subscription)
+  expect(before.channels.A.messages).toEqual([record(100)])
+})
+
+it('unchanged protocol input keeps state identity and duplicate merge never copies the loaded window', () => {
+  const d = boot()
+  const before = d.get()
+  const original = before.channels.A.messages
+  before.channels.A.messages = new Proxy(original, {
+    get(target, key, receiver) {
+      if (key === 'map' || key === 'slice' || key === Symbol.iterator || key === 'sort')
+        throw new Error('copied or traversed duplicate window')
+      return Reflect.get(target, key, receiver)
+    },
+  })
+  for (const input of [
+    { type: 'watch', channel: 'A' },
+    { type: 'user_discard', channel: 'A', clientMessageId: 'absent' },
+    { type: 'user_retry', channel: 'A', clientMessageId: 'absent' },
+    { type: 'event', connection: d.connection, event: { type: 'message', message: { ...record(100) } } },
+    { type: 'event', connection: d.connection, subscription: before.channels.A.subscription!.id,
+      event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } },
+    { type: 'history_failed', request: -1, status: 404 },
+    { type: 'send_failed', request: -1, status: 401 },
+    { type: 'timer_elapsed', id: -1 },
+  ] satisfies Input[]) {
+    const result = step(before, input)
+    expect(result.state).toBe(before)
+    expect(result.effects).toEqual([])
+  }
+})
+
+it('incremental merge handles unordered duplicates and history pages with canonical pending settlement', () => {
+  const d = boot()
+  for (const key of ['match', 'other', 'unsettled'])
+    d.feed({ type: 'user_send', channel: 'A', clientMessageId: key, body: 'optimistic' })
+  const pending = d.get().channels.A.pending
+  const old = d.get().channels.A.messages[0]
+  const older = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
+  const canonical = { ...record(99), sender: 'me', client_message_id: 'match', body: 'canonical', id: 'server-99' }
+  d.feed({ type: 'history_result', request: older, page: {
+    messages: [record(99), record(97), record(98), canonical, { ...record(96), client_message_id: 'other' }], has_more: false,
+  } })
+  expect(d.get().channels.A.messages).toEqual([{ ...record(96), client_message_id: 'other' }, record(97), record(98), canonical, old])
+  expect(d.get().channels.A.messages.at(-1)).toBe(old)
+  expect(d.get().channels.A.pending).toEqual(pending.slice(1))
+  expect(d.get().channels.A.pending[0]).toBe(pending[1])
+  expect(d.get().channels.A.cursor).toBe(100)
+  // Refresh overlaps existing records and contains out-of-order repeated seqs: last server record wins.
+  const latest = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
+  const changed = { ...record(100), body: 'server replacement' }
+  d.feed({ type: 'history_result', request: latest, page: {
+    messages: [record(103), record(100), record(102), changed, record(101), record(103)], has_more: false,
+  } })
+  expect(d.get().channels.A.messages.map(m => m.seq)).toEqual([96, 97, 98, 99, 100, 101, 102, 103])
+  expect(d.get().channels.A.messages.find(m => m.seq === 100)).toBe(changed)
+  expect(d.get().channels.A.cursor).toBe(100)
+  d.event(103); d.event(101); d.event(102)
+  expect(d.get().channels.A.cursor).toBe(103)
+})
+
+it('incremental merge matches a full-window reference across deterministic overlapping pages', () => {
+  const d = boot()
+  const expected = new Map(d.get().channels.A.messages.map(m => [m.seq, m]))
+  for (let batch = 0; batch < 60; batch++) {
+    const records = Array.from({ length: 13 }, (_, i) => ({ ...record((batch * 17 + i * 31) % 151 + 1), body: `batch-${batch}-${i}` }))
+    records.push({ ...records[3], body: 'last duplicate wins' }, { ...records[5] })
+    const request = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
+    for (const message of records) expected.set(message.seq, message)
+    d.feed({ type: 'history_result', request, page: { messages: records, has_more: false } })
+    expect(d.get().channels.A.messages).toEqual([...expected.values()].sort((a, b) => a.seq - b.seq))
+    expect(d.get().channels.A.cursor).toBe(100)
+  }
+})
