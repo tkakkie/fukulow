@@ -1,4 +1,4 @@
-.PHONY: api load
+.PHONY: api load load-record load-image
 api:
 	cargo run --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
@@ -21,4 +21,11 @@ load:
 		-e $(call shell_quote,BASE_URL=$(BASE_URL)) -e LOAD_EMAIL -e LOAD_PASSWORD -e LOAD_ORGANIZATION_ID \
 		-e LOAD_BOOTSTRAP -e LOAD_SETUP_TOKEN -e CHANNELS -e SUBSCRIBERS -e PUBLISHERS \
 		-e DURATION_SECONDS -e PUBLISH_INTERVAL_MS -e READY_TIMEOUT_SECONDS -e DRAIN_TIMEOUT_SECONDS \
-		-e CHANNEL_VISIBILITY $(call shell_quote,$(K6_IMAGE)) run load/scenario.ts
+		-e CHANNEL_VISIBILITY -e SOCKETS_PER_SESSION -e LOAD_MEASURE $(call shell_quote,$(K6_IMAGE)) run load/scenario.ts
+
+# Isolated Docker baseline with resource/SQL snapshots; artifacts default to /private/tmp.
+load-record:
+	node load/record.ts
+
+load-image:
+	@echo $(call shell_quote,$(K6_IMAGE))

@@ -1,0 +1,26 @@
+# Disposable measurement environment; never shares production/E2E images, ports or volumes.
+services:
+  app:
+    image: ${LOAD_PROJECT:?Set LOAD_PROJECT}-app
+    build: ..
+    environment:
+      FUKULOW_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://fukulow:${LOAD_DB_PASSWORD:?Set LOAD_DB_PASSWORD}@db:5432/fukulow
+      FUKULOW_COOKIE_SECURE: "false"
+    ports:
+      - "127.0.0.1:${LOAD_PORT:?Set LOAD_PORT}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:18
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=all"]
+    environment:
+      POSTGRES_USER: fukulow
+      POSTGRES_DB: fukulow
+      POSTGRES_PASSWORD: ${LOAD_DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fukulow -d fukulow"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
