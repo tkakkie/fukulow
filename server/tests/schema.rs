@@ -51,39 +51,128 @@ async fn migrated_tables_have_not_null_organization_id(pool: PgPool) {
     check_organization_ids(&pool).await.unwrap();
 }
 
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct Index {
+    name: String,
+    key_columns: Vec<String>,
+    total_attributes: i16,
+    options: Vec<i16>,
+    nulls_not_distinct: bool,
+    is_unique: bool,
+    is_primary: bool,
+    has_predicate: bool,
+    has_expressions: bool,
+    is_valid: bool,
+    method: String,
+}
+
+async fn session_indexes(pool: &PgPool) -> Result<Vec<Index>, sqlx::Error> {
+    // Rebuild indoption as a one-based array; SQLx cannot decode the catalog's
+    // zero-based int2vector directly, even when cast to int2[].
+    sqlx::query_as(
+        "SELECT c.relname::text AS name, \
+                ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(attnum, n) \
+                      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+                      WHERE k.n <= i.indnkeyatts ORDER BY k.n) AS key_columns, \
+                i.indnatts AS total_attributes, \
+                ARRAY(SELECT unnest(i.indoption::int2[])) AS options, \
+                i.indnullsnotdistinct AS nulls_not_distinct, \
+                i.indisunique AS is_unique, i.indisprimary AS is_primary, \
+                i.indpred IS NOT NULL AS has_predicate, i.indexprs IS NOT NULL AS has_expressions, \
+                i.indisvalid AS is_valid, am.amname::text AS method \
+         FROM pg_index i \
+         JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = c.relam \
+         WHERE i.indrelid = 'public.sessions'::regclass ORDER BY c.relname",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 #[sqlx::test(migrations = false)]
 async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expiry(pool: PgPool) {
     migrate(&pool).await.unwrap();
-    let indexes: Vec<(String, String)> = sqlx::query_as(
-        "SELECT indexname, indexdef FROM pg_indexes \
-         WHERE schemaname = 'public' AND tablename = 'sessions' ORDER BY indexname",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-
     assert_eq!(
-        indexes,
+        session_indexes(&pool).await.unwrap(),
         vec![
-            (
-                "sessions_organization_expiry".into(),
-                "CREATE INDEX sessions_organization_expiry ON public.sessions USING btree (organization_id, expires_at, token_hash)".into(),
-            ),
-            (
-                "sessions_pkey".into(),
-                "CREATE UNIQUE INDEX sessions_pkey ON public.sessions USING btree (organization_id, token_hash)".into(),
-            ),
+            Index {
+                name: "sessions_organization_expiry".into(),
+                key_columns: vec![
+                    "organization_id".into(),
+                    "expires_at".into(),
+                    "token_hash".into()
+                ],
+                total_attributes: 3,
+                options: vec![0, 0, 0],
+                nulls_not_distinct: false,
+                is_unique: false,
+                is_primary: false,
+                has_predicate: false,
+                has_expressions: false,
+                is_valid: true,
+                method: "btree".into(),
+            },
+            Index {
+                name: "sessions_pkey".into(),
+                key_columns: vec!["organization_id".into(), "token_hash".into()],
+                total_attributes: 2,
+                options: vec![0, 0],
+                nulls_not_distinct: false,
+                is_unique: true,
+                is_primary: true,
+                has_predicate: false,
+                has_expressions: false,
+                is_valid: true,
+                method: "btree".into(),
+            },
         ]
     );
-    let primary_key: String = sqlx::query_scalar(
-        "SELECT i.relname::text FROM pg_constraint c \
+    let primary_key: (String, String) = sqlx::query_as(
+        "SELECT c.conname::text, i.relname::text FROM pg_constraint c \
          JOIN pg_class i ON i.oid = c.conindid \
          WHERE c.conrelid = 'public.sessions'::regclass AND c.contype = 'p'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(primary_key, "sessions_pkey");
+    assert_eq!(
+        primary_key,
+        ("sessions_pkey".into(), "sessions_pkey".into())
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn session_index_check_distinguishes_include_sort_and_null_changes(pool: PgPool) {
+    migrate(&pool).await.unwrap();
+    let original = session_indexes(&pool).await.unwrap();
+    for definition in [
+        "(organization_id, expires_at, token_hash) INCLUDE (user_id)",
+        "(organization_id DESC, expires_at, token_hash)",
+        "(organization_id NULLS FIRST, expires_at, token_hash)",
+        "(organization_id, expires_at, token_hash) NULLS NOT DISTINCT",
+    ] {
+        sqlx::raw_sql(&format!(
+            "DROP INDEX sessions_organization_expiry; \
+             CREATE INDEX sessions_organization_expiry ON sessions {definition}"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_ne!(
+            session_indexes(&pool).await.unwrap(),
+            original,
+            "structural check must detect {definition}"
+        );
+    }
+    sqlx::raw_sql(
+        "DROP INDEX sessions_organization_expiry; \
+         CREATE INDEX sessions_organization_expiry \
+         ON sessions (organization_id, expires_at, token_hash)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(session_indexes(&pool).await.unwrap(), original);
 }
 
 #[sqlx::test(migrations = false)]
