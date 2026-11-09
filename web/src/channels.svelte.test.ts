@@ -26,24 +26,24 @@ function setup() {
 describe('channels adapter', () => {
   it('shows list loading, selection and creation as they happen', async () => {
     const { adapter, lists, creates } = setup()
-    const view = await mount(() => ({ state: adapter.state, selected: adapter.selected }))
-    expect(view.last).toMatchObject({ state: { status: 'loading', channels: [] }, selected: undefined })
+    const view = await mount(() => adapter.state)
+    expect(view.last).toMatchObject({ status: 'loading', channels: [], selectedId: null })
 
     void adapter.load()
     lists[0].resolve(ok({ channels: [channel('a'), channel('b')] }))
     await settle()
-    expect(view.last).toMatchObject({ state: { status: 'ready', selectedId: 'a' }, selected: { id: 'a' } })
+    expect(view.last).toMatchObject({ status: 'ready', selectedId: 'a' })
 
     adapter.select('b')
     await settle()
-    expect(view.last.selected).toMatchObject({ id: 'b' })
+    expect(view.last.selectedId).toBe('b')
 
     const created = adapter.create('general', 'public')
     creates[0].resolve(ok(channel('n', 'general')))
     expect(await created).toBeNull()
     await settle()
-    expect(view.last.state.channels.map((c) => c.id)).toEqual(['a', 'b', 'n'])
-    expect(view.last.selected).toMatchObject({ id: 'n', name: 'general' })
+    expect(view.last.channels.map((c) => c.id)).toEqual(['a', 'b', 'n'])
+    expect(view.last.selectedId).toBe('n')
     await view.unmount()
   })
 
@@ -76,7 +76,7 @@ describe('channels adapter', () => {
   it('releases its controller listener with the last observer', async () => {
     const { adapter, count } = setup()
     const first = await mount(() => adapter.state)
-    const second = await mount(() => adapter.selected)
+    const second = await mount(() => adapter.state.selectedId)
     expect(count.active).toBe(1)
     await first.unmount()
     expect(count.active).toBe(1)

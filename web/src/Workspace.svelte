@@ -7,29 +7,32 @@
   // The session's controllers outlive this component: unmounting it never closes the connection.
   let { session }: { session: SessionModel } = $props()
   const channels = $derived(session.channels)
-  const selected = $derived(channels.selected)
+  // One adapter read per derived: every read of the adapter registers a listener effect.
+  const s = $derived(channels.state)
+  const selected = $derived(s.channels.find((c) => c.id === s.selectedId))
 </script>
 
 <div class="workspace">
   <aside>
-    {#if channels.state.status === 'error'}
+    {#if s.status === 'error'}
       <p role="alert">チャンネルを読み込めませんでした。</p>
       <button type="button" onclick={() => channels.load()}>再試行</button>
-    {:else if channels.state.status === 'loading' && channels.state.channels.length === 0}
+    {:else if s.status === 'loading' && s.channels.length === 0}
       <p>読み込み中…</p>
     {/if}
-    <ChannelList channels={channels.state.channels} selectedId={channels.state.selectedId} onselect={(id) => channels.select(id)} />
+    <ChannelList channels={s.channels} selectedId={s.selectedId} onselect={(id) => channels.select(id)} />
     <CreateChannelForm oncreate={(name, visibility) => channels.create(name, visibility)} />
   </aside>
   <div class="main">
     {#if selected}
       {@const channel = session.sync.channel(selected.id)}
       <h2>{selected.name}</h2>
-      <small data-testid="live-status" data-live={channel.live}>
-        {channel.live ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
+      {@const live = channel.live}
+      <small data-testid="live-status" data-live={live}>
+        {live ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
       </small>
       {#key selected.id}<Timeline {channel} />{/key}
-    {:else if channels.state.status === 'ready'}
+    {:else if s.status === 'ready'}
       <p>チャンネルがありません。左のフォームから作成してください。</p>
     {/if}
   </div>

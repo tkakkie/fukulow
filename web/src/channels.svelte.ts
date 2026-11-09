@@ -1,5 +1,5 @@
 import { createSubscriber } from 'svelte/reactivity'
-import { channelNameTooLong, type Channel, type ChannelsState, type createChannels } from './channels'
+import { channelNameTooLong, type ChannelsState, type createChannels } from './channels'
 
 export { channelNameTooLong, type Channel, type ChannelVisibility } from './channels'
 
@@ -15,10 +15,6 @@ export function channelsAdapter(channels: Channels) {
     get state(): ChannelsState {
       subscribe()
       return channels.get()
-    },
-    get selected(): Channel | undefined {
-      const s = this.state
-      return s.channels.find(c => c.id === s.selectedId)
     },
     load: () => channels.load(),
     select: (id: string) => channels.select(id),
