@@ -1,5 +1,7 @@
 # Decisions
 
+- #77 implements #72 with API validation after the 128-scalar length check and before opening a transaction: reject `name != name.trim()` with 400, preserving internal whitespace and empty names. No DB CHECK or migration: PostgreSQL's default whitespace operations differ from Rust `str::trim()`. OpenAPI describes the rule without an approximate regex; existing data remains unchanged.
+
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.
 - Reverse proxy is optional: app speaks plain HTTP; Caddy (default) or nginx via compose profile. Reason: Caddy gave trouble in ribbitto and may limit performance.
 - OpenAPI generated from Rust, committed, diff-checked in CI. Reason: future native clients (Kotlin).

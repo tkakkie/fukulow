@@ -35,6 +35,8 @@ pub struct Channel {
 #[serde(deny_unknown_fields)]
 pub struct CreateChannelRequest {
     /// At most 128 Unicode scalar values.
+    /// Leading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.
+    /// Internal whitespace and empty names are allowed.
     #[schema(max_length = 128)]
     pub name: String,
     pub visibility: ChannelVisibility,
@@ -87,7 +89,7 @@ pub async fn create_channel(
     auth: Auth,
     ApiJson(input): ApiJson<CreateChannelRequest>,
 ) -> Result<Response, ApiError> {
-    if input.name.chars().count() > 128 {
+    if input.name.chars().count() > 128 || input.name != input.name.trim() {
         return Ok((
             StatusCode::BAD_REQUEST,
             [(header::CACHE_CONTROL, "no-store")],

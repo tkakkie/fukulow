@@ -779,7 +779,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "At most 128 Unicode scalar values.",
+            "description": "At most 128 Unicode scalar values.\nLeading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.\nInternal whitespace and empty names are allowed.",
             "maxLength": 128
           },
           "visibility": {

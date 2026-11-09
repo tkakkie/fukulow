@@ -181,7 +181,11 @@ export interface components {
         ClientMessage: components["schemas"]["Subscribe"] | components["schemas"]["Unsubscribe"];
         /** @description Identity and organization come from the session, never from request fields. */
         CreateChannelRequest: {
-            /** @description At most 128 Unicode scalar values. */
+            /**
+             * @description At most 128 Unicode scalar values.
+             *     Leading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.
+             *     Internal whitespace and empty names are allowed.
+             */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
         };

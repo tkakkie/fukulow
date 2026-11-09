@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 mod name_length;
+mod name_whitespace;
 mod names;
 
 fn router(pool: &PgPool) -> Router {
