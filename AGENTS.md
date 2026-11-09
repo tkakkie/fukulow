@@ -45,7 +45,7 @@ Also: sending a message is idempotent (client-generated id); reconnect uses per-
 
 ## Commands (fill in as they appear)
 - Server: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-- Module direction: `rustup component add rustc-dev && rustfmt --check --edition 2024 scripts/module-direction.rs && node --test scripts/check-module-direction.test.ts && node scripts/check-module-direction.ts` (pinned Rust toolchain; build web assets first).
+- Module direction: `rustup component add rustc-dev && rustfmt --check --edition 2024 scripts/module-direction.rs && node --test scripts/check-module-direction.test.ts && node scripts/check-module-direction.ts` (pinned Rust toolchain; build web assets first). Every Rust toolchain bump must re-verify this checker (rustc_private is unstable).
 - Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build`
 - Migrations: `bash scripts/check-migrations.sh <base-sha>`; guard tests: `node --test scripts/check-migrations.test.ts`. Schema guard runs in `cargo test` with Postgres.
 - API types: `make api` (regenerates openapi.json and TS types). CI fails on a diff.
