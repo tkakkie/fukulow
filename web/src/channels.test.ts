@@ -28,15 +28,42 @@ describe('channels', () => {
     await c.load()
     expect(c.get().status).toBe('error')
   })
-  it('create trims the name, adds and selects the channel', async () => {
+  it('create adds and selects the channel', async () => {
     const createChannel = vi.fn(async (b) => ok(ch('n', b.name)))
     const c = createChannels({ listChannels: async () => ok({ channels: [ch('a')] }), createChannel })
     await c.load()
-    const r = await c.create({ name: '  general ', visibility: 'public' })
+    const r = await c.create({ name: 'general', visibility: 'public' })
     expect(createChannel).toHaveBeenCalledWith({ name: 'general', visibility: 'public' })
     expect('channel' in r).toBe(true)
     expect(c.get()).toMatchObject({ selectedId: 'n' })
     expect(c.get().channels).toHaveLength(2)
+  })
+  const names = [
+    ' general', 'general ', '  general ', '\tgeneral\n', '　general', 'general　', ' general ',
+    ' general ', '﻿general', 'general\u0085', ' ', 'gen eral', 'gen　eral',
+  ]
+  for (const name of names) {
+    it(`create sends ${JSON.stringify(name)} unchanged (the server validates)`, async () => {
+      const createChannel = vi.fn(async (b) => ok(ch('n', b.name)))
+      const c = createChannels({ listChannels: async () => ok({ channels: [] }), createChannel })
+      await c.create({ name, visibility: 'public' })
+      expect(createChannel).toHaveBeenCalledTimes(1)
+      expect(createChannel.mock.calls[0][0]).toEqual({ name, visibility: 'public' })
+    })
+  }
+  it('a 400 shows the name error, adds no channel and allows a corrected retry', async () => {
+    const createChannel = vi.fn(async (b: { name: string }) =>
+      b.name === b.name.trim() ? ok(ch('n', b.name)) : ({ ok: false, kind: 'http', status: 400 } as const),
+    )
+    const c = createChannels({ listChannels: async () => ok({ channels: [] }), createChannel })
+    await c.load()
+    const bad = await c.create({ name: ' general', visibility: 'public' })
+    expect(bad).toEqual({ error: 'チャンネル名の前後に空白を入れず、128文字以内にしてください。' })
+    expect(c.get().channels).toEqual([])
+    expect(c.get().selectedId).toBeNull()
+    const good = await c.create({ name: 'general', visibility: 'public' })
+    expect('channel' in good).toBe(true)
+    expect(c.get().channels).toHaveLength(1)
   })
   it('create failure returns a Japanese error and changes nothing', async () => {
     const c = createChannels({
