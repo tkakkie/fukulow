@@ -90,6 +90,7 @@ try {
       throw new Error('SQL snapshot exceeded the measurement boundary pause');
     }
   };
+  if (primaryError) throw primaryError; // a signal arrived during build/setup: do not start the measurement
   const generator = spawn('make', ['load'], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child = generator;
   let buffered = '';
