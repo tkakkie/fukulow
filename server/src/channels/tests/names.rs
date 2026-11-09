@@ -186,7 +186,12 @@ async fn channel_name_migration_rejects_existing_duplicates_without_changing_the
     .unwrap();
     let migration = include_str!("../../../migrations/202611090003_channel_names.sql");
     let error = sqlx::raw_sql(migration).execute(&pool).await.unwrap_err();
-    assert!(error.as_database_error().unwrap().is_unique_violation());
+    let error = error.as_database_error().unwrap();
+    assert!(error.is_unique_violation());
+    assert_eq!(
+        error.constraint(),
+        Some("channels_organization_name_unique")
+    );
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM channels WHERE organization_id = $1 ORDER BY name COLLATE \"C\"",
     )

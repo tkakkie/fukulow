@@ -53,10 +53,31 @@ async fn migrated_tables_have_not_null_organization_id(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expiry(pool: PgPool) {
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct Index {
+        name: String,
+        key_columns: Vec<String>,
+        is_unique: bool,
+        is_primary: bool,
+        has_predicate: bool,
+        has_expressions: bool,
+        is_valid: bool,
+        method: String,
+    }
+
     migrate(&pool).await.unwrap();
-    let indexes: Vec<(String, String)> = sqlx::query_as(
-        "SELECT indexname, indexdef FROM pg_indexes \
-         WHERE schemaname = 'public' AND tablename = 'sessions' ORDER BY indexname",
+    let indexes: Vec<Index> = sqlx::query_as(
+        "SELECT c.relname::text AS name, \
+                ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(attnum, n) \
+                      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+                      WHERE k.n <= i.indnkeyatts ORDER BY k.n) AS key_columns, \
+                i.indisunique AS is_unique, i.indisprimary AS is_primary, \
+                i.indpred IS NOT NULL AS has_predicate, i.indexprs IS NOT NULL AS has_expressions, \
+                i.indisvalid AS is_valid, am.amname::text AS method \
+         FROM pg_index i \
+         JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = c.relam \
+         WHERE i.indrelid = 'public.sessions'::regclass ORDER BY c.relname",
     )
     .fetch_all(&pool)
     .await
@@ -65,25 +86,44 @@ async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expir
     assert_eq!(
         indexes,
         vec![
-            (
-                "sessions_organization_expiry".into(),
-                "CREATE INDEX sessions_organization_expiry ON public.sessions USING btree (organization_id, expires_at, token_hash)".into(),
-            ),
-            (
-                "sessions_pkey".into(),
-                "CREATE UNIQUE INDEX sessions_pkey ON public.sessions USING btree (organization_id, token_hash)".into(),
-            ),
+            Index {
+                name: "sessions_organization_expiry".into(),
+                key_columns: vec![
+                    "organization_id".into(),
+                    "expires_at".into(),
+                    "token_hash".into()
+                ],
+                is_unique: false,
+                is_primary: false,
+                has_predicate: false,
+                has_expressions: false,
+                is_valid: true,
+                method: "btree".into(),
+            },
+            Index {
+                name: "sessions_pkey".into(),
+                key_columns: vec!["organization_id".into(), "token_hash".into()],
+                is_unique: true,
+                is_primary: true,
+                has_predicate: false,
+                has_expressions: false,
+                is_valid: true,
+                method: "btree".into(),
+            },
         ]
     );
-    let primary_key: String = sqlx::query_scalar(
-        "SELECT i.relname::text FROM pg_constraint c \
+    let primary_key: (String, String) = sqlx::query_as(
+        "SELECT c.conname::text, i.relname::text FROM pg_constraint c \
          JOIN pg_class i ON i.oid = c.conindid \
          WHERE c.conrelid = 'public.sessions'::regclass AND c.contype = 'p'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(primary_key, "sessions_pkey");
+    assert_eq!(
+        primary_key,
+        ("sessions_pkey".into(), "sessions_pkey".into())
+    );
 }
 
 #[sqlx::test(migrations = false)]

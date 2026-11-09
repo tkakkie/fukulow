@@ -181,10 +181,9 @@ async fn channel_name_length_migration_rejects_existing_violators_without_changi
     expected.sort_by_key(|row| row.0);
     let migration = include_str!("../../../migrations/202611090004_channel_name_length.sql");
     let error = sqlx::raw_sql(migration).execute(&pool).await.unwrap_err();
-    assert_eq!(
-        error.as_database_error().unwrap().code().as_deref(),
-        Some("23514")
-    );
+    let error = error.as_database_error().unwrap();
+    assert_eq!(error.code().as_deref(), Some("23514"));
+    assert_eq!(error.constraint(), Some("channels_name_length"));
     let stored: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, name, visibility FROM channels WHERE organization_id = $1 ORDER BY id",
     )
