@@ -49,7 +49,10 @@ Never push to `main`. Never merge unless the maintainer explicitly says so.
   low = small copy, limit or type fixes; medium = new screens or state modules, vitest additions, conflict and CI fixes, browser checks; high = browser-side real-time, auth-screen session handling, new E2E suites, multi-screen state design.
   If harder than expected: stop, report, restart higher.
 - Claude: Sonnet by default; Opus only for round 1 of high-risk review or heavy implementation.
-- Launch every AI under its own identity via `run-as.sh <name> <cli ...>`; Codex effort via `model_reasoning_effort`. Put the model and effort in the signature line.
+- Launch every AI under its own identity via `~/.fukulow-ai/run-as.sh <name> <cli ...>` (its own GitHub token). Put the model and effort in the signature line. Run in the background from the task worktree; the exit notification wakes the orchestrator.
+  Codex: `cd <worktree> && nohup run-as.sh codex codex exec -m <gpt-6.1-sol|gpt-6-astra> -c 'model_reasoning_effort="<medium|high>"' --sandbox danger-full-access -o result.md "$(cat prompt.md)" < /dev/null > log 2>&1 &`
+  Antigravity: `run-as.sh antigravity env HOME=<repo>/agy-home PATH=/usr/local/argon-agy:$PATH GIT_AUTHOR_NAME=Antigravity GIT_AUTHOR_EMAIL=noreply@example.com GIT_COMMITTER_NAME=Antigravity GIT_COMMITTER_EMAIL=noreply@example.com /usr/local/argon-agy/agy -p "$(cat prompt.md)" --model claude-sonnet-5-5-<low|medium|high> --print-timeout 3000s --output-format text < /dev/null > log 2>&1 &`
+  Claude: `run-as.sh claude gh ...` and `run-as.sh claude git push -q origin HEAD:<branch>`, always with `< /dev/null`.
 - Exceptions to the area table need a line in the Issue (e.g. Codex implements the sync protocol/controller, H3 high; adapter and components stay with Antigravity).
 
 ## 5. Reviews
