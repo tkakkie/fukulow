@@ -25,6 +25,7 @@ Do not create docs other than `docs/spec.md`, `docs/decisions.md`, `docs/invaria
 - Tier 1, CI: module dependency direction (see Boundaries) is checked on resolved paths, macros, calls, field accesses and inferred types, in production and test targets.
 - `main`, `openapi` and `lib` are composition exceptions; root nominal-wrapper fields and composition-root bodies are not traced (review-enforced).
 - Tier 1, approved, CI pending (review-enforced): every row of `docs/invariants.md` names a test that exists.
+- `npm test` checks invariants statically only (no Rust build); `cargo test` in the CI server job is the only Rust gate.
 - Tier 1, approved, CI pending (review-enforced): the web reaches the server only through its API layer, with types generated from `openapi.json` (no hand-written copies).
 - Credentials are never kept in web storage (harmless UI settings may be).
 - Tier 1, review-enforced: Organization data is accessed scoped by `organization_id`; documented global operations (e.g. setup existence check) are exceptions.
