@@ -1,14 +1,13 @@
 <script lang="ts">
-  import { sendErrorMessage, type createTimeline } from './timeline'
+  import { sendErrorMessage, type Timeline } from './timeline'
   import Composer from './Composer.svelte'
 
   // The parent keys this component by channel and owns the instance (it outlives this component).
-  let { timeline: given }: { timeline: ReturnType<typeof createTimeline> } = $props()
+  let { timeline: given }: { timeline: Timeline } = $props()
   // svelte-ignore state_referenced_locally
   const timeline = given
   let s = $state(timeline.get())
   const unsubscribe = timeline.subscribe(() => (s = timeline.get()))
-  if (s.status !== 'ready') timeline.loadLatest()
   $effect(() => unsubscribe)
 </script>
 
