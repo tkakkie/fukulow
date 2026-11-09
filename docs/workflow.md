@@ -9,8 +9,8 @@ Never push to `main`. Never merge unless the maintainer explicitly says so.
 2. For each item, find its row in section 2 and do the "Next action" if an AI can do it. Then re-list; repeat until nothing AI-doable is left.
 3. Fix labels: at most one `status:*` label per item; an open item with none gets the one that matches its state; green + reviews done never stays unlabelled.
 4. Check for stalls (section 7): an AI run that ended without updating label/comment, stale CI, `blocked` whose blocker is merged.
-5. Waiting is not the same as human-pending. Items waiting for an async result (CI, Copilot, a background AI run) keep their current label; do not move them to `status:human-review` or `status:needs-decision` to park them. Continue with every other AI-doable item; the completion notification (or the next sweep) resumes the waiting one.
-6. Stop only when every remaining item is waiting for a human (`status:human-review` / `status:needs-decision`, question in the last comment). Then report the list to the user.
+5. Waiting is not the same as human-pending. Items waiting for an async result (CI, Copilot, a background AI run) keep their current label; never move them to `status:human-review` or `status:needs-decision` to park them. Check async state with one non-blocking query per item per sweep (`gh pr checks <n>` without `--watch`, `gh pr view --json reviews`, the worker `-o` file and `pgrep`); never block the sweep on it.
+6. When no AI-doable item is left, end this sweep iteration even if items still wait for async results (CI, Copilot, background AI). Do not re-poll them in a loop: each waiting item is checked at most once per iteration. Resume on a completion notification, the next sweep (wake-up, user message), or a stall check (section 7), whichever comes first. Report the human-pending list (`status:human-review` / `status:needs-decision`, question in the last comment) and name what is still waiting.
 
 ## 2. State -> next action
 | Item, label | Who acts | Next action | Step ends when |
@@ -23,8 +23,8 @@ Never push to `main`. Never merge unless the maintainer explicitly says so.
 | Issue, `status:ready`, no `blocked` | implementer by area (section 4) | Set `status:working`, branch, worktree, implement, open draft PR | PR open, Issue linked (`Closes #n`); Issue stays `status:working` |
 | Issue, `status:ready` and `blocked` | none | `blocked` wins: do not start until every blocker named in the Issue is satisfied (a PR merged; with several blockers, all of them). The row "blocked, blocker resolved" below decides when `blocked` goes | `blocked` removed |
 | Issue, `status:working` | implementer | Its PR row governs. No PR and no activity: section 7 (stall) | PR merged, Issue closed |
-| PR draft/open, `status:working` | implementer | Run Commands from `AGENTS.md`; push; wait for CI with `gh pr checks <n> --watch` | CI green on the head and PR marked ready -> `status:ai-review` |
-| PR, `status:ai-review`, CI pending or missing on the head | sweeper | `gh pr checks <n> --watch`; missing: section 7 | CI finished on the head |
+| PR draft/open, `status:working` | implementer | Run Commands from `AGENTS.md`; push; check CI with `gh pr checks <n>` (non-blocking; see section 1 step 5) | CI green on the head and PR marked ready -> `status:ai-review` |
+| PR, `status:ai-review`, CI pending or missing on the head | sweeper | `gh pr checks <n>` (non-blocking), then do other work; missing: section 7 | CI finished on the head |
 | PR, `status:ai-review`, CI red | implementer (or sweeper) | Read the failing job tail (`gh run view <id> --log-failed`); fix; transient failure: section 7 | CI green on the head |
 | PR, `status:ai-review`, CI green, review not done | sweeper | Launch the required AI review (section 5). Copilot due and not yet requested: request once | review verdict commented |
 | PR, `status:ai-review`, blocking findings | implementer | Set `status:working`, fix, push, CI, comment how each was addressed, back to `status:ai-review` for round 2 | blocking findings resolved |
@@ -86,7 +86,7 @@ Never push to `main`. Never merge unless the maintainer explicitly says so.
 | Transient CI failure (network, runner, flaky) | rerun the failed job once (`gh run rerun <id> --failed`); if denied: `status:needs-decision`, no workaround; a second failure is a real failure |
 | AI run ended without label/comment update | sweeper reads the PR/branch, finishes the label and writes the comment with the next step |
 | Dependent Issue waits on a PR | label it `blocked`, comment "blocked by #n" (all blockers listed); the sweeper removes it once every blocker is merged (closed unmerged: re-evaluate, see section 2) |
-| Async result (CI, Copilot, background AI) is overdue with no notification | check directly: `gh pr checks`, `gh pr view --json reviews`, the worker log/`-o` file and `pgrep`. Finished: handle the result. Still running: keep waiting and do other work. Dead without a result: relaunch (section 4). Not a human decision, so no `status:needs-decision` |
+| Async result (CI, Copilot, background AI) is overdue with no notification | check directly: `gh pr checks`, `gh pr view --json reviews`, the worker log/`-o` file and `pgrep`. Finished: handle the result. Still running: keep the current label and do other work; it is checked again at the next sweep, not in a loop. Repeated checks in one sweep are not allowed (no busy loop); the next sweep or stall check looks again. Dead without a result: relaunch (section 4). Not a human decision, so no `status:needs-decision` |
 | Results arrive while orchestrator idle | run the sweep at once, do not wait for the next user message |
 | An AI is stuck or needs higher effort | stop it, comment findings, restart at the next effort (section 4) |
 | Needs a token, secret or denied permission | `status:needs-decision` with the exact request; continue other items |
