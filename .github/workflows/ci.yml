@@ -27,7 +27,6 @@ jobs:
       - run: npm --prefix web ci
       - run: npm --prefix web run check
       - run: npm --prefix web test
-      - run: node web/scripts/check-invariants.ts
       - run: npm --prefix web run build
       - uses: actions/upload-artifact@v7
         with: { name: web-dist, path: web/dist }
@@ -57,7 +56,9 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - uses: actions/setup-node@v7
-        with: { node-version-file: .node-version }
+        with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm --prefix web ci # the invariants check imports typescript
+      - run: node web/scripts/check-invariants.ts # reuses the test build of `cargo test` above (no extra cold build); fails if cargo is missing
       - run: rustup component add rustc-dev
       - run: rustfmt --check --edition 2024 scripts/module-direction.rs
       - run: node --test scripts/check-module-direction.test.ts

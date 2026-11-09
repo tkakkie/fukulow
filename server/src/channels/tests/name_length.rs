@@ -53,16 +53,7 @@ async fn channel_name_length_boundaries_count_unicode_scalars(pool: PgPool) {
 async fn oversized_channel_name_is_rejected_before_opening_transaction(pool: PgPool) {
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
-    let state = AppState {
-        pool: pool.clone(),
-        cookie_secure: true,
-        setup_token: None,
-        sign_in_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        ws_allowed_origins: Default::default(),
-    };
+    let state = AppState::for_test(pool.clone());
     let (mut parts, _) = Request::post("/api/v1/channels")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
