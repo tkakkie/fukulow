@@ -1,0 +1,48 @@
+{
+  "kind": "delivery",
+  "scenarios": [
+    {
+      "id": "history-latest-page-of-an-empty-channel",
+      "title": "The latest page of an empty Channel is empty and has no more",
+      "covers": ["H"],
+      "rust": {"existing_tests":["server/src/messages/tests.rs::message_pages_are_bounded_exclusive_ascending_and_directional"]},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"history","as":"alice","channel":"general","query":{},"expect":{"status":200,"seqs":[],"has_more":false}}
+      ]
+    },
+    {
+      "id": "history-pages-are-bounded-exclusive-ascending-and-directional",
+      "title": "Latest and before pages report whether OLDER Messages exist; after pages report whether NEWER ones exist; cursors are exclusive; default size 50, maximum 200",
+      "covers": ["H"],
+      "rust": {"existing_tests":["server/src/messages/tests.rs::message_pages_are_bounded_exclusive_ascending_and_directional","server/src/messages/tests.rs::message_query_validation_matches_contract"]},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":205}]},
+      "steps": [
+        {"do":"history","as":"alice","channel":"general","query":{},"expect":{"status":200,"seqs":[{"from":156,"to":205}],"has_more":true}},
+        {"do":"history","as":"alice","channel":"general","query":{"limit":200},"expect":{"status":200,"seqs":[{"from":6,"to":205}],"has_more":true}},
+        {"do":"history","as":"alice","channel":"general","query":{"after_seq":0,"limit":200},"expect":{"status":200,"seqs":[{"from":1,"to":200}],"has_more":true}},
+        {"do":"history","as":"alice","channel":"general","query":{"after_seq":200,"limit":5},"expect":{"status":200,"seqs":[{"from":201,"to":205}],"has_more":false}},
+        {"do":"history","as":"alice","channel":"general","query":{"after_seq":201,"limit":2},"expect":{"status":200,"seqs":[202,203],"has_more":true}},
+        {"do":"history","as":"alice","channel":"general","query":{"before_seq":5,"limit":2},"expect":{"status":200,"seqs":[3,4],"has_more":true}},
+        {"do":"history","as":"alice","channel":"general","query":{"before_seq":3,"limit":2},"expect":{"status":200,"seqs":[1,2],"has_more":false}},
+        {"do":"history","as":"alice","channel":"general","query":{"before_seq":1},"expect":{"status":200,"seqs":[],"has_more":false}},
+        {"do":"history","as":"alice","channel":"general","query":{"after_seq":205},"expect":{"status":200,"seqs":[],"has_more":false}},
+        {"do":"history","as":"alice","channel":"general","query":{"after_seq":4000000000},"expect":{"status":200,"seqs":[],"has_more":false}}
+      ]
+    },
+    {
+      "id": "history-rejects-invalid-queries",
+      "title": "Conflicting or out-of-range query parameters return 400 (a limit above 200 is rejected, not clamped)",
+      "covers": ["H"],
+      "rust": {"existing_tests":["server/src/messages/tests.rs::message_query_validation_matches_contract","server/src/messages/tests.rs::message_pages_are_bounded_exclusive_ascending_and_directional"]},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":3}]},
+      "steps": [
+        {"do":"history","as":"alice","channel":"general","query":{"after_seq":0,"before_seq":2},"expect":{"status":400}},
+        {"do":"history","as":"alice","channel":"general","query":{"after_seq":-1},"expect":{"status":400}},
+        {"do":"history","as":"alice","channel":"general","query":{"before_seq":0},"expect":{"status":400}},
+        {"do":"history","as":"alice","channel":"general","query":{"limit":0},"expect":{"status":400}},
+        {"do":"history","as":"alice","channel":"general","query":{"limit":201},"expect":{"status":400}}
+      ]
+    }
+  ]
+}

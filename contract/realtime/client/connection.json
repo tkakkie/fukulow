@@ -1,0 +1,172 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "reconnect-fills-history-without-duplicates-or-omissions",
+      "title": "After a reconnect the Channel resumes from its cursor; replayed duplicates collapse and nothing is missing",
+      "covers": ["C1","C2","C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":101}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":102}},"observe":{"channels":{"A":{"cursor":102}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":102,"as":"r_s"}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":102}},"observe":{"channels":{"A":{"cursor":102,"visible":[{"from":51,"to":102}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":104}}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":104,"respond_to":"r_s"},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"state":"ready","cursor":104,"visible":[{"from":51,"to":104}]}}}}
+      ]
+    },
+    {
+      "id": "reconnect-races-history-fill-and-replay",
+      "title": "A fill answered while disconnected and the replay after reconnect overlap; they converge without duplicates or omissions",
+      "covers": ["C1","C3","C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"}]}},
+        {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":104}],"has_more":false},"observe":{"channels":{"A":{"cursor":104,"visible":[{"from":51,"to":104}]}}}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":104,"as":"r_s"}],"forbidden":[{"type":"subscribe","channel":"A","after_seq":100}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":104}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":105}}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":105,"respond_to":"r_s"},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"state":"ready","cursor":105,"visible":[{"from":51,"to":105}]}}}}
+      ]
+    },
+    {
+      "id": "independent-channels-keep-separate-cursors-and-gaps",
+      "title": "Each Channel has its own cursor, gap and fill; a reconnect resubscribes each from its own cursor",
+      "covers": ["C2","C3","C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"B_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"B_f0","messages":[{"from":1,"to":7}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":7,"as":"B_s0"}]}},
+        {"input":{"type":"subscribed","channel":"B","caught_up_seq":7,"respond_to":"B_s0"},"observe":{"channels":{"B":{"state":"ready","cursor":7,"visible":[{"from":1,"to":7}]}}}},
+        {"input":{"type":"message","channel":"B","message":{"seq":8}},"observe":{"channels":{"A":{"cursor":100},"B":{"cursor":8}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":102}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"A_t1"}],"forbidden":[{"type":"fetch_history","channel":"B"}]},"observe":{"channels":{"A":{"cursor":100},"B":{"cursor":8}}}},
+        {"input":{"type":"message","channel":"B","message":{"seq":9}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"},{"type":"fetch_history","channel":"B"}]},"observe":{"channels":{"A":{"cursor":100},"B":{"cursor":9}}},"note":"A gap in A does not hold back B."},
+        {"input":{"type":"timer_elapsed","respond_to":"A_t1"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"A_f1"}],"forbidden":[{"type":"fetch_history","channel":"B"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":101,"to":102}],"has_more":false},"observe":{"channels":{"A":{"cursor":102},"B":{"cursor":9}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":102,"as":"rA_s"},{"type":"subscribe","channel":"B","after_seq":9,"as":"rB_s"}],"forbidden":[{"type":"subscribe","channel":"A","after_seq":9},{"type":"subscribe","channel":"A","after_seq":100},{"type":"subscribe","channel":"B","after_seq":102},{"type":"subscribe","channel":"B","after_seq":100}]}}
+      ]
+    },
+    {
+      "id": "unwatch-stops-the-subscription-and-it-is-not-restored-on-reconnect",
+      "title": "A Channel the UI stopped showing is unsubscribed, its late events change nothing, and a reconnect resubscribes only the watched Channels",
+      "covers": ["C4"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"B_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"B_f0","messages":[{"from":1,"to":7}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":7,"as":"B_s0"}]}},
+        {"input":{"type":"subscribed","channel":"B","caught_up_seq":7,"respond_to":"B_s0"},"observe":{"channels":{"B":{"state":"ready","cursor":7,"visible":[{"from":1,"to":7}]}}}},
+        {"input":{"type":"unwatch","channel":"B"},"effects":{"required":[{"type":"unsubscribe","channel":"B"}]}},
+        {"input":{"type":"message","channel":"B","message":{"seq":8}},"effects":{"forbidden":[{"type":"fetch_history","channel":"B"},{"type":"subscribe","channel":"B","after_seq":7}]}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"rA_s"}],"forbidden":[{"type":"subscribe","channel":"B"}]}}
+      ]
+    },
+    {
+      "id": "session-replacement-fences-stale-results",
+      "title": "A replaced session discards the previous session's Messages and pending sends; its late responses and waits change nothing",
+      "covers": ["C5"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":105}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"session_replaced"},"effects":{"required":[{"type":"connect"}]},"observe":{"channels":{"A":{"visible":[],"pending":[]}}}},
+        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"effects":{"forbidden":[{"type":"send"},{"type":"subscribe"}]},"observe":{"channels":{"A":{"visible":[],"pending":[]}}}},
+        {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":105}],"has_more":false},"effects":{"forbidden":[{"type":"subscribe"}]},"observe":{"channels":{"A":{"visible":[],"pending":[]}}}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"forbidden":[{"type":"fetch_history"},{"type":"wait"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"N_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"N_f0","messages":[{"from":11,"to":20}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":20,"as":"N_s0"}]},"observe":{"channels":{"A":{"cursor":20,"visible":[{"from":11,"to":20}],"pending":[]}}}}
+      ]
+    },
+    {
+      "id": "clamp-recovery-with-cached-messages-then-live-delivery",
+      "title": "The server's Channel is behind the cursor the client sent (database restore): the confirmed window and cursor are dropped, the Channel is bootstrapped again, and new Messages do not collide with cached ones",
+      "covers": ["C8"],
+      "note": "Quiescent case: no concurrent sends while subscribing. A restored history that has already grown past the old cursor is out of scope (C8 scope limit).",
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":60,"respond_to":"r_s"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"r_f"}]},"observe":{"channels":{"A":{"visible":[],"cursor":null}}},"note":"caught_up_seq 60 is below the after_seq 100 that was sent for this subscription."},
+        {"input":{"type":"history_result","respond_to":"r_f","messages":[{"from":11,"to":60}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":60,"as":"r_s2"}]},"observe":{"channels":{"A":{"cursor":60,"visible":[{"from":11,"to":60}]}}}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":60,"respond_to":"r_s2"},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"state":"ready","cursor":60,"visible":[{"from":11,"to":60}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":61,"body":"new-61","id":"new61"}},"observe":{"channels":{"A":{"cursor":61,"visible":[{"from":11,"to":61}],"records":[{"seq":61,"body":"new-61","id":"new61"}]}}},"note":"Seq 61 existed in the cached window with another body; the new record wins and 62..100 of the old history are gone."}
+      ]
+    },
+    {
+      "id": "clamp-recovery-fences-an-in-flight-fill",
+      "title": "A fill requested before the reset answers after it: its page belongs to the old history and is ignored",
+      "covers": ["C3","C8"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":105}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":60,"respond_to":"r_s"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"r_f"}]},"observe":{"channels":{"A":{"visible":[],"cursor":null}}}},
+        {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":105}],"has_more":false},"effects":{"forbidden":[{"type":"subscribe"}]},"observe":{"channels":{"A":{"visible":[],"cursor":null}}}},
+        {"input":{"type":"history_result","respond_to":"r_f","messages":[{"from":11,"to":60}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":60,"as":"r_s2"}]},"observe":{"channels":{"A":{"cursor":60,"visible":[{"from":11,"to":60}]}}}}
+      ]
+    },
+    {
+      "id": "handoff-is-compared-with-the-sent-cursor-not-the-current-one",
+      "title": "caught_up_seq is compared with the after_seq sent for the subscription: a cursor that advanced since (by a fill) does not make it a clamp",
+      "covers": ["C3","C8"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
+        {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":103}],"has_more":false},"observe":{"channels":{"A":{"cursor":103,"visible":[{"from":51,"to":103}]}}}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"r_s"},"effects":{"forbidden":[{"type":"fetch_history","channel":"A","page":"latest"}]},"observe":{"channels":{"A":{"state":"ready","cursor":103,"visible":[{"from":51,"to":103}]}}},"note":"100 is not below the sent 100, even though the cursor is now 103."},
+        {"input":{"type":"message","channel":"A","message":{"seq":104}},"observe":{"channels":{"A":{"cursor":104,"visible":[{"from":51,"to":104}]}}}}
+      ]
+    }
+  ]
+}

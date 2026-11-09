@@ -1,0 +1,144 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "out-of-order-ack-and-websocket",
+      "title": "PILOT. Cursor 100: the ack for 102 arrives before WebSocket 101; the cursor stays at 100 until 101 arrives, then moves to 102 without a fill",
+      "covers": ["C1","C2","C3","C5"],
+      "note": "Not a Rust delivery trace: the server orders one socket. Mixed HTTP and WebSocket arrival is a client-only case.",
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
+        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":102,"sender":"me","client_message_id":"c1","body":"hello"}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"A_t1"}],"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":100},102],"pending":[]}}},"note":"Gap at 101 is detected, but the client waits for reordering; the cursor never passes the gap."},
+        {"input":{"type":"message","channel":"A","message":{"seq":101}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":102,"visible":[{"from":51,"to":102}]}}}},
+        {"input":{"type":"timer_elapsed","respond_to":"A_t1"},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":102,"visible":[{"from":51,"to":102}]}}},"note":"Stale timer: the gap closed meanwhile."}
+      ]
+    },
+    {
+      "id": "gap-above-handoff-watermark-follows-the-grace-period",
+      "title": "A gap above caught_up_seq may still be in flight: wait, no fill; the late Messages close it",
+      "covers": ["C2","C3"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"A_t1"}],"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":100},103]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":101}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101},103]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":102}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":103,"visible":[{"from":51,"to":103}]}}}},
+        {"input":{"type":"timer_elapsed","respond_to":"A_t1"},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]}}
+      ]
+    },
+    {
+      "id": "gap-at-or-below-handoff-watermark-is-filled-at-once",
+      "title": "A gap at or below caught_up_seq of a completed subscribed is not explained by replay: fill at once, no grace wait needed",
+      "covers": ["C3"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"r_w"}],"forbidden":[{"type":"connect"},{"type":"subscribe"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"r_w"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":102}},"observe":{"channels":{"A":{"cursor":100}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"observe":{"channels":{"A":{"cursor":100}}}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":103,"respond_to":"r_s"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"r_f","times":1}]},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":100},102,103]}}},"note":"Hypothetical replay that skipped 101 (the server does not do this); the client must not trust it."},
+        {"input":{"type":"history_result","respond_to":"r_f","messages":[{"from":101,"to":103}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":103,"visible":[{"from":51,"to":103}]}}}}
+      ]
+    },
+    {
+      "id": "one-fill-for-a-gap-overlapping-fills-are-suppressed",
+      "title": "While a fill is in flight no second fill is issued for the same range, even when more Messages arrive or a wait fires again",
+      "covers": ["C3"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":104}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":105}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"note":"Same wait delivered again."},
+        {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":105}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":105,"visible":[{"from":51,"to":105}]}}}}
+      ]
+    },
+    {
+      "id": "fill-result-merges-the-contiguous-suffix",
+      "title": "Live Messages close part of the gap while a fill is in flight; the late page adds only what is still missing",
+      "covers": ["C1","C2","C3"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":101}},"observe":{"channels":{"A":{"cursor":101}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":102}},"observe":{"channels":{"A":{"cursor":103}}}},
+        {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":104}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":104,"visible":[{"from":51,"to":104}]}}},"note":"The page started at 101 but the cursor was already 103: only 104 is new."}
+      ]
+    },
+    {
+      "id": "failed-fill-clears-coverage-and-backs-off",
+      "title": "A failed fill leaves the gap fillable again, but only after a backoff, never in a tight loop",
+      "covers": ["C3"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"history_failed","respond_to":"g_f","status":"network"},"effects":{"required":[{"type":"wait","purpose":"fill_backoff","channel":"A","as":"g_b"}],"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":100}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":104}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"note":"More Messages arrive during the backoff: still no fetch."},
+        {"input":{"type":"timer_elapsed","respond_to":"g_b"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f2","times":1}]}},
+        {"input":{"type":"history_result","respond_to":"g_f2","messages":[{"from":101,"to":104}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":104,"visible":[{"from":51,"to":104}]}}}}
+      ]
+    },
+    {
+      "id": "large-gap-is-filled-page-by-page",
+      "title": "A gap of 249 Messages (more than one maximum page) is filled page by page, each page continuing from the cursor, until it is closed",
+      "covers": ["C3"],
+      "note": "Pages hold 50 Messages (the default page size), valid whatever limit the client asked for.",
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":350}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
+        {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":150}],"has_more":true},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":150,"as":"g_f1"}]},"observe":{"channels":{"A":{"cursor":150}}}},
+        {"input":{"type":"history_result","respond_to":"g_f1","messages":[{"from":151,"to":200}],"has_more":true},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":200,"as":"g_f2"}]},"observe":{"channels":{"A":{"cursor":200}}}},
+        {"input":{"type":"history_result","respond_to":"g_f2","messages":[{"from":201,"to":250}],"has_more":true},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":250,"as":"g_f3"}]},"observe":{"channels":{"A":{"cursor":250}}}},
+        {"input":{"type":"history_result","respond_to":"g_f3","messages":[{"from":251,"to":300}],"has_more":true},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":300,"as":"g_f4"}]},"observe":{"channels":{"A":{"cursor":300}}}},
+        {"input":{"type":"history_result","respond_to":"g_f4","messages":[{"from":301,"to":350}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":350,"visible":[{"from":51,"to":350}]}}}}
+      ]
+    },
+    {
+      "id": "consecutive-but-nonadjacent-page-does-not-advance-the-cursor",
+      "title": "A page that is internally consecutive but not adjacent to the cursor extends the window only",
+      "covers": ["C2"],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
+        {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f1"}]}},
+        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":150,"to":199}],"has_more":true},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":100},{"from":150,"to":199}]}}}}
+      ]
+    }
+  ]
+}

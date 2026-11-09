@@ -1,0 +1,146 @@
+{
+  "kind": "delivery",
+  "scenarios": [
+    {
+      "id": "subscribe-after-n-replays-then-reports-handoff",
+      "title": "subscribe(after_seq=N) replays seq > N ascending, then subscribed(caught_up_seq) = the Channel high-water seq; N at the high-water mark replays nothing; an empty Channel reports 0",
+      "covers": ["S2","S3"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps"],"note":"Small-N cases of the same behaviour; the existing test covers pages and handoff."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":10},{"id":"quiet","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":10}]},{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent"}]},
+        {"do":"connect","socket":"s2","as":"alice"},
+        {"do":"subscribe","socket":"s2","channel":"general","after_seq":4},
+        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[{"from":5,"to":10}]},{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent"}]},
+        {"do":"connect","socket":"s3","as":"alice"},
+        {"do":"subscribe","socket":"s3","channel":"general","after_seq":10},
+        {"do":"expect","socket":"s3","events":[{"type":"subscribed","channel":"general","caught_up_seq":10},{"type":"silent"}]},
+        {"do":"connect","socket":"s4","as":"alice"},
+        {"do":"subscribe","socket":"s4","channel":"quiet","after_seq":0},
+        {"do":"expect","socket":"s4","events":[{"type":"subscribed","channel":"quiet","caught_up_seq":0},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "replay-across-pages-keeps-ascending-order",
+      "title": "A replay of more than one internal page (50) is delivered in ascending order without omissions",
+      "covers": ["S2","S3"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps"]},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":120}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":7},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":8,"to":120}]},{"type":"subscribed","channel":"general","caught_up_seq":120},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "handoff-with-concurrent-sends-keeps-order-and-omits-nothing",
+      "title": "Messages committed after the replay snapshot but before the handoff are delivered after the replay, ascending, with nothing omitted",
+      "covers": ["S2","S3"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps"],"note":"Needs the replay gate (hold_replay) the in-crate harness already has."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":120}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"hold_replay","channel":"general"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":7},
+        {"do":"await_replay_held","channel":"general"},
+        {"do":"post","as":"alice","channel":"general","count":5},
+        {"do":"release_replay","channel":"general"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":8,"to":125}]},{"type":"subscribed","channel":"general","caught_up_seq":125},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "concurrent-sends-are-delivered-in-channel-sequence-order",
+      "title": "Concurrent sends get consecutive seqs 1..n and a subscriber sees them ascending",
+      "covers": ["S1","S2"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::concurrent_message_delivery_is_in_channel_sequence_order","server/src/messages/tests.rs::concurrent_sends_allocate_unique_consecutive_channel_sequences"]},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
+        {"do":"post","as":"alice","channel":"general","count":32,"concurrent":true},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":32}]},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "future-cursor-is-clamped-to-the-high-water-mark",
+      "title": "QUIESCENT case (no send runs while subscribing): a cursor beyond the Channel high-water mark is clamped, so subscribed(caught_up_seq) = min(N, high-water) and every later Message is delivered",
+      "covers": ["S2","S3"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::malformed_controls_and_future_cursor_do_not_break_subscription_state"],"note":"The existing test also covers malformed controls and i64::MAX; this fixture uses 4000000000 (JSON-safe). With concurrent sends the clamp can be masked (C8 scope)."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":4000000000},
+        {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
+        {"do":"post","as":"alice","channel":"general","count":2},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[1,2]},{"type":"silent"}]},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":4000000000},
+        {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":2}]},
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[3]},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "independent-channels-keep-separate-sequences-across-reconnect",
+      "title": "Each Channel has its own seq and its own cursor; after a reconnect each resumes from its own cursor",
+      "covers": ["S1","S2"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps"]},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":12},{"id":"random","organization":"o1","visibility":"public","creator":"alice","messages":9}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":7},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":8,"to":12}]},{"type":"subscribed","channel":"general","caught_up_seq":12}]},
+        {"do":"subscribe","socket":"s1","channel":"random","after_seq":4},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"random","seqs":[{"from":5,"to":9}]},{"type":"subscribed","channel":"random","caught_up_seq":9}]},
+        {"do":"close_socket","socket":"s1"},
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"post","as":"alice","channel":"random"},
+        {"do":"connect","socket":"s2","as":"alice"},
+        {"do":"subscribe","socket":"s2","channel":"general","after_seq":12},
+        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"general","seqs":[13]},{"type":"subscribed","channel":"general","caught_up_seq":13}]},
+        {"do":"subscribe","socket":"s2","channel":"random","after_seq":9},
+        {"do":"expect","socket":"s2","events":[{"type":"message","channel":"random","seqs":[10]},{"type":"subscribed","channel":"random","caught_up_seq":10},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "unsubscribe-stops-delivery-and-resubscribe-resumes",
+      "title": "After unsubscribe nothing is delivered for the Channel; subscribing again from the last cursor replays what was missed and live delivery continues",
+      "covers": ["S2"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::live_delivery_denies_other_organization_and_private_nonmember_with_positive_controls"],"note":"The existing test uses unsubscribe only as part of a denial check."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice","messages":3},{"id":"random","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":3}]},{"type":"subscribed","channel":"general","caught_up_seq":3}]},
+        {"do":"unsubscribe","socket":"s1","channel":"general"},
+        {"do":"subscribe","socket":"s1","channel":"random","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"random","caught_up_seq":0}]},
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"expect","socket":"s1","events":[{"type":"silent"}]},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":3},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[4]},{"type":"subscribed","channel":"general","caught_up_seq":4}]},
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[5]},{"type":"silent"}]}
+      ]
+    },
+    {
+      "id": "idempotent-retry-publishes-one-event",
+      "title": "Sending the same client_message_id twice returns the same canonical Message (201) and publishes it once",
+      "covers": ["S1","S5"],
+      "rust": {"existing_tests":["server/src/realtime/tests.rs::rollback_and_idempotent_retry_emit_no_notification_and_publish_sees_committed_rows","server/src/messages/tests.rs::committed_send_retry_returns_canonical_message_without_sequence_allocation"],"note":"S1/S5 tests stay; this only shows the delivery side in fixture form."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"connect","socket":"s1","as":"alice"},
+        {"do":"subscribe","socket":"s1","channel":"general","after_seq":0},
+        {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
+        {"do":"post","as":"alice","channel":"general","key":"k1","label":"first"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","from_post":"first"}]},
+        {"do":"post","as":"alice","channel":"general","key":"k1","expect_status":201},
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[2]},{"type":"silent"}]}
+      ]
+    }
+  ]
+}
