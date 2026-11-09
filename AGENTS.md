@@ -73,8 +73,8 @@ Do not create docs other than `docs/spec.md`, `docs/decisions.md`, `docs/invaria
 - Work in your own worktree and branch `claude/<topic>`, `codex/<topic>` or `antigravity/<topic>`. Never push to `main`. Only the maintainer merges (or explicitly tells an AI to).
 - Implement only an Issue with a "Done when" and label `status:ready`. Open a draft PR; CI must pass; PRs always get the maintainer's review.
 - Every Issue/PR carries at most one status label, set by the AI that hands off:
-- `status:working`: an AI is working. `status:ai-review`: waiting for CI / AI review / Copilot. `status:ready`: Issue approved; an AI may start.
-- `status:human-review`: maintainer's turn (Issue to approve, or PR with CI green, required AI reviews done, marked ready). `status:needs-decision`: question is in the last comment.
+- `status:working`: an AI is working; do not review yet. `status:ai-review`: waiting for CI / AI review / Copilot. `status:ready`: Issue approved; an AI may start.
+- `status:human-review`: maintainer's turn (Issue to approve, or PR with current-head CI green, required AI reviews and fixes done, Copilot finished if requested, marked ready). `status:needs-decision`: question is in the last comment.
 - Other labels: `security`, `bug`, `risk:needs-review` (auth, permissions, real-time, migrations), `blocked`. Every Issue gets a milestone.
 - Write everything on GitHub (Issues, PRs, comments, reviews, commits) in English; Japanese only where unavoidable (UI strings).
 - Every Issue comment, review and PR body from an AI ends with one line: `AI: <name> / model: <id> / effort: <level>`.
