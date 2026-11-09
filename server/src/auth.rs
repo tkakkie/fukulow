@@ -1,4 +1,3 @@
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json,
     extract::{ConnectInfo, FromRequest, FromRequestParts, Request, State},
@@ -16,6 +15,8 @@ use uuid::Uuid;
 use crate::AppState;
 
 mod cleanup;
+mod password;
+use password::{check_password, hash_password};
 mod session;
 mod throttle;
 pub use cleanup::SessionCleanup;
@@ -192,63 +193,6 @@ fn email(value: &str) -> Result<String, ApiError> {
         return Err(ApiError::bad_request());
     }
     Ok(value)
-}
-
-async fn hash_password(
-    password: String,
-    workers: &'static tokio::sync::Semaphore,
-) -> Result<String, ApiError> {
-    let permit = workers
-        .acquire()
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        Argon2::default()
-            .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
-            .map(|hash| hash.to_string())
-    })
-    .await
-    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?
-    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))
-}
-
-async fn check_password(
-    password: String,
-    stored: Option<String>,
-    attempt: throttle::Attempt,
-    workers: &'static tokio::sync::Semaphore,
-) -> Result<bool, ApiError> {
-    let permit = workers
-        .acquire()
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let valid = match stored {
-            Some(stored) => PasswordHash::new(&stored).is_ok_and(|hash| {
-                Argon2::default()
-                    .verify_password(password.as_bytes(), &hash)
-                    .is_ok()
-            }),
-            None => {
-                // Unknown organization/email spends the same password work.
-                Argon2::default()
-                    .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
-                    .map_err(|_| {
-                        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
-                    })?;
-                false
-            }
-        };
-        // Keep the reservation and record failures even if the HTTP task was cancelled.
-        if !valid {
-            attempt.failed();
-        }
-        Ok(valid)
-    })
-    .await
-    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?
 }
 
 // Global bootstrap is a tenant-scope exception: only existence is exposed.

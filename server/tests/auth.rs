@@ -1156,3 +1156,123 @@ async fn ambiguous_organization_charges_only_ip_budget_and_leaves_other_sign_ins
     )
     .await;
 }
+
+// Generated once with argon2 0.5.3 defaults and the 16-byte salt
+// b"0123456789abcdef"; do not regenerate with the dependency under test.
+const ARGON2_053_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$gy5SuVm5Z7Vw7keB9se9p87QGcomaseB/S2U1OhTsM0";
+
+#[sqlx::test]
+async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let organization = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap();
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE organization_id = $2")
+        .bind(ARGON2_053_PHC)
+        .bind(organization.parse::<Uuid>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sign_in(&app, organization, PASSWORD).await.status(),
+        StatusCode::OK
+    );
+    let response = sign_in(&app, organization, "incorrect password").await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        body(response).await,
+        json!({"error": "invalid credentials"})
+    );
+}
+
+#[sqlx::test]
+async fn new_password_hash_preserves_explicit_parameters_and_salt_length(pool: PgPool) {
+    let identity = setup(&router(&pool)).await;
+    let hash: String =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE organization_id = $1")
+            .bind(
+                identity["organization"]["organization_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<Uuid>()
+                    .unwrap(),
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let fields: Vec<_> = hash.split('$').collect();
+    assert_eq!(fields.len(), 6);
+    assert_eq!(&fields[..4], &["", "argon2id", "v=19", "m=19456,t=2,p=1"]);
+    // PHC uses unpadded base64: 16 salt bytes -> 22 chars; 32 output bytes -> 43.
+    assert_eq!(fields[4].len(), 22);
+    assert_eq!(fields[5].len(), 43);
+    assert!(fields[4..].iter().all(|field| {
+        field
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+    }));
+}
+
+// Independent SHA-256 fixture computed with Node's crypto module, not sha2.
+const FIXED_CREDENTIAL: &str = "11111111-2222-4333-8444-555555555555.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const FIXED_DIGEST: &str = "da36cd522069db7890f63fe6e69904762a6868b9b26b8533b81792b4eda34db0";
+
+#[sqlx::test]
+async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) {
+    let organization: Uuid = "11111111-2222-4333-8444-555555555555".parse().unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Fixture')")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) VALUES ($1, $2, 'fixture@example.com', 'Fixture', $3, 'owner')")
+        .bind(organization).bind(user_id).bind(ARGON2_053_PHC).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO sessions (organization_id, user_id, token_hash) VALUES ($1, $2, decode($3, 'hex'))")
+        .bind(organization).bind(user_id).bind(FIXED_DIGEST).execute(&pool).await.unwrap();
+    let app = router(&pool);
+    for (name, value) in [
+        ("cookie", format!("fukulow_session={FIXED_CREDENTIAL}")),
+        ("authorization", format!("Bearer {FIXED_CREDENTIAL}")),
+    ] {
+        let response = request(&app, "GET", "/api/v1/me", Value::Null, &[(name, &value)]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let identity = body(response).await;
+        assert_eq!(
+            identity["organization"]["organization_id"],
+            organization.to_string()
+        );
+        assert_eq!(identity["member"]["id"], user_id.to_string());
+    }
+}
+
+#[sqlx::test]
+async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let organization = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap();
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let response = sign_in(&app, organization, PASSWORD).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = body(response).await;
+        let token = session["token"].as_str().unwrap();
+        let (prefix, secret) = token.split_once('.').unwrap();
+        assert_eq!(prefix, organization);
+        assert_eq!(secret.len(), 64);
+        assert!(
+            secret
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        // PostgreSQL's SHA-256 is independent from the Rust implementation.
+        let stored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE organization_id = $1 AND token_hash = sha256(convert_to($2, 'UTF8')))")
+            .bind(organization.parse::<Uuid>().unwrap()).bind(token).fetch_one(&pool).await.unwrap();
+        assert!(stored);
+        tokens.push(token.to_owned());
+    }
+    assert_ne!(tokens[0], tokens[1]);
+}
