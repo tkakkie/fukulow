@@ -1,7 +1,7 @@
 use super::{ApiError, throttle};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use axum::http::StatusCode;
-use rand::rngs::OsRng;
+use rand::{RngCore, rngs::OsRng};
 
 pub(super) async fn hash_password(
     password: String,
@@ -43,11 +43,11 @@ async fn check_password_with_hash(
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let valid = match stored {
-            Some(stored) => PasswordHash::new(&stored).is_ok_and(|hash| {
-                Argon2::default()
-                    .verify_password(password.as_bytes(), &hash)
-                    .is_ok()
-            }),
+            Some(stored) => {
+                let argon2 = password_hasher()?;
+                PasswordHash::new(&stored)
+                    .is_ok_and(|hash| argon2.verify_password(password.as_bytes(), &hash).is_ok())
+            }
             None => {
                 // Unknown organization/email spends the same password work.
                 dummy_hash(password.as_bytes())?;
@@ -65,10 +65,21 @@ async fn check_password_with_hash(
 }
 
 fn hash_password_sync(password: &[u8]) -> Result<String, ApiError> {
-    Argon2::default()
-        .hash_password(password, &SaltString::generate(&mut OsRng))
+    let mut salt = [0u8; 16];
+    OsRng
+        .try_fill_bytes(&mut salt)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
+    password_hasher()?
+        .hash_password_with_salt(password, &salt)
         .map(|hash| hash.to_string())
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))
+}
+
+// Preserve the pre-migration algorithm and costs independently of crate defaults.
+fn password_hasher() -> Result<Argon2<'static>, ApiError> {
+    let params = Params::new(19_456, 2, 1, Some(32))
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
 #[cfg(test)]
