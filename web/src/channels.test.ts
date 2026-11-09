@@ -110,4 +110,55 @@ describe('channels', () => {
     await loading
     expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'b', 'n'])
   })
+  describe('close (the session ended)', () => {
+    const held = <T>() => {
+      let resolve!: (r: T) => void
+      const promise = new Promise<T>((r) => (resolve = r))
+      return { promise, resolve }
+    }
+    it('drops a list that finishes after close and notifies nobody', async () => {
+      const list = held<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>()
+      const c = createChannels({ listChannels: () => list.promise, createChannel: vi.fn() })
+      const listener = vi.fn()
+      c.subscribe(listener)
+      const loading = c.load()
+      listener.mockClear()
+      c.close()
+      list.resolve(ok({ channels: [ch('old')] }))
+      await loading
+      expect(c.get()).toMatchObject({ status: 'loading', channels: [], selectedId: null })
+      expect(listener).not.toHaveBeenCalled()
+    })
+    it('drops a failed list too', async () => {
+      const list = held<{ ok: false; kind: 'network' }>()
+      const c = createChannels({ listChannels: () => list.promise, createChannel: vi.fn() })
+      const loading = c.load()
+      c.close()
+      list.resolve({ ok: false, kind: 'network' })
+      await loading
+      expect(c.get().status).toBe('loading')
+    })
+    it('a create that finishes after close reports an error and does not add or select the Channel', async () => {
+      const created = held<ReturnType<typeof ok<ReturnType<typeof ch>>>>()
+      const c = createChannels({ listChannels: async () => ok({ channels: [ch('a')] }), createChannel: () => created.promise })
+      await c.load()
+      const creating = c.create({ name: 'n', visibility: 'public' })
+      c.close()
+      created.resolve(ok(ch('n')))
+      expect(await creating).toEqual({ error: 'セッションが終了しました。' })
+      expect(c.get().channels.map((x) => x.id)).toEqual(['a'])
+      expect(c.get().selectedId).toBe('a')
+    })
+    it('a new list is not affected by the closed one', async () => {
+      const old = held<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>()
+      const first = createChannels({ listChannels: () => old.promise, createChannel: vi.fn() })
+      const loading = first.load()
+      first.close()
+      const second = createChannels({ listChannels: async () => ok({ channels: [ch('new')] }), createChannel: vi.fn() })
+      await second.load()
+      old.resolve(ok({ channels: [ch('old')] }))
+      await loading
+      expect(second.get().channels.map((x) => x.id)).toEqual(['new'])
+    })
+  })
 })
