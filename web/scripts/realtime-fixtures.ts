@@ -413,20 +413,43 @@ const matches = (effect: Effect, pattern: Pattern) =>
 
 /** Runs a client scenario; returns the failures (empty = the client satisfies the scenario). */
 export function runClientScenario(scenario: ClientScenario, client: ClientUnderTest): string[] {
+  const inputs = scenarioInputs(scenario)
+  let next = inputs.next()
+  while (!next.done) {
+    const effects = client.feed(next.value)
+    next = inputs.next({ effects, observation: client.observe() })
+  }
+  return next.value
+}
+
+/** The same assertions, with real asynchronous controller completions between inputs. */
+export async function runClientScenarioAsync(scenario: ClientScenario, client: {
+  feed(input: ResolvedInput): Promise<Effect[]>; observe(): Observed
+}): Promise<string[]> {
+  const inputs = scenarioInputs(scenario)
+  let next = inputs.next()
+  while (!next.done) {
+    const effects = await client.feed(next.value)
+    next = inputs.next({ effects, observation: client.observe() })
+  }
+  return next.value
+}
+
+function* scenarioInputs(scenario: ClientScenario): Generator<ResolvedInput, string[], { effects: Effect[]; observation: Observed }> {
   const failures: string[] = []
   const bound = new Map<string, Effect>()
   let connectPending = false
   let socketOpen = false
-  scenario.steps.forEach((step, index) => {
+  for (const [index, step] of scenario.steps.entries()) {
     const at = `${scenario.id} step ${index + 1} (${String(step.input.type)})`
-    if (step.only_if === 'connect_pending' && !connectPending) return
-    if (step.only_if === 'socket_open' && !socketOpen) return
+    if (step.only_if === 'connect_pending' && !connectPending) continue
+    if (step.only_if === 'socket_open' && !socketOpen) continue
     const input: ResolvedInput = { ...step.input, type: step.input.type as string }
     if (typeof step.input.respond_to === 'string') {
       const effect = bound.get(step.input.respond_to)
       if (!effect) {
         failures.push(`${at}: no effect was bound to ${step.input.respond_to}`)
-        return
+        continue
       }
       input.respond_to = effect
     }
@@ -435,7 +458,7 @@ export function runClientScenario(scenario: ClientScenario, client: ClientUnderT
       const expanded = expandMessage(step.input.message, channelOf(input.respond_to))
       if (expanded.length !== 1) {
         failures.push(`${at}: input.message must be one Message, not a range`)
-        return
+        continue
       }
       input.message = expanded[0]
     }
@@ -444,14 +467,14 @@ export function runClientScenario(scenario: ClientScenario, client: ClientUnderT
     }
     if (input.type === 'connection_ready') [connectPending, socketOpen] = [false, true]
     if (input.type === 'socket_closed') socketOpen = false
-    const emitted = client.feed(input)
+    const { effects: emitted, observation } = yield input
     if (emitted.some((e) => e.type === 'connect')) connectPending = true
     checkEffects(step, emitted, bound, at, failures)
     for (const p of scenario.never ?? []) {
       if (emitted.some((e) => matches(e, p))) failures.push(`${at}: emitted a never-effect ${JSON.stringify(p)}`)
     }
-    if (step.observe) checkObservation(step.observe, client.observe(), at, failures)
-  })
+    if (step.observe) checkObservation(step.observe, observation, at, failures)
+  }
   return failures
 }
 
