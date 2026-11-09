@@ -23,6 +23,7 @@ Tier 1, enforced by CI today:
 - No secrets in the repo (gitleaks on PR and main, plus `.gitignore` and review). The repo is public.
 - Every table has `organization_id` (NOT NULL), except the `organizations` root and migration bookkeeping; migrations are append-only: an existing migration file is never edited or deleted (#31, #40).
 - Rust: `unsafe` forbidden; `unwrap()`, `expect()` and `panic!()` denied outside `#[cfg(test)]` (clippy lints, with negative compilation tests). Startup errors propagate as `Result`. An unavoidable exception needs a stated reason and the maintainer's approval; do not add abstractions just to satisfy the lint (#32, #41).
+- Module dependency direction (see Boundaries) is checked for resolved paths (including module aliases, local type-alias paths and re-exports), macro invocations/expansions, type-dependent calls and ADT field accesses in production and test targets, with negative compilation tests; `main`, `openapi` and `lib` are composition exceptions. This does not trace inferred values through composition-root fields/functions or inspect nominal wrappers' contents; those indirect dependencies remain review-enforced (#46).
 
 Tier 1, approved, CI check pending (review enforces until the Issue lands):
 - Every row of `docs/invariants.md` names a test that exists (checked against real test definitions, not text search) (#34).
@@ -32,7 +33,7 @@ Tier 1, review-enforced (tests run in CI; review judges whether they are the rig
 - Data that belongs to an Organization is accessed scoped by `organization_id`. Explicitly documented global operations (e.g. the setup existence check, see `docs/decisions.md`) are exceptions; do not force an artificial Organization scope onto genuinely global operations.
 - A change to permissions, tenant scoping or real-time delivery needs denial tests for the authorization rule it touches: another Organization is always denied, and so is any other denial the rule defines (e.g. a non-member of a private Channel inside the same Organization). Cross-Organization denial alone is not enough (see `docs/invariants.md`).
 
-Tier 2 (defaults): terms from `docs/spec.md` everywhere (UI, API, DB, code), no synonyms; languages (see Languages); errors as `ErrorBody`; SQL only in the module that owns the table; indexes added with the migration that needs them; no N+1 on hot paths; small files and functions; comments only for non-obvious reasons; Svelte: small components, state in plain TS modules with vitest tests; module dependency direction (see Boundaries) is review-enforced under #32's fallback, `main`, `openapi` and `lib` being the only exceptions (a check must cover every reference path, including re-exports, before it becomes Tier 1; see `docs/decisions.md`).
+Tier 2 (defaults): terms from `docs/spec.md` everywhere (UI, API, DB, code), no synonyms; languages (see Languages); errors as `ErrorBody`; SQL only in the module that owns the table; indexes added with the migration that needs them; no N+1 on hot paths; small files and functions; comments only for non-obvious reasons; Svelte: small components, state in plain TS modules with vitest tests.
 
 Also: sending a message is idempotent (client-generated id); reconnect uses per-channel sequence numbers. Keep it simple: no new dependency, abstraction or doc without a reason in the PR.
 
@@ -43,7 +44,8 @@ Also: sending a message is idempotent (client-generated id); reconnect uses per-
 - Split into crates only when build time, dependencies or parallel-work conflicts hurt; no premature design.
 
 ## Commands (fill in as they appear)
-- Server: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
+- Server: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
+- Module direction: `rustup component add rustc-dev && rustfmt --check --edition 2024 scripts/module-direction.rs && node --test scripts/check-module-direction.test.ts && node scripts/check-module-direction.ts` (pinned Rust toolchain; build web assets first). Every Rust toolchain bump must re-verify this checker (rustc_private is unstable).
 - Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build`
 - Migrations: `bash scripts/check-migrations.sh <base-sha>`; guard tests: `node --test scripts/check-migrations.test.ts`. Schema guard runs in `cargo test` with Postgres.
 - API types: `make api` (regenerates openapi.json and TS types). CI fails on a diff.
