@@ -24,10 +24,10 @@ Do not create docs other than `docs/spec.md`, `docs/decisions.md`, `docs/invaria
 - An unavoidable Rust lint exception needs a stated reason and the maintainer's approval; no abstractions just to satisfy a lint.
 - Tier 1, CI: module dependency direction (see Boundaries) is checked on resolved paths, macros, calls, field accesses and inferred types, in production and test targets.
 - `main`, `openapi` and `lib` are composition exceptions; root nominal-wrapper fields and composition-root bodies are not traced (review-enforced).
-- Tier 1, approved, CI pending (review-enforced): every row of `docs/invariants.md` names a test that exists.
+- Tier 1, CI: every row of `docs/invariants.md` names a test that exists (`web/scripts/check-invariants.ts`).
 - `npm test` checks invariants statically only (no Rust build); Rust tests and the cargo-based invariants matching run in the CI server job.
 - Tier 1: the web reaches the server only through its API layer (CI web-boundary check). Generated types are CI-enforced only as far as `make api` diff and `tsc` go; that no hand-written copy of an API type exists is review-enforced (a structural duplicate still type-checks).
-- Credentials are never kept in web storage (harmless UI settings may be).
+- Credentials are never kept in web storage (harmless UI settings may be). Today the web-boundary check forbids any web-storage use (until a UI-settings helper exists); what a future helper may store is review-enforced.
 - Tier 1, review-enforced: Organization data is accessed scoped by `organization_id`; documented global operations (e.g. setup existence check) are exceptions.
 - Do not force an artificial Organization scope onto genuinely global operations.
 - Tier 1, review-enforced: a change to permissions, tenant scoping or real-time delivery needs denial tests for each denial the rule defines (see `docs/invariants.md`).
