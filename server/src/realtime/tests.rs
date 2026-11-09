@@ -852,7 +852,9 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
     assert_eq!(event(&mut socket).await["message"], second);
     gate.release.add_permits(1);
     assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
+    f.state.message_delivery.flush().await;
     silent(&mut socket).await;
 }
 
 mod contract;
+mod notification;

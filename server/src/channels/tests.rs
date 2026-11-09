@@ -13,6 +13,7 @@ use tower::ServiceExt;
 mod name_length;
 mod name_whitespace;
 mod names;
+mod visibility;
 
 fn router(pool: &PgPool) -> Router {
     crate::app(AppState::for_test(pool.clone()))

@@ -18,6 +18,7 @@ struct Member {
 struct Runner {
     pool: PgPool,
     server: Server,
+    delivery: messages::Delivery,
     members: HashMap<String, Member>,
     channels: HashMap<String, Uuid>,
     sockets: HashMap<String, Client>,
@@ -43,10 +44,13 @@ impl Runner {
                 return Err(Failure::PublicMembers(channel.id.clone()));
             }
         }
-        let server = Server::start(crate::app(state(&pool))).await;
+        let state = state(&pool);
+        let delivery = state.message_delivery.clone();
+        let server = Server::start(crate::app(state)).await;
         let mut runner = Self {
             pool,
             server,
+            delivery,
             members: HashMap::new(),
             channels: HashMap::new(),
             sockets: HashMap::new(),
@@ -336,6 +340,9 @@ impl Runner {
     }
 
     async fn expect(&mut self, socket: &str, expected: Event) -> Result<(), Assertion> {
+        if matches!(expected, Event::Silent { .. }) {
+            self.delivery.flush().await;
+        }
         match &expected {
             Event::Message { channel, .. }
             | Event::Subscribed { channel, .. }

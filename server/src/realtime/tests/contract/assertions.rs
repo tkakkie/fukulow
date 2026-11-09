@@ -74,8 +74,8 @@ pub(super) async fn silence(
             _ => Err(Assertion::Read),
         };
     }
-    // send_message awaits persist -> Delivery::publish, including every enqueue, before
-    // its HTTP response. All fixture posts (including concurrent ones) have returned.
+    // Runner awaited all detached notification tasks before entering this barrier.
+    // All fixture posts (including concurrent ones) have returned and enqueued.
     // Connection::control(Subscribe) runs serially with live delivery, snapshots the
     // shared FIFO queue length and awaits live() for that whole prefix before sending
     // subscribed. This drains *all* Channels, even a wrongly enqueued denial/duplicate.
@@ -87,7 +87,7 @@ pub(super) async fn silence(
     // an error response alone would not drain the queue and is not a valid barrier.
     // Close paths are covered too: connected() polls session end (4001) and overflow
     // (4008) before connection.run() in a biased select. Overflow is signalled before
-    // the POST response, so a pending close wins over processing this barrier.
+    // notification completion, so a pending close wins over processing this barrier.
     // Use the fixture's authorized Channel/current watermark: no new replay, and do
     // not restore the subscription/access whose absence is being checked.
     let nonce = barrier_controls(client, channel, caught_up_seq).await?;
