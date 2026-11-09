@@ -232,3 +232,21 @@ it('an older-page failure preserves the ready timeline and allows a user retry',
   expect(d.get().channels.A.messages.map(m => m.seq)).toEqual([100])
   expect(d.feed({ type: 'load_older', channel: 'A' }).some(e => e.type === 'fetch_history')).toBe(true)
 })
+
+it('async channel_not_found terminates a confirmed generation until explicit reselect', () => {
+  const d = boot()
+  const subscription = d.get().channels.A.subscription!.id
+  expect(d.feed({ type: 'event', connection: d.connection, subscription,
+    event: { type: 'error', channel_id: 'A', code: 'channel_not_found' } }))
+    .toEqual([{ type: 'unsubscribe', channel: 'A' }])
+  expect(d.get().channels.A.state).toBe('unavailable')
+  expect(d.event(101)).toEqual([])
+  expect(d.feed({ type: 'load_older', channel: 'A' })).toEqual([])
+  expect(d.feed({ type: 'watch', channel: 'A' })).toContainEqual(
+    expect.objectContaining({ type: 'subscribe', after_seq: 100 }))
+  const current = d.get().channels.A.subscription!.id
+  d.feed({ type: 'event', connection: d.connection, subscription,
+    event: { type: 'error', channel_id: 'A', code: 'channel_not_found' } })
+  expect(d.get().channels.A.subscription!.id).toBe(current)
+  expect(d.get().channels.A.state).toBe('loading')
+})

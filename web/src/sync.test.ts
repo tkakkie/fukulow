@@ -243,6 +243,8 @@ it('same-connection stale subscription replies cannot confirm or refuse a later 
   await client.sync.watch('A')
   await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' })
   expect(client.sync.get().channels.A.state).toBe('loading')
+  await vi.advanceTimersByTimeAsync(500)
+  await client.feed({ type: 'connection_ready' })
   await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(client.sync.get().channels.A.state).toBe('ready')
   await client.sync.close()
@@ -251,8 +253,6 @@ it('same-connection stale subscription replies cannot confirm or refuse a later 
 it('an explicit retry after a terminal refusal fetches and subscribes again through the timeline delegate', async () => {
   const client = controllerClient()
   await ready(client)
-  await client.sync.unwatch('A')
-  await client.sync.watch('A')
   await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' })
   const t = client.sync.getTimeline('A')
   expect(t.get().status).toBe('error')
@@ -290,4 +290,44 @@ it('connection lifetime is independent of observers and an unavailable timeline 
   expect(client.allEffects.filter(e => e.type === 'send')).toEqual([])
   await client.sync.close()
   expect(client.sockets[0].closed).toBe(true)
+})
+
+it('controller async channel_not_found marks a confirmed Channel unavailable without automatic recovery', async () => {
+  const client = controllerClient()
+  await ready(client)
+  expect(await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' }))
+    .toContainEqual(expect.objectContaining({ type: 'unsubscribe', channel: 'A' }))
+  expect(client.sync.get().channels.A.state).toBe('unavailable')
+  expect(client.sync.getTimeline('A').get().status).toBe('error')
+  const count = client.allEffects.length
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(client.allEffects).toHaveLength(count)
+  expect(await client.feed({ type: 'watch', channel: 'A' })).toContainEqual(
+    expect.objectContaining({ type: 'subscribe', after_seq: 100 }))
+  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  expect(client.sync.get().channels.A.state).toBe('ready')
+  await client.sync.close()
+})
+
+it('ambiguous async error during rewatch reconnects without attributing it to the new subscription', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const old = client.sockets[0]
+  await client.sync.unwatch('A')
+  await client.sync.watch('A')
+  const subscription = client.sync.get().channels.A.subscription!.id
+  const effects = await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' })
+  expect(effects).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff' }))
+  expect(client.sync.get().channels.A.state).toBe('loading')
+  expect(old.closed).toBe(true)
+  await vi.advanceTimersByTimeAsync(500)
+  await client.feed({ type: 'connection_ready' })
+  expect(client.sync.get().channels.A.subscription!.id).not.toBe(subscription)
+  old.onEvent({ type: 'error', channel_id: 'A', code: 'channel_not_found' })
+  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  expect(client.sync.get().channels.A.state).toBe('ready')
+  // A genuine refusal is terminal on the fresh connection, just like an initial subscribe refusal.
+  await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' })
+  expect(client.sync.get().channels.A.state).toBe('unavailable')
+  await client.sync.close()
 })

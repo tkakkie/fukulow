@@ -73,13 +73,37 @@ export function createSync(options: SyncOptions) {
         socket?.transport.close()
         try {
           const subscriptions = new Map<string, number[]>()
+          const confirmed = new Map<string, number>()
           const transport = connect({
             onReady: () => { void dispatch({ type: 'connection_ready', connection: effect.id }) },
             onEvent: event => {
-              // Pair ordered control replies with their local subscription generation, even after unwatch.
               const isReply = event.type === 'subscribed' || (event.type === 'error' &&
                 (event.code === 'channel_not_found' || event.code === 'subscription_limit'))
-              const subscription = isReply && event.channel_id ? subscriptions.get(event.channel_id)?.shift() ?? -1 : undefined
+              let subscription: number | undefined
+              if (isReply && event.channel_id) {
+                const channel = event.channel_id
+                const pending = subscriptions.get(channel)
+                if (event.type === 'error' && event.code === 'channel_not_found') {
+                  // With no pending control this belongs to the confirmed generation, even after unwatch.
+                  // With no prior confirmation, ordered replies pair with queued subscribe generations.
+                  // A prior confirmed subscription plus a pending subscribe is ambiguous: the wire has
+                  // no generation id, so this could be an old async error or the new refusal. Do not
+                  // consume a reply or invalidate either generation; reconnect to establish a wire fence.
+                  // The server serializes controls/live delivery: a new subscribed handoff ends that ambiguity.
+                  if (confirmed.has(channel) && pending?.length) {
+                    if (state.connection === effect.id && state.connected) {
+                      void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
+                      socket?.transport.close()
+                    }
+                    return
+                  }
+                  subscription = pending?.shift() ?? confirmed.get(channel) ?? -1
+                  confirmed.delete(channel)
+                } else {
+                  subscription = pending?.shift() ?? -1
+                  if (event.type === 'subscribed' && subscription !== -1) confirmed.set(channel, subscription)
+                }
+              }
               void dispatch({ type: 'event', connection: effect.id, event, subscription })
             },
             onClose: code => { void dispatch({ type: 'socket_closed', connection: effect.id, code }) },
