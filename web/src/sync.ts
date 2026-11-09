@@ -1,7 +1,7 @@
 import * as api from './api'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
-import { initialState, step, type Effect, type Input, type State } from './protocol'
+import { initialState, step, type ChannelState, type Effect, type Input } from './protocol'
 
 export type TimelineApi = {
   listMessages(channel: string, query?: ListMessagesQuery): Promise<Result<MessagePage>>
@@ -41,12 +41,19 @@ export function createSync(options: SyncOptions) {
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
   const listeners = new Set<() => void>()
+  const channelListeners = new Map<string, Set<() => void>>()
   const timelines = new Map<string, ReturnType<typeof timeline>>()
 
   function dispatch(input: Input): Promise<void> {
+    const previous = state
     const result = step(state, input)
     state = result.state
-    listeners.forEach(l => l())
+    if (state !== previous) {
+      listeners.forEach(l => l())
+      channelListeners.forEach((listeners, channel) => {
+        if (state.channels[channel] !== previous.channels[channel]) listeners.forEach(l => l())
+      })
+    }
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 
@@ -73,13 +80,38 @@ export function createSync(options: SyncOptions) {
         socket?.transport.close()
         try {
           const subscriptions = new Map<string, number[]>()
+          const confirmed = new Map<string, number>()
           const transport = connect({
             onReady: () => { void dispatch({ type: 'connection_ready', connection: effect.id }) },
             onEvent: event => {
-              // Pair ordered control replies with their local subscription generation, even after unwatch.
               const isReply = event.type === 'subscribed' || (event.type === 'error' &&
                 (event.code === 'channel_not_found' || event.code === 'subscription_limit'))
-              const subscription = isReply && event.channel_id ? subscriptions.get(event.channel_id)?.shift() ?? -1 : undefined
+              let subscription: number | undefined
+              if (isReply && event.channel_id) {
+                const channel = event.channel_id
+                const pending = subscriptions.get(channel)
+                if (event.type === 'error' && event.code === 'channel_not_found') {
+                  // With no pending control this belongs to the confirmed generation, even after unwatch.
+                  // With no prior confirmation, ordered replies pair with queued subscribe generations.
+                  // A prior confirmed subscription plus a pending subscribe is ambiguous: the wire has
+                  // no generation id, so this could be an old async error or the new refusal. Do not
+                  // consume a reply or invalidate either generation; reconnect to establish a wire fence.
+                  // The server serializes controls/live delivery: a new subscribed handoff ends that ambiguity.
+                  if (confirmed.has(channel) && pending?.length) {
+                    if (state.connection === effect.id && state.connected) {
+                      const own = socket?.transport
+                      void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
+                      own?.close()
+                    }
+                    return
+                  }
+                  subscription = pending?.shift() ?? confirmed.get(channel) ?? -1
+                  confirmed.delete(channel)
+                } else {
+                  subscription = pending?.shift() ?? -1
+                  if (event.type === 'subscribed' && subscription !== -1) confirmed.set(channel, subscription)
+                }
+              }
               void dispatch({ type: 'event', connection: effect.id, event, subscription })
             },
             onClose: code => { void dispatch({ type: 'socket_closed', connection: effect.id, code }) },
@@ -139,12 +171,14 @@ export function createSync(options: SyncOptions) {
 
   function timeline(channel: string) {
     let snapshot: TimelineState
-    let last: State | undefined
+    let last: ChannelState | undefined | null = null
+    const listeners = new Set<() => void>()
+    channelListeners.set(channel, listeners)
     return {
       get(): TimelineState {
-        if (last === state) return snapshot
-        last = state
         const c = state.channels[channel]
+        if (last === c) return snapshot
+        last = c
         snapshot = {
           // Content visibility depends on the base; subscription confirmation drives the separate live indicator.
           status: c?.state === 'unavailable' || c?.historyError ? 'error' : c && c.cursor !== null ? 'ready' : 'loading',

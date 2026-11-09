@@ -1,4 +1,4 @@
-import type { components, ServerEvent } from './api-schema'
+import type { components, ServerEvent } from './api-schema.d.ts'
 
 type Message = components['schemas']['Message']
 type MessagePage = components['schemas']['MessagePage']
@@ -22,9 +22,11 @@ export type ChannelState = {
   fillAttempt: number
   subscription?: { id: number; after: number; confirmed: boolean; watermark: number }
 }
+/** `stale`: invalidated by a history-generation change (unwatch, unavailable, clamp). Its late result never changes
+ *  Channel state, but a 401 still means Sign in because the session is the same (C6/C8). */
 type Request =
-  | { type: 'history'; channel: string; page: 'latest' | 'before' | 'after'; seq?: number }
-  | { type: 'send'; channel: string; clientMessageId: string }
+  | { type: 'history'; channel: string; page: 'latest' | 'before' | 'after'; seq?: number; stale?: true }
+  | { type: 'send'; channel: string; clientMessageId: string; stale?: true }
 type Timer = { purpose: Purpose; channel?: string }
 export type State = {
   selfId: string
@@ -71,15 +73,38 @@ export function initialState(selfId = ''): State {
 }
 const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [],
   advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 })
+const sameFields = <T extends object>(a: T, b: T) => {
+  const keys = Object.keys(a) as (keyof T)[]
+  return keys.every(key => a[key] === b[key]) && (Object.keys(b) as (keyof T)[]).every(key => a[key] === b[key])
+}
 
 /** All policy lives here. Tokens are deterministic local generations, never wire ids. */
 export function step(previous: State, input: Input): { state: State; effects: Effect[] } {
-  let state: State = { ...previous, channels: Object.fromEntries(Object.entries(previous.channels).map(([id, c]) =>
-    [id, { ...c, messages: [...c.messages], advancing: [...c.advancing], pending: c.pending.map(p => ({ ...p })),
-      subscription: c.subscription && { ...c.subscription } }])), requests: { ...previous.requests }, timers: { ...previous.timers } }
+  let state: State = { ...previous, channels: { ...previous.channels },
+    requests: { ...previous.requests }, timers: { ...previous.timers } }
+  const channels = state.channels
+  const touched = new Set<string>()
   const effects: Effect[] = []
   const token = () => state.next++
-  const channel = (id: string) => state.channels[id] ??= emptyChannel()
+  const channel = (id: string) => {
+    if (!touched.has(id)) {
+      state.channels[id] = state.channels[id] ? { ...state.channels[id] } : emptyChannel()
+      touched.add(id)
+    }
+    return state.channels[id]
+  }
+  const finish = () => {
+    let changed = false
+    for (const id of touched) {
+      const before = previous.channels[id]
+      if (before && state.channels[id] && sameFields(before, state.channels[id])) state.channels[id] = before
+      else changed = true
+    }
+    if (!changed && state.channels === channels) state.channels = previous.channels
+    if (sameFields(previous.requests, state.requests)) state.requests = previous.requests
+    if (sameFields(previous.timers, state.timers)) state.timers = previous.timers
+    return { state: sameFields(previous, state) ? previous : state, effects }
+  }
   const cancel = (id: number | undefined) => {
     if (id === undefined || !state.timers[id]) return
     delete state.timers[id]
@@ -100,7 +125,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     cancel(c.wait)
     c.wait = c.fill = c.latest = c.older = undefined
     for (const [key, r] of Object.entries(state.requests)) {
-      if (r.channel === id && (sends || r.type === 'history')) delete state.requests[Number(key)]
+      if (!r.stale && r.channel === id && (sends || r.type === 'history')) state.requests[Number(key)] = { ...r, stale: true }
     }
   }
   const stop = (signIn: boolean) => {
@@ -131,7 +156,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     effects.push({ type: 'fetch_history', id: n, channel: id, page, seq })
   }
   const gap = (c: ChannelState) => c.cursor !== null &&
-    (c.messages.some(m => m.seq > c.cursor! + 1) || (c.subscription?.confirmed && c.subscription.watermark > c.cursor))
+    ((c.messages.at(-1)?.seq ?? 0) > c.cursor + 1 || (c.subscription?.confirmed && c.subscription.watermark > c.cursor))
   const reconcile = (id: string, immediate = false) => {
     const c = channel(id)
     if (!c.watched || c.state === 'unavailable' || c.cursor === null) return
@@ -148,13 +173,35 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream') => {
     const c = channel(id)
     const valid = records.filter(m => m.channel_id === id)
-    const bySeq = new Map(c.messages.map(m => [m.seq, m]))
-    for (const m of valid) {
-      bySeq.set(m.seq, m)
-      if (m.sender === state.selfId) c.pending = c.pending.filter(p => p.clientMessageId !== m.client_message_id)
+    // Sort/deduplicate only the incoming page. Find changes in the existing sorted window without
+    // rebuilding an index or sorting it; allocate one replacement array only when a record changes.
+    const incoming = valid.length < 2 ? valid : [...new Map(valid.map(m => [m.seq, m])).values()].sort((a, b) => a.seq - b.seq)
+    let merged: Message[] | undefined
+    let offset = 0
+    for (const m of incoming) {
+      let lo = 0, hi = c.messages.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if (c.messages[mid].seq < m.seq) lo = mid + 1
+        else hi = mid
+      }
+      const existing = c.messages[lo]
+      if (existing?.seq === m.seq && sameFields(existing, m)) continue
+      if (!merged) merged = c.messages.slice(0, lo)
+      else for (; offset < lo; offset++) merged.push(c.messages[offset])
+      merged.push(m)
+      offset = lo + (existing?.seq === m.seq ? 1 : 0)
     }
-    c.messages = [...bySeq.values()].sort((a, b) => a.seq - b.seq)
-    if (source !== 'window') c.advancing = [...new Set([...c.advancing, ...valid.map(m => m.seq)])]
+    if (merged) {
+      for (; offset < c.messages.length; offset++) merged.push(c.messages[offset])
+      c.messages = merged
+    }
+    const settled = new Set(valid.filter(m => m.sender === state.selfId).map(m => m.client_message_id))
+    if (c.pending.some(p => settled.has(p.clientMessageId))) c.pending = c.pending.filter(p => !settled.has(p.clientMessageId))
+    if (source !== 'window') {
+      const added = valid.map(m => m.seq).filter(n => (c.cursor === null || n > c.cursor) && !c.advancing.includes(n))
+      if (added.length) c.advancing = [...new Set([...c.advancing, ...added])]
+    }
     if (source === 'stream' && c.cursor !== null && valid.some(m => m.seq === c.cursor! + 1)) {
       const eligible = new Set(c.advancing)
       while (eligible.has(c.cursor + 1)) c.cursor++
@@ -163,7 +210,9 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   }
   const attempt = (id: string, p: Pending) => {
     const n = token()
-    p.state = 'sending'; p.request = n
+    const c = channel(id)
+    const sending: Pending = { ...p, state: 'sending', request: n }
+    c.pending = c.pending.includes(p) ? c.pending.map(entry => entry === p ? sending : entry) : [...c.pending, sending]
     state.requests[n] = { type: 'send', channel: id, clientMessageId: p.clientMessageId }
     effects.push({ type: 'send', id: n, channel: id, client_message_id: p.clientMessageId, body: p.body })
   }
@@ -182,7 +231,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     return { state, effects }
   }
   if (input.type === 'stop') { stop(false); return { state, effects } }
-  if (!state.running) return { state, effects }
+  if (!state.running) return finish()
 
   switch (input.type) {
     case 'connection_ready':
@@ -193,7 +242,9 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     case 'socket_closed':
       if (input.connection !== state.connection) break
       state.connection = null; state.connected = false
-      for (const c of Object.values(state.channels)) c.subscription = undefined
+      for (const id of Object.keys(state.channels)) {
+        if (state.channels[id].subscription) channel(id).subscription = undefined
+      }
       if (input.code === 4001) { stop(true); break }
       // One immediate overflow retry per session; overflows is intentionally never reset within a session.
       if (input.code === 4008 && state.overflows++ === 0) connect()
@@ -230,7 +281,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const c = channel(input.channel)
       if (c.state === 'unavailable' || !input.body.trim() || c.pending.some(p => p.clientMessageId === input.clientMessageId)) break
       const p: Pending = { clientMessageId: input.clientMessageId, body: input.body, state: 'sending', request: 0 }
-      c.pending.push(p); attempt(input.channel, p)
+      attempt(input.channel, p)
       break
     }
     case 'user_retry': {
@@ -241,7 +292,8 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     }
     case 'user_discard': {
       const c = channel(input.channel)
-      c.pending = c.pending.filter(p => p.clientMessageId !== input.clientMessageId || p.state === 'sending')
+      if (c.pending.some(p => p.clientMessageId === input.clientMessageId && p.state !== 'sending'))
+        c.pending = c.pending.filter(p => p.clientMessageId !== input.clientMessageId || p.state === 'sending')
       break
     }
     case 'event': {
@@ -249,20 +301,27 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const e = input.event
       const id = e.type === 'message' ? e.message.channel_id : e.channel_id
       if (!id) break
-      const c = state.channels[id]
+      let c = state.channels[id]
       if (!c?.watched || c.state === 'unavailable' || !c.subscription) break
       if (e.type !== 'message' && input.subscription !== undefined && input.subscription !== c.subscription.id) break
+      c = channel(id)
       if (e.type === 'message') { merge(id, [e.message], 'stream'); reconcile(id) }
       else if (e.type === 'error') {
         if (e.code === 'channel_not_found' || e.code === 'subscription_limit') unavailable(id)
       } else if (e.type === 'subscribed') {
-        if (e.caught_up_seq < c.subscription.after) {
+        if (e.caught_up_seq < c.subscription!.after) {
+          // The server still owns this slot while the replacement latest request is in flight.
+          effects.push({ type: 'unsubscribe', channel: id })
           invalidate(id, true)
-          const pending = c.pending.map(p => ({ ...p, state: 'unknown' as const }))
+          // Pre-clamp HTTP results may refer to the discarded history generation. Only those
+          // sending attempts become unknown; definite refusals and same-key retries keep their state.
+          // Sends started during the new bootstrap remain valid until completion/timeout or another clamp.
+          const pending = c.pending.map(p => p.state === 'sending' ? { ...p, state: 'unknown' as const } : p)
           state.channels[id] = { ...emptyChannel(), watched: true, pending }
           history(id, 'latest')
         } else {
-          c.subscription.confirmed = true; c.subscription.watermark = e.caught_up_seq
+          if (!c.subscription!.confirmed || c.subscription!.watermark !== e.caught_up_seq)
+            c.subscription = { ...c.subscription!, confirmed: true, watermark: e.caught_up_seq }
           // Only a confirmed subscription resets backoff; with no watched Channel it may stay at the cap.
           c.state = 'ready'; c.historyError = false; state.reconnectAttempt = 0
           reconcile(id)
@@ -275,6 +334,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const r = state.requests[input.request]
       if (!r || r.type !== 'history') break
       delete state.requests[input.request]
+      if (r.stale) { if (input.type === 'history_failed' && input.status === 401) stop(true); break }
       const c = channel(r.channel)
       c[r.page === 'latest' ? 'latest' : r.page === 'before' ? 'older' : 'fill'] = undefined
       if (input.type === 'history_failed') {
@@ -308,12 +368,16 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const r = state.requests[input.request]
       if (!r || r.type !== 'send') break
       delete state.requests[input.request]
+      if (r.stale) { if (input.type === 'send_failed' && input.status === 401) stop(true); break }
       const c = channel(r.channel)
       if (input.type === 'ack') { merge(r.channel, [input.message], 'ack'); reconcile(r.channel) }
       else {
         if (input.status === 401) { stop(true); break }
         const p = c.pending.find(p => p.clientMessageId === r.clientMessageId && p.request === input.request)
-        if (p) p.state = typeof input.status === 'number' && [400, 403, 404, 409, 413, 415].includes(input.status) ? 'failed' : 'unknown'
+        if (p) {
+          const outcome = typeof input.status === 'number' && [400, 403, 404, 409, 413, 415].includes(input.status) ? 'failed' : 'unknown'
+          if (p.state !== outcome) c.pending = c.pending.map(entry => entry === p ? { ...p, state: outcome } : entry)
+        }
       }
       break
     }
@@ -332,5 +396,5 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       break
     }
   }
-  return { state, effects }
+  return finish()
 }
