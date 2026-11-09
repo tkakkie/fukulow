@@ -11,7 +11,7 @@ import type {
 } from '../web/src/api-schema.d.ts';
 import { Deliveries, positiveInteger } from './delivery.ts';
 
-const baseUrl = (__ENV.BASE_URL || 'http://host.docker.internal:8080').replace(/\/$/, '');
+const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const channels = positiveInteger(__ENV.CHANNELS, 1);
 const subscribers = positiveInteger(__ENV.SUBSCRIBERS, 5);
 const publishers = positiveInteger(__ENV.PUBLISHERS, 2);
@@ -91,13 +91,23 @@ export function setup(): Setup {
   const response = http.post(`${baseUrl}/api/v1/session`, JSON.stringify(body), params('sign_in'));
   requireStatus(response, 200, 'sign_in');
   const { token } = response.json() as SessionResponse;
-  const channelIds = Array.from({ length: channels }, (_, index) => {
-    const body: CreateChannelRequest = { name: `load-${Date.now()}-${index}`, visibility };
-    const response = http.post(`${baseUrl}/api/v1/channels`, JSON.stringify(body), params('create_channel', token));
-    requireStatus(response, 201, 'create_channel');
-    return (response.json() as Channel).id;
-  });
-  return { token, channelIds };
+  try {
+    const channelIds = Array.from({ length: channels }, (_, index) => {
+      const body: CreateChannelRequest = { name: `load-${Date.now()}-${index}`, visibility };
+      const response = http.post(`${baseUrl}/api/v1/channels`, JSON.stringify(body), params('create_channel', token));
+      requireStatus(response, 201, 'create_channel');
+      return (response.json() as Channel).id;
+    });
+    return { token, channelIds };
+  } catch (error) {
+    // k6 skips teardown when setup fails; retain the provisioning error if sign-out also fails.
+    try {
+      teardown({ token, channelIds: [] });
+    } catch {
+      console.error('Failed to revoke session after setup failure');
+    }
+    throw error;
+  }
 }
 
 function uuid(): string {

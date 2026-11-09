@@ -78,7 +78,10 @@ jobs:
           LOAD_BOOTSTRAP: '1'
           LOAD_EMAIL: load@example.test
           LOAD_PASSWORD: ci-load-test-only-password
-        run: timeout 55s make load
+        run: timeout 55s make load LOAD_CONTAINER_NAME=fukulow-ci-load
+      - name: Remove load container even after timeout
+        if: always()
+        run: docker rm -f fukulow-ci-load || true
       - if: failure()
         run: docker compose --profile caddy logs
         env:
