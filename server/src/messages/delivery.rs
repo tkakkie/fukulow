@@ -1,4 +1,5 @@
 use super::Message;
+use super::failure::{FailureWatch, Failures};
 use crate::channels;
 use std::{
     collections::{HashMap, HashSet},
@@ -20,7 +21,6 @@ struct Sender {
     member: Uuid,
     events: mpsc::Sender<Arc<Message>>,
     overflow: watch::Sender<bool>,
-    notification_failed: watch::Sender<bool>,
 }
 impl Sender {
     fn send(&self, message: Arc<Message>) {
@@ -35,6 +35,7 @@ impl Sender {
 pub struct Delivery {
     recipients: Arc<Mutex<HashMap<ChannelKey, Recipients>>>,
     notifications: Arc<Semaphore>,
+    failures: Failures,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -44,6 +45,7 @@ impl Default for Delivery {
         Self {
             recipients: Default::default(),
             notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
+            failures: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
         }
@@ -96,16 +98,7 @@ impl Notification {
 impl Drop for Notification {
     fn drop(&mut self) {
         if !self.completed {
-            let registry = self
-                .delivery
-                .recipients
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(recipients) = registry.get(&self.key) {
-                for sender in recipients.values() {
-                    sender.notification_failed.send_replace(true);
-                }
-            }
+            self.delivery.failures.signal(self.key);
         }
     }
 }
@@ -118,14 +111,13 @@ pub(crate) struct LiveQueue {
     channels: Vec<Uuid>,
     pub events: mpsc::Receiver<Arc<Message>>,
     pub overflow: watch::Receiver<bool>,
-    pub notification_failed: watch::Receiver<bool>,
+    pub notification_failed: FailureWatch,
 }
 
 impl Delivery {
     pub(crate) fn queue(&self, organization: Uuid, member: Uuid, capacity: usize) -> LiveQueue {
         let (events, receiver) = mpsc::channel(capacity);
         let (overflow, closed) = watch::channel(false);
-        let (notification_failed, failed) = watch::channel(false);
         LiveQueue {
             delivery: self.clone(),
             id: Uuid::new_v4(),
@@ -134,12 +126,11 @@ impl Delivery {
                 member,
                 events,
                 overflow,
-                notification_failed,
             },
             channels: Vec::new(),
             events: receiver,
             overflow: closed,
-            notification_failed: failed,
+            notification_failed: Default::default(),
         }
     }
 
@@ -149,6 +140,12 @@ impl Delivery {
             key: (organization, channel),
             completed: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_recipients_locked(&self, run: impl FnOnce()) {
+        let _registry = self.recipients.lock().unwrap();
+        run();
     }
 
     #[cfg(test)]
@@ -232,6 +229,9 @@ impl LiveQueue {
     pub(crate) fn subscribe(&mut self, channel: Uuid) {
         if !self.channels.contains(&channel) {
             self.delivery
+                .failures
+                .subscribe((self.organization, channel), &self.notification_failed);
+            self.delivery
                 .recipients
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -242,6 +242,9 @@ impl LiveQueue {
         }
     }
     pub(crate) fn unsubscribe(&mut self, channel: Uuid) {
+        self.delivery
+            .failures
+            .unsubscribe((self.organization, channel), &self.notification_failed);
         let mut registry = self
             .delivery
             .recipients
@@ -300,10 +303,10 @@ mod tests {
             MAX_IN_FLIGHT_NOTIFICATIONS - 1
         );
         tokio::time::advance(NOTIFICATION_TIMEOUT - Duration::from_millis(1)).await;
-        assert!(!*affected.notification_failed.borrow());
+        assert!(!affected.notification_failed.is_failed());
         tokio::time::advance(Duration::from_millis(1)).await;
         delivery.flush().await;
-        assert!(*affected.notification_failed.borrow());
+        assert!(affected.notification_failed.is_failed());
         assert!(!*affected.overflow.borrow());
         assert!(affected.events.try_recv().is_err());
         assert_eq!(
@@ -343,10 +346,10 @@ mod tests {
         let task = delivery.tasks.lock().unwrap().pop().unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert!(*affected.notification_failed.borrow());
+        assert!(affected.notification_failed.is_failed());
         assert!(!*affected.overflow.borrow());
-        assert!(!*other_channel.notification_failed.borrow());
-        assert!(!*other_org.notification_failed.borrow());
+        assert!(!other_channel.notification_failed.is_failed());
+        assert!(!other_org.notification_failed.is_failed());
         assert!(affected.events.try_recv().is_err());
     }
 

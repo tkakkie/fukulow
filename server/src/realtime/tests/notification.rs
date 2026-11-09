@@ -69,9 +69,13 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
     // The same Channel UUID in another Organization, on the same Delivery registry.
     sqlx::query("INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $2, 'Foreign', 'public')")
         .bind(foreign.organization).bind(f.channel).execute(&pool).await.unwrap();
-    let mut affected = f.server.connect(&f.token).await;
-    subscribe(&mut affected, f.channel, 0).await;
-    ready(&mut affected, f.channel, 0).await;
+    let mut affected = Vec::new();
+    for _ in 0..256 {
+        let mut socket = f.server.connect(&f.token).await;
+        subscribe(&mut socket, f.channel, 0).await;
+        ready(&mut socket, f.channel, 0).await;
+        affected.push(socket);
+    }
     let mut unrelated = f.server.connect(&f.token).await;
     subscribe(&mut unrelated, other_channel, 0).await;
     ready(&mut unrelated, other_channel, 0).await;
@@ -89,7 +93,7 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
         gates.push(gate);
     }
     // All slots are occupied, but there is no failure or HTTP backpressure yet.
-    silent(&mut affected).await;
+    silent(&mut affected[0]).await;
     let key = Uuid::new_v4();
     committed.push(
         tokio::time::timeout(
@@ -99,7 +103,9 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
         .await
         .unwrap(),
     );
-    closed(&mut affected, 1011).await;
+    for socket in &mut affected {
+        closed(socket, 1011).await;
+    }
     silent(&mut unrelated).await;
     silent(&mut other_org).await;
 
@@ -119,6 +125,56 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
     assert_eq!(event(&mut unrelated).await["message"], own);
     let own = send(&f, &foreign.token, f.channel, Uuid::new_v4(), "foreign").await;
     assert_eq!(event(&mut other_org).await["message"], own);
+    f.state.message_delivery.flush().await;
+}
+
+#[sqlx::test]
+async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lock(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let mut queues = Vec::new();
+    for _ in 0..512 {
+        let mut queue = f.state.message_delivery.queue(f.organization, f.member, 1);
+        queue.subscribe(f.channel);
+        queues.push(queue);
+    }
+    let mut gates = Vec::new();
+    for _ in 0..messages::MAX_IN_FLIGHT_NOTIFICATIONS {
+        let key = Uuid::new_v4();
+        let gate = messages::pause_publication(key);
+        send(&f, &f.token, f.channel, key, "held").await;
+        publication_entered(&gate).await;
+        gates.push(gate);
+    }
+    let delivery = f.state.message_delivery.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let held = tokio::task::spawn_blocking(move || {
+        delivery.with_recipients_locked(|| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+    });
+    entered_rx.await.unwrap();
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        send(&f, &f.token, f.channel, Uuid::new_v4(), "saturated"),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    // Release even on a regression so the assertion cannot deadlock the runtime.
+    release_tx.send(()).unwrap();
+    held.await.unwrap();
+    assert_eq!(response.unwrap()["seq"], 41);
+    assert!(elapsed < Duration::from_secs(1), "HTTP took {elapsed:?}");
+    eprintln!("saturated HTTP with 512 subscribers and recipients locked: {elapsed:?}");
+    for queue in &queues {
+        assert!(queue.notification_failed.is_failed());
+        assert!(!*queue.overflow.borrow());
+    }
+    for gate in gates {
+        gate.release.add_permits(1);
+    }
     f.state.message_delivery.flush().await;
 }
 

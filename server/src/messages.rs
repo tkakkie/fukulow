@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod delivery;
+mod failure;
 pub use delivery::Delivery;
 #[cfg(test)]
 pub(crate) use delivery::{
