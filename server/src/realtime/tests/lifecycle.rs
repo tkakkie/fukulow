@@ -2,6 +2,10 @@ use super::*;
 use crate::realtime::connection::Lifecycle;
 use tokio::sync::oneshot;
 
+// Keep explicit clock jumps below the session monitor's independent 30 s SQL recheck.
+const PING_INTERVAL: Duration = Duration::from_secs(2);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(6);
+
 async fn lifecycle_socket(f: &Fixture) -> (Server, Client, oneshot::Receiver<()>) {
     let (done, finished) = oneshot::channel();
     let done = Arc::new(Mutex::new(Some(done)));
@@ -18,8 +22,8 @@ async fn lifecycle_socket(f: &Fixture) -> (Server, Client, oneshot::Receiver<()>
                                 state,
                                 auth,
                                 Lifecycle {
-                                    ping_interval: Duration::from_secs(1),
-                                    idle_timeout: Duration::from_secs(3),
+                                    ping_interval: PING_INTERVAL,
+                                    idle_timeout: IDLE_TIMEOUT,
                                 },
                             )
                             .await;
@@ -49,13 +53,13 @@ async fn advance(duration: Duration) {
 async fn missing_pong_disconnects_idle_websocket(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, finished) = lifecycle_socket(&f).await;
-    advance(Duration::from_secs(1)).await;
+    advance(PING_INTERVAL).await;
     assert!(matches!(
         frame(&mut socket).await,
         tungstenite::Message::Ping(_)
     ));
     // Reading queues an automatic pong, but not polling/writing again leaves it unsent.
-    advance(Duration::from_secs(2)).await;
+    advance(IDLE_TIMEOUT).await;
     tokio::time::timeout(Duration::from_secs(5), finished)
         .await
         .unwrap()
@@ -79,7 +83,7 @@ async fn answering_pings_keeps_websocket_and_live_delivery_healthy(pool: PgPool)
     let (_server, mut socket, mut finished) = lifecycle_socket(&f).await;
     // Only Pong frames go from client to server after the initial subscription.
     for _ in 0..7 {
-        advance(Duration::from_secs(1)).await;
+        advance(PING_INTERVAL).await;
         assert!(matches!(
             frame(&mut socket).await,
             tungstenite::Message::Ping(_)
@@ -92,27 +96,113 @@ async fn answering_pings_keeps_websocket_and_live_delivery_healthy(pool: PgPool)
             Err(oneshot::error::TryRecvError::Empty)
         ));
     }
-    // A pong queued while replay holds the loop must count before an overdue idle tick.
+    socket.close(None).await.unwrap();
+    assert_eq!(frame(&mut socket).await, tungstenite::Message::Close(None));
+}
+
+async fn post_replay_ping(f: &Fixture, socket: &mut Client) {
+    let canonical = post(f, f.channel).await;
+    assert_eq!(event(socket).await["message"], canonical);
     let gate = pause(f.channel);
-    subscribe(&mut socket, f.channel, 6).await;
+    subscribe(socket, f.channel, 0).await;
+    entered(&gate).await;
+    // No client frame is sent while replay prevents the first heartbeat Ping.
+    advance(IDLE_TIMEOUT + PING_INTERVAL).await;
+    gate.release.add_permits(1);
+    assert_eq!(event(socket).await["message"], canonical);
+    ready(socket, f.channel, 1).await;
+    assert!(matches!(frame(socket).await, tungstenite::Message::Ping(_)));
+}
+
+#[sqlx::test]
+async fn answering_post_replay_ping_preserves_websocket_and_live_delivery(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (_server, mut socket, mut finished) = lifecycle_socket(&f).await;
+    post_replay_ping(&f, &mut socket).await;
+    // Even an answer partway through the fresh grace period must keep the socket alive.
+    advance(IDLE_TIMEOUT / 2).await;
+    assert!(matches!(
+        finished.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    socket.flush().await.unwrap();
+    let canonical = post(&f, f.channel).await;
+    assert_eq!(event(&mut socket).await["message"], canonical);
+    // Continue beyond the original post-replay Ping's deadline, answering each Ping.
+    for _ in 0..4 {
+        advance(PING_INTERVAL).await;
+        assert!(matches!(
+            frame(&mut socket).await,
+            tungstenite::Message::Ping(_)
+        ));
+        socket.flush().await.unwrap();
+        let canonical = post(&f, f.channel).await;
+        assert_eq!(event(&mut socket).await["message"], canonical);
+    }
+    socket.close(None).await.unwrap();
+    assert_eq!(frame(&mut socket).await, tungstenite::Message::Close(None));
+}
+
+#[sqlx::test]
+async fn unanswered_post_replay_ping_closes_only_after_full_grace(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (_server, mut socket, mut finished) = lifecycle_socket(&f).await;
+    post_replay_ping(&f, &mut socket).await;
+    // Do not poll or flush the client: its automatically queued Pong stays unsent.
+    advance(IDLE_TIMEOUT / 2).await;
+    assert!(matches!(
+        finished.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    advance(IDLE_TIMEOUT / 2).await;
+    tokio::time::timeout(Duration::from_secs(5), finished)
+        .await
+        .unwrap()
+        .unwrap();
+    loop {
+        match frame(&mut socket).await {
+            tungstenite::Message::Ping(_) => {}
+            tungstenite::Message::Close(Some(close)) => {
+                assert_eq!(u16::from(close.code), 1001);
+                break;
+            }
+            other => panic!("expected ping or idle close, got {other:?}"),
+        }
+    }
+}
+
+#[sqlx::test]
+async fn pong_queued_during_replay_clears_outstanding_ping(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
+    advance(PING_INTERVAL).await;
+    assert!(matches!(
+        frame(&mut socket).await,
+        tungstenite::Message::Ping(_)
+    ));
+    let gate = pause(f.channel);
+    subscribe(&mut socket, f.channel, 0).await;
     entered(&gate).await;
     socket
         .send(tungstenite::Message::Pong(vec![1].into()))
         .await
         .unwrap();
-    advance(Duration::from_secs(4)).await;
+    advance(IDLE_TIMEOUT + PING_INTERVAL).await;
     gate.release.add_permits(1);
-    assert_eq!(event(&mut socket).await["message"]["seq"], 7);
-    ready(&mut socket, f.channel, 7).await;
-    assert!(matches!(
-        frame(&mut socket).await,
-        tungstenite::Message::Ping(_)
-    ));
-    socket.flush().await.unwrap();
+    ready(&mut socket, f.channel, 0).await;
     let canonical = post(&f, f.channel).await;
     assert_eq!(event(&mut socket).await["message"], canonical);
     socket.close(None).await.unwrap();
-    assert_eq!(frame(&mut socket).await, tungstenite::Message::Close(None));
+    // An overdue heartbeat may also have sent a Ping before consuming the queued Pong.
+    loop {
+        match frame(&mut socket).await {
+            tungstenite::Message::Ping(_) => {}
+            close => {
+                assert_eq!(close, tungstenite::Message::Close(None));
+                break;
+            }
+        }
+    }
 }
 
 #[sqlx::test]

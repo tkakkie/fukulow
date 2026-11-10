@@ -201,25 +201,25 @@ impl Connection<'_> {
     }
 
     pub async fn run(&mut self, socket: &mut WebSocket, lifecycle: Lifecycle) -> Result<(), u16> {
-        let mut last_received = Instant::now();
-        let mut next_ping = last_received + lifecycle.ping_interval;
-        let mut heartbeat = tokio::time::interval_at(
-            next_ping.min(last_received + lifecycle.idle_timeout),
-            lifecycle.ping_interval,
-        );
+        let mut ping_sent_at: Option<Instant> = None;
+        let mut next_ping = Instant::now() + lifecycle.ping_interval;
+        let mut heartbeat = tokio::time::interval_at(next_ping, lifecycle.ping_interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             let frame = tokio::select! {
                 frame = socket.recv() => frame,
                 _ = heartbeat.tick() => {
-                    if last_received.elapsed() >= lifecycle.idle_timeout {
+                    if ping_sent_at.is_some_and(|sent| sent.elapsed() >= lifecycle.idle_timeout) {
                         // Replay may have delayed reading a queued pong or other client frame.
                         tokio::time::timeout(Duration::ZERO, socket.recv())
                             .await.map_err(|_| 1001u16)?
                     } else {
                         Self::send(socket, Frame::Ping(Default::default())).await?;
-                        next_ping = Instant::now() + lifecycle.ping_interval;
-                        heartbeat.reset_at(next_ping.min(last_received + lifecycle.idle_timeout));
+                        let sent = Instant::now();
+                        // Replay/live work can delay this tick: grace starts only after a Ping.
+                        let first_ping = *ping_sent_at.get_or_insert(sent);
+                        next_ping = sent + lifecycle.ping_interval;
+                        heartbeat.reset_at(next_ping.min(first_ping + lifecycle.idle_timeout));
                         continue;
                     }
                 },
@@ -229,8 +229,8 @@ impl Connection<'_> {
                 },
             };
             if matches!(frame, Some(Ok(_))) {
-                last_received = Instant::now();
-                heartbeat.reset_at(next_ping.min(last_received + lifecycle.idle_timeout));
+                ping_sent_at = None;
+                heartbeat.reset_at(next_ping);
             }
             match frame {
                 Some(Ok(Frame::Text(text))) => match serde_json::from_str(&text) {
