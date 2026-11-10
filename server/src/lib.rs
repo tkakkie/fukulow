@@ -74,6 +74,22 @@ pub fn app(state: AppState) -> Router {
                 // 4000 control characters escape to 6 bytes each in JSON, so the global 16 KiB would reject valid bodies.
                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
         )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/timeline",
+            get(messages::list_timeline),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/topics",
+            get(messages::list_topics),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}",
+            get(messages::topic_summary),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/messages",
+            get(messages::topic_history),
+        )
         .route("/api/v1/orgs/{org}/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .fallback(static_handler)

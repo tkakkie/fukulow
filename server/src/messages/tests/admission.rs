@@ -156,6 +156,7 @@ async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(
         (sender, 0),
         channel,
         SendMessageRequest {
+            topic_name: None,
             client_message_id: key,
             body: "expired".into(),
         },
@@ -192,6 +193,7 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
         (sender, 0),
         channel,
         SendMessageRequest {
+            topic_name: None,
             client_message_id: Uuid::new_v4(),
             body: "wait longer than the work deadline".into(),
         },
@@ -239,6 +241,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
                 (sender, 0),
                 channel,
                 SendMessageRequest {
+                    topic_name: None,
                     client_message_id: Uuid::new_v4(),
                     body: "pool wait".into(),
                 },
@@ -273,6 +276,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
         (sender, 0),
         channel,
         SendMessageRequest {
+            topic_name: None,
             client_message_id: Uuid::new_v4(),
             body: "after timeout".into(),
         },

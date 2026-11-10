@@ -399,3 +399,53 @@ async fn delivery_contract_rejects_empty_channel_ranges(pool: PgPool) {
         );
     }
 }
+
+#[sqlx::test]
+async fn timeline_contract_rejects_incorrect_pages(pool: PgPool) {
+    for wrong in 0..7 {
+        let mut scenario = scenarios()
+            .into_iter()
+            .find(|s| s.id == "main-timeline-pages-as-of-w-while-posting")
+            .unwrap();
+        let (step, spec) = scenario
+            .steps
+            .iter_mut()
+            .enumerate()
+            .find_map(|(step, item)| {
+                if let Step::MainTimeline(spec) = item {
+                    Some((step, spec))
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        match wrong {
+            0 => spec.expect.as_of_seq -= 1,
+            1 => spec.expect.has_more = false,
+            2 => {
+                spec.expect.items.remove(0);
+            }
+            3 => spec.expect.items.reverse(),
+            4 => {
+                if let TimelineItem::Topic { topic } = &mut spec.expect.items[1] {
+                    topic.message_count += 1;
+                }
+            }
+            5 => {
+                if let TimelineItem::Topic { topic } = &mut spec.expect.items[2] {
+                    topic.last_seq = 6;
+                }
+            }
+            _ => {
+                spec.expect.items[1] = TimelineItem::Message {
+                    message: TimelineMessage { seq: 9 },
+                }
+            }
+        }
+        assert_eq!(
+            Runner::run(pool.clone(), scenario).await,
+            Err(Failure::Timeline { step }),
+            "mutation {wrong}"
+        );
+    }
+}

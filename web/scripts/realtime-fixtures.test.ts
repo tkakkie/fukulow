@@ -164,10 +164,11 @@ describe('realtime fixtures: validation', () => {
     const topicPage = (f: any) => (f.client.scenarios[0].steps[1].input.messages = [{ seq: 1, topic: 'T' }, { from: 2, to: 3 }])
     const propose = (f: any) => (f.client.scenarios[0].proposed = { owner: ['#138'] })
     expect(problemsOf(topicPage)).toContain('input.messages[0].topic is planned vocabulary; mark the scenario proposed')
-    expect(problemsOf((f) => (f.delivery.scenarios[0].steps[0] = { do: 'main_timeline', as: 'alice', channel: 'general', query: {}, expect: { status: 200 } }))).toContain('do main_timeline is planned vocabulary')
+    expect(problemsOf((f) => f.delivery.scenarios[0].steps.push({ do: 'main_timeline', as: 'alice', channel: 'general', query: { as_of_seq: 0 }, expect: { status: 200, as_of_seq: 0, items: [], has_more: false } }))).toBe('')
+    expect(problemsOf((f) => (f.delivery.scenarios[0].covers = ['P6']))).toContain('covers is planned vocabulary')
     expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P1']))).toContain('covers is planned vocabulary')
     // A planned key inside a forbidden or never pattern would silently match nothing; it must fail too.
-    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].effects = { forbidden: [{ type: 'fetch_history', before: 4 }] }))).toContain('before is planned vocabulary')
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].effects = { forbidden: [{ type: 'fetch_history', before_position: 4 }] }))).toContain('before_position is planned vocabulary')
     expect(problemsOf((f) => (topicPage(f), propose(f)))).toBe('')
     expect(problemsOf((f) => (f.delivery.scenarios[0].proposed = { owner: ['#137'] }))).toBe('')
     // A proposed scenario is still fully validated.
@@ -179,6 +180,30 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf(lines([{ topic: 'T', position: 2, message_count: 1 }, { topic: 'T', position: 3, message_count: 2 }]))).toContain('more than once')
     const all = [{ id: 'a' }, { id: 'b', proposed: { owner: ['#137'] } }]
     expect(partitionScenarios(all)).toEqual({ running: [all[0]], proposed: [all[1]] })
+  })
+
+  it('validates implemented delivery timeline vocabulary without enabling client projections', () => {
+    const timeline = (f: any): any => {
+      f.delivery.scenarios[0].covers = ['P2', 'P5']
+      const step = {
+        do: 'main_timeline', as: 'alice', channel: 'general', query: { as_of_seq: 10, before_position: 8 },
+        expect: { status: 200, as_of_seq: 10, items: [
+          { kind: 'message', message: { seq: 4 } },
+          { kind: 'topic', topic: { name: 'T', last_seq: 7, message_count: 2 } },
+        ], has_more: true },
+      }
+      f.delivery.scenarios[0].steps.push(step)
+      return step
+    }
+    expect(problemsOf((f) => timeline(f))).toBe('')
+    expect(problemsOf((f) => { timeline(f).query.before = 8 })).toContain('before: unknown property')
+    expect(problemsOf((f) => { timeline(f).expect.lines = [] })).toContain('lines: unknown property')
+    expect(problemsOf((f) => { timeline(f).expect.items[0].kind = 'plain' })).toContain('unknown kind')
+    expect(problemsOf((f) => { timeline(f).expect.items.reverse() })).toContain('strictly ascending')
+    expect(problemsOf((f) => { const items = timeline(f).expect.items; items.push({ kind: 'topic', topic: { name: 'T', last_seq: 8, message_count: 3 } }) })).toContain('more than once')
+    expect(problemsOf((f) => { f.delivery.scenarios[0].steps.push({ do: 'post', as: 'alice', channel: 'general', topic_name: 'T' }) })).toBe('')
+    expect(problemsOf((f) => { f.delivery.scenarios[0].steps[0] = { do: 'post', as: 'alice', channel: 'general', topic_id: 'T' } })).toContain('topic_id: unknown property')
+    expect(problemsOf((f) => { f.client.scenarios[0].steps[1].input = { type: 'main_timeline_result', respond_to: 'f0', as_of_seq: 10, items: [], has_more: false } })).toContain('planned vocabulary')
   })
 
   it('rejects dangling references in delivery scenarios', () => {

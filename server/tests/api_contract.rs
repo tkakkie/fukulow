@@ -21,8 +21,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// Account / Member split adds scoped responses and malformed-Organization 400s; send admission adds 503.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 61;
+// Topic projections add four routes with six described responses each.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 85;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {
@@ -362,12 +362,23 @@ fn sign_in_retry_after_is_at_least_one_second() {
 }
 
 #[test]
-fn send_admission_retry_after_is_at_least_one_second() {
+fn send_and_topic_admission_retry_after_is_at_least_one_second() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
-    let schema = &document["paths"]["/api/v1/orgs/{org}/channels/{id}/messages"]["post"]["responses"]
-        ["503"]["headers"]["Retry-After"]["schema"];
-    assert_eq!(schema["type"], "integer");
-    assert_eq!(schema["minimum"], 1);
+    for (path, method) in [
+        ("/api/v1/orgs/{org}/channels/{id}/messages", "post"),
+        ("/api/v1/orgs/{org}/channels/{id}/timeline", "get"),
+        ("/api/v1/orgs/{org}/channels/{id}/topics", "get"),
+        ("/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}", "get"),
+        (
+            "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/messages",
+            "get",
+        ),
+    ] {
+        let schema = &document["paths"][path][method]["responses"]["503"]["headers"]["Retry-After"]
+            ["schema"];
+        assert_eq!(schema["type"], "integer", "{method} {path}");
+        assert_eq!(schema["minimum"], 1, "{method} {path}");
+    }
 }
 
 fn assert_variant_contract<T: Serialize>(root: &str, variants: &[(T, &str)]) {
@@ -439,7 +450,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         sender: Uuid::from_u128(4),
         body: "hello".into(),
         created_at: "2026-11-09T00:00:00Z".into(),
-        topic_id: (),
+        topic_id: None,
     };
     assert_eq!(
         serde_json::to_value(&message).unwrap()["topic_id"],
@@ -532,7 +543,16 @@ fn account_and_member_openapi_contracts_are_separate() {
             .get("email")
             .is_none()
     );
-    for suffix in ["me", "channels", "channels/{id}/messages", "ws"] {
+    for suffix in [
+        "me",
+        "channels",
+        "channels/{id}/messages",
+        "channels/{id}/timeline",
+        "channels/{id}/topics",
+        "channels/{id}/topics/{topic_id}",
+        "channels/{id}/topics/{topic_id}/messages",
+        "ws",
+    ] {
         let path = format!("/api/v1/orgs/{{org}}/{suffix}");
         let item = &document["paths"][&path];
         for method in ["get", "post"] {
@@ -556,4 +576,64 @@ fn account_and_member_openapi_contracts_are_separate() {
     }
     assert!(document["paths"].get("/api/v1/ws").is_none());
     assert!(document["paths"].get("/api/v1/channels").is_none());
+}
+
+#[test]
+fn topic_openapi_contract_includes_all_shapes_and_discriminators() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        schemas["Message"]["properties"]["topic_id"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
+        schemas["Message"]["properties"]["topic_id"]["format"],
+        "uuid"
+    );
+    assert!(
+        schemas["Message"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("topic_id"))
+    );
+    assert!(
+        schemas["SendMessageRequest"]["properties"]
+            .get("topic_id")
+            .is_none()
+    );
+    assert_eq!(schemas["SendMessageRequest"]["additionalProperties"], false);
+    let item = &schemas["TimelineItem"];
+    assert_eq!(item["discriminator"]["propertyName"], "kind");
+    assert_eq!(
+        item["discriminator"]["mapping"],
+        json!({"message":"#/components/schemas/TimelineMessage","topic":"#/components/schemas/TimelineTopic"})
+    );
+    assert_eq!(
+        schemas["TimelineMessage"]["properties"]["kind"]["enum"],
+        json!(["message"])
+    );
+    assert_eq!(
+        schemas["TimelineTopic"]["properties"]["kind"]["enum"],
+        json!(["topic"])
+    );
+    assert_eq!(
+        schemas["TopicSummary"]["required"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    for (route, shape) in [
+        ("timeline", "TimelinePage"),
+        ("topics", "TopicPage"),
+        ("topics/{topic_id}", "TopicSummaryResponse"),
+        ("topics/{topic_id}/messages", "MessagePage"),
+    ] {
+        let path = format!("/api/v1/orgs/{{org}}/channels/{{id}}/{route}");
+        assert_eq!(
+            document["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            format!("#/components/schemas/{shape}")
+        );
+    }
 }

@@ -4,150 +4,162 @@ use super::*;
 async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish(
     pool: PgPool,
 ) {
-    for private in [false, true] {
-        let (_, org, sender, channel_id, _) = fixture(&pool).await;
-        let nonmember = Uuid::new_v4();
-        let deactivated = Uuid::new_v4();
-        let reactivated = Uuid::new_v4();
-        let revoked_between_pages = Uuid::new_v4();
-        for id in [nonmember, deactivated, reactivated, revoked_between_pages] {
-            member(&pool, org, id).await;
-        }
-        let other = organization(&pool).await;
-        let foreign = Uuid::new_v4();
-        member(&pool, other, foreign).await;
-        member(&pool, other, sender).await;
-        channel(&pool, other, channel_id, sender, true).await;
-        if private {
+    for topic_messages in [false, true] {
+        for private in [false, true] {
+            let (_, org, sender, channel_id, _) = fixture(&pool).await;
+            let nonmember = Uuid::new_v4();
+            let deactivated = Uuid::new_v4();
+            let reactivated = Uuid::new_v4();
+            let revoked_between_pages = Uuid::new_v4();
+            for id in [nonmember, deactivated, reactivated, revoked_between_pages] {
+                member(&pool, org, id).await;
+            }
+            let other = organization(&pool).await;
+            let foreign = Uuid::new_v4();
+            member(&pool, other, foreign).await;
+            member(&pool, other, sender).await;
+            channel(&pool, other, channel_id, sender, true).await;
+            if private {
+                sqlx::query(
+                    "UPDATE channels SET visibility='private' WHERE organization_id=$1 AND id=$2",
+                )
+                .bind(org)
+                .bind(channel_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+                for id in [sender, deactivated, reactivated, revoked_between_pages] {
+                    sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)")
+                    .bind(org).bind(channel_id).bind(id).execute(&pool).await.unwrap();
+                }
+            }
+            let delivery = Delivery::default();
+            let mut queues = Vec::new();
+            for (id, revision, allowed) in [
+                (sender, 0, true),
+                (nonmember, 0, !private),
+                (deactivated, 0, false),
+                (reactivated, 0, false),
+                (reactivated, 1, !private),
+                (foreign, 0, false),
+            ] {
+                let mut queue = delivery.queue(org, (id, revision), 256);
+                queue.subscribe(channel_id);
+                queues.push((queue, allowed));
+            }
+            let mut foreign_queue = delivery.queue(other, (sender, 0), 256);
+            foreign_queue.subscribe(channel_id);
+            let mut revoked_queue = delivery.queue(org, (revoked_between_pages, 0), 256);
+            revoked_queue.subscribe(channel_id);
             sqlx::query(
-                "UPDATE channels SET visibility='private' WHERE organization_id=$1 AND id=$2",
+                "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=ANY($2)",
             )
             .bind(org)
-            .bind(channel_id)
+            .bind(vec![deactivated, reactivated])
             .execute(&pool)
             .await
             .unwrap();
-            for id in [sender, deactivated, reactivated, revoked_between_pages] {
-                sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)")
-                    .bind(org).bind(channel_id).bind(id).execute(&pool).await.unwrap();
+            sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2")
+                .bind(org)
+                .bind(reactivated)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let topic = if topic_messages {
+                let id = Uuid::new_v4();
+                sqlx::query("INSERT INTO topics (organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES ($1,$2,$3,'Shared prefix',1,121,121)").bind(org).bind(channel_id).bind(id).execute(&pool).await.unwrap();
+                Some(id)
+            } else {
+                None
+            };
+            sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed prefix',$4 FROM generate_series(1,121) n")
+            .bind(org).bind(channel_id).bind(sender).bind(topic).execute(&pool).await.unwrap();
+            let first = replay_page(&pool, org, channel_id, 0, 1)
+                .await
+                .unwrap()
+                .remove(0);
+            let page_one_target = replay_page(&pool, org, channel_id, 50, 51)
+                .await
+                .unwrap()
+                .remove(0);
+            // Arm the first notification before the later one, as serialized persistence does.
+            let early = delivery.notification(org, channel_id, 1);
+            delivery
+                .notification(org, channel_id, 51)
+                .spawn(pool.clone(), page_one_target);
+            delivery.flush().await;
+            for seq in 1..=51 {
+                assert_eq!(revoked_queue.events.try_recv().unwrap().seq, seq);
             }
-        }
-        let delivery = Delivery::default();
-        let mut queues = Vec::new();
-        for (id, revision, allowed) in [
-            (sender, 0, true),
-            (nonmember, 0, !private),
-            (deactivated, 0, false),
-            (reactivated, 0, false),
-            (reactivated, 1, !private),
-            (foreign, 0, false),
-        ] {
-            let mut queue = delivery.queue(org, (id, revision), 256);
-            queue.subscribe(channel_id);
-            queues.push((queue, allowed));
-        }
-        let mut foreign_queue = delivery.queue(other, (sender, 0), 256);
-        foreign_queue.subscribe(channel_id);
-        let mut revoked_queue = delivery.queue(org, (revoked_between_pages, 0), 256);
-        revoked_queue.subscribe(channel_id);
-        sqlx::query(
-            "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=ANY($2)",
-        )
-        .bind(org)
-        .bind(vec![deactivated, reactivated])
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2")
-            .bind(org)
-            .bind(reactivated)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed prefix' FROM generate_series(1,121) n")
-            .bind(org).bind(channel_id).bind(sender).execute(&pool).await.unwrap();
-        let first = replay_page(&pool, org, channel_id, 0, 1)
-            .await
-            .unwrap()
-            .remove(0);
-        let page_one_target = replay_page(&pool, org, channel_id, 50, 51)
-            .await
-            .unwrap()
-            .remove(0);
-        // Arm the first notification before the later one, as serialized persistence does.
-        let early = delivery.notification(org, channel_id, 1);
-        delivery
-            .notification(org, channel_id, 51)
-            .spawn(pool.clone(), page_one_target);
-        delivery.flush().await;
-        for seq in 1..=51 {
-            assert_eq!(revoked_queue.events.try_recv().unwrap().seq, seq);
-        }
-        // Each shared recovery is now at most one page. Gate the next recovery
-        // between page 1 (1..50) and page 2 (52..101), then change live visibility.
-        let page_two_target = replay_page(&pool, org, channel_id, 101, 102)
-            .await
-            .unwrap()
-            .remove(0);
-        let gate = delivery::pause_publication(page_two_target.client_message_id);
-        delivery
-            .notification(org, channel_id, 102)
-            .spawn(pool.clone(), page_two_target);
-        tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-        if private {
-            sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+            // Each shared recovery is now at most one page. Gate the next recovery
+            // between page 1 (1..50) and page 2 (52..101), then change live visibility.
+            let page_two_target = replay_page(&pool, org, channel_id, 101, 102)
+                .await
+                .unwrap()
+                .remove(0);
+            let gate = delivery::pause_publication(page_two_target.client_message_id);
+            delivery
+                .notification(org, channel_id, 102)
+                .spawn(pool.clone(), page_two_target);
+            tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.acquire())
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+            if private {
+                sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                 .bind(org).bind(channel_id).bind(revoked_between_pages).execute(&pool).await.unwrap();
-        } else {
-            sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
+            } else {
+                sqlx::query(
+                    "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2",
+                )
                 .bind(org)
                 .bind(revoked_between_pages)
                 .execute(&pool)
                 .await
                 .unwrap();
-        }
-        gate.release.add_permits(1);
-        delivery.flush().await;
-        let last = replay_page(&pool, org, channel_id, 120, 121)
-            .await
-            .unwrap()
-            .remove(0);
-        delivery
-            .notification(org, channel_id, 121)
-            .spawn(pool.clone(), last);
-        delivery.flush().await;
-        let mut canonical = Vec::new();
-        for (queue, allowed) in &mut queues {
-            if *allowed {
-                for seq in 1..=121 {
-                    let message = queue.events.try_recv().unwrap();
-                    assert_eq!(message.seq, seq);
-                    assert_eq!(message.channel_id, channel_id);
-                    if canonical.len() < 121 {
-                        canonical.push(message);
-                    } else {
-                        assert!(std::sync::Arc::ptr_eq(
-                            &message,
-                            &canonical[(seq - 1) as usize]
-                        ));
+            }
+            gate.release.add_permits(1);
+            delivery.flush().await;
+            let last = replay_page(&pool, org, channel_id, 120, 121)
+                .await
+                .unwrap()
+                .remove(0);
+            delivery
+                .notification(org, channel_id, 121)
+                .spawn(pool.clone(), last);
+            delivery.flush().await;
+            let mut canonical = Vec::new();
+            for (queue, allowed) in &mut queues {
+                if *allowed {
+                    for seq in 1..=121 {
+                        let message = queue.events.try_recv().unwrap();
+                        assert_eq!(message.seq, seq);
+                        assert_eq!(message.topic_id, topic);
+                        assert_eq!(message.channel_id, channel_id);
+                        if canonical.len() < 121 {
+                            canonical.push(message);
+                        } else {
+                            assert!(std::sync::Arc::ptr_eq(
+                                &message,
+                                &canonical[(seq - 1) as usize]
+                            ));
+                        }
                     }
                 }
+                assert!(queue.events.try_recv().is_err());
+                assert!(!*queue.overflow.borrow());
+                assert!(!queue.notification_failed.is_failed());
             }
-            assert!(queue.events.try_recv().is_err());
-            assert!(!*queue.overflow.borrow());
-            assert!(!queue.notification_failed.is_failed());
-        }
-        assert!(foreign_queue.events.try_recv().is_err());
-        assert!(revoked_queue.events.try_recv().is_err());
-        assert!(!*revoked_queue.overflow.borrow());
-        assert!(!revoked_queue.notification_failed.is_failed());
-        early.spawn(pool.clone(), first);
-        delivery.flush().await;
-        for (queue, _) in &mut queues {
-            assert!(queue.events.try_recv().is_err());
+            assert!(foreign_queue.events.try_recv().is_err());
+            assert!(revoked_queue.events.try_recv().is_err());
+            assert!(!*revoked_queue.overflow.borrow());
+            assert!(!revoked_queue.notification_failed.is_failed());
+            early.spawn(pool.clone(), first);
+            delivery.flush().await;
+            for (queue, _) in &mut queues {
+                assert!(queue.events.try_recv().is_err());
+            }
         }
     }
 }
