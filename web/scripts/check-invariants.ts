@@ -209,6 +209,9 @@ export function tsTests(src: string, fileName = 'x.ts'): TsTest[] {
 
 export type Row = { line: number; rule: string; names: string[]; todo: boolean }
 
+/** Maximum Rule cell length in Unicode code points, markup included (AGENTS.md "Writing docs"). */
+export const MAX_RULE_LENGTH = 160
+
 /** Parses the table in docs/invariants.md. Returns rows, or errors for malformed ones. */
 export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
   const rows: Row[] = []
@@ -221,6 +224,9 @@ export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
     const cell = cells[1] ?? ''
     const names = [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1])
     const todo = /\(todo\)/.test(cell)
+    const ruleLength = [...cells[0]].length
+    if (cells.length === 2 && ruleLength > MAX_RULE_LENGTH)
+      errors.push(`line ${line}: Rule cell is ${ruleLength} characters (max ${MAX_RULE_LENGTH}): ${[...cells[0]].slice(0, 40).join('')}`)
     if (cells.length !== 2) errors.push(`line ${line}: expected 2 columns (Rule | Test): ${cells[0]}`)
     else if (names.length === 0 && !todo) errors.push(`line ${line}: Test column names no test and is not (todo): ${cells[0]}`)
     else if (todo && cell !== '(todo)') errors.push(`line ${line}: (todo) must stand alone in the Test column, not mixed with references: ${cells[0]}`)
