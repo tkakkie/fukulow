@@ -1,8 +1,59 @@
+use super::admission::Permit;
+use sqlx::{Executor, PgConnection, PgPool, Postgres, pool::PoolConnection};
 use uuid::Uuid;
+
+// Own the connection separately from SQLx's transaction so cancellation can drop
+// the socket synchronously, rather than queue a rollback behind a stuck COMMIT.
+// Field/Drop order keeps admission held until the connection is gone.
+pub(crate) struct Transaction {
+    connection: Option<PoolConnection<Postgres>>,
+    _permit: Permit,
+}
+
+impl Transaction {
+    pub(crate) fn connection(&mut self) -> Result<&mut PgConnection, sqlx::Error> {
+        self.connection
+            .as_deref_mut()
+            .ok_or(sqlx::Error::WorkerCrashed)
+    }
+
+    pub(super) async fn begin(
+        pool: &PgPool,
+        permit: Permit,
+        sql: &str,
+    ) -> Result<Self, sqlx::Error> {
+        let mut tx = Self {
+            connection: Some(pool.acquire().await?),
+            _permit: permit,
+        };
+        tx.connection()?.execute(sql).await?;
+        Ok(tx)
+    }
+
+    pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
+        self.connection()?.execute("COMMIT").await?;
+        drop(self.connection.take());
+        Ok(())
+    }
+
+    pub(crate) async fn rollback(mut self) -> Result<(), sqlx::Error> {
+        self.connection()?.execute("ROLLBACK").await?;
+        drop(self.connection.take());
+        Ok(())
+    }
+}
+
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            drop(connection.detach());
+        }
+    }
+}
 
 // Hash collisions only serialize unrelated Channels; they cannot expose their data.
 pub(super) async fn lock(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut PgConnection,
     organization: Uuid,
     channel: Uuid,
     shared: bool,
@@ -20,21 +71,18 @@ pub(super) async fn lock(
     sqlx::query(sql)
         .bind(organization)
         .bind(channel)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     Ok(())
 }
 
-pub(super) async fn finish(
-    tx: sqlx::Transaction<'static, sqlx::Postgres>,
-    _key: Uuid,
-) -> Result<(), sqlx::Error> {
+pub(super) async fn finish(tx: Transaction, _key: Uuid) -> Result<(), sqlx::Error> {
     #[cfg(test)]
     {
         let sender = AMBIGUOUS_COMMITS.lock().unwrap().remove(&_key);
         if let Some(sender) = sender {
             // Model a lost COMMIT response while PostgreSQL still owns the transaction.
-            sender.send(tx).unwrap();
+            assert!(sender.send(tx).is_ok());
             return Err(sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()));
         }
     }
@@ -55,16 +103,14 @@ fn rollback_code(code: &str) -> bool {
 }
 
 #[cfg(test)]
-type PendingCommit = tokio::sync::oneshot::Sender<sqlx::Transaction<'static, sqlx::Postgres>>;
+type PendingCommit = tokio::sync::oneshot::Sender<Transaction>;
 #[cfg(test)]
 static AMBIGUOUS_COMMITS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, PendingCommit>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(Default::default()));
 
 #[cfg(test)]
-pub(crate) fn ambiguous_commit(
-    key: Uuid,
-) -> tokio::sync::oneshot::Receiver<sqlx::Transaction<'static, sqlx::Postgres>> {
+pub(crate) fn ambiguous_commit(key: Uuid) -> tokio::sync::oneshot::Receiver<Transaction> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     AMBIGUOUS_COMMITS.lock().unwrap().insert(key, sender);
     receiver

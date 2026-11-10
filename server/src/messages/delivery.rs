@@ -38,7 +38,7 @@ impl Sender {
 pub struct Delivery {
     recipients: Arc<Mutex<HashMap<ChannelKey, Recipients>>>,
     notifications: Arc<Semaphore>,
-    admission: Arc<OnceLock<Admission>>,
+    admission: Arc<OnceLock<Arc<Admission>>>,
     failures: Failures,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -126,7 +126,7 @@ pub(crate) struct LiveQueue {
 impl Delivery {
     // Exactly one Delivery (and its clones) belongs to one application pool.
     // Lazily size its shared budget from that pool, including in small test pools.
-    pub(super) fn admission(&self, pool: &sqlx::PgPool) -> &Admission {
+    pub(super) fn admission(&self, pool: &sqlx::PgPool) -> &Arc<Admission> {
         self.admission
             .get_or_init(|| Admission::new(pool.options().get_max_connections()))
     }
@@ -142,7 +142,7 @@ impl Delivery {
                 .admission(pool)
                 .acquire(organization, channel, false)
                 .await?;
-            super::latest_seq(pool, organization, channel).await
+            super::latest_seq(pool, organization, channel, _permit).await
         })
         .await
         .map_err(|_| {
@@ -311,7 +311,7 @@ mod tests {
     #[sqlx::test]
     async fn watermark_capacity_covers_pool_wait_and_releases_on_every_exit(pool: sqlx::PgPool) {
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
+            .max_connections(3)
             .connect_with((*pool.connect_options()).clone())
             .await
             .unwrap();
@@ -321,13 +321,14 @@ mod tests {
         for cancel in [true, false] {
             let first = pool.acquire().await.unwrap();
             let second = pool.acquire().await.unwrap();
+            let third = pool.acquire().await.unwrap();
             let waiting = {
                 let pool = pool.clone();
                 let delivery = delivery.clone();
                 tokio::spawn(async move { delivery.latest_seq(&pool, organization, channel).await })
             };
             tokio::time::timeout(Duration::from_secs(2), async {
-                while delivery.admission(&pool).available_permits() != 0 {
+                while delivery.admission(&pool).available_permits() != 1 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -350,8 +351,8 @@ mod tests {
                 tokio::time::resume();
                 assert!(matches!(waiting.await.unwrap(), Err(sqlx::Error::Io(_))));
             }
-            assert_eq!(delivery.admission(&pool).available_permits(), 1);
-            drop((first, second));
+            assert_eq!(delivery.admission(&pool).available_permits(), 2);
+            drop((first, second, third));
             assert_eq!(
                 delivery
                     .latest_seq(&pool, organization, channel)
@@ -359,14 +360,14 @@ mod tests {
                     .unwrap(),
                 0
             );
-            assert_eq!(delivery.admission(&pool).available_permits(), 1);
+            assert_eq!(delivery.admission(&pool).available_permits(), 2);
         }
         pool.close().await;
         assert!(matches!(
             delivery.latest_seq(&pool, organization, channel).await,
             Err(sqlx::Error::PoolClosed)
         ));
-        assert_eq!(delivery.admission(&pool).available_permits(), 1);
+        assert_eq!(delivery.admission(&pool).available_permits(), 2);
     }
 
     #[tokio::test(start_paused = true)]

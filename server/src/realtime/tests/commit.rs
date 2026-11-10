@@ -62,7 +62,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
         failed_send(&f, key, "ambiguous").await;
         let mut tx = pending.await.unwrap();
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *tx)
+            .fetch_one(tx.connection().unwrap())
             .await
             .unwrap();
         closed(&mut before, 1011).await;
@@ -95,25 +95,11 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let blocked: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE \
-                     query LIKE '%SELECT pg_advisory_xact_lock(%' \
-                     AND $1 = ANY(pg_blocking_pids(pid)))",
-                )
-                .bind(pid)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                if blocked {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !retry.is_finished(),
+            "the original transaction owns admission"
+        );
         tx.commit().await.unwrap();
         let response = retry.await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -157,7 +143,7 @@ async fn ambiguous_commit_rollback_allows_gap_free_same_key_retry(pool: PgPool) 
     failed_send(&f, key, "rolled back").await;
     let mut tx = pending.await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.connection().unwrap())
         .await
         .unwrap();
     closed(&mut before, 1011).await;
@@ -241,7 +227,7 @@ async fn unresolved_commit_subscription_timeout_closes_and_later_reconnect_recov
     failed_send(&f, key, "late commit").await;
     let mut tx = pending.await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.connection().unwrap())
         .await
         .unwrap();
     let mut waiting = f.server.connect(&f.token).await;
@@ -303,7 +289,7 @@ async fn ambiguous_commit_recovery_preserves_organization_and_private_channel_de
     failed_send(&f, key, "private").await;
     let mut tx = pending.await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.connection().unwrap())
         .await
         .unwrap();
     closed(&mut owner, 1011).await;

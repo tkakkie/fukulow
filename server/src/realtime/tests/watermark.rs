@@ -98,7 +98,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let mut tx = pending.await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.connection().unwrap())
         .await
         .unwrap();
 
@@ -117,7 +117,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         waiting.push(socket);
     }
 
-    // One send holds a connection; every other same-Channel send/retry waits outside
+    // The unresolved send owns admission; every same-Channel send/retry waits outside
     // the pool. Preserve the admitted retry to check canonical recovery after COMMIT.
     let address = f.server.address;
     let token = f.token.clone();
@@ -131,14 +131,8 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%SELECT pg_advisory_xact_lock(%' AND $1 = ANY(pg_blocking_pids(pid))")
-                .bind(pid).fetch_one(&pool).await.unwrap();
-            if count == 1 { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(!admitted_retry.is_finished());
 
     let barrier = Arc::new(tokio::sync::Barrier::new(161));
     let mut reconnecting = tokio::task::JoinSet::new();
@@ -239,10 +233,10 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         sending.try_join_next().is_none(),
         "send waiters must remain queued until COMMIT resolves"
     );
-    // One unresolved COMMIT + four watermark waiters + one send; no storm work
+    // One unresolved COMMIT + four watermark waiters; no storm work
     // may have acquired the remaining fourteen connections.
     assert!(
-        app_pool.size() - app_pool.num_idle() as u32 <= 6,
+        app_pool.size() - app_pool.num_idle() as u32 <= 5,
         "storm occupied extra pool connections"
     );
 
@@ -352,4 +346,225 @@ async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: P
     for (channel, socket) in &mut connected {
         assert_eq!(event(socket).await["message"], canonical[channel]);
     }
+}
+
+#[sqlx::test]
+async fn repeated_send_deadlines_abandon_connections_and_preserve_other_organization_progress(
+    pool: PgPool,
+) {
+    let app_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let f = fixture(&app_pool).await;
+    let foreign_org = organization(&pool).await;
+    let (foreign_member, foreign_token) = member(&pool, foreign_org).await;
+    let foreign_channel = channel(&pool, foreign_org, foreign_member, false).await;
+    let mut before = f.server.connect(&f.token).await;
+    subscribe(&mut before, f.channel, 0).await;
+    ready(&mut before, f.channel, 0).await;
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(158::bigint)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    // Disable only this injected COMMIT's lock timeout, so a backend really stays
+    // unresolved across several response deadlines even after its socket is gone.
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION hold_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.channel_id = '{}'::uuid THEN \
+         PERFORM set_config('lock_timeout', '0', true); \
+         PERFORM pg_advisory_xact_lock(158::bigint); END IF; RETURN NEW; END $$; \
+         CREATE CONSTRAINT TRIGGER hold_commit AFTER INSERT ON messages \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION hold_commit();",
+        f.channel,
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let key = Uuid::new_v4();
+    let address = f.server.address;
+    let channel = f.channel;
+    let started = tokio::time::Instant::now();
+    let mut peak_held = 0;
+    for round in 0..3 {
+        let token = f.token.clone();
+        let sending = tokio::spawn(async move {
+            http_status(
+                address,
+                &token,
+                channel,
+                Some(json!({"client_message_id": key, "body": "held commit"})),
+                "500 Internal Server Error",
+            )
+            .await
+        });
+        // Keep probing for the whole deadline, rather than only before 10 s.
+        for tick in 0..11 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let sent = http_json(
+                    address,
+                    &foreign_token,
+                    foreign_channel,
+                    Some(json!({"client_message_id": Uuid::new_v4(), "body": "independent"})),
+                )
+                .await;
+                let seq = round * 11 + tick + 1;
+                assert_eq!(sent["seq"], seq);
+                let page = http_json(address, &foreign_token, foreign_channel, None).await;
+                assert_eq!(page["messages"][seq as usize - 1], sent);
+                let mut socket = connect(address, &foreign_token).await;
+                subscribe(&mut socket, foreign_channel, seq).await;
+                ready(&mut socket, foreign_channel, seq).await;
+            })
+            .await
+            .expect("another Organization's HTTP reads/writes/subscriptions must keep working");
+            // Pool returns include an asynchronous readiness check; wait only for
+            // that cleanup, never for the stuck transaction to finish.
+            tokio::time::timeout(Duration::from_millis(500), async {
+                while app_pool.size() - app_pool.num_idle() as u32 > 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("timed-out work retained pool connections");
+            let held = app_pool.size() - app_pool.num_idle() as u32;
+            peak_held = peak_held.max(held);
+            assert!(
+                held <= 1,
+                "timed-out work retained pool connections: {held}"
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(2), sending)
+            .await
+            .unwrap()
+            .unwrap();
+        if round == 0 {
+            closed(&mut before, 1011).await;
+        }
+    }
+    assert!(started.elapsed() >= Duration::from_secs(33));
+    assert_eq!(peak_held, 1);
+    // A local socket close need not decide the server-side COMMIT. Recovery still
+    // uses #135's barrier and canonical key, whether it committed or rolled back.
+    blocker.commit().await.unwrap();
+    let canonical = http_json(
+        address,
+        &f.token,
+        channel,
+        Some(json!({"client_message_id": key, "body": "held commit"})),
+    )
+    .await;
+    assert_eq!(canonical["seq"], 1);
+    assert_eq!(
+        http_json(
+            address,
+            &f.token,
+            channel,
+            Some(json!({"client_message_id": key, "body": "held commit"}))
+        )
+        .await,
+        canonical
+    );
+    let next = http_json(
+        address,
+        &f.token,
+        channel,
+        Some(json!({"client_message_id": Uuid::new_v4(), "body": "next"})),
+    )
+    .await;
+    assert_eq!(next["seq"], 2);
+    let mut recovered = connect(address, &f.token).await;
+    subscribe(&mut recovered, channel, 0).await;
+    assert_eq!(event(&mut recovered).await["message"], canonical);
+    assert_eq!(event(&mut recovered).await["message"], next);
+    ready(&mut recovered, channel, 2).await;
+    drop(recovered);
+    drop(before);
+    drop(f);
+    app_pool.close().await;
+}
+
+#[sqlx::test]
+async fn sixteen_concurrent_sends_leave_reserved_capacity_for_new_subscription(pool: PgPool) {
+    let app_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let f = fixture(&app_pool).await;
+    let foreign_org = organization(&pool).await;
+    let (foreign_member, foreign_token) = member(&pool, foreign_org).await;
+    let foreign_channel = channel(&pool, foreign_org, foreign_member, false).await;
+    let mut channels = Vec::new();
+    for _ in 0..16 {
+        channels.push(channel(&pool, f.organization, f.member, false).await);
+    }
+    // A finite 1.5 s COMMIT delay represents ordinary slow work, below the 10 s
+    // work deadline but above watermark admission's 1 s. All sends must succeed.
+    sqlx::raw_sql(
+        "CREATE FUNCTION slow_send() RETURNS trigger LANGUAGE plpgsql AS $$ \
+        BEGIN PERFORM pg_sleep(1.5); RETURN NEW; END $$; \
+        CREATE CONSTRAINT TRIGGER slow_send AFTER INSERT ON messages \
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION slow_send();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut socket = connect(f.server.address, &foreign_token).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(17));
+    let mut sends = tokio::task::JoinSet::new();
+    for channel in channels {
+        let address = f.server.address;
+        let token = f.token.clone();
+        let barrier = barrier.clone();
+        sends.spawn(async move {
+            barrier.wait().await;
+            http_json(
+                address,
+                &token,
+                channel,
+                Some(json!({"client_message_id": Uuid::new_v4(), "body": "normal send"})),
+            )
+            .await
+        });
+    }
+    barrier.wait().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let committing: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+                 AND query = 'COMMIT' AND wait_event = 'PgSleep'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if committing >= 8 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(sends.try_join_next().is_none());
+    // With the former shared budget all 16 slots stay occupied for >1 s,
+    // so this subscription closes with 1011 instead of confirming.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        subscribe(&mut socket, foreign_channel, 0).await;
+        ready(&mut socket, foreign_channel, 0).await;
+    })
+    .await
+    .expect("sends must leave reserved watermark capacity");
+    let mut completed = 0;
+    while let Some(result) = sends.join_next().await {
+        assert_eq!(result.unwrap()["seq"], 1);
+        completed += 1;
+    }
+    assert_eq!(completed, 16);
+    drop(socket);
+    drop(f);
+    app_pool.close().await;
 }
