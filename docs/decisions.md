@@ -150,7 +150,9 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Known limits for the 10k target: FIFO budgets can delay unrelated Organizations; four watermarks per Channel cap popular-Channel reconnects (~1,000/s at ~4 ms each); 10,000 simultaneous reconnects need client backoff (#156).
 - #178 keeps send queue caps 256/2,048: smaller caps raised refusals; larger ones roughly doubled accepted HTTP/delivery delay with no shown capacity benefit; RSS did not discriminate. A conservative choice, not an optimality or fairness claim.
 - #179 isolates held cursor waiters from execution capacity. #190 prevents only one Organization monopolizing reservations; simultaneous multi-Organization exhaustion and contention for the 40 shared execution permits remain. No cross-Organization fairness guarantee.
-- Pending maintainer decision (#158 N1): two stuck Channels with 4+ reconnecting subscribers each can fill all 8 watermark slots; lowering the per-Channel cap to 2 would trade popular-Channel reconnect throughput.
+- [#199](https://github.com/tkakkie/fukulow/issues/199): measured, the cap stays 4; cap 2 cut steady-state throughput ~31% and raised recovery 1011 admission rejections ~45%, with no significant 10,000-client recovery-time improvement. The cap-2 change is not merged.
+- #199 known limit: two stuck Channels can hold all 8 watermark slots; another Organization's subscribe then fails with 1011. #213 defers per-Organization watermark fairness unless cross-tenant failure spread becomes a real problem.
+- #212 follows up handshake admission, listen backlog and accept pacing; client jitter is in #195. #199's local recovery was bounded by handshake capacity, not the watermark cap; it does not establish production 10,000-connection capacity.
 
 ## Web client
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
