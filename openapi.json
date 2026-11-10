@@ -77,6 +77,106 @@
         ]
       }
     },
+    "/api/v1/native/session": {
+      "post": {
+        "tags": [
+          "crate::auth"
+        ],
+        "operationId": "native_sign_in",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in for a native client; returns identity, bearer token and expiry without setting cookies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid sign-in JSON, fields, email or password length",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Email or password does not match an Account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Expected application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many failed or in-flight sign-in attempts; budget shared with web sign-in",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Seconds until retry; at least 1"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database, password verification, or credential generation failure while signing in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/orgs/{org}/channels": {
       "get": {
         "tags": [
@@ -1292,13 +1392,13 @@
         },
         "responses": {
           "200": {
-            "description": "Signed in; returns identity, session token and expiry, and sets the session cookie",
+            "description": "Signed in for the web; returns only identity and expiry and sets the session cookie",
             "headers": {
               "Set-Cookie": {
                 "schema": {
                   "type": "string"
                 },
-                "description": "HttpOnly; SameSite=Strict; Path=/; Secure by default"
+                "description": "__Host-fukulow_session; Secure; HttpOnly; SameSite=Strict; Path=/; no Domain. Local HTTP uses fukulow_session. Legacy cookie expired on HTTPS"
               }
             },
             "content": {
@@ -1904,6 +2004,28 @@
           }
         }
       },
+      "NativeSessionResponse": {
+        "type": "object",
+        "required": [
+          "identity",
+          "token",
+          "expires_in"
+        ],
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "identity": {
+            "$ref": "#/components/schemas/AccountIdentity"
+          },
+          "token": {
+            "type": "string",
+            "description": "Opaque bearer credential. Store securely; returned only on native sign-in."
+          }
+        }
+      },
       "Organization": {
         "type": "object",
         "required": [
@@ -1985,7 +2107,6 @@
         "type": "object",
         "required": [
           "identity",
-          "token",
           "expires_in"
         ],
         "properties": {
@@ -1996,10 +2117,6 @@
           },
           "identity": {
             "$ref": "#/components/schemas/AccountIdentity"
-          },
-          "token": {
-            "type": "string",
-            "description": "Opaque bearer credential. Store securely; returned only on sign-in."
           }
         }
       },
@@ -2307,7 +2424,8 @@
       "cookie": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "fukulow_session"
+        "name": "__Host-fukulow_session",
+        "description": "HTTPS production cookie; local HTTP with FUKULOW_COOKIE_SECURE=false uses fukulow_session"
       }
     }
   }

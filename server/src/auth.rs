@@ -28,6 +28,7 @@ pub use throttle::SignInThrottle;
 static PASSWORD_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 const COOKIE: &str = "fukulow_session";
+const SECURE_COOKIE: &str = "__Host-fukulow_session";
 const SESSION_SECONDS: u32 = 30 * 24 * 60 * 60;
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -188,9 +189,21 @@ pub struct SignInRequest {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct SessionResponse {
     pub identity: AccountIdentity,
-    /// Opaque bearer credential. Store securely; returned only on sign-in.
+    pub expires_in: u32,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct NativeSessionResponse {
+    pub identity: AccountIdentity,
+    /// Opaque bearer credential. Store securely; returned only on native sign-in.
     pub token: String,
     pub expires_in: u32,
+}
+
+impl IntoResponse for NativeSessionResponse {
+    fn into_response(self) -> Response {
+        ([(header::CACHE_CONTROL, "no-store")], Json(self)).into_response()
+    }
 }
 
 fn email(value: &str) -> Result<String, ApiError> {
@@ -365,7 +378,7 @@ impl utoipa::PartialSchema for RetryAfterSeconds {
 impl ToSchema for RetryAfterSeconds {}
 
 #[utoipa::path(post, path = "/api/v1/session", request_body = SignInRequest,
-    responses((status = 200, description = "Signed in; returns identity, session token and expiry, and sets the session cookie", body = SessionResponse, headers(("Set-Cookie" = String, description = "HttpOnly; SameSite=Strict; Path=/; Secure by default"))),
+    responses((status = 200, description = "Signed in for the web; returns only identity and expiry and sets the session cookie", body = SessionResponse, headers(("Set-Cookie" = String, description = "__Host-fukulow_session; Secure; HttpOnly; SameSite=Strict; Path=/; no Domain. Local HTTP uses fukulow_session. Legacy cookie expired on HTTPS"))),
     (status = 400, description = "Invalid sign-in JSON, fields, email or password length", body = ErrorBody),
     (status = 401, description = "Email or password does not match an Account", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
@@ -379,7 +392,44 @@ pub async fn sign_in(
     headers: HeaderMap,
     ApiJson(input): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
-    sign_in_with_workers(state, peer, headers, input, &PASSWORD_WORKERS).await
+    let session =
+        sign_in_with_workers(state.clone(), peer, headers, input, &PASSWORD_WORKERS).await?;
+    let mut response = (
+        [
+            (
+                header::SET_COOKIE,
+                cookie(&state, &session.token, SESSION_SECONDS),
+            ),
+            (header::CACHE_CONTROL, "no-store".into()),
+        ],
+        Json(SessionResponse {
+            identity: session.identity,
+            expires_in: session.expires_in,
+        }),
+    )
+        .into_response();
+    clear_legacy_cookie(&state, &mut response);
+    Ok(response)
+}
+
+#[utoipa::path(post, path = "/api/v1/native/session", request_body = SignInRequest,
+    responses((status = 200, description = "Signed in for a native client; returns identity, bearer token and expiry without setting cookies", body = NativeSessionResponse),
+    (status = 400, description = "Invalid sign-in JSON, fields, email or password length", body = ErrorBody),
+    (status = 401, description = "Email or password does not match an Account", body = ErrorBody),
+    (status = 413, description = "Request body too large", body = ErrorBody),
+    (status = 415, description = "Expected application/json", body = ErrorBody),
+    (status = 429, description = "Too many failed or in-flight sign-in attempts; budget shared with web sign-in", body = ErrorBody,
+        headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
+    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody)))]
+pub async fn native_sign_in(
+    State(state): State<AppState>,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    ApiJson(input): ApiJson<SignInRequest>,
+) -> Result<Response, ApiError> {
+    sign_in_with_workers(state, peer, headers, input, &PASSWORD_WORKERS)
+        .await
+        .map(IntoResponse::into_response)
 }
 
 async fn sign_in_with_workers(
@@ -388,7 +438,7 @@ async fn sign_in_with_workers(
     headers: HeaderMap,
     input: SignInRequest,
     workers: &'static tokio::sync::Semaphore,
-) -> Result<Response, ApiError> {
+) -> Result<NativeSessionResponse, ApiError> {
     sign_in_with_entropy(state, peer, headers, input, workers, fill_random).await
 }
 
@@ -399,7 +449,7 @@ async fn sign_in_with_entropy(
     input: SignInRequest,
     workers: &'static tokio::sync::Semaphore,
     entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
-) -> Result<Response, ApiError> {
+) -> Result<NativeSessionResponse, ApiError> {
     let email = email(&input.email)?;
     if input.password.is_empty() || input.password.len() > 1024 {
         return Err(ApiError::bad_request());
@@ -435,18 +485,11 @@ async fn sign_in_with_entropy(
         .await?;
     let identity = account_identity(&state.pool, user_id).await?;
     state.session_cleanup.trigger(&state.pool);
-    Ok((
-        [
-            (header::SET_COOKIE, cookie(&state, &token, SESSION_SECONDS)),
-            (header::CACHE_CONTROL, "no-store".into()),
-        ],
-        Json(SessionResponse {
-            identity,
-            token,
-            expires_in: SESSION_SECONDS,
-        }),
-    )
-        .into_response())
+    Ok(NativeSessionResponse {
+        identity,
+        token,
+        expires_in: SESSION_SECONDS,
+    })
 }
 
 fn fill_random(bytes: &mut [u8]) -> Result<(), ApiError> {
@@ -457,9 +500,25 @@ fn fill_random(bytes: &mut [u8]) -> Result<(), ApiError> {
 
 fn cookie(state: &AppState, token: &str, seconds: u32) -> String {
     format!(
-        "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={seconds}{}",
+        "{}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={seconds}{}",
+        cookie_name(state.cookie_secure),
         if state.cookie_secure { "; Secure" } else { "" }
     )
+}
+
+fn cookie_name(secure: bool) -> &'static str {
+    if secure { SECURE_COOKIE } else { COOKIE }
+}
+
+fn clear_legacy_cookie(state: &AppState, response: &mut Response) {
+    if state.cookie_secure {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_static(
+                "fukulow_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure",
+            ),
+        );
+    }
 }
 
 async fn account_identity(
@@ -492,7 +551,7 @@ impl FromRequestParts<AppState> for AccountAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token_hash = credential_hash(&parts.headers)?;
+        let token_hash = credential_hash(&parts.headers, state.cookie_secure)?;
         let account_id = sqlx::query_scalar(
             "SELECT account_id FROM account_sessions WHERE token_hash = $1 AND expires_at > now()",
         )
@@ -520,7 +579,7 @@ impl FromRequestParts<AppState> for Auth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token_hash = credential_hash(&parts.headers)?;
+        let token_hash = credential_hash(&parts.headers, state.cookie_secure)?;
         let Path(params) =
             Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
                 .await
@@ -600,15 +659,15 @@ pub async fn deactivate_member(
     }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
 }
 
-fn credential_hash(headers: &HeaderMap) -> Result<Vec<u8>, ApiError> {
-    let token = credential(headers)?;
+fn credential_hash(headers: &HeaderMap, secure: bool) -> Result<Vec<u8>, ApiError> {
+    let token = credential(headers, secure)?;
     if !(64..=128).contains(&token.len()) || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
         return Err(ApiError::unauthorized());
     }
     Ok(Sha256::digest(token.as_bytes()).to_vec())
 }
 
-fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
+fn credential(headers: &HeaderMap, secure: bool) -> Result<&str, ApiError> {
     // An explicit Authorization header always wins; never silently fall back to a cookie.
     if headers.contains_key(header::AUTHORIZATION) {
         let mut values = headers.get_all(header::AUTHORIZATION).iter();
@@ -634,7 +693,7 @@ fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
             .split(';')
         {
             if let Some((name, value)) = cookie.trim().split_once('=')
-                && name == COOKIE
+                && name == cookie_name(secure)
             {
                 if token.is_some() {
                     return Err(ApiError::unauthorized());
@@ -674,8 +733,17 @@ pub async fn organization_me(auth: Auth) -> impl IntoResponse {
     (status = 500, description = "Database or worker failure while resolving or revoking the session", body = ErrorBody)))]
 pub async fn sign_out(
     State(state): State<AppState>,
-    auth: AccountAuth,
+    auth: Result<AccountAuth, ApiError>,
 ) -> Result<Response, ApiError> {
+    let auth = match auth {
+        Ok(auth) => auth,
+        Err(error) if error.0 == StatusCode::UNAUTHORIZED => {
+            let mut response = error.into_response();
+            clear_legacy_cookie(&state, &mut response);
+            return Ok(response);
+        }
+        Err(error) => return Err(error),
+    };
     let pool = state.pool.clone();
     let changes = state.session_changes.clone();
     // Finish revocation + notification even if the HTTP caller disconnects.
@@ -689,14 +757,16 @@ pub async fn sign_out(
     })
     .await
     .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
-    Ok((
+    let mut response = (
         StatusCode::NO_CONTENT,
         [
             (header::SET_COOKIE, cookie(&state, "", 0)),
             (header::CACHE_CONTROL, "no-store".into()),
         ],
     )
-        .into_response())
+        .into_response();
+    clear_legacy_cookie(&state, &mut response);
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -721,9 +791,13 @@ mod tests {
             )
             .route(
                 "/api/v1/session",
-                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
-                    sign_in_with_workers(state, peer, headers, input, workers)
-                }),
+                axum::routing::post(
+                    move |State(state), peer, headers, ApiJson(input)| async move {
+                        sign_in_with_workers(state, peer, headers, input, workers)
+                            .await
+                            .map(IntoResponse::into_response)
+                    },
+                ),
             )
             .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
             .with_state(state)
