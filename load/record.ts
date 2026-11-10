@@ -141,6 +141,9 @@ try {
   if (primaryError) throw primaryError;
   if (timer) clearInterval(timer);
   await sampling;
+  if (rate && Number(rate.elapsedMs) < Number(rate.duration) * 1000) {
+    throw new Error('Scheduling window ended before its configured deadline');
+  }
   if (rate && snapshots.before?.completedAt >= rate.startedAt) {
     throw new Error('SQL baseline snapshot missed the start of publishing');
   }

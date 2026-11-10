@@ -56,3 +56,16 @@ test('a rejected HTTP task invalidates the run even if it completes before drain
   await assert.rejects(schedule(1000, 100, 1, () => now,
     async (ms) => { now += ms; }, async () => { throw new Error('send failed'); }), /send failed/);
 });
+
+test('early timer wakes cannot start a batch or end the window prematurely', async () => {
+  let now = 0;
+  let early = true;
+  const starts: number[] = [];
+  const result = await schedule(1000, 100, 1, () => now, async (ms) => {
+    if (ms > 0 && early) { early = false; return; }
+    now += ms;
+    early = true;
+  }, async () => { starts.push(now); });
+  assert.deepEqual(starts, Array.from({ length: 10 }, (_, i) => i * 100));
+  assert.equal(result.elapsedMs, 1000);
+});
