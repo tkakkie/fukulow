@@ -24,7 +24,7 @@ describe('controller shared client fixtures with fake transport and timers', () 
     }
   })
   it('fails the Membership-check fixtures for a controller that never checks after a handshake failure', async () => {
-    const checks = scenarios.filter(s => s.layer === 'controller')
+    const checks = scenarios.filter(s => s.steps.some(step => step.input.type === 'membership_check_result'))
     expect(checks.length).toBeGreaterThan(0)
     for (const scenario of checks) {
       const client = controllerClient({ checkMembership: undefined })

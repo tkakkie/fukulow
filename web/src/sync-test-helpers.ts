@@ -1,8 +1,10 @@
-import type { Result } from './api'
+import type { Result, TimelinePage, TopicSummary } from './api'
+import { createTopics } from './topics'
+import { expandMessage } from '../scripts/realtime-fixtures'
 import type { Effect as FixtureEffect, ResolvedInput } from '../scripts/realtime-fixtures'
 import { createSync, type SyncOptions } from './sync'
 import type { Connection, RealtimeHandlers } from './realtime'
-import { message, observe } from './protocol-test-helpers'
+import { message, observe, record } from './protocol-test-helpers'
 export { scenarios, record } from './protocol-test-helpers'
 
 export const flush = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
@@ -50,9 +52,27 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
     },
     ...overrides,
   })
+  const topics = createTopics(sync, { api: {
+    listTimeline: (channel, query) => request({ type: 'fetch_main_timeline', channel, ...query }),
+    listTopics: (channel, query) => request({ type: 'fetch_topics', channel, ...query }),
+    getTopicSummary: (channel, topic) => request({ type: 'fetch_topic_summary', channel, topic }),
+    listTopicMessages: (channel, topic, query) => request({ type: 'fetch_history', channel, topic,
+      page: query?.before_seq === undefined ? 'latest' : 'before', seq: query?.before_seq }),
+  } })
   const client = {
-    sync, sockets, allEffects,
-    observe: () => observe(sync.get()),
+    sync, topics, sockets, allEffects,
+    observe: () => {
+      const observation = observe(sync.get())
+      for (const [channel, c] of Object.entries(observation.channels)) {
+        const projection = topics.get(channel)
+        c.main_timeline = projection.lines.map(l => l.kind === 'message' ? { seq: l.message.seq }
+          : { topic: l.topicId, position: l.position, message_count: l.messageCount })
+        const ids = new Set(sync.get().channels[channel].messages.flatMap(m => m.topic_id ? [m.topic_id] : []))
+        for (const effect of allEffects) if (effect.channel === channel && typeof effect.topic === 'string') ids.add(effect.topic)
+        c.topics = Object.fromEntries([...ids].map(id => [id, { visible: projection.topic(id).messages.map(m => m.seq) }]))
+      }
+      return observation
+    },
     async feed(i: ResolvedInput) {
       emitted = []
       const e = i.respond_to
@@ -78,6 +98,20 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
           : { ok: false, kind: 'network' }); break
         case 'history_failed': case 'send_failed': resolve(typeof i.status === 'number'
           ? { ok: false, kind: 'http', status: i.status } : { ok: false, kind: 'network' }); break
+        case 'load_main_timeline': void topics.loadMain(channel); break
+        case 'open_topic': void topics.loadTopic(channel, i.topic as string); break
+        case 'main_timeline_result': {
+          const items = i.items as ({ kind: 'message'; message: Record<string, unknown> } | { kind: 'topic'; topic: { name: string; last_seq: number; message_count: number } })[]
+          const page: TimelinePage = { as_of_seq: i.as_of_seq as number, has_more: i.has_more as boolean,
+            items: items.map(item => {
+              if (item.kind === 'message') return { kind: 'message', message: message(expandMessage(item.message, channel)[0], channel) }
+              const t = item.topic
+              const summary: TopicSummary = { ...t, id: t.name, first_seq: 1,
+                latest_message: { ...record(t.last_seq, channel), topic_id: t.name } }
+              return { kind: 'topic', topic: summary }
+            }) }
+          resolve({ ok: true, data: page }); break
+        }
         case 'watch': void sync.watch(channel); break
         case 'unwatch': void sync.unwatch(channel); break
         case 'refresh': void t.loadLatest(); break

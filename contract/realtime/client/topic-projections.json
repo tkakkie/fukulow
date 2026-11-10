@@ -5,7 +5,7 @@
       "id": "topic-messages-leave-holes-in-projections-without-false-gap",
       "title": "Topic Messages leave seq holes in the main timeline and in a Topic page, never a gap: the unfiltered stream moves the cursor, no fill is requested",
       "covers": ["P1","P2","C2","C3"],
-      "proposed": {"owner": ["#138"]},
+      "layer": "controller",
       "never": [{"type":"fetch_history","page":"after"},{"type":"wait","purpose":"reorder_grace"}],
       "steps": [
         {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
@@ -27,7 +27,7 @@
       "id": "filtered-page-does-not-move-cursor",
       "title": "A Topic-filtered page holding Messages above the cursor extends the Topic view only: the cursor stays, no gap fill starts, the stream advances it",
       "covers": ["P1","C1","C2","C3"],
-      "proposed": {"owner": ["#138"]},
+      "layer": "controller",
       "never": [{"type":"fetch_history","page":"after"},{"type":"wait","purpose":"reorder_grace"}],
       "steps": [
         {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
@@ -47,7 +47,7 @@
       "id": "established-cursor-not-moved-by-page-anchor",
       "title": "A main-timeline page's W never moves an established cursor, and Messages at or below W never change the page's baseline count",
       "covers": ["P3","P4","C2"],
-      "proposed": {"owner": ["#138"]},
+      "layer": "controller",
       "never": [{"type":"subscribe","after_seq":9}],
       "steps": [
         {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
@@ -65,9 +65,10 @@
     },
     {
       "id": "posting-during-main-timeline-paging-loses-and-duplicates-no-topic",
+      "note": "Server pages run in delivery/main-timeline-paging.json (#137). W = 10. As of W: 1 none, 2 T1, 3 T2, 4 none, 5 T3, 6 T1, 7 T2, 8 none, 9 T4, 10 T1. After W: 11 T2, 12 T5 (new), 13 T3, 14 T4, 15 none. Pages of 3 lines.",
       "title": "Posts during main-timeline paging (existing unpaged Topics, a new Topic, an already paged Topic) lose and duplicate no Topic, and merged counts are exact",
       "covers": ["P2","P3","P4","P5","C1","C2"],
-      "proposed": {"owner": ["#138"], "note": "Server pages run in delivery/main-timeline-paging.json (#137); client merging remains proposed (#138). W = 10. As of W: 1 none, 2 T1, 3 T2, 4 none, 5 T3, 6 T1, 7 T2, 8 none, 9 T4, 10 T1. After W: 11 T2, 12 T5 (new), 13 T3, 14 T4, 15 none. Pages of 3 lines."},
+      "layer": "controller",
       "steps": [
         {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
         {"input":{"type":"connection_ready"}},
