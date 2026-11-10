@@ -888,6 +888,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 
 mod commit;
 mod contract;
+mod lifecycle;
 mod notification;
 mod session;
 mod watermark;

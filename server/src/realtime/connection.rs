@@ -6,9 +6,25 @@ use crate::{
 };
 use axum::extract::ws::{Message as Frame, WebSocket};
 use std::{collections::HashMap, time::Duration};
+use tokio::time::{Instant, MissedTickBehavior};
 use uuid::Uuid;
 
 const MAX_SUBSCRIPTIONS: usize = 256;
+
+#[derive(Clone, Copy)]
+pub(super) struct Lifecycle {
+    pub ping_interval: Duration,
+    pub idle_timeout: Duration,
+}
+
+impl Default for Lifecycle {
+    fn default() -> Self {
+        Self {
+            ping_interval: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(60),
+        }
+    }
+}
 
 pub(super) struct Connection<'a> {
     pub state: &'a AppState,
@@ -45,13 +61,14 @@ impl Connection<'_> {
 
     async fn event(socket: &mut WebSocket, event: ServerEvent) -> Result<(), u16> {
         let json = serde_json::to_string(&event).map_err(|_| 1011u16)?;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            socket.send(Frame::Text(json.into())),
-        )
-        .await
-        .map_err(|_| CLOSE_QUEUE_OVERFLOW)?
-        .map_err(|_| 1001u16)
+        Self::send(socket, Frame::Text(json.into())).await
+    }
+
+    async fn send(socket: &mut WebSocket, frame: Frame) -> Result<(), u16> {
+        tokio::time::timeout(Duration::from_secs(5), socket.send(frame))
+            .await
+            .map_err(|_| CLOSE_QUEUE_OVERFLOW)?
+            .map_err(|_| 1001u16)
     }
 
     async fn error(
@@ -183,19 +200,53 @@ impl Connection<'_> {
         Ok(())
     }
 
-    pub async fn run(&mut self, socket: &mut WebSocket) -> Result<(), u16> {
+    pub async fn run(&mut self, socket: &mut WebSocket, lifecycle: Lifecycle) -> Result<(), u16> {
+        let mut last_received = Instant::now();
+        let mut next_ping = last_received + lifecycle.ping_interval;
+        let mut heartbeat = tokio::time::interval_at(
+            next_ping.min(last_received + lifecycle.idle_timeout),
+            lifecycle.ping_interval,
+        );
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            tokio::select! {
-                frame = socket.recv() => match frame {
-                    Some(Ok(Frame::Text(text))) => match serde_json::from_str(&text) {
-                        Ok(control) => self.control(socket, control).await?,
-                        Err(_) => Self::error(socket, None, "invalid_input").await?,
-                    },
-                    Some(Ok(Frame::Close(_))) | None | Some(Err(_)) => return Ok(()),
-                    Some(Ok(Frame::Binary(_))) => Self::error(socket, None, "invalid_input").await?,
-                    _ => {},
+            let frame = tokio::select! {
+                frame = socket.recv() => frame,
+                _ = heartbeat.tick() => {
+                    if last_received.elapsed() >= lifecycle.idle_timeout {
+                        // Replay may have delayed reading a queued pong or other client frame.
+                        tokio::time::timeout(Duration::ZERO, socket.recv())
+                            .await.map_err(|_| 1001u16)?
+                    } else {
+                        Self::send(socket, Frame::Ping(Default::default())).await?;
+                        next_ping = Instant::now() + lifecycle.ping_interval;
+                        heartbeat.reset_at(next_ping.min(last_received + lifecycle.idle_timeout));
+                        continue;
+                    }
                 },
-                Some(message) = self.queue.events.recv() => self.live(socket, message).await?,
+                Some(message) = self.queue.events.recv() => {
+                    self.live(socket, message).await?;
+                    continue;
+                },
+            };
+            if matches!(frame, Some(Ok(_))) {
+                last_received = Instant::now();
+                heartbeat.reset_at(next_ping.min(last_received + lifecycle.idle_timeout));
+            }
+            match frame {
+                Some(Ok(Frame::Text(text))) => match serde_json::from_str(&text) {
+                    Ok(control) => self.control(socket, control).await?,
+                    Err(_) => Self::error(socket, None, "invalid_input").await?,
+                },
+                Some(Ok(Frame::Close(_))) => {
+                    // Another read flushes tungstenite's queued Close reply before EOF.
+                    let _ = tokio::time::timeout(Duration::from_secs(1), socket.recv()).await;
+                    return Ok(());
+                }
+                None | Some(Err(_)) => return Ok(()),
+                Some(Ok(Frame::Binary(_))) => {
+                    Self::error(socket, None, "invalid_input").await?;
+                }
+                _ => {}
             }
         }
     }
