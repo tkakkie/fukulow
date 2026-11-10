@@ -116,3 +116,10 @@ Cloud session (no `$FUKULOW_RUN_AS`, Codex or Antigravity): a Claude Code cloud 
 
 ## 12. Needs the maintainer
 Merges; Issue approvals ("OK"); token/secret changes; adding a language, dependency or cost; deploy; anything in the AI prohibited list; denied permissions. Everything else proceeds without asking.
+
+## 13. Splitting a doc
+- Triggers mean "evaluate": a doc over about 40 KB; repeated merge conflicts in the same doc (any size); a major feature added to `docs/spec.md`. Not splitting is a valid outcome when the benefit is small (e.g. a doc outside normal reading such as `docs/measurements.md`).
+- A split needs its own Issue approved by the maintainer; never split inside an unrelated PR. The Issue states its review mode: the cloud-session exception (top of this file) covers only doc-length CI scripts and their tests, so changing which files a CI check reads (e.g. the invariants check) follows the independent-review rules of section 5 unless the maintainer approves otherwise.
+- Shape: the original path stays as the index (area name, one-line scope, link); parts live in `docs/<kind>/<area>.md`, areas aligned to modules (`auth`, `channels`, `messages`, `realtime`) or product features. No per-decision files; no new doc kinds without maintainer approval. `AGENTS.md` is never split.
+- Move text verbatim, with an old location -> new location table in the PR. Check relative links, heading anchors and file-path references; fix only the reference a move breaks. No spec, decision or invariant change in the same PR; for `docs/spec.md` every guarantee keeps its meaning and scope. A constraint spanning areas is cross-referenced from each affected part.
+- No check gets weaker. Splitting `docs/invariants.md` also requires: `web/scripts/check-invariants.ts` verifies every part and a new part cannot escape it; no `path::test_name` reference is lost; the 160-character Rule limit holds in every part; existence, skip and cargo reconciliation still work; negative tests for the multi-file case; no invariant changes meaning.
