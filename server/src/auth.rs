@@ -641,9 +641,19 @@ impl FromRequestParts<AppState> for DeferredOrganizationAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        match Auth::from_request_parts(parts, state).await {
+        Self::from_auth_result(Auth::from_request_parts(parts, state).await)
+    }
+}
+
+impl DeferredOrganizationAuth {
+    fn from_auth_result(result: Result<Auth, ApiError>) -> Result<Self, ApiError> {
+        match result {
             Ok(auth) => Ok(Self(Some(auth))),
-            Err(error) if error.0 == StatusCode::NOT_FOUND => Ok(Self(None)),
+            Err(error)
+                if error.0 == StatusCode::NOT_FOUND && error.1 == "organization_unavailable" =>
+            {
+                Ok(Self(None))
+            }
             Err(error) => Err(error),
         }
     }
@@ -793,6 +803,32 @@ mod tests {
     use axum::body::to_bytes;
     use serde_json::json;
     use tower::ServiceExt;
+
+    #[test]
+    fn deferred_organization_auth_rejects_other_errors_unchanged() {
+        let deferred = DeferredOrganizationAuth::from_auth_result(Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "organization_unavailable",
+            None,
+        )))
+        .unwrap();
+        assert!(deferred.0.is_none());
+        for (status, code) in [
+            (StatusCode::NOT_FOUND, "scoped_session_unavailable"),
+            (StatusCode::UNAUTHORIZED, "organization_unavailable"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
+        ] {
+            let retry = Some(std::time::Duration::from_secs(3));
+            let Err(error) =
+                DeferredOrganizationAuth::from_auth_result(Err(ApiError(status, code, retry)))
+            else {
+                panic!("unexpected auth deferral: {status} {code}");
+            };
+            assert_eq!(error.0, status);
+            assert_eq!(error.1, code);
+            assert_eq!(error.2, retry);
+        }
+    }
 
     // The real app uses the process-global PASSWORD_WORKERS. These saturation tests
     // need an isolated semaphore so holding every permit cannot stall parallel tests.

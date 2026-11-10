@@ -337,6 +337,18 @@ async fn reply_validation_precedes_organization_denial_but_preserves_session_aut
     for scope in [org, unknown] {
         let send_path = format!("/api/v1/orgs/{scope}/channels/{channel}/messages");
         let chain_path = format!("{send_path}/{}/chain", id(&root));
+        assert_error(
+            request(
+                &app,
+                "POST",
+                &send_path,
+                &token,
+                input(Uuid::new_v4(), "   "),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
         error(
             request(&app, "POST", &send_path, &token, invalid.clone()).await,
             StatusCode::BAD_REQUEST,

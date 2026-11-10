@@ -107,13 +107,14 @@ pub async fn upgrade(
                 .into_response();
         }
     };
+    let socket_work = state.shutdown.sockets.enter();
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
-        .on_upgrade(move |socket| connected(socket, state, auth))
+        .on_upgrade(move |socket| connected(socket, state, auth, socket_work))
 }
 
-async fn connected(socket: WebSocket, state: AppState, auth: Auth) {
-    connected_with_lifecycle(socket, state, auth, connection::Lifecycle::default()).await;
+async fn connected(socket: WebSocket, state: AppState, auth: Auth, work: crate::shutdown::Guard) {
+    connected_with_lifecycle(socket, state, auth, connection::Lifecycle::default(), work).await;
 }
 
 async fn connected_with_lifecycle(
@@ -121,8 +122,14 @@ async fn connected_with_lifecycle(
     state: AppState,
     auth: Auth,
     lifecycle: connection::Lifecycle,
+    _work: crate::shutdown::Guard,
 ) {
-    let mut session = match auth.watch_session(&state).await {
+    let session = tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => { close(&mut socket, 1001).await; return; }
+        session = auth.watch_session(&state) => session,
+    };
+    let mut session = match session {
         Ok(Some(session)) => session,
         Ok(None) => {
             close(&mut socket, CLOSE_SESSION_ENDED).await;
@@ -151,6 +158,7 @@ async fn connected_with_lifecycle(
     };
     let code = tokio::select! {
         biased;
+        _ = state.shutdown.cancelled() => Some(1001),
         result = session.ended() => Some(result.unwrap_or(1011)),
         _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
         _ = notification_failed.failed() => Some(1011),

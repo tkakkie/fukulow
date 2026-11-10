@@ -4,6 +4,7 @@ services:
     image: ${LOAD_APP_IMAGE:-${LOAD_PROJECT:?Set LOAD_PROJECT}-app}
     build:
       context: ${LOAD_SERVER_SOURCE:-..}
+    stop_grace_period: 75s
     ulimits:
       nofile: 65536
     environment:

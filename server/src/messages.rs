@@ -25,7 +25,7 @@ pub(crate) mod replies;
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub(crate) mod topics;
 #[cfg(test)]
-pub(crate) use commit::ambiguous_commit;
+pub(crate) use commit::{ambiguous_commit, pause_commit};
 pub use delivery::Delivery;
 pub(crate) use delivery::LIVE_QUEUE_CAPACITY;
 #[cfg(test)]
@@ -189,6 +189,8 @@ pub async fn list_messages(
 }
 
 /// Send a Message, optionally joining/creating a Topic by name in the same transaction.
+/// For all sends, Account Session authentication precedes input validation (400/413/415),
+/// which precedes organization_unavailable (404) and Channel authorization.
 /// The session supplies organization and sender. A successful retry returns the same
 /// canonical message with 201, allocating no new sequence and publishing no new event.
 /// A reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.
@@ -222,7 +224,9 @@ pub async fn send_message(
         .admission(&state.pool)
         .reserve_send(organization_id, channel_id)?;
     // Finish persistence even if the HTTP caller disconnects; notification is detached.
+    let work = state.message_delivery.work.enter();
     let message = tokio::spawn(async move {
+        let _work = work;
         persist(
             &state.pool,
             &state.message_delivery,

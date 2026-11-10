@@ -62,11 +62,11 @@ pub(super) const PAGE_SQL: &str = "SELECT * FROM (\
 /// after_seq defaults to 0 and is exclusive; limit defaults to 50, maximum 200.
 /// A page is a projection, never evidence of Channel-log contiguity.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain",
-    params(("org" = Uuid, Path), ("id" = Uuid, Path), ("message_id" = Uuid, Path), ReplyChainQuery),
+    params(("org" = Uuid, Path, description = "Organization id"), ("id" = Uuid, Path, description = "Channel id"), ("message_id" = Uuid, Path, description = "Root or descendant Message id in the Reply chain"), ReplyChainQuery),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Root and all descendants in ascending seq; exclusive continuation with exact has_more; cursor-neutral", body = ReplyChainPage),
         (status = 400, description = "Malformed Organization id, Channel id, Message id or after_seq, negative after_seq, or limit outside 1..=200", body = ErrorBody),
-        (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found for authorization; reply_chain_not_found for unknown or foreign Organization/Channel anchor", body = ErrorBody),
         (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),

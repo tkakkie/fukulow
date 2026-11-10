@@ -122,6 +122,7 @@ fn state(pool: &PgPool) -> AppState {
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     }
 }
@@ -756,7 +757,10 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
                     let exhausted = exhausted.clone();
                     async move {
                         state.pool = exhausted;
-                        ws.on_upgrade(move |socket| connected(socket, state, auth))
+                        {
+                            let work = state.shutdown.sockets.enter();
+                            ws.on_upgrade(move |socket| connected(socket, state, auth, work))
+                        }
                     }
                 },
             ),
@@ -1025,6 +1029,7 @@ async fn cookie_origin_is_checked_before_auth_and_organization_without_database(
 mod fanout;
 mod measurement;
 
+mod shutdown;
 mod topics;
 
 mod replies;

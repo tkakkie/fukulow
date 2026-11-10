@@ -100,6 +100,7 @@ impl Sender {
 /// once from that pool on first use.
 #[derive(Clone)]
 pub struct Delivery {
+    pub(crate) work: crate::shutdown::Work,
     recipients: ChannelRegistry,
     notifications: Arc<Semaphore>,
     pending_notifications: Arc<Semaphore>,
@@ -115,6 +116,7 @@ pub struct Delivery {
 impl Default for Delivery {
     fn default() -> Self {
         Self {
+            work: Default::default(),
             recipients: Default::default(),
             notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
             pending_notifications: Arc::new(Semaphore::new(MAX_PENDING_NOTIFICATIONS)),
@@ -176,7 +178,9 @@ impl Notification {
             .unwrap()
             .get(&message.client_message_id)
             .cloned();
+        let work = self.delivery.work.enter();
         let task = tokio::spawn(async move {
+            let _work = work;
             let _slots = (channel_slot, organization_slot);
             self.completed = tokio::time::timeout_at(
                 deadline,
@@ -220,6 +224,10 @@ pub(crate) struct LiveQueue {
 }
 
 impl Delivery {
+    pub async fn drained(&self) {
+        self.work.drained().await;
+    }
+
     #[cfg(test)]
     pub(crate) async fn hold_publication_cursor(
         &self,
