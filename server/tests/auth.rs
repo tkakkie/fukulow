@@ -1433,6 +1433,165 @@ async fn member_truncate_is_refused_and_preserves_history(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_on_http(
+    pool: PgPool,
+) {
+    let secure = router(&pool);
+    let victim = setup(&secure).await;
+    let organization = victim["organization"]["organization_id"].as_str().unwrap();
+    let victim_session = body(sign_in(&secure, organization, PASSWORD).await).await;
+    let victim_account = victim_session["identity"]["account"]["id"]
+        .as_str()
+        .unwrap();
+    sqlx::query("INSERT INTO accounts (id, email, password_hash) SELECT $1, 'attacker@example.com', password_hash FROM accounts WHERE id = $2")
+        .bind(Uuid::new_v4())
+        .bind(Uuid::parse_str(victim_account).unwrap())
+        .execute(&pool).await.unwrap();
+    let attacker_session = body(
+        request(
+            &secure,
+            "POST",
+            "/api/v1/native/session",
+            json!({"email":"attacker@example.com", "password":PASSWORD}),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    let victim_cookie = format!(
+        "__Host-fukulow_session={}",
+        victim_session["token"].as_str().unwrap()
+    );
+    let planted_cookie = format!(
+        "fukulow_session={}",
+        attacker_session["token"].as_str().unwrap()
+    );
+    let paths = [
+        "/api/v1/me".to_owned(),
+        format!("/api/v1/orgs/{organization}/me"),
+    ];
+    for cookies in [
+        format!("{planted_cookie}; {victim_cookie}"),
+        format!("{victim_cookie}; {planted_cookie}"),
+    ] {
+        for path in &paths {
+            let response =
+                request(&secure, "GET", path, Value::Null, &[("cookie", &cookies)]).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let identity = body(response).await;
+            if path == "/api/v1/me" {
+                assert_eq!(identity, victim_session["identity"]);
+            } else {
+                assert_eq!(identity, victim);
+            }
+        }
+    }
+    let http = router_with_cookie_security(&pool, false);
+    for path in &paths {
+        assert_eq!(
+            request(
+                &http,
+                "GET",
+                path,
+                Value::Null,
+                &[("cookie", &victim_cookie)]
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // HTTP mode ignores the __Host- name even beside its configured cookie.
+    let cookies = format!("{victim_cookie}; {planted_cookie}");
+    let response = request(
+        &http,
+        "GET",
+        "/api/v1/me",
+        Value::Null,
+        &[("cookie", &cookies)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, attacker_session["identity"]);
+}
+
+#[sqlx::test(migrations = false)]
+async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool: PgPool) {
+    let migrations = sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations"
+    )))
+    .await
+    .unwrap();
+    for migration in migrations.iter().filter(|m| m.version < 202611110197) {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    let app = router_with_cookie_security(&pool, false);
+    setup(&app).await;
+    let input = json!({"email":"owner@example.com", "password":PASSWORD});
+    let web = request(&app, "POST", "/api/v1/session", input.clone(), &[]).await;
+    assert_eq!(web.status(), StatusCode::OK);
+    let cookie = web.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let web_bearer = format!("Bearer {}", cookie.split_once('=').unwrap().1);
+    let native = request(&app, "POST", "/api/v1/native/session", input.clone(), &[]).await;
+    assert_eq!(native.status(), StatusCode::OK);
+    let native_bearer = format!("Bearer {}", body(native).await["token"].as_str().unwrap());
+    let credentials = [
+        ("cookie", cookie.as_str()),
+        ("authorization", web_bearer.as_str()),
+        ("authorization", native_bearer.as_str()),
+    ];
+    for credential in credentials {
+        assert_eq!(
+            request(&app, "GET", "/api/v1/me", Value::Null, &[credential])
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+    sqlx::raw_sql(include_str!(
+        "../migrations/202611110197_revoke_exposed_sessions.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for credential in credentials {
+        assert_eq!(
+            request(&app, "GET", "/api/v1/me", Value::Null, &[credential])
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM account_sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions, 0);
+    let fresh = request(&app, "POST", "/api/v1/native/session", input, &[]).await;
+    assert_eq!(fresh.status(), StatusCode::OK);
+    let fresh_bearer = format!("Bearer {}", body(fresh).await["token"].as_str().unwrap());
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("authorization", &fresh_bearer)]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test]
 async fn web_and_native_contracts_cookie_migration_and_revocation(pool: PgPool) {
     setup(&router(&pool)).await;
     for secure in [false, true] {

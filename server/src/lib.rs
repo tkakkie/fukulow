@@ -398,6 +398,11 @@ mod tests {
 
     #[tokio::test]
     async fn html_and_unhashed_files_revalidate_and_hashed_assets_are_immutable() {
+        let manifest = Assets::get(".vite/manifest.json").expect(
+            "web/dist/.vite/manifest.json is missing: build the SPA and preserve hidden files in the web-dist artifact",
+        );
+        serde_json::from_slice::<HashMap<String, ManifestChunk>>(&manifest.data)
+            .expect("web/dist/.vite/manifest.json must be a valid Vite manifest");
         for path in ["/", "/index.html", "/channels/general", "/favicon.svg"] {
             assert_eq!(
                 get(path).await.headers()[header::CACHE_CONTROL],
@@ -413,7 +418,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked > 0);
+        assert!(
+            checked > 0,
+            "Vite manifest must list hashed assets under assets/"
+        );
         for name in [
             "assets/app.js",
             "assets/logo.svg",

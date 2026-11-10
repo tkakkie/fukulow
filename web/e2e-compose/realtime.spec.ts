@@ -56,7 +56,8 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   expect(headers['content-security-policy']).not.toMatch(/unsafe-inline|unsafe-eval/)
   expect(headers['x-content-type-options']).toBe('nosniff')
   expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin')
-  expect(headers['strict-transport-security']).toBe('max-age=31536000')
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(baseURL!).hostname)
+  expect(headers['strict-transport-security']).toBe(loopback ? undefined : 'max-age=31536000')
   expect(headers['cache-control']).toBe('no-cache')
   for (const path of ['/index.html', '/channels/general', '/favicon.svg']) {
     expect((await a.request.get(path)).headers()['cache-control']).toBe('no-cache')
@@ -101,7 +102,8 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
     if (new URL(r.url()).pathname.endsWith('/messages') && r.method() === 'GET') historyAfterPost.push(r.url())
   })
 
-  const text = `live ${Date.now()}`
+  // Exceed Caddy's compression threshold to verify that API responses stay uncompressed.
+  const text = `live ${Date.now()} ${'message '.repeat(128)}`
   await a.getByLabel('メッセージ').fill(text)
   const acknowledgement = a.waitForResponse(response =>
     new URL(response.url()).pathname.endsWith('/messages') && response.request().method() === 'POST')
@@ -111,6 +113,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   await expect(b.locator('.body', { hasText: text })).toHaveCount(1)
   const response = await acknowledgement
   expect(response.status()).toBe(201)
+  expect(response.headers()['content-encoding']).toBeUndefined()
   const canonical = await response.json() as Message
   await expect.poll(() => echoes.filter(m => m.client_message_id === canonical.client_message_id)).toEqual([canonical])
   await expect(a.locator('li[data-status]')).toHaveCount(0)

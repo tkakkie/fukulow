@@ -33,7 +33,7 @@ jobs:
       - run: npm --prefix web test
       - run: npm --prefix web run build
       - uses: actions/upload-artifact@v7
-        with: { name: web-dist, path: web/dist }
+        with: { name: web-dist, path: web/dist, include-hidden-files: true }
   # fmt and clippy only compile (no DB, no real SPA): an empty web/dist satisfies rust-embed, so they run alongside `web`.
   lint:
     runs-on: ubuntu-latest
