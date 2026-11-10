@@ -42,6 +42,11 @@ FROM channel_read_positions p JOIN topics t ON t.organization_id = p.organizatio
 
 CREATE FUNCTION initialize_unread(o uuid, c uuid, m uuid, revision bigint) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
+    IF EXISTS (SELECT 1 FROM channel_read_positions WHERE organization_id = o AND channel_id = c
+        AND member_id = m AND membership_revision = revision) THEN RETURN; END IF;
+    -- A send cannot commit between this baseline and the grant's COMMIT. Wait
+    -- out an already unresolved COMMIT, then read its outcome in a fresh query.
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended(o::text || '/' || c::text, 135));
     INSERT INTO channel_read_positions
     SELECT o, c, m, revision, COALESCE(seq, 0), COALESCE(seq, 0)
     FROM (SELECT (SELECT seq FROM channel_message_sequences WHERE organization_id = o AND channel_id = c) AS seq) s
