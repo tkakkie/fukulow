@@ -7,13 +7,13 @@ import { setTimeout } from 'k6/timers';
 import { WebSocket } from 'k6/websockets';
 import type {
   Channel, ClientMessage, CreateChannelRequest, Message, ServerEvent,
-  SendMessageRequest, SessionResponse, SetupRequest, SignInRequest,
+  SendMessageRequest, NativeSessionResponse, SetupRequest, SignInRequest,
 } from '../web/src/api-schema.d.ts';
 import { Deliveries, positiveInteger } from './delivery.ts';
 import { schedule, sessionIndex } from './scheduler.ts';
 import { revokeSessions } from './sessions.ts';
 import { summaryForReport } from './summary.ts';
-import { legacyOrganization, organizationPath } from './compat.ts';
+import { legacyOrganization, organizationPath, signInPath } from './compat.ts';
 
 const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const channels = positiveInteger(__ENV.CHANNELS, 1);
@@ -117,17 +117,17 @@ export function setup(): Setup {
     requireStatus(http.post(`${baseUrl}/api/v1/setup`, JSON.stringify(body), params('setup')), 201, 'setup');
   }
   const body: SignInRequest = { email, password };
-  const response = http.post(`${baseUrl}/api/v1/session`, JSON.stringify(body), params('sign_in'));
+  const response = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
   requireStatus(response, 200, 'sign_in');
-  const { token, identity } = response.json() as SessionResponse;
+  const { token, identity } = response.json() as NativeSessionResponse;
   const organizationId = legacy ? legacyOrganization(identity) : (__ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id);
   if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
   const tokens = [token];
   try {
     for (let i = 1; i < Math.ceil(channels * subscribers / socketsPerSession); i++) {
-      const session = http.post(`${baseUrl}/api/v1/session`, JSON.stringify(body), params('sign_in'));
+      const session = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
       requireStatus(session, 200, 'sign_in');
-      tokens.push((session.json() as SessionResponse).token);
+      tokens.push((session.json() as NativeSessionResponse).token);
     }
     const channelIds = Array.from({ length: channels }, (_, index) => {
       const body: CreateChannelRequest = { name: `load-${Date.now()}-${index}`, visibility };

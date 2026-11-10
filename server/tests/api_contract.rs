@@ -21,8 +21,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// Account / Member split adds scoped responses and malformed-Organization 400s; send admission adds 503.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 61;
+// Native sign-in adds seven responses to the Account/Member and send-admission contract.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 68;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {
@@ -32,6 +32,7 @@ fn added_error_responses_have_error_body_and_meaningful_descriptions() {
         for (method, path, status, reason) in [
             ("post", "/api/v1/setup", "500", "creating"),
             ("post", "/api/v1/session", "500", "signing in"),
+            ("post", "/api/v1/native/session", "500", "signing in"),
             ("delete", "/api/v1/session", "500", "revoking"),
             ("get", "/api/v1/me", "500", "session identity"),
             (
@@ -555,4 +556,46 @@ fn account_and_member_openapi_contracts_are_separate() {
     }
     assert!(document["paths"].get("/api/v1/ws").is_none());
     assert!(document["paths"].get("/api/v1/channels").is_none());
+}
+
+#[test]
+fn sign_in_contracts_separate_web_identity_from_native_bearer() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        schemas["SessionResponse"]["properties"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        schemas["SessionResponse"]["properties"]
+            .get("token")
+            .is_none()
+    );
+    assert!(
+        schemas["NativeSessionResponse"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("token"))
+    );
+    let native = &document["paths"]["/api/v1/native/session"]["post"]["responses"];
+    assert_eq!(
+        native["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/NativeSessionResponse"
+    );
+    assert!(native["200"].get("headers").is_none());
+    assert_eq!(
+        native["429"]["headers"]["Retry-After"]["schema"]["minimum"],
+        1
+    );
+    let cookie = &document["components"]["securitySchemes"]["cookie"];
+    assert_eq!(cookie["name"], "__Host-fukulow_session");
+    assert!(
+        cookie["description"]
+            .as_str()
+            .unwrap()
+            .contains("local HTTP")
+    );
 }

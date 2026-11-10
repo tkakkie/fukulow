@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig(({ mode }) => {
   const test = mode === 'test'
   return {
+    build: { manifest: true },
     plugins: [
       svelte({
         // Vitest runs in Node, which Vite treats as SSR: `.svelte.ts` modules would compile with `generate: 'server'`,

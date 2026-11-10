@@ -15,9 +15,13 @@ use uuid::Uuid;
 const PASSWORD: &str = "correct horse battery staple";
 
 fn router(pool: &PgPool) -> Router {
+    router_with_cookie_security(pool, true)
+}
+
+fn router_with_cookie_security(pool: &PgPool, cookie_secure: bool) -> Router {
     app(AppState {
         pool: pool.clone(),
-        cookie_secure: true,
+        cookie_secure,
         setup_token: None,
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
@@ -68,7 +72,7 @@ async fn sign_in(app: &Router, _organization_id: &str, password: &str) -> Respon
     request(
         app,
         "POST",
-        "/api/v1/session",
+        "/api/v1/native/session",
         json!({"email": "owner@example.com", "password": password}),
         &[],
     )
@@ -166,6 +170,11 @@ async fn public_endpoint_database_failures_return_generic_500(pool: PgPool) {
         (
             "POST",
             "/api/v1/session",
+            json!({"email": "owner@example.com", "password": PASSWORD}),
+        ),
+        (
+            "POST",
+            "/api/v1/native/session",
             json!({"email": "owner@example.com", "password": PASSWORD}),
         ),
     ] {
@@ -326,6 +335,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
         ("/api/v1/setup", None),
         ("/api/v1/setup", Some("setup-token-test-only")),
         ("/api/v1/session", None),
+        ("/api/v1/native/session", None),
     ] {
         let app = app(AppState {
             pool: pool.clone(),
@@ -541,7 +551,8 @@ async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
         session["identity"]["organizations"],
         json!([identity["organization"]])
     );
-    let bearer = format!("Bearer {}", session["token"].as_str().unwrap());
+    assert!(session.get("token").is_none());
+    let bearer = format!("Bearer {}", cookie.split_once('=').unwrap().1);
     for headers in [
         [("cookie", cookie.as_str())],
         [("authorization", bearer.as_str())],
@@ -647,7 +658,14 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
     )
     .await;
     assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
-    let response = sign_in(&app, organization_id, PASSWORD).await;
+    let response = request(
+        &app,
+        "POST",
+        "/api/v1/session",
+        json!({"email":"owner@example.com", "password":PASSWORD}),
+        &[],
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let cookie = response.headers()[header::SET_COOKIE]
@@ -665,7 +683,9 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
     }
     let cookie = cookie.split(';').next().unwrap();
     let session = body(response).await;
-    let token = session["token"].as_str().unwrap();
+    assert_eq!(session.as_object().unwrap().len(), 2);
+    assert!(session.get("token").is_none());
+    let token = cookie.split_once('=').unwrap().1;
     let bearer = format!("Bearer {token}");
     for headers in [[("cookie", cookie)], [("authorization", bearer.as_str())]] {
         let response = request(&app, "GET", "/api/v1/me", Value::Null, &headers).await;
@@ -755,7 +775,7 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
         .unwrap();
     let session = body(sign_in(&app, id, PASSWORD).await).await;
     let token = session["token"].as_str().unwrap();
-    let cookie = format!("fukulow_session={token}");
+    let cookie = format!("__Host-fukulow_session={token}");
     let bearer = format!("Bearer {token}");
     let duplicate_cookie = format!("{cookie}; {cookie}");
     let forged = format!("Bearer {id}.{}", "0".repeat(64));
@@ -1298,7 +1318,10 @@ async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) 
     .unwrap();
     let app = router(&pool);
     for (name, value) in [
-        ("cookie", format!("fukulow_session={FIXED_CREDENTIAL}")),
+        (
+            "cookie",
+            format!("__Host-fukulow_session={FIXED_CREDENTIAL}"),
+        ),
         ("authorization", format!("Bearer {FIXED_CREDENTIAL}")),
     ] {
         let response = request(&app, "GET", "/api/v1/me", Value::Null, &[(name, &value)]).await;
@@ -1407,4 +1430,236 @@ async fn member_truncate_is_refused_and_preserves_history(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(member.to_string(), identity["member"]["id"]);
+}
+
+#[sqlx::test]
+async fn web_and_native_contracts_cookie_migration_and_revocation(pool: PgPool) {
+    setup(&router(&pool)).await;
+    for secure in [false, true] {
+        let app = router_with_cookie_security(&pool, secure);
+        let input = json!({"email":"owner@example.com", "password":PASSWORD});
+        let web = request(
+            &app,
+            "POST",
+            "/api/v1/session",
+            input.clone(),
+            &[("user-agent", "NativeClient/1")],
+        )
+        .await;
+        assert_eq!(web.status(), StatusCode::OK);
+        assert_eq!(web.headers()[header::CACHE_CONTROL], "no-store");
+        let cookies: Vec<_> = web
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|c| c.to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(cookies.len(), if secure { 2 } else { 1 });
+        let name = if secure {
+            "__Host-fukulow_session"
+        } else {
+            "fukulow_session"
+        };
+        let cookie = &cookies[0];
+        assert!(cookie.starts_with(&format!("{name}=")));
+        for flag in ["HttpOnly", "SameSite=Strict", "Path=/", "Max-Age=2592000"] {
+            assert!(cookie.contains(flag));
+        }
+        assert_eq!(cookie.contains("; Secure"), secure);
+        assert!(!cookie.contains("Domain"));
+        if secure {
+            assert_eq!(
+                cookies[1],
+                "fukulow_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure"
+            );
+        }
+        let web_body = body(web).await;
+        assert_eq!(web_body.as_object().unwrap().len(), 2);
+        assert_eq!(web_body["expires_in"], 2592000);
+        assert!(web_body.get("token").is_none());
+        let cookie = cookie.split(';').next().unwrap();
+        let token = cookie.split_once('=').unwrap().1;
+        let bearer = format!("Bearer {token}");
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/v1/me",
+                Value::Null,
+                &[("cookie", cookie)]
+            )
+            .await
+            .status(),
+            200
+        );
+        if secure {
+            // A valid token under the old name grants no Account or Organization authority.
+            let legacy = format!("fukulow_session={token}");
+            for path in [
+                "/api/v1/me".to_owned(),
+                format!(
+                    "/api/v1/orgs/{}/me",
+                    web_body["identity"]["organizations"][0]["organization_id"]
+                        .as_str()
+                        .unwrap()
+                ),
+            ] {
+                assert_eq!(
+                    request(&app, "GET", &path, Value::Null, &[("cookie", &legacy)])
+                        .await
+                        .status(),
+                    401
+                );
+            }
+        }
+        let native = request(
+            &app,
+            "POST",
+            "/api/v1/native/session",
+            input.clone(),
+            &[("user-agent", "Mozilla/5.0"), ("cookie", cookie)],
+        )
+        .await;
+        assert_eq!(native.status(), 200);
+        assert_eq!(native.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!native.headers().contains_key(header::SET_COOKIE));
+        let native = body(native).await;
+        assert_eq!(native.as_object().unwrap().len(), 3);
+        assert_eq!(native["identity"], web_body["identity"]);
+        let native_bearer = format!("Bearer {}", native["token"].as_str().unwrap());
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/v1/me",
+                Value::Null,
+                &[("authorization", &native_bearer)]
+            )
+            .await
+            .status(),
+            200
+        );
+        let logout = request(
+            &app,
+            "DELETE",
+            "/api/v1/session",
+            Value::Null,
+            &[("cookie", cookie)],
+        )
+        .await;
+        assert_eq!(logout.status(), 204);
+        let expired: Vec<_> = logout
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|c| c.to_str().unwrap())
+            .collect();
+        assert!(expired[0].starts_with(&format!("{name}=;")));
+        assert!(
+            expired
+                .iter()
+                .all(|c| c.contains("Max-Age=0") && !c.contains("Domain"))
+        );
+        assert_eq!(expired.len(), if secure { 2 } else { 1 });
+        for credential in [("cookie", cookie), ("authorization", bearer.as_str())] {
+            assert_eq!(
+                request(&app, "GET", "/api/v1/me", Value::Null, &[credential])
+                    .await
+                    .status(),
+                401
+            );
+        }
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/v1/me",
+                Value::Null,
+                &[("authorization", &native_bearer)]
+            )
+            .await
+            .status(),
+            200
+        );
+        assert_eq!(
+            request(
+                &app,
+                "DELETE",
+                "/api/v1/session",
+                Value::Null,
+                &[("authorization", &native_bearer)]
+            )
+            .await
+            .status(),
+            204
+        );
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/v1/me",
+                Value::Null,
+                &[("authorization", &native_bearer)]
+            )
+            .await
+            .status(),
+            401
+        );
+        for path in ["/api/v1/session", "/api/v1/native/session"] {
+            let mut flagged = input.clone();
+            flagged["native"] = json!(true);
+            assert_eq!(
+                request(&app, "POST", path, flagged, &[]).await.status(),
+                400
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn web_and_native_share_account_and_ip_failure_budgets(pool: PgPool) {
+    setup(&router(&pool)).await;
+    for by_ip in [false, true] {
+        let app = router(&pool);
+        for n in 0..if by_ip { 20 } else { 5 } {
+            let path = if n % 2 == 0 {
+                "/api/v1/session"
+            } else {
+                "/api/v1/native/session"
+            };
+            let email = if by_ip {
+                format!("unknown{n}@example.com")
+            } else {
+                " Owner@Example.com ".into()
+            };
+            assert_eq!(
+                request(
+                    &app,
+                    "POST",
+                    path,
+                    json!({"email":email,"password":"incorrect password"}),
+                    &[]
+                )
+                .await
+                .status(),
+                401
+            );
+        }
+        for path in ["/api/v1/session", "/api/v1/native/session"] {
+            let response = request(
+                &app,
+                "POST",
+                path,
+                json!({"email":"owner@example.com","password":PASSWORD}),
+                &[],
+            )
+            .await;
+            assert!(
+                response
+                    .headers()
+                    .contains_key(header::CONTENT_SECURITY_POLICY)
+            );
+            assert_throttled(response).await;
+        }
+    }
 }
