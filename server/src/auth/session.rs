@@ -1,28 +1,116 @@
 use super::Auth;
 use crate::AppState;
-use std::time::Duration;
-use tokio::{sync::broadcast, time::Instant};
+use sqlx::PgPool;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Once},
+    time::Duration,
+};
+use tokio::{sync::watch, time::Instant};
 use uuid::Uuid;
 
-/// Wake open connections immediately after sign-out commits. Only credential hashes are retained.
+const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+type SessionKey = (Uuid, Vec<u8>);
+
+#[derive(Clone, Copy, Default)]
+struct SessionStatus {
+    revoked: bool,
+    failed: bool,
+}
+
+/// Only connected sessions retain a signal; sign-out never wakes unrelated sessions.
 #[derive(Clone)]
-pub struct SessionChanges(broadcast::Sender<(Uuid, Vec<u8>)>);
+pub struct SessionChanges {
+    sessions: Arc<Mutex<HashMap<SessionKey, watch::Sender<SessionStatus>>>>,
+    worker: Arc<Once>,
+    interval: Duration,
+    timeout: Duration,
+    #[cfg(test)]
+    gate: Arc<Mutex<Option<Arc<tests::Gate>>>>,
+}
 impl Default for SessionChanges {
     fn default() -> Self {
-        Self(broadcast::channel(1024).0)
-    }
-}
-impl SessionChanges {
-    pub(super) fn revoked(&self, organization: Uuid, hash: Vec<u8>) {
-        let _ = self.0.send((organization, hash));
+        Self {
+            sessions: Default::default(),
+            worker: Arc::new(Once::new()),
+            interval: RECHECK_INTERVAL,
+            timeout: CHECK_TIMEOUT,
+            #[cfg(test)]
+            gate: Default::default(),
+        }
     }
 }
 
+impl SessionChanges {
+    fn register(&self, key: SessionKey) -> Registration {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = sessions
+            .entry(key.clone())
+            .or_insert_with(|| watch::channel(SessionStatus::default()).0)
+            .subscribe();
+        Registration {
+            changed,
+            guard: RegistrationGuard {
+                registry: self.clone(),
+                key,
+            },
+        }
+    }
+
+    pub(super) fn revoked(&self, organization: Uuid, hash: Vec<u8>) {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(signal) = sessions.get(&(organization, hash)) {
+            signal.send_modify(|status| status.revoked = true);
+        }
+    }
+}
+
+struct Registration {
+    // Drop the receiver before checking for last-socket cleanup, including concurrent drops.
+    changed: watch::Receiver<SessionStatus>,
+    guard: RegistrationGuard,
+}
+struct RegistrationGuard {
+    registry: SessionChanges,
+    key: SessionKey,
+}
+impl Drop for RegistrationGuard {
+    fn drop(&mut self) {
+        let mut sessions = self
+            .registry
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Registration and last-receiver removal use the same lock as sign-out.
+        if sessions
+            .get(&self.key)
+            .is_some_and(|signal| signal.receiver_count() == 0)
+        {
+            sessions.remove(&self.key);
+        }
+    }
+}
 pub(crate) struct SessionWatch {
-    changes: broadcast::Receiver<(Uuid, Vec<u8>)>,
-    organization: Uuid,
-    hash: Vec<u8>,
+    registration: Registration,
     deadline: Instant,
+}
+
+async fn deadline(pool: &PgPool, key: &SessionKey) -> Result<Option<Instant>, sqlx::Error> {
+    let checked_at = Instant::now();
+    let remaining = tokio::time::timeout(
+        CHECK_TIMEOUT,
+        sqlx::query_scalar::<_, f64>(
+            "SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 \
+             FROM sessions WHERE organization_id = $1 AND token_hash = $2 AND expires_at > clock_timestamp()",
+        ).bind(key.0).bind(&key.1).fetch_optional(pool),
+    ).await.map_err(|_| sqlx::Error::PoolTimedOut)??;
+    Ok(remaining
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .map(|seconds| {
+            // Count SQL latency conservatively: never extend a session past its DB expiry.
+            checked_at + Duration::from_secs_f64(seconds.min(f64::from(super::SESSION_SECONDS)))
+        }))
 }
 
 impl Auth {
@@ -31,93 +119,45 @@ impl Auth {
         &self,
         state: &AppState,
     ) -> Result<Option<SessionWatch>, sqlx::Error> {
-        let changes = state.session_changes.0.subscribe();
-        let organization = self.identity.organization.organization_id;
-        let checked_at = Instant::now();
-        let remaining = sqlx::query_scalar::<_, f64>(
-            "SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 \
-             FROM sessions WHERE organization_id = $1 AND token_hash = $2 AND expires_at > clock_timestamp()",
-        ).bind(organization).bind(&self.token_hash).fetch_optional(&state.pool).await?;
-        let Some(seconds) = remaining else {
-            return Ok(None);
-        };
-        if !seconds.is_finite() || seconds <= 0.0 {
-            return Ok(None);
-        }
-        Ok(Some(SessionWatch {
-            changes,
-            organization,
-            hash: self.token_hash.clone(),
-            // Count SQL latency conservatively: never extend a session past its DB expiry.
-            deadline: checked_at
-                + Duration::from_secs_f64(seconds.min(f64::from(super::SESSION_SECONDS))),
+        let registration = state.session_changes.register((
+            self.identity.organization.organization_id,
+            self.token_hash.clone(),
+        ));
+        #[cfg(test)]
+        state
+            .session_changes
+            .pause_check(tests::Phase::Registered)
+            .await;
+        state.session_changes.start_rechecks(&state.pool);
+        let deadline = deadline(&state.pool, &registration.guard.key).await?;
+        #[cfg(test)]
+        state
+            .session_changes
+            .pause_check(tests::Phase::Checked)
+            .await;
+        Ok(deadline.map(|deadline| SessionWatch {
+            registration,
+            deadline,
         }))
     }
 }
 
 impl SessionWatch {
-    pub(crate) async fn ended(&mut self) {
-        loop {
-            tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(self.deadline) => return,
-                result = self.changes.recv() => match result {
-                    Ok((organization, hash)) if organization == self.organization && hash == self.hash => return,
-                    Ok(_) => {},
-                    // If revocations outrun the receiver, close conservatively rather than miss one.
-                    Err(_) => return,
-                },
+    pub(crate) async fn ended(&mut self) -> Result<(), sqlx::Error> {
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(self.deadline) => Ok(()),
+            status = self.registration.changed.wait_for(|status| status.revoked || status.failed) => {
+                match status {
+                    Ok(status) if status.revoked => Ok(()),
+                    _ => Err(sqlx::Error::PoolTimedOut),
+                }
             }
         }
     }
 }
 
+mod recheck;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test(start_paused = true)]
-    async fn session_watch_expires_and_only_matching_sign_out_ends_it() {
-        let changes = SessionChanges::default();
-        let organization = Uuid::new_v4();
-        let mut watch = SessionWatch {
-            changes: changes.0.subscribe(),
-            organization,
-            hash: vec![1],
-            deadline: Instant::now() + Duration::from_secs(3),
-        };
-        changes.revoked(Uuid::new_v4(), vec![1]);
-        changes.revoked(organization, vec![2]);
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), watch.ended())
-                .await
-                .is_err()
-        );
-        changes.revoked(organization, vec![1]);
-        watch.ended().await;
-        let mut expiry = SessionWatch {
-            changes: changes.0.subscribe(),
-            organization,
-            hash: vec![1],
-            deadline: Instant::now() + Duration::from_secs(3),
-        };
-        let started = Instant::now();
-        expiry.ended().await;
-        assert_eq!(Instant::now() - started, Duration::from_secs(3));
-    }
-    #[tokio::test]
-    async fn missed_session_revocations_fail_closed() {
-        let changes = SessionChanges::default();
-        let mut watch = SessionWatch {
-            changes: changes.0.subscribe(),
-            organization: Uuid::new_v4(),
-            hash: vec![1],
-            deadline: Instant::now() + Duration::from_secs(60),
-        };
-        for _ in 0..2048 {
-            changes.revoked(Uuid::new_v4(), vec![2]);
-        }
-        tokio::time::timeout(Duration::from_secs(1), watch.ended())
-            .await
-            .unwrap();
-    }
-}
+mod tests;
