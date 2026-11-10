@@ -885,4 +885,4 @@ fn scoped_path(path: &str, token: &str) -> String {
     }
 }
 
-mod membership;
+pub(super) mod membership;

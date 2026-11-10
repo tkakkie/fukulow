@@ -234,7 +234,7 @@ impl Drop for RegistrationGuard {
 }
 pub(crate) struct SessionWatch {
     registration: Registration,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 async fn deadline(
@@ -281,6 +281,12 @@ impl Auth {
         if status.revoked {
             return Ok(None);
         }
+        if status.membership_revoked {
+            return Ok(Some(SessionWatch {
+                registration,
+                deadline: None,
+            }));
+        }
         if status.failed {
             return Err(sqlx::Error::PoolClosed);
         }
@@ -289,14 +295,14 @@ impl Auth {
             .session_changes
             .pause_check(tests::Phase::Registered)
             .await;
-        let (deadline, active) = deadline(
+        let checked = deadline(
             &state.pool,
             &registration.guard.key,
             self.account_id,
             self.membership_revision,
         )
-        .await?;
-        if !active {
+        .await;
+        if matches!(checked, Ok((Some(_), false))) {
             registration
                 .guard
                 .epoch
@@ -311,12 +317,18 @@ impl Auth {
         if status.revoked {
             return Ok(None);
         }
+        if status.membership_revoked {
+            return Ok(Some(SessionWatch {
+                registration,
+                deadline: checked.as_ref().ok().and_then(|(deadline, _)| *deadline),
+            }));
+        }
         if status.failed {
             return Err(sqlx::Error::PoolClosed);
         }
-        Ok(deadline.map(|deadline| SessionWatch {
+        Ok(checked?.0.map(|deadline| SessionWatch {
             registration,
-            deadline,
+            deadline: Some(deadline),
         }))
     }
 }
@@ -325,7 +337,12 @@ impl SessionWatch {
     pub(crate) async fn ended(&mut self) -> Result<u16, sqlx::Error> {
         tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(self.deadline) => Ok(4001),
+            _ = async {
+                match self.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => Ok(4001),
             status = self.registration.changed.wait_for(|status| status.revoked || status.membership_revoked || status.failed) => {
                 match status {
                     Ok(status) if status.revoked => Ok(4001),

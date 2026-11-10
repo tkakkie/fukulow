@@ -53,7 +53,7 @@ async fn many_socket_monitors_share_one_non_overlapping_fallback_query(pool: PgP
             } else {
                 (key.0, i.to_be_bytes().to_vec())
             }),
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
         })
         .collect();
     let valid = state.session_changes.register(foreign_key);
@@ -135,7 +135,7 @@ async fn timed_out_pass_latches_errors_and_releases_its_pool_connection(pool: Pg
     let mut watches: Vec<_> = (0..32)
         .map(|_| SessionWatch {
             registration: state.session_changes.register(key.clone()),
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
         })
         .collect();
     let mut held = pool.begin().await.unwrap();

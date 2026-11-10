@@ -360,6 +360,49 @@ async fn membership_signals_scope_all_account_sessions_and_preserve_new_revision
 }
 
 #[sqlx::test]
+async fn latched_membership_at_connect_yields_4003_and_session_end_wins(pool: PgPool) {
+    for (session_ended, failed) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (state, auth) = fixture(&pool).await;
+        let fallback = state.session_changes.pause_fallback();
+        let registration = state.session_changes.register_member(
+            (
+                auth.identity.organization.organization_id,
+                auth.token_hash.clone(),
+            ),
+            auth.account_id,
+            auth.membership_revision,
+        );
+        state.session_changes.membership_revoked(
+            auth.identity.organization.organization_id,
+            auth.account_id,
+            1,
+        );
+        // Even a missing SQL deadline must not relabel a latched Membership loss.
+        sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
+            .bind(&auth.token_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        if failed {
+            registration
+                .guard
+                .epoch
+                .send_modify(|status| status.failed = true);
+        }
+        if session_ended {
+            state.session_changes.revoked(auth.token_hash.clone());
+        }
+        let code = match auth.watch_session(&state).await.unwrap() {
+            Some(mut watch) => watch.ended().await.unwrap(),
+            None => 4001,
+        };
+        assert_eq!(code, if session_ended { 4001 } else { 4003 });
+        fallback.entered().await;
+        fallback.release();
+    }
+}
+
+#[sqlx::test]
 async fn membership_connect_race_is_classified_independently_from_session_end(pool: PgPool) {
     let (state, auth) = fixture(&pool).await;
     let checked = state.session_changes.pause(Phase::Checked);
@@ -412,7 +455,7 @@ async fn stale_membership_registration_cannot_revoke_or_replace_a_newer_epoch() 
     assert!(!current.changed.borrow().membership_revoked);
     let mut stale = SessionWatch {
         registration: changes.register_member(key.clone(), account, 0),
-        deadline: Instant::now() + Duration::from_secs(60),
+        deadline: Some(Instant::now() + Duration::from_secs(60)),
     };
     assert_eq!(stale.ended().await.unwrap(), 4003);
     assert!(!current.changed.has_changed().unwrap());

@@ -38,6 +38,10 @@ pub struct ErrorBody {
 #[derive(Debug)]
 pub struct ApiError(StatusCode, &'static str, Option<std::time::Duration>);
 impl ApiError {
+    pub(crate) fn organization_unavailable() -> Self {
+        Self(StatusCode::NOT_FOUND, "organization_unavailable", None)
+    }
+
     fn unauthorized() -> Self {
         Self(StatusCode::UNAUTHORIZED, "invalid credentials", None)
     }
@@ -570,9 +574,9 @@ impl FromRequestParts<AppState> for Auth {
 
 // Owned here so Channel authorization can compose one query without owning Member SQL.
 // $1 is always the Organization; callers filter the captured Member/revision pairs.
-// A send retains this shared row lock through COMMIT; deactivation cannot commit
+// A write retains this shared row lock through COMMIT; deactivation cannot commit
 // between its authorization and persistence. Ordinary reads release it with the query.
-pub(crate) const CURRENT_MEMBER_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND id = $2 AND membership_revision = $4 AND deactivated_at IS NULL FOR SHARE";
+pub(crate) const CURRENT_MEMBER_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND id = $2 AND membership_revision = $3 AND deactivated_at IS NULL FOR SHARE";
 
 pub(crate) const ACTIVE_MEMBERS_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND deactivated_at IS NULL";
 

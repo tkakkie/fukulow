@@ -55,7 +55,7 @@ async fn worker_panic_requests_fatal_exit_once_after_grace() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let mut refused = SessionWatch {
         registration: changes.register((Uuid::new_v4(), vec![])),
-        deadline: Instant::now() + Duration::from_secs(60),
+        deadline: Some(Instant::now() + Duration::from_secs(60)),
     };
     assert!(refused.ended().await.is_err());
     tokio::time::advance(EXIT_GRACE - Duration::from_millis(1)).await;

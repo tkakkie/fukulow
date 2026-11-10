@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+mod membership;
 mod name_length;
 mod name_whitespace;
 mod names;

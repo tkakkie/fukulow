@@ -120,13 +120,24 @@ pub async fn list_messages(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization_id = auth.identity.organization.organization_id;
-    require_visible(
-        &state.pool,
+    let mut tx = state
+        .pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await?;
+    match channels::is_visible_in_snapshot(
+        &mut *tx,
         organization_id,
         (auth.identity.member.id, auth.membership_revision),
         channel_id,
     )
-    .await?;
+    .await?
+    {
+        Some(true) => {}
+        Some(false) => return Err(MessageError::NotFound),
+        None => return Err(MessageError::OrganizationUnavailable),
+    }
+    #[cfg(test)]
+    tests::membership::pause_history(channel_id).await;
     let ascending = query.after_seq.is_some();
     let sql = if ascending {
         "SELECT id, channel_id, seq, client_message_id, sender, body, \
@@ -150,8 +161,9 @@ pub async fn list_messages(
         .bind(channel_id)
         .bind(cursor)
         .bind(i64::from(limit) + 1)
-        .fetch_all(&state.pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
     let has_more = messages.len() > usize::from(limit);
     messages.truncate(usize::from(limit));
     if !ascending {

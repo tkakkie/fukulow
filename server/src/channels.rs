@@ -60,19 +60,38 @@ pub async fn list_channels(
     State(state): State<AppState>,
     auth: Auth,
 ) -> Result<Response, ApiError> {
-    let channels = sqlx::query_as::<_, Channel>(
-        "SELECT c.id, c.name, c.visibility FROM channels c \
-         WHERE c.organization_id = $1 AND (c.visibility = 'public' OR EXISTS (\
+    // The LEFT JOIN retains one empty row for an active Member with no visible Channels.
+    let sql = format!(
+        "SELECT c.id, c.name, c.visibility FROM ({}) u \
+         LEFT JOIN channels c ON c.organization_id = $1 \
+         AND (c.visibility = 'public' OR EXISTS (\
              SELECT 1 FROM channel_members cm \
              WHERE cm.organization_id = c.organization_id \
-               AND cm.channel_id = c.id AND cm.member_id = $2 AND cm.membership_revision = $3\
-         )) ORDER BY lower(c.name COLLATE \"C\"), c.id",
-    )
-    .bind(auth.identity.organization.organization_id)
-    .bind(auth.identity.member.id)
-    .bind(auth.membership_revision)
-    .fetch_all(&state.pool)
-    .await?;
+               AND cm.channel_id = c.id AND cm.member_id = u.id \
+               AND cm.membership_revision = u.membership_revision\
+         )) WHERE u.id = $2 AND u.membership_revision = $3 \
+         ORDER BY lower(c.name COLLATE \"C\"), c.id",
+        auth::ACTIVE_MEMBERS_SQL
+    );
+    let rows = sqlx::query_as::<_, (Option<Uuid>, Option<String>, Option<ChannelVisibility>)>(&sql)
+        .bind(auth.identity.organization.organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision)
+        .fetch_all(&state.pool)
+        .await?;
+    if rows.is_empty() {
+        return Err(ApiError::organization_unavailable());
+    }
+    let channels = rows
+        .into_iter()
+        .filter_map(|(id, name, visibility)| {
+            Some(Channel {
+                id: id?,
+                name: name?,
+                visibility: visibility?,
+            })
+        })
+        .collect();
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(ChannelList { channels }),
@@ -111,6 +130,17 @@ pub async fn create_channel(
     }
     let organization_id = auth.identity.organization.organization_id;
     let mut tx = state.pool.begin().await?;
+    let sql = format!("SELECT id FROM ({}) u", auth::CURRENT_MEMBER_SQL);
+    if sqlx::query_scalar::<_, Uuid>(&sql)
+        .bind(organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::organization_unavailable());
+    }
     let channel = match sqlx::query_as::<_, Channel>(
         "INSERT INTO channels (organization_id, id, name, visibility) \
          VALUES ($1, $2, $3, $4) RETURNING id, name, visibility",
@@ -169,19 +199,51 @@ pub(crate) async fn is_visible<'e, E: sqlx::PgExecutor<'e>>(
     member: (Uuid, i64),
     channel_id: Uuid,
 ) -> Result<Option<bool>, sqlx::Error> {
+    member_visibility(
+        executor,
+        organization_id,
+        member,
+        channel_id,
+        auth::CURRENT_MEMBER_SQL,
+    )
+    .await
+}
+
+pub(crate) async fn is_visible_in_snapshot<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+    member: (Uuid, i64),
+    channel_id: Uuid,
+) -> Result<Option<bool>, sqlx::Error> {
+    member_visibility(
+        executor,
+        organization_id,
+        member,
+        channel_id,
+        auth::ACTIVE_MEMBERS_SQL,
+    )
+    .await
+}
+
+async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+    member: (Uuid, i64),
+    channel_id: Uuid,
+    member_sql: &str,
+) -> Result<Option<bool>, sqlx::Error> {
     let sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM channels c WHERE c.organization_id = $1 AND c.id = $3 \
+        "SELECT EXISTS (SELECT 1 FROM channels c WHERE c.organization_id = $1 AND c.id = $4 \
          AND (c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
          WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
          AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision))) \
-         FROM ({}) u WHERE u.id = $2 AND u.membership_revision = $4",
-        auth::CURRENT_MEMBER_SQL
+         FROM ({member_sql}) u WHERE u.id = $2 AND u.membership_revision = $3"
     );
     sqlx::query_scalar(&sql)
         .bind(organization_id)
         .bind(member.0)
-        .bind(channel_id)
         .bind(member.1)
+        .bind(channel_id)
         .fetch_optional(executor)
         .await
 }
