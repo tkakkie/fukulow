@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createSync } from './sync'
-import type { Message, Result } from './api'
+import type { Message, MessagePage, Result } from './api'
 import { record } from './protocol-test-helpers'
 
 afterEach(() => vi.useRealTimers())
@@ -120,10 +120,11 @@ it('restores only non-retryable failed sends into the Composer draft for editing
 })
 
 it('reports loadOlder failures in olderError and clears olderError on retry', async () => {
+  let resolveRetry!: (r: Result<MessagePage>) => void
   const listMessages = vi.fn()
     .mockResolvedValueOnce({ ok: true, data: { messages: [record(10)], has_more: true } })
     .mockResolvedValueOnce({ ok: false, kind: 'network' })
-    .mockResolvedValueOnce({ ok: true, data: { messages: [record(9)], has_more: false } })
+    .mockImplementationOnce(() => new Promise(r => { resolveRetry = r }))
   const sync = createSync({
     selfId: 'me',
     connect: () => ({ send() {}, close() {} }),
@@ -137,10 +138,14 @@ it('reports loadOlder failures in olderError and clears olderError on retry', as
   await t.loadOlder()
   expect(t.get()).toMatchObject({ status: 'ready', hasOlder: true, olderError: true, messages: [record(10)] })
 
-  await t.loadOlder()
+  const retry = t.loadOlder()
+  expect(t.get()).toMatchObject({ status: 'ready', hasOlder: true, loadingOlder: true, olderError: false })
+  resolveRetry({ ok: true, data: { messages: [record(9)], has_more: true } })
+  await retry
   expect(t.get()).toMatchObject({
     status: 'ready',
-    hasOlder: false,
+    hasOlder: true,
+    loadingOlder: false,
     olderError: false,
     messages: [record(9), record(10)],
   })
