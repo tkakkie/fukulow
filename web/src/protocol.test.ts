@@ -160,6 +160,32 @@ it('reconnects with backoff after a 1001 idle-timeout close', () => {
   expect(next).toBeDefined()
 })
 
+it.each([4008, 1001, 1011, 1006])('defers a pending fill backoff after close %s until reconnected and resubscribed', code => {
+  const d = boot()
+  const grace = id(d.event(103), 'wait')
+  const fill = id(d.feed({ type: 'timer_elapsed', id: grace }), 'fetch_history')
+  const backoff = d.feed({ type: 'history_failed', request: fill, status: 'network' })
+  expect(backoff).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'fill_backoff' }))
+  const closed = d.feed({ type: 'socket_closed', connection: d.connection, code })
+  expect(closed).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff' }))
+  expect(closed.some(e => e.type === 'fetch_history' || e.type === 'connect')).toBe(false)
+  expect(d.feed({ type: 'timer_elapsed', id: id(backoff, 'wait') })).toEqual([])
+  expect(d.get().channels.A.fill).toBeUndefined()
+
+  const connection = id(d.feed({ type: 'timer_elapsed', id: id(closed, 'wait') }), 'connect')
+  const ready = d.feed({ type: 'connection_ready', connection })
+  expect(ready).toContainEqual(expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }))
+  expect(ready.some(e => e.type === 'fetch_history')).toBe(false)
+  // Replay may arrive before its handoff confirmation; give it a chance to close the gap first.
+  expect(d.event(104)).toEqual([])
+  const resumed = d.feed({ type: 'event', connection,
+    event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 104 } })
+  expect(resumed).toContainEqual(expect.objectContaining({ type: 'fetch_history', channel: 'A', page: 'after', seq: 100 }))
+  d.feed({ type: 'history_result', request: id(resumed, 'fetch_history'),
+    page: { messages: [101, 102, 103, 104].map(seq => record(seq)), has_more: false } })
+  expect(d.get().channels.A).toMatchObject({ cursor: 104, fill: undefined, wait: undefined })
+})
+
 it('rejects stale connection readiness, events, closes and subscription completions', () => {
   const d = boot()
   const timer = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1011 }), 'wait')

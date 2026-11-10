@@ -160,6 +160,8 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   const reconcile = (id: string, immediate = false) => {
     const c = channel(id)
     if (!c.watched || c.state === 'unavailable' || c.cursor === null) return
+    // Let reconnect replay finish before timers or HTTP completions start another fill (C4).
+    if (!state.connected || !c.subscription?.confirmed) return
     if (!gap(c)) { cancel(c.wait); c.wait = undefined; return }
     if (c.fill !== undefined) return
     // Backoff cannot be bypassed by further traffic or a handoff watermark.
