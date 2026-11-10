@@ -1,6 +1,6 @@
 # Decisions
 
-Current decisions only: what + why, at most 300 characters each; details in the linked Issue/PR. Superseded entries and raw measurements were removed in #175; the full former text is at [5023c62](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md); #178 measurement tables at [2599d3b](https://github.com/tkakkie/fukulow/blob/2599d3b9c0e79f336b5726c6f6fbbc31e5db08da/docs/decisions.md).
+Current decisions only: what + why, at most 300 characters each; details in the linked Issue/PR. Superseded entries were removed in #175 and raw measurement records moved to `docs/measurements.md` (#182); the full former text is at [5023c62](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md); #178 measurement tables at [2599d3b](https://github.com/tkakkie/fukulow/blob/2599d3b9c0e79f336b5726c6f6fbbc31e5db08da/docs/decisions.md).
 
 ## Product, stack and delivery
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.
