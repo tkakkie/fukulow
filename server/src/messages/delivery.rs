@@ -47,7 +47,7 @@ impl Default for ChannelFanout {
             recipients: Default::default(),
             first_seq: Default::default(),
             published: Default::default(),
-            notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
+            notifications: Arc::new(Semaphore::new(MAX_CHANNEL_NOTIFICATIONS)),
         }
     }
 }
@@ -55,6 +55,7 @@ impl Default for ChannelFanout {
 // Execution is twice the production pool's 20 connections. Cursor waiters reserve
 // separate capacity before spawning: at most 40 per Channel and 2,048 in total.
 pub(crate) const MAX_IN_FLIGHT_NOTIFICATIONS: usize = 40;
+const MAX_CHANNEL_NOTIFICATIONS: usize = 40;
 const MAX_PENDING_NOTIFICATIONS: usize = 2048;
 pub(crate) const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const LIVE_QUEUE_CAPACITY: usize = 256;
@@ -125,6 +126,7 @@ impl Notification {
             .clone()
             .try_acquire_owned()
         else {
+            // This Channel already has its bounded set of waiters; signal reconnect/replay.
             return;
         };
         let Ok(pending_slot) = self
@@ -154,6 +156,7 @@ impl Notification {
             )
             .await
             .is_ok_and(|result| result.is_ok());
+            drop(_slots);
             drop(self);
         });
         #[cfg(test)]
