@@ -390,3 +390,127 @@ async fn send_deadline_during_commit_signals_and_reconnect_waits_for_final_messa
     );
     silent(&mut recovered).await;
 }
+
+#[sqlx::test]
+async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let mut before = f.server.connect(&f.token).await;
+    subscribe(&mut before, f.channel, 0).await;
+    ready(&mut before, f.channel, 0).await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION sleep_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_sleep(60); RETURN NEW; END $$; \
+         CREATE CONSTRAINT TRIGGER sleep_commit AFTER INSERT ON messages \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION sleep_commit();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let key = Uuid::new_v4();
+    let app = f.app.clone();
+    let token = f.token.clone();
+    let channel = f.channel;
+    let sending = tokio::spawn(async move {
+        request(
+            &app,
+            "POST",
+            &format!("/api/v1/channels/{channel}/messages"),
+            &token,
+            json!({"client_message_id": key, "body": "unknown then rolled back"}),
+        )
+        .await
+    });
+    let pid: i32 = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pid = sqlx::query_scalar(
+                "SELECT pid FROM pg_stat_activity \
+                WHERE datname = current_database() AND query = 'COMMIT' AND wait_event = 'PgSleep'",
+            )
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if let Some(pid) = pid {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let started = std::time::Instant::now();
+    // Advance only the HTTP work clock; PostgreSQL's real timeout is unchanged.
+    tokio::time::pause();
+    tokio::time::advance(messages::NOTIFICATION_TIMEOUT).await;
+    tokio::time::resume();
+    assert_eq!(
+        sending.await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    closed(&mut before, 1011).await;
+    let locks: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE pid = $1")
+        .bind(pid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        locks > 0,
+        "socket abandonment alone must leave the injected COMMIT unresolved"
+    );
+    let mut between = f.server.connect(&f.token).await;
+    subscribe(&mut between, channel, 0).await;
+    tokio::select! {
+        _ = waiting_for_commit(&pool, pid) => {},
+        stale = event(&mut between) => panic!("handoff before COMMIT resolved: {stale}"),
+    }
+    tokio::time::timeout(Duration::from_secs(9), async {
+        loop {
+            let residue: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM pg_stat_activity WHERE pid = $1) + \
+                 (SELECT count(*) FROM pg_locks WHERE pid = $1)",
+            )
+            .bind(pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if residue == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("PostgreSQL must end the disconnected backend and release every lock");
+    eprintln!(
+        "abandoned_commit pid={pid} initial_locks={locks} backend_and_locks_gone_ms={}",
+        started.elapsed().as_millis()
+    );
+    ready(&mut between, channel, 0).await;
+    assert!(
+        messages::replay_page(&pool, f.organization, channel, 0, i64::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("DROP TRIGGER sleep_commit ON messages")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let canonical = send(&f, &f.token, channel, key, "unknown then rolled back").await;
+    assert_eq!(canonical["seq"], 1);
+    assert_eq!(event(&mut between).await["message"], canonical);
+    assert_eq!(
+        send(&f, &f.token, channel, key, "unknown then rolled back").await,
+        canonical
+    );
+    let next = post(&f, channel).await;
+    assert_eq!(next["seq"], 2);
+    assert_eq!(event(&mut between).await["message"], next);
+    let mut replay = f.server.connect(&f.token).await;
+    subscribe(&mut replay, channel, 0).await;
+    assert_eq!(event(&mut replay).await["message"], canonical);
+    assert_eq!(event(&mut replay).await["message"], next);
+    ready(&mut replay, channel, 2).await;
+    f.state.message_delivery.flush().await;
+    silent(&mut between).await;
+    silent(&mut replay).await;
+}

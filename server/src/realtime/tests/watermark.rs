@@ -354,7 +354,11 @@ async fn repeated_send_deadlines_abandon_connections_and_preserve_other_organiza
 ) {
     let app_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
-        .connect_with((*pool.connect_options()).clone())
+        .connect_with(
+            (*pool.connect_options())
+                .clone()
+                .application_name("commit-residue"),
+        )
         .await
         .unwrap();
     let f = fixture(&app_pool).await;
@@ -364,127 +368,212 @@ async fn repeated_send_deadlines_abandon_connections_and_preserve_other_organiza
     let mut before = f.server.connect(&f.token).await;
     subscribe(&mut before, f.channel, 0).await;
     ready(&mut before, f.channel, 0).await;
-    let mut blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(158::bigint)")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    // Disable only this injected COMMIT's lock timeout, so a backend really stays
-    // unresolved across several response deadlines even after its socket is gone.
+    let mut channels = vec![f.channel];
+    for _ in 0..3 {
+        channels.push(channel(&pool, f.organization, f.member, false).await);
+    }
+    // Non-lock COMMIT work: leave ALL production timeouts intact. A lock_timeout
+    // alone cannot stop this, even after the app drops the client socket.
     sqlx::raw_sql(&format!(
         "CREATE FUNCTION hold_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN IF NEW.channel_id = '{}'::uuid THEN \
-         PERFORM set_config('lock_timeout', '0', true); \
-         PERFORM pg_advisory_xact_lock(158::bigint); END IF; RETURN NEW; END $$; \
+         BEGIN IF NEW.organization_id = '{}'::uuid THEN \
+         PERFORM pg_sleep(60); END IF; RETURN NEW; END $$; \
          CREATE CONSTRAINT TRIGGER hold_commit AFTER INSERT ON messages \
          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION hold_commit();",
-        f.channel,
+        f.organization,
     ))
     .execute(&pool)
     .await
     .unwrap();
-    let key = Uuid::new_v4();
+    let keys: HashMap<_, _> = channels
+        .iter()
+        .map(|channel| (*channel, Uuid::new_v4()))
+        .collect();
     let address = f.server.address;
-    let channel = f.channel;
-    let started = tokio::time::Instant::now();
-    let mut peak_held = 0;
-    for round in 0..3 {
-        let token = f.token.clone();
-        let sending = tokio::spawn(async move {
-            http_status(
-                address,
-                &token,
-                channel,
-                Some(json!({"client_message_id": key, "body": "held commit"})),
-                "500 Internal Server Error",
-            )
-            .await
-        });
-        // Keep probing for the whole deadline, rather than only before 10 s.
-        for tick in 0..11 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            tokio::time::timeout(Duration::from_secs(2), async {
-                let sent = http_json(
+    let mut residue = Vec::new();
+    let mut fault_pids = std::collections::BTreeSet::new();
+    let mut probes = 0;
+    for (round, batch) in [
+        vec![f.channel],
+        vec![f.channel],
+        vec![f.channel],
+        channels[1..].to_vec(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let started = std::time::Instant::now();
+        let mut sending = tokio::task::JoinSet::new();
+        for channel in batch {
+            let key = keys[&channel];
+            let token = f.token.clone();
+            sending.spawn(async move {
+                http_status(
                     address,
-                    &foreign_token,
-                    foreign_channel,
-                    Some(json!({"client_message_id": Uuid::new_v4(), "body": "independent"})),
+                    &token,
+                    channel,
+                    Some(json!({"client_message_id": key, "body": "held commit"})),
+                    "500 Internal Server Error",
                 )
-                .await;
-                let seq = round * 11 + tick + 1;
-                assert_eq!(sent["seq"], seq);
-                let page = http_json(address, &foreign_token, foreign_channel, None).await;
-                assert_eq!(page["messages"][seq as usize - 1], sent);
-                let mut socket = connect(address, &foreign_token).await;
-                subscribe(&mut socket, foreign_channel, seq).await;
-                ready(&mut socket, foreign_channel, seq).await;
-            })
-            .await
-            .expect("another Organization's HTTP reads/writes/subscriptions must keep working");
-            // Pool returns include an asynchronous readiness check; wait only for
-            // that cleanup, never for the stuck transaction to finish.
-            tokio::time::timeout(Duration::from_millis(500), async {
-                while app_pool.size() - app_pool.num_idle() as u32 > 1 {
+                .await
+            });
+        }
+        if round == 0 {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while sleeping_commits(&pool).await.is_empty() {
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("timed-out work retained pool connections");
-            let held = app_pool.size() - app_pool.num_idle() as u32;
-            peak_held = peak_held.max(held);
-            assert!(
-                held <= 1,
-                "timed-out work retained pool connections: {held}"
-            );
-        }
-        tokio::time::timeout(Duration::from_secs(2), sending)
-            .await
-            .unwrap()
             .unwrap();
+        }
+        let mut peak_backends = 0;
+        tokio::time::timeout(Duration::from_secs(13), async {
+            while !sending.is_empty() {
+                let pids = sleeping_commits(&pool).await;
+                peak_backends = peak_backends.max(pids.len());
+                fault_pids.extend(pids);
+                tokio::select! {
+                    result = sending.join_next() => { result.unwrap().unwrap(); continue; }
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let sent = http_json(
+                        address,
+                        &foreign_token,
+                        foreign_channel,
+                        Some(json!({"client_message_id": Uuid::new_v4(), "body": "independent"})),
+                    )
+                    .await;
+                    let seq = probes + 1;
+                    assert_eq!(sent["seq"], seq);
+                    let page = http_json(address, &foreign_token, foreign_channel, None).await;
+                    assert_eq!(page["messages"][seq as usize - 1], sent);
+                    let mut socket = connect(address, &foreign_token).await;
+                    subscribe(&mut socket, foreign_channel, seq).await;
+                    ready(&mut socket, foreign_channel, seq).await;
+                })
+                .await
+                .expect("another Organization's HTTP reads/writes/subscriptions must keep working");
+                probes += 1;
+            }
+        })
+        .await
+        .unwrap();
+        // Wait for asynchronous pool returns, not for a stranded PostgreSQL COMMIT.
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while app_pool.size() - app_pool.num_idle() as u32 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed-out work retained pool connections");
+        let remaining = sleeping_commits(&pool).await;
+        fault_pids.extend(remaining.iter().copied());
+        let (backends, locks): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)), \
+             (SELECT count(*) FROM pg_locks WHERE pid = ANY($1))",
+        )
+        .bind(fault_pids.iter().copied().collect::<Vec<_>>())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        residue.push((backends, locks));
+        eprintln!(
+            "commit_residue round={round} elapsed_ms={} peak_sleeping_backends={peak_backends} remaining_backends={backends} remaining_locks={locks} held_pool_connections=0 probes={probes}",
+            started.elapsed().as_millis()
+        );
         if round == 0 {
             closed(&mut before, 1011).await;
         }
     }
-    assert!(started.elapsed() >= Duration::from_secs(33));
-    assert_eq!(peak_held, 1);
-    // A local socket close need not decide the server-side COMMIT. Recovery still
-    // uses #135's barrier and canonical key, whether it committed or rolled back.
-    blocker.commit().await.unwrap();
-    let canonical = http_json(
-        address,
-        &f.token,
-        channel,
-        Some(json!({"client_message_id": key, "body": "held commit"})),
-    )
-    .await;
-    assert_eq!(canonical["seq"], 1);
+    // Clean up even when run as a negative control against the original code.
+    for pid in &fault_pids {
+        sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid = $1")
+            .bind(pid)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let remaining: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)) + \
+                 (SELECT count(*) FROM pg_locks WHERE pid = ANY($1))",
+            )
+            .bind(fault_pids.iter().copied().collect::<Vec<_>>())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if remaining == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
-        http_json(
+        residue,
+        vec![(0, 0); 4],
+        "PostgreSQL COMMITs outlived HTTP responses"
+    );
+    assert!(
+        fault_pids.len() >= 6,
+        "each retry must reach a fresh COMMIT"
+    );
+    sqlx::query("DROP TRIGGER hold_commit ON messages")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for channel in channels {
+        let key = keys[&channel];
+        let canonical = http_json(
             address,
             &f.token,
             channel,
-            Some(json!({"client_message_id": key, "body": "held commit"}))
+            Some(json!({"client_message_id": key, "body": "held commit"})),
         )
-        .await,
-        canonical
-    );
-    let next = http_json(
-        address,
-        &f.token,
-        channel,
-        Some(json!({"client_message_id": Uuid::new_v4(), "body": "next"})),
-    )
-    .await;
-    assert_eq!(next["seq"], 2);
-    let mut recovered = connect(address, &f.token).await;
-    subscribe(&mut recovered, channel, 0).await;
-    assert_eq!(event(&mut recovered).await["message"], canonical);
-    assert_eq!(event(&mut recovered).await["message"], next);
-    ready(&mut recovered, channel, 2).await;
-    drop(recovered);
+        .await;
+        assert_eq!(canonical["seq"], 1);
+        assert_eq!(
+            http_json(
+                address,
+                &f.token,
+                channel,
+                Some(json!({"client_message_id": key, "body": "held commit"}))
+            )
+            .await,
+            canonical
+        );
+        let next = http_json(
+            address,
+            &f.token,
+            channel,
+            Some(json!({"client_message_id": Uuid::new_v4(), "body": "next"})),
+        )
+        .await;
+        assert_eq!(next["seq"], 2);
+        let mut recovered = connect(address, &f.token).await;
+        subscribe(&mut recovered, channel, 0).await;
+        assert_eq!(event(&mut recovered).await["message"], canonical);
+        assert_eq!(event(&mut recovered).await["message"], next);
+        ready(&mut recovered, channel, 2).await;
+        drop(recovered);
+    }
     drop(before);
     drop(f);
     app_pool.close().await;
+}
+
+async fn sleeping_commits(pool: &PgPool) -> Vec<i32> {
+    sqlx::query_scalar(
+        "SELECT pid FROM pg_stat_activity WHERE datname = current_database() \
+        AND application_name = 'commit-residue' AND query = 'COMMIT' AND wait_event = 'PgSleep'",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
 }
 
 #[sqlx::test]

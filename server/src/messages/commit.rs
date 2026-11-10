@@ -59,12 +59,16 @@ pub(super) async fn lock(
     shared: bool,
 ) -> Result<(), sqlx::Error> {
     let sql = if shared {
-        // Materialization makes the transaction-local timeout precede the lock.
-        "WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true)) \
+        // PostgreSQL 18: bound the whole remaining transaction, including COMMIT
+        // and disconnected backends, below the app's 10 s work deadline.
+        // Materialization makes both local settings precede the lock.
+        "WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true), \
+         set_config('transaction_timeout', '8s', true)) \
          SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) \
          FROM timeout"
     } else {
-        "WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true)) \
+        "WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true), \
+         set_config('transaction_timeout', '8s', true)) \
          SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) \
          FROM timeout"
     };
@@ -121,27 +125,37 @@ mod tests {
     use super::*;
 
     #[sqlx::test]
-    async fn both_barriers_set_transaction_local_lock_timeout(pool: sqlx::PgPool) {
+    async fn both_barriers_set_transaction_local_timeouts(pool: sqlx::PgPool) {
         let mut connection = pool.acquire().await.unwrap();
-        let original: String = sqlx::query_scalar("SHOW lock_timeout")
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
+        let original: (String, String) = sqlx::query_as(
+            "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
         for shared in [true, false] {
             let mut tx = sqlx::Connection::begin(&mut *connection).await.unwrap();
             lock(&mut tx, Uuid::new_v4(), Uuid::new_v4(), shared)
                 .await
                 .unwrap();
-            let timeout: String = sqlx::query_scalar("SHOW lock_timeout")
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-            assert_eq!(timeout, "10s");
-            tx.rollback().await.unwrap();
-            let restored: String = sqlx::query_scalar("SHOW lock_timeout")
-                .fetch_one(&mut *connection)
-                .await
-                .unwrap();
+            let timeouts: (String, String) = sqlx::query_as(
+                "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            assert_eq!(timeouts, ("10s".into(), "8s".into()));
+            if shared {
+                tx.commit().await.unwrap();
+            } else {
+                tx.rollback().await.unwrap();
+            }
+            let restored: (String, String) = sqlx::query_as(
+                "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+            )
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
             assert_eq!(restored, original);
         }
     }
@@ -151,7 +165,9 @@ mod tests {
         for code in ["23503", "23514", "40000", "40001", "40002", "40P01"] {
             assert!(rollback_code(code), "{code}");
         }
-        for code in ["40003", "08007", "57P01", "58030", "P0001"] {
+        for code in [
+            "40003", "08007", "57014", "57P01", "25P04", "58030", "P0001",
+        ] {
             assert!(!rollback_code(code), "{code}");
         }
     }
