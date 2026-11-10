@@ -133,7 +133,10 @@ async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lo
     let f = fixture(&pool).await;
     let mut queues = Vec::new();
     for _ in 0..512 {
-        let mut queue = f.state.message_delivery.queue(f.organization, f.member, 1);
+        let mut queue = f
+            .state
+            .message_delivery
+            .queue(f.organization, (f.member, 0), 1);
         queue.subscribe(f.channel);
         queues.push(queue);
     }

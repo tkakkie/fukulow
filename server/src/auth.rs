@@ -488,12 +488,7 @@ impl FromRequestParts<AppState> for AccountAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = credential(&parts.headers)?;
-        if !(64..=128).contains(&token.len()) || !token.bytes().all(|byte| byte.is_ascii_graphic())
-        {
-            return Err(ApiError::unauthorized());
-        }
-        let token_hash = Sha256::digest(token.as_bytes()).to_vec();
+        let token_hash = credential_hash(&parts.headers)?;
         let account_id = sqlx::query_scalar(
             "SELECT account_id FROM account_sessions WHERE token_hash = $1 AND expires_at > now()",
         )
@@ -521,7 +516,7 @@ impl FromRequestParts<AppState> for Auth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let account = AccountAuth::from_request_parts(parts, state).await?;
+        let token_hash = credential_hash(&parts.headers)?;
         let Path(params) =
             Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
                 .await
@@ -531,43 +526,55 @@ impl FromRequestParts<AppState> for Auth {
             .ok_or_else(ApiError::bad_request)?
             .parse()
             .map_err(|_| ApiError::bad_request())?;
-        let row = sqlx::query_as::<_, (Uuid,String,Role,String,i64)>(
-            "SELECT u.id, u.name, u.role, o.name, u.membership_revision FROM users u JOIN organizations o USING (organization_id) WHERE u.organization_id = $1 AND u.account_id = $2 AND u.deactivated_at IS NULL"
-        ).bind(organization).bind(account.account_id).fetch_optional(&state.pool).await?
-            .ok_or(ApiError(StatusCode::NOT_FOUND,"organization_unavailable",None))?;
+        let row = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                Option<Uuid>,
+                Option<String>,
+                Option<Role>,
+                Option<String>,
+                Option<i64>,
+            ),
+        >(
+            "SELECT s.account_id, u.id, u.name, u.role, o.name, u.membership_revision \
+             FROM account_sessions s LEFT JOIN users u ON u.account_id = s.account_id \
+             AND u.organization_id = $2 AND u.deactivated_at IS NULL \
+             LEFT JOIN organizations o ON o.organization_id = u.organization_id \
+             WHERE s.token_hash = $1 AND s.expires_at > now()",
+        )
+        .bind(&token_hash)
+        .bind(organization)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
+        let unavailable = || ApiError(StatusCode::NOT_FOUND, "organization_unavailable", None);
         Ok(Self {
             identity: Identity {
                 organization: Organization {
                     organization_id: organization,
-                    name: row.3,
+                    name: row.4.ok_or_else(unavailable)?,
                 },
                 member: Member {
-                    id: row.0,
-                    name: row.1,
-                    role: row.2,
+                    id: row.1.ok_or_else(unavailable)?,
+                    name: row.2.ok_or_else(unavailable)?,
+                    role: row.3.ok_or_else(unavailable)?,
                 },
             },
-            account_id: account.account_id,
-            membership_revision: row.4,
-            token_hash: account.token_hash,
+            account_id: row.0,
+            membership_revision: row.5.ok_or_else(unavailable)?,
+            token_hash,
         })
     }
 }
 
-pub(crate) async fn member_revision(
-    pool: &sqlx::PgPool,
-    organization: Uuid,
-    member: Uuid,
-) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar("SELECT membership_revision FROM users WHERE organization_id = $1 AND id = $2 AND deactivated_at IS NULL").bind(organization).bind(member).fetch_optional(pool).await
-}
-pub(crate) async fn active_members(
-    pool: &sqlx::PgPool,
-    organization: Uuid,
-    members: &[Uuid],
-) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
-    sqlx::query_as("SELECT id, membership_revision FROM users WHERE organization_id = $1 AND id = ANY($2) AND deactivated_at IS NULL").bind(organization).bind(members).fetch_all(pool).await
-}
+// Owned here so Channel authorization can compose one query without owning Member SQL.
+// $1 is always the Organization; callers filter the captured Member/revision pairs.
+// A send retains this shared row lock through COMMIT; deactivation cannot commit
+// between its authorization and persistence. Ordinary reads release it with the query.
+pub(crate) const CURRENT_MEMBER_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND id = $2 AND membership_revision = $4 AND deactivated_at IS NULL FOR SHARE";
+
+pub(crate) const ACTIVE_MEMBERS_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND deactivated_at IS NULL";
 
 /// Foundation for Member administration (#144/#149); no removal endpoint is exposed.
 pub async fn deactivate_member(
@@ -582,6 +589,14 @@ pub async fn deactivate_member(
         if let Some(revision) = revision { state.session_changes.membership_revoked(organization,account,revision); }
         Ok(())
     }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
+}
+
+fn credential_hash(headers: &HeaderMap) -> Result<Vec<u8>, ApiError> {
+    let token = credential(headers)?;
+    if !(64..=128).contains(&token.len()) || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(Sha256::digest(token.as_bytes()).to_vec())
 }
 
 fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -623,8 +638,8 @@ fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 #[utoipa::path(get, path = "/api/v1/me", security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, description = "Current session's Member and Organization identity", body = AccountIdentity),
-    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+    responses((status = 200, description = "Current Account and active Organizations", body = AccountIdentity),
+    (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
     (status = 500, description = "Database failure while resolving the session identity", body = ErrorBody)))]
 pub async fn me(State(state): State<AppState>, auth: AccountAuth) -> Result<Response, ApiError> {
     Ok((
@@ -636,6 +651,7 @@ pub async fn me(State(state): State<AppState>, auth: AccountAuth) -> Result<Resp
 
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/me", params(("org" = Uuid, Path, description = "Organization id")), security(("cookie" = []), ("bearer" = [])),
  responses((status=200, description="Active Member in this Organization",body=Identity),
+ (status=400,description="Malformed Organization id",body=ErrorBody),
  (status=401,description="Account Session ended",body=ErrorBody),
  (status=404,description="Non-Member, unknown Organization or deactivated Member: organization_unavailable",body=ErrorBody),
  (status=500,description="Database failure",body=ErrorBody)))]
@@ -645,7 +661,7 @@ pub async fn organization_me(auth: Auth) -> impl IntoResponse {
 
 #[utoipa::path(delete, path = "/api/v1/session", security(("cookie" = []), ("bearer" = [])),
     responses((status = 204, description = "Session revoked and cookie cleared", headers(("Set-Cookie" = String))),
-    (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+    (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
     (status = 500, description = "Database or worker failure while resolving or revoking the session", body = ErrorBody)))]
 pub async fn sign_out(
     State(state): State<AppState>,

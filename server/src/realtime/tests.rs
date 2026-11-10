@@ -83,7 +83,11 @@ impl Server {
         let mut request = format!(
             "ws://{}{}",
             self.address,
-            scoped_path("/api/v1/ws", bearer.or(cookie).unwrap_or(""))
+            bearer
+                .or(cookie)
+                .filter(|token| token.contains('.'))
+                .map(|token| scoped_path("/api/v1/ws", token))
+                .unwrap_or_else(|| format!("/api/v1/orgs/{}/ws", Uuid::nil()))
         )
         .into_client_request()
         .unwrap();
@@ -309,7 +313,13 @@ async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_token
     let router = crate::app(state(&pool));
     for path in ["/api/v1/ws", "/api/v1/ws?token=ignored"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
-            let mut builder = Request::get(scoped_path(path, ""));
+            let mut builder = Request::get(path.replacen(
+                "/api/v1/",
+                &format!("/api/v1/orgs/{}/", Uuid::nil()),
+                1,
+            ))
+            .header(header::HOST, "chat.example")
+            .header(header::ORIGIN, "http://chat.example");
             if let Some(value) = authorization {
                 builder = builder.header(header::AUTHORIZATION, value);
             }
@@ -369,7 +379,7 @@ async fn invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_
 #[sqlx::test]
 async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(pool: PgPool) {
     let f = fixture(&pool).await;
-    rejected(f.server.handshake(None, None, None).await, 401);
+    rejected(f.server.handshake(None, None, None).await, 403);
     let query_url = format!(
         "ws://{}/api/v1/orgs/{}/ws?token={}",
         f.server.address, f.organization, f.token
@@ -378,7 +388,7 @@ async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(po
         tokio_tungstenite::connect_async(query_url)
             .await
             .map(|(client, _)| client),
-        401,
+        403,
     );
     let invalid_upgrade = request(&f.app, "GET", "/api/v1/ws", &f.token, Value::Null).await;
     assert_eq!(invalid_upgrade.status(), StatusCode::BAD_REQUEST);
@@ -566,7 +576,10 @@ async fn rollback_and_idempotent_retry_emit_no_notification_and_publish_sees_com
     pool: PgPool,
 ) {
     let f = fixture(&pool).await;
-    let mut queue = f.state.message_delivery.queue(f.organization, f.member, 8);
+    let mut queue = f
+        .state
+        .message_delivery
+        .queue(f.organization, (f.member, 0), 8);
     queue.subscribe(f.channel);
     sqlx::raw_sql("CREATE FUNCTION fail_realtime_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.body = 'rollback' THEN RAISE EXCEPTION 'injected'; END IF; RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER fail_realtime_insert AFTER INSERT ON messages DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_realtime_insert();").execute(&pool).await.unwrap();
     let response = request(
@@ -831,7 +844,10 @@ async fn publication_waits_for_commit_even_when_http_request_is_cancelled(pool: 
         .await
         .unwrap();
     sqlx::raw_sql("CREATE FUNCTION pause_realtime_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1818::bigint); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER pause_realtime_commit AFTER INSERT ON messages DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION pause_realtime_commit();").execute(&pool).await.unwrap();
-    let mut queue = f.state.message_delivery.queue(f.organization, f.member, 8);
+    let mut queue = f
+        .state
+        .message_delivery
+        .queue(f.organization, (f.member, 0), 8);
     queue.subscribe(f.channel);
     let app = f.app.clone();
     let token = f.token.clone();
@@ -922,9 +938,38 @@ fn scoped_path(path: &str, token: &str) -> String {
         let organization = token
             .split_once('.')
             .map(|(id, _)| id)
-            .unwrap_or("00000000-0000-0000-0000-000000000000");
+            .expect("test token must carry its Organization scope");
         path.replacen("/api/v1/", &format!("/api/v1/orgs/{organization}/"), 1)
     } else {
         path.to_owned()
+    }
+}
+
+#[tokio::test]
+async fn cookie_origin_is_checked_before_auth_and_organization_without_database() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let app = crate::app(state(&pool));
+    for org in [Uuid::nil().to_string(), "malformed".into()] {
+        for cookie in ["invalid".to_owned(), "a".repeat(64)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/api/v1/orgs/{org}/ws"))
+                        .header(header::COOKIE, format!("fukulow_session={cookie}"))
+                        .header(header::HOST, "chat.example")
+                        .header(header::ORIGIN, "https://foreign.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap())
+                    .unwrap();
+            assert_eq!(body, json!({"error":"origin_not_allowed"}));
+        }
     }
 }

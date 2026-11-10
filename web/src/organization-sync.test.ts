@@ -34,7 +34,7 @@ it('4003 is terminal for only its Organization, fails pending sends and starts n
 it.each([
   { ok: false, kind: 'network' } as const,
   { ok: false, kind: 'http', status: 503 } as const,
-  { ok: false, kind: 'http', status: 403, error: 'origin_rejected' } as const,
+  { ok: false, kind: 'http', status: 403, error: 'origin_not_allowed' } as const,
   { ok: false, kind: 'http', status: 404, error: 'channel_not_found' } as const,
   { ok: true, data: {} } as const,
 ])('a failed handshake with REST result %j backs off without inferring Membership loss', async result => {
@@ -93,6 +93,11 @@ it('a REST 401 after a handshake failure ends the Account Session', async () => 
   client.sockets[0].onClose(1006)
   await flush()
   expect(onSessionEnded).toHaveBeenCalledOnce()
+  expect(client.sync.get()).toMatchObject({ session: 'sign_in_required', running: false, connected: false, timers: {} })
+  expect(client.sockets[0].closed).toBe(true)
+  await vi.advanceTimersByTimeAsync(120_000)
+  expect(client.sockets).toHaveLength(1)
+  expect(vi.getTimerCount()).toBe(0)
   await client.sync.close()
 })
 

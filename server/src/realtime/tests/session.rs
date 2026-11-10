@@ -424,3 +424,78 @@ async fn websocket_organization_denials_are_identical_for_nonmember_unknown_and_
         }
     }
 }
+
+#[sqlx::test]
+async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool: PgPool) {
+    let f = fixture(&pool).await;
+    post(&f, f.channel).await;
+    let changes = crate::auth::SessionChanges::with_recheck_timing(
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+    );
+    let fallback = changes.pause_fallback();
+    let server = Server::start(crate::app(AppState {
+        session_changes: changes,
+        ..f.state.clone()
+    }))
+    .await;
+    let mut live = server.connect(&f.token).await;
+    subscribe(&mut live, f.channel, 1).await;
+    ready(&mut live, f.channel, 1).await;
+    let mut idle = server.connect(&f.token).await;
+    // A control round-trip establishes that connect-time checks finished before revocation.
+    control(
+        &mut idle,
+        ClientMessage::Subscribe {
+            channel_id: Uuid::new_v4(),
+            after_seq: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(event(&mut idle).await["code"], "channel_not_found");
+    let mut replay = server.connect(&f.token).await;
+    let gate = pause(f.channel);
+    subscribe(&mut replay, f.channel, 0).await;
+    entered(&gate).await;
+    fallback.entered().await;
+    // Lost signal, followed by reactivation before the worker is permitted to check.
+    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
+        .bind(f.organization)
+        .bind(f.member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2")
+        .bind(f.organization)
+        .bind(f.member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    gate.release.add_permits(1);
+    closed(&mut replay, CLOSE_ORGANIZATION_UNAVAILABLE).await;
+    subscribe(&mut idle, f.channel, 0).await;
+    closed(&mut idle, CLOSE_ORGANIZATION_UNAVAILABLE).await;
+    // Include both epochs in the same fan-out snapshot, independently of registry signals.
+    let mut current_epoch = f
+        .state
+        .message_delivery
+        .queue(f.organization, (f.member, 1), 8);
+    current_epoch.subscribe(f.channel);
+    // HTTP resolves the new revision, but fan-out must still exclude the old socket.
+    let canonical = post(&f, f.channel).await;
+    f.state.message_delivery.flush().await;
+    let delivered = tokio::time::timeout(Duration::from_secs(5), current_epoch.events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::to_value(delivered.as_ref()).unwrap(), canonical);
+    silent(&mut live).await;
+    let mut current = server.connect(&f.token).await;
+    // Registering the new epoch also signals the old epoch, independently of fallback.
+    closed(&mut live, CLOSE_ORGANIZATION_UNAVAILABLE).await;
+    subscribe(&mut current, f.channel, 1).await;
+    assert_eq!(event(&mut current).await["message"], canonical);
+    ready(&mut current, f.channel, 2).await;
+    fallback.release();
+}

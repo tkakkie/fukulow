@@ -106,8 +106,8 @@ pub struct MessagePage {
     params(("org" = Uuid, Path, description = "Organization id"), ("id" = Uuid, Path, description = "Channel id"), ListMessagesQuery),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Page of Channel Messages in ascending sequence order with directional has_more", body = MessagePage),
-        (status = 400, description = "Invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined", body = ErrorBody),
-        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
         (status = 500, description = "Database failure while resolving the session, checking Channel visibility, or listing Messages", body = ErrorBody)))]
 pub async fn list_messages(
@@ -123,7 +123,7 @@ pub async fn list_messages(
     require_visible(
         &state.pool,
         organization_id,
-        auth.identity.member.id,
+        (auth.identity.member.id, auth.membership_revision),
         channel_id,
     )
     .await?;
@@ -172,8 +172,8 @@ pub async fn list_messages(
     params(("org" = Uuid, Path, description = "Organization id"), ("id" = Uuid, Path, description = "Channel id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, description = "Confirmed Message; an idempotent retry returns the same Message and sequence", body = Message),
-        (status = 400, description = "Invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values", body = ErrorBody),
-        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
         (status = 409, description = "Client message id reused with different body or channel", body = ErrorBody),
         (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
@@ -190,7 +190,7 @@ pub async fn send_message(
     let Path((_, channel_id)) = path.map_err(|_| MessageError::InvalidInput)?;
     input.validate()?;
     let organization_id = auth.identity.organization.organization_id;
-    let sender = auth.identity.member.id;
+    let sender = (auth.identity.member.id, auth.membership_revision);
     require_visible(&state.pool, organization_id, sender, channel_id).await?;
     let waiter = state
         .message_delivery
@@ -249,6 +249,7 @@ impl ListMessagesQuery {
 pub enum MessageError {
     InvalidInput,
     NotFound,
+    OrganizationUnavailable,
     Conflict,
     AdmissionRejected,
     Database(sqlx::Error),
@@ -265,6 +266,7 @@ impl IntoResponse for MessageError {
         let (status, error) = match self {
             Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
             Self::NotFound => (StatusCode::NOT_FOUND, "channel not found"),
+            Self::OrganizationUnavailable => (StatusCode::NOT_FOUND, "organization_unavailable"),
             Self::Conflict => (
                 StatusCode::CONFLICT,
                 "client message id reused with different body or channel",
@@ -298,16 +300,17 @@ impl IntoResponse for MessageError {
     }
 }
 
-pub(crate) async fn require_visible(
-    pool: &sqlx::PgPool,
+pub(crate) async fn require_visible<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
     organization_id: Uuid,
-    member_id: Uuid,
+    member: (Uuid, i64),
     channel_id: Uuid,
 ) -> Result<(), MessageError> {
-    if !channels::is_visible(pool, organization_id, member_id, channel_id).await? {
-        return Err(MessageError::NotFound);
+    match channels::is_visible(executor, organization_id, member, channel_id).await? {
+        Some(true) => Ok(()),
+        Some(false) => Err(MessageError::NotFound),
+        None => Err(MessageError::OrganizationUnavailable),
     }
-    Ok(())
 }
 
 async fn existing<'e, E: sqlx::PgExecutor<'e>>(
@@ -343,7 +346,7 @@ async fn persist(
     pool: &sqlx::PgPool,
     delivery: &Delivery,
     organization_id: Uuid,
-    sender: Uuid,
+    sender: (Uuid, i64),
     channel_id: Uuid,
     input: SendMessageRequest,
     waiter: admission::SendWaiter,
@@ -364,12 +367,14 @@ async fn persist_admitted(
     pool: &sqlx::PgPool,
     delivery: &Delivery,
     organization_id: Uuid,
-    sender: Uuid,
+    sender: (Uuid, i64),
     channel_id: Uuid,
     input: SendMessageRequest,
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN").await?;
+    require_visible(tx.connection()?, organization_id, sender, channel_id).await?;
+    let sender = sender.0;
     if let Some(message) = existing(
         tx.connection()?,
         organization_id,

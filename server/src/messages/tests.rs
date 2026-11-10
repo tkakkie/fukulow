@@ -878,9 +878,11 @@ fn scoped_path(path: &str, token: &str) -> String {
         let organization = token
             .split_once('.')
             .map(|(id, _)| id)
-            .unwrap_or("00000000-0000-0000-0000-000000000000");
+            .expect("test token must carry its Organization scope");
         path.replacen("/api/v1/", &format!("/api/v1/orgs/{organization}/"), 1)
     } else {
         path.to_owned()
     }
 }
+
+mod membership;

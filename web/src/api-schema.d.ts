@@ -450,7 +450,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Current session's Member and Organization identity */
+            /** @description Current Account and active Organizations */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -459,7 +459,7 @@ export interface operations {
                     "application/json": components["schemas"]["AccountIdentity"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -500,7 +500,16 @@ export interface operations {
                     "application/json": components["schemas"]["ChannelList"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Malformed Organization id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -554,7 +563,7 @@ export interface operations {
                     "application/json": components["schemas"]["Channel"];
                 };
             };
-            /** @description Invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace */
+            /** @description Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -563,7 +572,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -649,7 +658,7 @@ export interface operations {
                     "application/json": components["schemas"]["MessagePage"];
                 };
             };
-            /** @description Invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined */
+            /** @description Malformed Organization id, invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -658,7 +667,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -714,7 +723,7 @@ export interface operations {
                     "application/json": components["schemas"]["Message"];
                 };
             };
-            /** @description Invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
+            /** @description Malformed Organization id, invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -723,7 +732,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -811,6 +820,15 @@ export interface operations {
                     "application/json": components["schemas"]["Identity"];
                 };
             };
+            /** @description Malformed Organization id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Account Session ended */
             401: {
                 headers: {
@@ -859,7 +877,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Invalid WebSocket upgrade request after successful authentication and Origin validation */
+            /** @description Malformed Organization id, or invalid WebSocket upgrade after Origin validation and successful authentication */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -868,7 +886,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade */
+            /** @description Missing, invalid, expired, or revoked Account Session credential before WebSocket upgrade */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -877,7 +895,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Cookie Origin missing or not allowed: origin_not_allowed */
+            /** @description Cookie Origin missing or not allowed, checked before authentication and Organization resolution: origin_not_allowed */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1005,7 +1023,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;

@@ -4,7 +4,7 @@ use axum::{
         State, WebSocketUpgrade,
         ws::{CloseFrame, Message as Frame, WebSocket, rejection::WebSocketUpgradeRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -85,30 +85,17 @@ pub enum ServerEvent {
     params(("org" = Uuid, Path, description = "Organization id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 101, description = "WebSocket upgrade; frames use ClientMessage / ServerEvent"),
-        (status = 400, description = "Invalid WebSocket upgrade request after successful authentication and Origin validation", body = ErrorBody),
-        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade", body = ErrorBody),
-        (status = 403, description = "Cookie Origin missing or not allowed: origin_not_allowed", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, or invalid WebSocket upgrade after Origin validation and successful authentication", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential before WebSocket upgrade", body = ErrorBody),
+        (status = 403, description = "Cookie Origin missing or not allowed, checked before authentication and Organization resolution: origin_not_allowed", body = ErrorBody),
         (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
         (status = 500, description = "Database failure while resolving the session before WebSocket upgrade", body = ErrorBody)))]
 pub async fn upgrade(
     State(state): State<AppState>,
+    _origin: origin::CheckedOrigin,
     auth: Auth,
-    headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    if !state
-        .ws_allowed_origins
-        .permits(&headers, state.cookie_secure)
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(ErrorBody {
-                error: "origin_not_allowed".into(),
-            }),
-        )
-            .into_response();
-    }
     let ws = match ws {
         Ok(ws) => ws,
         Err(_) => {
@@ -152,7 +139,7 @@ async fn connected_with_lifecycle(
     // A stopped fallback worker must never admit an unmonitored subscription.
     let queue = state.message_delivery.queue(
         auth.identity.organization.organization_id,
-        auth.identity.member.id,
+        (auth.identity.member.id, auth.membership_revision),
         LIVE_QUEUE_CAPACITY,
     );
     let mut overflow = queue.overflow.clone();

@@ -52,7 +52,8 @@ pub struct ChannelList {
     params(("org" = Uuid, Path, description = "Organization id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Public Channels and private Channels the Member belongs to in their Organization", body = ChannelList),
-        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
         (status = 500, description = "Database failure while resolving the session or listing visible Channels", body = ErrorBody)))]
 pub async fn list_channels(
@@ -86,8 +87,8 @@ pub async fn list_channels(
     params(("org" = Uuid, Path, description = "Organization id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, description = "Created Channel; a private Channel includes its creator as a Member", body = Channel),
-        (status = 400, description = "Invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace", body = ErrorBody),
-        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 409, description = "Channel name already exists", body = ErrorBody),
         (status = 413, description = "Channel creation request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Channel creation requires an application/json content type", body = ErrorBody),
@@ -161,70 +162,54 @@ pub async fn create_channel(
         .into_response())
 }
 
-// Always resolve the Organization/Channel boundary from current database state.
-async fn visibility(
-    pool: &sqlx::PgPool,
+// None distinguishes Membership loss from an unavailable Channel in one snapshot.
+pub(crate) async fn is_visible<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
     organization_id: Uuid,
+    member: (Uuid, i64),
     channel_id: Uuid,
-) -> Result<Option<ChannelVisibility>, sqlx::Error> {
-    sqlx::query_scalar("SELECT visibility FROM channels WHERE organization_id = $1 AND id = $2")
+) -> Result<Option<bool>, sqlx::Error> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM channels c WHERE c.organization_id = $1 AND c.id = $3 \
+         AND (c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
+         WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
+         AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision))) \
+         FROM ({}) u WHERE u.id = $2 AND u.membership_revision = $4",
+        auth::CURRENT_MEMBER_SQL
+    );
+    sqlx::query_scalar(&sql)
         .bind(organization_id)
+        .bind(member.0)
         .bind(channel_id)
-        .fetch_optional(pool)
+        .bind(member.1)
+        .fetch_optional(executor)
         .await
 }
 
-// Keep channel visibility SQL here for message reads and sends.
-pub(crate) async fn is_visible(
-    pool: &sqlx::PgPool,
-    organization_id: Uuid,
-    member_id: Uuid,
-    channel_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let Some(revision) = auth::member_revision(pool, organization_id, member_id).await? else {
-        return Ok(false);
-    };
-    match visibility(pool, organization_id, channel_id).await? {
-        Some(ChannelVisibility::Public) => return Ok(true),
-        None => return Ok(false),
-        Some(ChannelVisibility::Private) => {}
-    }
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM channels c \
-         WHERE c.organization_id = $1 AND c.id = $3 \
-           AND (c.visibility = 'public' OR EXISTS (\
-               SELECT 1 FROM channel_members cm \
-               WHERE cm.organization_id = c.organization_id \
-                 AND cm.channel_id = c.id AND cm.member_id = $2 AND cm.membership_revision = $4)))",
-    )
-    .bind(organization_id)
-    .bind(member_id)
-    .bind(channel_id)
-    .bind(revision)
-    .fetch_one(pool)
-    .await
-}
-
-// Public delivery needs only the boundary read; private delivery checks all candidates.
+// Match each socket's captured revision, including multiple epochs for the same Member.
 pub(crate) async fn visible_members(
     pool: &sqlx::PgPool,
     organization_id: Uuid,
     channel_id: Uuid,
-    members: &[Uuid],
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    let active = auth::active_members(pool, organization_id, members).await?;
-    let members: Vec<_> = active.iter().map(|(id, _)| *id).collect();
-    match visibility(pool, organization_id, channel_id).await? {
-        Some(ChannelVisibility::Public) => return Ok(members),
-        None => return Ok(Vec::new()),
-        Some(ChannelVisibility::Private) => {}
-    }
-    let revisions: Vec<_> = active.iter().map(|(_, revision)| *revision).collect();
-    sqlx::query_scalar(
-        "SELECT candidate.member_id FROM UNNEST($3::uuid[], $4::bigint[]) AS candidate(member_id, revision) \
-         WHERE EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id = $1 AND cm.channel_id = $2 \
-         AND cm.member_id = candidate.member_id AND cm.membership_revision = candidate.revision)",
-    ).bind(organization_id).bind(channel_id).bind(members).bind(revisions).fetch_all(pool).await
+    members: &[(Uuid, i64)],
+) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
+    let (ids, revisions): (Vec<_>, Vec<_>) = members.iter().copied().unzip();
+    let sql = format!(
+        "SELECT u.id, u.membership_revision FROM UNNEST($3::uuid[], $4::bigint[]) candidate(id, revision) \
+         JOIN ({}) u ON u.id = candidate.id AND u.membership_revision = candidate.revision \
+         JOIN channels c ON c.organization_id = $1 AND c.id = $2 \
+         WHERE c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
+         WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
+         AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision)",
+        auth::ACTIVE_MEMBERS_SQL
+    );
+    sqlx::query_as(&sql)
+        .bind(organization_id)
+        .bind(channel_id)
+        .bind(ids)
+        .bind(revisions)
+        .fetch_all(pool)
+        .await
 }
 
 #[cfg(test)]

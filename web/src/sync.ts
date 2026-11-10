@@ -128,7 +128,7 @@ export function createSync(options: SyncOptions) {
               void request(effect.id, options.checkMembership).then(result => {
                 if (state.connection !== effect.id || !state.running) return
                 if (api.isOrganizationUnavailable(result)) void dispatch({ type: 'organization_unavailable' })
-                else if (!result.ok && result.kind === 'http' && result.status === 401) options.onSessionEnded?.()
+                else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
                 else void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
               }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
             },

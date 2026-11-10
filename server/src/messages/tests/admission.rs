@@ -153,7 +153,7 @@ async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(
         &pool,
         &delivery,
         organization,
-        sender,
+        (sender, 0),
         channel,
         SendMessageRequest {
             client_message_id: key,
@@ -189,7 +189,7 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
         &pool,
         &delivery,
         organization,
-        sender,
+        (sender, 0),
         channel,
         SendMessageRequest {
             client_message_id: Uuid::new_v4(),
@@ -236,7 +236,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
                 &pool,
                 &delivery,
                 organization,
-                sender,
+                (sender, 0),
                 channel,
                 SendMessageRequest {
                     client_message_id: Uuid::new_v4(),
@@ -270,7 +270,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
         &app_pool,
         &delivery,
         organization,
-        sender,
+        (sender, 0),
         channel,
         SendMessageRequest {
             client_message_id: Uuid::new_v4(),

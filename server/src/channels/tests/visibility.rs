@@ -16,37 +16,44 @@ async fn public_authorization_skips_membership_sql_but_checks_organization_and_c
     member(&pool, other, creator, "member").await;
     let nonmember = Uuid::new_v4();
     member(&pool, org, nonmember, "member").await;
-    // If either public path issues membership SQL, it fails deterministically.
+    // Public authorization must not execute private-grant checks, even in a combined query.
     sqlx::query("ALTER TABLE channel_members RENAME TO unavailable_channel_members")
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION membership_query_forbidden() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private grant query executed'; END $$; CREATE VIEW channel_members AS SELECT * FROM unavailable_channel_members WHERE membership_query_forbidden()")
+        .execute(&pool).await.unwrap();
     for reader in [creator, nonmember] {
-        assert!(is_visible(&pool, org, reader, public).await.unwrap());
+        assert!(is_visible(&pool, org, (reader, 0), public).await.unwrap() == Some(true));
     }
     assert_eq!(
-        visible_members(&pool, org, public, &[creator, nonmember])
+        visible_members(&pool, org, public, &[(creator, 0), (nonmember, 0)])
             .await
             .unwrap()
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>(),
-        [creator, nonmember]
+        [(creator, 0), (nonmember, 0)]
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>()
     );
     for (scope, channel) in [(other, public), (org, Uuid::new_v4())] {
-        assert!(!is_visible(&pool, scope, creator, channel).await.unwrap());
         assert!(
-            visible_members(&pool, scope, channel, &[creator])
+            is_visible(&pool, scope, (creator, 0), channel)
+                .await
+                .unwrap()
+                != Some(true)
+        );
+        assert!(
+            visible_members(&pool, scope, channel, &[(creator, 0)])
                 .await
                 .unwrap()
                 .is_empty()
         );
     }
     // The private paths still require membership SQL, including for the creator.
-    assert!(is_visible(&pool, org, creator, private).await.is_err());
+    assert!(is_visible(&pool, org, (creator, 0), private).await.is_err());
     assert!(
-        visible_members(&pool, org, private, &[creator])
+        visible_members(&pool, org, private, &[(creator, 0)])
             .await
             .is_err()
     );
@@ -79,17 +86,27 @@ async fn authorization_reads_current_visibility_and_scopes_private_membership(po
             .execute(&pool)
             .await
             .unwrap();
-        assert!(is_visible(&pool, org, creator, channel).await.unwrap());
+        assert!(is_visible(&pool, org, (creator, 0), channel).await.unwrap() == Some(true));
         assert_eq!(
-            is_visible(&pool, org, reader, channel).await.unwrap(),
+            is_visible(&pool, org, (reader, 0), channel).await.unwrap() == Some(true),
             visibility == "public"
         );
-        let allowed = visible_members(&pool, org, channel, &[creator, reader])
+        let allowed = visible_members(&pool, org, channel, &[(creator, 0), (reader, 0)])
             .await
             .unwrap();
-        assert!(allowed.contains(&creator));
-        assert_eq!(allowed.contains(&reader), visibility == "public");
-        assert!(!is_visible(&pool, other, creator, channel).await.unwrap());
-        assert!(is_visible(&pool, other, reader, channel).await.unwrap());
+        assert!(allowed.contains(&(creator, 0)));
+        assert_eq!(allowed.contains(&(reader, 0)), visibility == "public");
+        assert!(
+            is_visible(&pool, other, (creator, 0), channel)
+                .await
+                .unwrap()
+                != Some(true)
+        );
+        assert!(
+            is_visible(&pool, other, (reader, 0), channel)
+                .await
+                .unwrap()
+                == Some(true)
+        );
     }
 }

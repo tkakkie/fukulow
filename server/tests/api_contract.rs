@@ -21,8 +21,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// Account / Member split adds scoped responses; send admission adds 503.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 59;
+// Account / Member split adds scoped responses and malformed-Organization 400s; send admission adds 503.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 61;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {
@@ -74,7 +74,7 @@ fn added_error_responses_have_error_body_and_meaningful_descriptions() {
                 "get",
                 "/api/v1/orgs/{org}/ws",
                 "400",
-                "Invalid WebSocket upgrade",
+                "invalid WebSocket upgrade",
             ),
         ] {
             let response = &document["paths"][path][method]["responses"][status];
@@ -507,6 +507,8 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
                 Request::builder()
                     .method(method)
                     .uri(path)
+                    .header("host", "chat.example")
+                    .header("origin", "https://chat.example")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -535,6 +537,12 @@ fn account_and_member_openapi_contracts_are_separate() {
         for method in ["get", "post"] {
             if let Some(operation) = item.get(method) {
                 let response = &operation["responses"]["404"];
+                assert!(
+                    operation["responses"]["400"]["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Organization id")
+                );
                 assert!(
                     response["description"]
                         .as_str()

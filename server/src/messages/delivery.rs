@@ -19,7 +19,7 @@ pub(crate) const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct Sender {
-    member: Uuid,
+    member: (Uuid, i64),
     events: mpsc::Sender<Arc<Message>>,
     overflow: watch::Sender<bool>,
 }
@@ -151,7 +151,12 @@ impl Delivery {
         })?
     }
 
-    pub(crate) fn queue(&self, organization: Uuid, member: Uuid, capacity: usize) -> LiveQueue {
+    pub(crate) fn queue(
+        &self,
+        organization: Uuid,
+        member: (Uuid, i64),
+        capacity: usize,
+    ) -> LiveQueue {
         let (events, receiver) = mpsc::channel(capacity);
         let (overflow, closed) = watch::channel(false);
         LiveQueue {
@@ -375,7 +380,7 @@ mod tests {
         let delivery = Delivery::default();
         let organization = Uuid::new_v4();
         let channel = Uuid::new_v4();
-        let mut affected = delivery.queue(organization, Uuid::new_v4(), 1);
+        let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
         affected.subscribe(channel);
         let key = Uuid::new_v4();
         let gate = pause_publication(key);
@@ -418,11 +423,11 @@ mod tests {
         let delivery = Delivery::default();
         let organization = Uuid::new_v4();
         let channel = Uuid::new_v4();
-        let mut affected = delivery.queue(organization, Uuid::new_v4(), 1);
+        let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
         affected.subscribe(channel);
-        let mut other_channel = delivery.queue(organization, Uuid::new_v4(), 1);
+        let mut other_channel = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
         other_channel.subscribe(Uuid::new_v4());
-        let mut other_org = delivery.queue(Uuid::new_v4(), Uuid::new_v4(), 1);
+        let mut other_org = delivery.queue(Uuid::new_v4(), (Uuid::new_v4(), 0), 1);
         other_org.subscribe(channel);
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
@@ -454,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn connection_queue_is_bounded_and_drop_removes_registrations() {
         let delivery = Delivery::default();
-        let mut queue = delivery.queue(Uuid::new_v4(), Uuid::new_v4(), 1);
+        let mut queue = delivery.queue(Uuid::new_v4(), (Uuid::new_v4(), 0), 1);
         let channel = Uuid::new_v4();
         queue.subscribe(channel);
         let message = Arc::new(Message {

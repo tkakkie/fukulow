@@ -37,7 +37,7 @@
         "operationId": "me",
         "responses": {
           "200": {
-            "description": "Current session's Member and Organization identity",
+            "description": "Current Account and active Organizations",
             "content": {
               "application/json": {
                 "schema": {
@@ -47,7 +47,7 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -107,8 +107,18 @@
               }
             }
           },
+          "400": {
+            "description": "Malformed Organization id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -187,7 +197,7 @@
             }
           },
           "400": {
-            "description": "Invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace",
+            "description": "Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace",
             "content": {
               "application/json": {
                 "schema": {
@@ -197,7 +207,7 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -343,7 +353,7 @@
             }
           },
           "400": {
-            "description": "Invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined",
+            "description": "Malformed Organization id, invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined",
             "content": {
               "application/json": {
                 "schema": {
@@ -353,7 +363,7 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -442,7 +452,7 @@
             }
           },
           "400": {
-            "description": "Invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values",
+            "description": "Malformed Organization id, invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values",
             "content": {
               "application/json": {
                 "schema": {
@@ -452,7 +462,7 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
             "content": {
               "application/json": {
                 "schema": {
@@ -571,6 +581,16 @@
               }
             }
           },
+          "400": {
+            "description": "Malformed Organization id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Account Session ended",
             "content": {
@@ -637,7 +657,7 @@
             "description": "WebSocket upgrade; frames use ClientMessage / ServerEvent"
           },
           "400": {
-            "description": "Invalid WebSocket upgrade request after successful authentication and Origin validation",
+            "description": "Malformed Organization id, or invalid WebSocket upgrade after Origin validation and successful authentication",
             "content": {
               "application/json": {
                 "schema": {
@@ -647,7 +667,7 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade",
+            "description": "Missing, invalid, expired, or revoked Account Session credential before WebSocket upgrade",
             "content": {
               "application/json": {
                 "schema": {
@@ -657,7 +677,7 @@
             }
           },
           "403": {
-            "description": "Cookie Origin missing or not allowed: origin_not_allowed",
+            "description": "Cookie Origin missing or not allowed, checked before authentication and Organization resolution: origin_not_allowed",
             "content": {
               "application/json": {
                 "schema": {
@@ -821,7 +841,7 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
             "content": {
               "application/json": {
                 "schema": {

@@ -1386,3 +1386,25 @@ async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool:
     assert_eq!(member.to_string(), identity["member"]["id"]);
     assert_eq!(revision, 1);
 }
+
+#[sqlx::test]
+async fn member_truncate_is_refused_and_preserves_history(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let error = sqlx::query("TRUNCATE users CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .as_database_error()
+            .unwrap()
+            .message()
+            .contains("Member rows must never be truncated")
+    );
+    let member: Uuid = sqlx::query_scalar("SELECT id FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(member.to_string(), identity["member"]["id"]);
+}

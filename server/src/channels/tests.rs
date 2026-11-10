@@ -438,7 +438,7 @@ fn scoped_path(path: &str, token: &str) -> String {
         let organization = token
             .split_once('.')
             .map(|(id, _)| id)
-            .unwrap_or("00000000-0000-0000-0000-000000000000");
+            .expect("test token must carry its Organization scope");
         path.replacen("/api/v1/", &format!("/api/v1/orgs/{organization}/"), 1)
     } else {
         path.to_owned()
@@ -515,26 +515,28 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
     let private_id = private["id"].as_str().unwrap().parse::<Uuid>().unwrap();
     let public_id = public["id"].as_str().unwrap().parse::<Uuid>().unwrap();
     assert!(
-        !is_visible(&pool, organization, id, private_id)
+        is_visible(&pool, organization, (id, 1), private_id)
             .await
             .unwrap()
+            != Some(true)
     );
     assert!(
-        visible_members(&pool, organization, private_id, &[id])
+        visible_members(&pool, organization, private_id, &[(id, 1)])
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
-        is_visible(&pool, organization, id, public_id)
+        is_visible(&pool, organization, (id, 1), public_id)
             .await
             .unwrap()
+            == Some(true)
     );
     assert_eq!(
-        visible_members(&pool, organization, public_id, &[id])
+        visible_members(&pool, organization, public_id, &[(id, 1)])
             .await
             .unwrap(),
-        vec![id]
+        vec![(id, 1)]
     );
     for (channel, status) in [
         (private_id, StatusCode::NOT_FOUND),
@@ -599,15 +601,16 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
     sqlx::query("UPDATE channel_members cm SET membership_revision=u.membership_revision FROM users u WHERE cm.organization_id=$1 AND cm.channel_id=$2 AND cm.member_id=$3 AND u.organization_id=cm.organization_id AND u.id=cm.member_id")
         .bind(organization).bind(private_id).bind(id).execute(&pool).await.unwrap();
     assert!(
-        is_visible(&pool, organization, id, private_id)
+        is_visible(&pool, organization, (id, 1), private_id)
             .await
             .unwrap()
+            == Some(true)
     );
     assert_eq!(
-        visible_members(&pool, organization, private_id, &[id])
+        visible_members(&pool, organization, private_id, &[(id, 1)])
             .await
             .unwrap(),
-        vec![id]
+        vec![(id, 1)]
     );
     socket
         .send(Message::text(

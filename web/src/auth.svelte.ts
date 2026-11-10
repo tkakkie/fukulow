@@ -73,6 +73,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     accountGeneration++
     unavailable.clear()
     selectedOrganizationId = ''
+    organizationStatus = 'loading'
     error = ''
     view = next
     if (next.screen === 'app' && next.identity.organizations[0]) {

@@ -269,36 +269,26 @@ async fn large_session_pass_fails_closed_by_production_deadline(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "manual many-distinct-sessions measurement; run alone with --ignored --nocapture"]
 async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
-    let (_, auth) = fixture(&pool).await;
-    let organization = auth.identity.organization.organization_id;
-    // 32-byte unique hashes; provision outside the timed pass.
-    sqlx::query(
-        "INSERT INTO account_sessions (token_hash, account_id) \
-        SELECT decode(lpad(to_hex(n), 64, '0'), 'hex'), $1 \
-        FROM generate_series(1, 100000) AS n",
-    )
-    .bind(auth.account_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql("ANALYZE account_sessions; ANALYZE users")
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Distinct Accounts/Members spread over ten Organizations; provisioning is untimed.
+    sqlx::raw_sql("INSERT INTO organizations (organization_id, name) SELECT lpad(to_hex(1000000+n),32,'0')::uuid, 'Measured Organization' FROM generate_series(0,9) n;
+        INSERT INTO accounts (id,email,password_hash) SELECT lpad(to_hex(n),32,'0')::uuid, n::text || '@measurement.example', 'unused' FROM generate_series(1,100000) n;
+        INSERT INTO users (organization_id,id,account_id,name,role) SELECT lpad(to_hex(1000000+n%10),32,'0')::uuid, lpad(to_hex(n),32,'0')::uuid, lpad(to_hex(n),32,'0')::uuid, 'Measured Member', 'member' FROM generate_series(1,100000) n;
+        INSERT INTO account_sessions (token_hash,account_id) SELECT decode(lpad(to_hex(n),64,'0'),'hex'), lpad(to_hex(n),32,'0')::uuid FROM generate_series(1,100000) n;
+        ANALYZE organizations; ANALYZE accounts; ANALYZE users; ANALYZE account_sessions;")
+        .execute(&pool).await.unwrap();
     for count in [1_000_u32, 10_000, 100_000] {
         let keys: Vec<_> = (1..=count)
             .map(|i| {
                 let mut hash = vec![0; 32];
                 hash[28..].copy_from_slice(&i.to_be_bytes());
-                (organization, hash)
+                (Uuid::from_u128(1_000_000 + u128::from(i % 10)), hash)
             })
             .collect();
         let changes = SessionChanges::default();
         let registrations: Vec<_> = keys
             .iter()
-            .map(|key| {
-                changes.register_member(key.clone(), auth.account_id, auth.membership_revision)
-            })
+            .enumerate()
+            .map(|(i, key)| changes.register_member(key.clone(), Uuid::from_u128(i as u128 + 1), 0))
             .collect();
         let started = Instant::now();
         pass(
@@ -316,7 +306,7 @@ async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
         }
         assert!(started.elapsed() < CHECK_TIMEOUT);
         eprintln!(
-            "DISTINCT_SESSION_PASS sessions={count} chunks={} elapsed_ms={:.3} deadline_ms=5000",
+            "DISTINCT_SESSION_PASS organizations=10 accounts={count} members={count} sessions={count} chunks={} elapsed_ms={:.3} deadline_ms=5000",
             keys.len().div_ceil(BATCH_SIZE),
             started.elapsed().as_secs_f64() * 1000.0
         );

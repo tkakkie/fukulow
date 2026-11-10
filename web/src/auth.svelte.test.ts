@@ -364,3 +364,18 @@ it('a late Organization identity response is fenced after switching, but its sam
   expect(s.auth.view.screen).toBe('signin')
   expect(s.auth.session).toBeNull()
 })
+
+it('a new Account with no Organizations clears the previous unavailable Organization status', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  s.nets[0].socket.onClose(4003)
+  await settle()
+  expect(s.auth.organizationStatus).toBe('unavailable')
+  vi.mocked(s.deps.signIn).mockResolvedValueOnce(ok({ identity: { account: { id: 'empty', email: 'empty@example.com' }, organizations: [] } }) as never)
+  await signInAs(s, 'empty')
+  expect(s.auth.view.screen).toBe('app')
+  expect(s.auth.organizationStatus).toBe('loading')
+  expect(s.auth.organization).toBeNull()
+  expect(s.auth.selectedOrganizationId).toBe('')
+  expect(s.auth.session).toBeNull()
+})

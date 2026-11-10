@@ -71,7 +71,7 @@ it('uses Account sign-in without an Organization and encodes the Organization-sc
 it('preserves ErrorBody codes and only the exact 404 organization_unavailable means Membership loss', async () => {
   for (const [status, error, unavailable] of [
     [404, 'organization_unavailable', true],
-    [403, 'origin_rejected', false],
+    [403, 'origin_not_allowed', false],
     [404, 'channel_not_found', false],
     [403, 'organization_unavailable', false],
   ] as const) {

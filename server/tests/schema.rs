@@ -98,6 +98,19 @@ async fn session_indexes_keep_primary_key_and_global_expiry(pool: PgPool) {
         session_indexes(&pool).await.unwrap(),
         vec![
             Index {
+                name: "account_sessions_account_id".into(),
+                key_columns: vec!["account_id".into()],
+                total_attributes: 1,
+                options: vec![0],
+                nulls_not_distinct: false,
+                is_unique: false,
+                is_primary: false,
+                has_predicate: false,
+                has_expressions: false,
+                is_valid: true,
+                method: "btree".into(),
+            },
+            Index {
                 name: "account_sessions_expiry".into(),
                 key_columns: vec!["expires_at".into(), "token_hash".into()],
                 total_attributes: 2,
@@ -124,6 +137,12 @@ async fn session_indexes_keep_primary_key_and_global_expiry(pool: PgPool) {
                 method: "btree".into(),
             },
         ]
+    );
+    let member_index: String = sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND tablename='users' AND indexname='users_account_id'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        member_index,
+        "CREATE INDEX users_account_id ON public.users USING btree (account_id)"
     );
     let primary_key: (String, String) = sqlx::query_as(
         "SELECT c.conname::text, i.relname::text FROM pg_constraint c \

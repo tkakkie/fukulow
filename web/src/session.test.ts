@@ -82,3 +82,58 @@ describe('session controllers', () => {
     session.close()
   })
 })
+
+it('ordinary REST organization_unavailable ends only its Organization', async () => {
+  for (const operation of ['history', 'send', 'list', 'create'] as const) {
+    vi.useFakeTimers()
+    const { net, session, onEnded } = open()
+    const other = open()
+    try {
+      net.pages.A = ok({ messages: [record(100)], has_more: false })
+      net.lists[0].resolve(ok({ channels: [channel('A')] }))
+      await settle()
+      net.subscribed('A', 100)
+      void session.sync.getTimeline('A').send('pending')
+      await settle()
+      const refusal = { ok: false, kind: 'http', status: 404, error: 'organization_unavailable' } as const
+      if (operation === 'history') {
+        net.pages.A = refusal
+        await session.sync.getTimeline('A').loadLatest()
+      } else if (operation === 'send') {
+        net.sends[0].resolve(refusal)
+      } else if (operation === 'list') {
+        void session.channels.load()
+        net.lists[1].resolve(refusal)
+      } else {
+        void session.channels.create({ name: 'New', visibility: 'public' })
+        net.creates[0].resolve(refusal)
+      }
+      await settle()
+      expect(session.sync.get()).toMatchObject({ organization: 'unavailable', running: false, timers: {},
+        channels: { A: { pending: [{ state: 'failed' }] } } })
+      expect(net.socket.closed).toBe(true)
+      expect(onEnded).not.toHaveBeenCalled()
+      expect(other.session.sync.get().organization).toBe('available')
+      expect(other.net.socket.closed).toBe(false)
+      const requests = [net.history.length, net.sends.length, net.lists.length, net.creates.length]
+      await session.sync.getTimeline('A').retry('me-c1')
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect([net.history.length, net.sends.length, net.lists.length, net.creates.length]).toEqual(requests)
+      expect(net.sockets).toHaveLength(1)
+    } finally {
+      session.close(); other.session.close(); vi.useRealTimers()
+    }
+  }
+})
+
+it('ordinary history channel_not_found stays terminal for the Channel under C9', async () => {
+  const { net, session, onEnded } = open()
+  net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
+  net.lists[0].resolve(ok({ channels: [channel('A')] }))
+  await settle()
+  expect(session.sync.get()).toMatchObject({ organization: 'available', running: true,
+    channels: { A: { state: 'unavailable' } } })
+  expect(net.socket.closed).toBe(false)
+  expect(onEnded).not.toHaveBeenCalled()
+  session.close()
+})

@@ -90,7 +90,7 @@ impl Connection<'_> {
         messages::require_visible(
             &self.state.pool,
             self.auth.identity.organization.organization_id,
-            self.auth.identity.member.id,
+            (self.auth.identity.member.id, self.auth.membership_revision),
             channel,
         )
         .await
@@ -119,6 +119,9 @@ impl Connection<'_> {
                 Err(MessageError::NotFound) => {
                     self.unsubscribe(channel);
                     return Self::error(socket, Some(channel), "channel_not_found").await;
+                }
+                Err(MessageError::OrganizationUnavailable) => {
+                    return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                 }
                 Err(_) => return Err(1011),
             }
@@ -162,6 +165,9 @@ impl Connection<'_> {
                     Ok(()) => {}
                     Err(MessageError::NotFound) => {
                         return Self::error(socket, Some(channel_id), "channel_not_found").await;
+                    }
+                    Err(MessageError::OrganizationUnavailable) => {
+                        return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                     }
                     Err(_) => return Err(1011),
                 }
