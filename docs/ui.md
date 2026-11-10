@@ -19,14 +19,14 @@ Shared rules for the web UI (#200). Layout A2, chosen by the maintainer: [mockup
 |---|---|---|---|---|
 | Select a チャンネル (column, palette, `Alt+↓`) | push | its main timeline | a tab stays open, re-scoped; a 返信のつながり closes | Composer |
 | Open a トピック view (any source) | push | that トピック | unchanged; phone: the panel layer is dropped | Composer |
-| Back button in a トピック view | `history.back()` if the previous entry is this チャンネル's timeline, else replace with it | main timeline | unchanged | that トピック's summary line if rendered, else Composer |
+| Back button in a トピック view | replace with this チャンネル's timeline URL, keeping `panel` | main timeline | unchanged | that トピック's summary line if rendered, else Composer |
 | Open a tab (header button, `⌘.`) | push | unchanged | tab | panel heading (`tabindex="-1"`) |
 | Switch tab | replace | unchanged | other tab | the tab |
 | Open a 返信のつながり | push; replace if one is already open | unchanged | 返信のつながり | its reply Composer |
-| `‹` in a 返信のつながり | `history.back()` | unchanged | the tab | the tab |
-| `×`, `Esc` | go back over the panel entries this page pushed; replace if there are none (direct link) | unchanged | closed | the control that opened the panel; if gone, the main Composer |
+| `‹` in a 返信のつながり | replace with the current main URL plus the previous tab | unchanged | the tab | the tab |
+| `×`, `Esc` | replace with the current main URL without `panel` (never pops, so main cannot change); older entries stay, so Browser Back may reopen a panel | unchanged | closed | the control that opened the panel; if gone, the main Composer |
 | Browser/OS Back | the browser pops | from the URL | from the URL | as for the matching row above |
-| Direct link or reload | one entry, no synthetic parents | from the URL | from the URL | Composer; phone `‹` at view level replaces with the チャンネル list |
+| Direct link or reload | one entry, no synthetic parents | from the URL | from the URL | Composer; in-app `‹` replaces with the parent level (panel -> view -> チャンネル list), so it never leaves the app |
 - Every view change is announced once through the page live region (§6): `# チャンネル名` or `トピック名`.
 - Wide screens (§3): the panel pushes main narrower. Narrower: the panel overlays main, with no scrim; main stays usable and scrollable.
 
@@ -37,7 +37,7 @@ Shared rules for the web UI (#200). Layout A2, chosen by the maintainer: [mockup
 | 960-1279px | shown | shown | shown | overlays main from the right |
 | 600-959px | shown | drawer, opened from the rail's チャンネル button; closes on selection or `Esc` | shown | overlays, `min(420px, 100%)` wide |
 | < 600px (phone) | becomes a bottom tab bar | its own screen | its own screen | its own full screen |
-- Phone (board A2-4): one screen at a time, three levels: チャンネル list -> view -> panel layer. The header's `‹` and browser/OS Back go up one level (§2 table); the bottom tab bar shows only at the チャンネル list level.
+- Phone (board A2-4): one screen at a time, three levels: チャンネル list -> view -> panel layer. The header's `‹` always goes up one level and replaces the entry when the previous entry is not that parent (§2 table). Browser/OS Back pops real history: after in-app navigation that is one level up, but from a direct link it may leave the app; the bottom tab bar shows only at the チャンネル list level.
 - Reflow: at 320 CSS px wide, cards, dialogs and Composers fit without horizontal scrolling or clipped actions (WCAG 1.4.10); text zoom to 200 % keeps every action reachable.
 - Touch targets at least 44 x 44px on phone, 32 x 32px elsewhere.
 - Drafts:
@@ -85,10 +85,10 @@ States look the same everywhere (board A2-2):
 | Error, not retryable | message + where to go | no retry button |
 | チャンネル unavailable (C9) | `このチャンネルは利用できません` + `チャンネル一覧へ` | Composer disabled; never retried in a loop; reselecting tries again |
 | 組織 unavailable (C10) | full main state + `組織を切り替える` | terminal: no reconnect, resubscribe or send retry for that 組織; other 組織 unaffected. Copy says access was lost and pending Messages could not be confirmed, never that they were not sent |
-| Reconnecting | StatusBanner `再接続しています…`, `role="status"` | content stays; banner only after 2 s offline; send behaviour unchanged (presentation only) |
+| Reconnecting | StatusBanner `再接続しています…` (visual only, no live role; the page status region announces it, §6) | content stays; banner only after 2 s offline; send behaviour unchanged (presentation only) |
 | Sending | Message with `送信中…` in `--text2` | resolved by C5 |
 | Send outcome unknown | `送信を確認できませんでした。` + `再送する` / `破棄` | network error, timeout, lost ack, retryable 503: `再送する` resends with the same `client_message_id` (C6); no `編集` (a new key could duplicate a committed Message) |
-| Send refused | reason + `編集して送り直す` / `破棄` | 400/403/404/409/413/415: never resent (C6); `編集して送り直す` moves the text into the Composer as a new send and removes the failed one |
+| Send refused | reason + `編集して送り直す` / `破棄` | 400/403/404/409/413/415: never resent (C6); `編集して送り直す` moves the text into the Composer as a new send and removes the failed one; if that Composer already has a draft, it first asks `入力中の下書きを置き換えますか？` (`置き換える` / `キャンセル`), and `キャンセル` keeps both |
 | After `破棄` | the Message is removed | focus goes to the Composer |
 | New Messages below | `新着 n件 ↓` button | only when not pinned (§8) |
 | Sign in | board A2-3 | an ended Account Session (4001 or 401, S4 and C6) shows `ログインの有効期限が切れました。` |
@@ -96,7 +96,7 @@ States look the same everywhere (board A2-2):
 ## 6. Accessibility baseline
 - WCAG 2.2 AA. Landmarks: rail and チャンネル column are `nav` with labels, main is `main`, the panel is `aside` with a label; one `h1` per view; a skip link `メッセージへ移動` first in the page.
 - Timeline semantics: the timeline is a labelled list of `article` Messages without live-region roles; it is not `role="log"`, because older pages, gap fills, reordering and トピック summary moves change it outside the end, where ARIA `log` expects additions only.
-- Announcements: one polite `role="status"` region per page. It announces each Message received live from someone else in the current view once (`田中 美咲: 本文の先頭 80 文字`; several within 2 s become `新着メッセージ n件`), view changes (§2) and connection changes (after the 2 s delay). It never announces initial history, older pages, gap fills, replay after reconnect, reordering, summary-line moves, own sends or their confirmations. Errors that need action use `role="alert"` once.
+- Announcements: one polite `role="status"` region per page, the only live region for these events (banners such as StatusBanner have no live role). It announces each Message received live from someone else in the current view once (`田中 美咲: 本文の先頭 80 文字`; several within 2 s become `新着メッセージ n件`), view changes (§2) and connection changes (after the 2 s delay). It never announces initial history, older pages, gap fills, replay after reconnect, reordering, summary-line moves, own sends or their confirmations. Errors that need action use `role="alert"` once.
 - Full keyboard use (§9); visible focus (§4); focus after actions as in §2 and §5; after send, focus stays in the Composer.
 - IME: Enter never sends while composing (`isComposing` or `keyCode 229`).
 - Icon-only buttons have an `aria-label` that includes the shortcut, for example `パネルを閉じる(Esc)`.

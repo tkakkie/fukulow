@@ -162,7 +162,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #146/#148 client classification: 4001 Sign in; 4003 terminal Organization unavailable; 1001/1011 back off and reconnect; 4008 reconnects with bounded retries. A rejected browser handshake never implies 4003 (`GET .../me` confirms).
 - The auth adapter keeps Account/controller lifetime and Organization selection together (Tier 2 deviation) to avoid an unrelated abstraction in the #146 migration; sync policy stays in the controller/protocol.
 - #200 layout A2 (rail, チャンネル column with トピック accordion, main card, closable right panel), picked by the maintainer from three mockups; surfaces split by tone and radius, not rules. Details in `docs/ui.md`.
-- #200 navigation uses the History API and the existing SPA fallback, with no router dependency: one entry per view or panel layer so browser/phone Back goes up one level. URLs are hints; the API decides access.
+- #200 navigation uses the History API and the existing SPA fallback, with no router dependency: one entry per view or panel layer; in-app back/close controls replace instead of popping, so they never change main or leave the app. URLs are hints; the API decides access.
 - #200 drafts live in controller memory per target for the Account Session, never in web storage; theme and text size are the only planned `ui-settings.ts` keys (enum values, per device, #48).
 - Sprint 1 web acceptance: `npm --prefix web run e2e:compose` against `docker compose --profile caddy up` from an empty database (#19).
 
