@@ -8,6 +8,7 @@ import {
   defaultDir,
   expandSeqs,
   loadClientScenario,
+  partitionScenarios,
   runClientScenario,
   type ClientScenario,
   type ClientUnderTest,
@@ -156,6 +157,28 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => f.client.scenarios[0].steps[1].input.messages.push({ seq: 2, from: 2, to: 3 }))).toContain('seq cannot be combined')
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].observe.channels.A.visible = [3, 2]))).toContain('strictly ascending')
     expect(problemsOf((f) => (f.client.scenarios[0].never = [{ type: 'send', as: 'x' }]))).toContain('cannot bind a label')
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'membership_check_result', respond_to: 'f0', status: 200 }))).toContain('answers a membership_check effect')
+  })
+
+  it('validates proposed scenarios and allows planned vocabulary only in them; runners partition them out', () => {
+    const topicPage = (f: any) => (f.client.scenarios[0].steps[1].input.messages = [{ seq: 1, topic: 'T' }, { from: 2, to: 3 }])
+    const propose = (f: any) => (f.client.scenarios[0].proposed = { owner: ['#138'] })
+    expect(problemsOf(topicPage)).toContain('input.messages[0].topic is planned vocabulary; mark the scenario proposed')
+    expect(problemsOf((f) => (f.delivery.scenarios[0].steps[0] = { do: 'main_timeline', as: 'alice', channel: 'general', query: {}, expect: { status: 200 } }))).toContain('do main_timeline is planned vocabulary')
+    expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P1']))).toContain('covers is planned vocabulary')
+    // A planned key inside a forbidden or never pattern would silently match nothing; it must fail too.
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].effects = { forbidden: [{ type: 'fetch_history', before: 4 }] }))).toContain('before is planned vocabulary')
+    expect(problemsOf((f) => (topicPage(f), propose(f)))).toBe('')
+    expect(problemsOf((f) => (f.delivery.scenarios[0].proposed = { owner: ['#137'] }))).toBe('')
+    // A proposed scenario is still fully validated.
+    expect(problemsOf((f) => (propose(f), (f.client.scenarios[0].proposed.owner = ['137'])))).toContain('does not match')
+    expect(problemsOf((f) => (propose(f), (f.client.scenarios[0].steps[1].input.respond_to = 'nope')))).toContain('not bound by an earlier step')
+    const lines = (mainTimeline: unknown) => (f: any) => (propose(f), (f.client.scenarios[0].steps[1].observe.channels.A.main_timeline = mainTimeline))
+    expect(problemsOf(lines([{ seq: 1 }, { topic: 'T', position: 3, message_count: 2 }]))).toBe('')
+    expect(problemsOf(lines([{ seq: 3 }, { topic: 'T', position: 2, message_count: 2 }]))).toContain('strictly ascending')
+    expect(problemsOf(lines([{ topic: 'T', position: 2, message_count: 1 }, { topic: 'T', position: 3, message_count: 2 }]))).toContain('more than once')
+    const all = [{ id: 'a' }, { id: 'b', proposed: { owner: ['#137'] } }]
+    expect(partitionScenarios(all)).toEqual({ running: [all[0]], proposed: [all[1]] })
   })
 
   it('rejects dangling references in delivery scenarios', () => {

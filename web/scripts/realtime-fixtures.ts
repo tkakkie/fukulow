@@ -117,6 +117,40 @@ export function expandSeqs(list: SeqItem[]): number[] | null {
 const channelKey = (ref: Json): string =>
   isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
 
+// Planned vocabulary (docs/spec.md 'Planned', P rules): allowed only in scenarios marked proposed.
+const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
+const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before'])
+
+/** The path of the first planned term in a scenario, or null. */
+function plannedTerm(value: Json, path: string): string | null {
+  if (Array.isArray(value)) {
+    for (const [i, item] of value.entries()) {
+      const found = plannedTerm(item, `${path}[${i}]`)
+      if (found) return found
+    }
+    return null
+  }
+  if (!isObject(value)) return null
+  for (const [key, item] of Object.entries(value)) {
+    if (plannedKeys.has(key)) return `${path}.${key}`
+    if ((key === 'type' || key === 'do') && plannedTypes.has(item as string)) return `${path}.${key} ${String(item)}`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P'))) return `${path}.covers`
+    const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`)
+    if (found) return found
+  }
+  return null
+}
+
+/** Main-timeline lines: positions strictly ascending, each Topic at most once. */
+function checkLines(list: Json, where: string, errors: string[]) {
+  if (!Array.isArray(list)) return
+  const lines = list as Record<string, Json>[]
+  const at = lines.map((l) => (l.seq ?? l.position) as number)
+  if (!at.every((n, i) => i === 0 || n > at[i - 1])) errors.push(`${where}: line positions must be strictly ascending`)
+  const topics = lines.flatMap((l) => (typeof l.topic === 'string' ? [l.topic] : []))
+  if (new Set(topics).size !== topics.length) errors.push(`${where}: a Topic appears more than once`)
+}
+
 function checkSeqList(list: Json, where: string, errors: string[]) {
   if (!Array.isArray(list)) return
   if (expandSeqs(list as SeqItem[]) === null) errors.push(`${where}: seq list must be strictly ascending (ranges from <= to)`)
@@ -231,6 +265,11 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
         checkChannel(step.channel, at)
         checkSeqList((step.expect as Record<string, Json>).seqs, `${at}.expect.seqs`, errors)
         break
+      case 'main_timeline':
+        member(step.as)
+        checkChannel(step.channel, at, false)
+        checkLines((step.expect as Record<string, Json>).lines, `${at}.expect.lines`, errors)
+        break
       case 'expect': {
         socket(step.socket)
         const events = step.events as Record<string, Json>[]
@@ -261,6 +300,8 @@ const respondsTo: Record<string, string> = {
   history_failed: 'fetch_history',
   subscribed: 'subscribe',
   timer_elapsed: 'wait',
+  membership_check_result: 'membership_check',
+  main_timeline_result: 'fetch_main_timeline',
 }
 
 function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
@@ -282,6 +323,7 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
       else if (bound !== respondsTo[type]) errors.push(`${at}.input: ${type} answers a ${respondsTo[type]} effect, but ${input.respond_to} is a ${bound} effect`)
     }
     if (isObject(input.message)) checkMessageSpec(input.message, `${at}.input.message`, errors, true)
+    checkLines(input.lines, `${at}.input.lines`, errors)
     if (Array.isArray(input.messages)) {
       (input.messages as Record<string, Json>[]).forEach((m, j) => checkMessageSpec(m, `${at}.input.messages[${j}]`, errors))
       const flat = (input.messages as Record<string, Json>[]).flatMap((m) => ('seq' in m ? [m.seq as number] : 'to' in m ? [m.from as number, m.to as number] : []))
@@ -309,6 +351,10 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
     const channels = ((step.observe ?? {}) as { channels?: Record<string, Record<string, Json>> }).channels ?? {}
     for (const [name, observed] of Object.entries(channels)) {
       checkSeqList(observed.visible, `${at}.observe.channels.${name}.visible`, errors)
+      checkLines(observed.main_timeline, `${at}.observe.channels.${name}.main_timeline`, errors)
+      for (const [topic, view] of Object.entries((observed.topics ?? {}) as Record<string, Record<string, Json>>)) {
+        checkSeqList(view.visible, `${at}.observe.channels.${name}.topics.${topic}.visible`, errors)
+      }
       for (const r of (observed.records ?? []) as { seq: number }[]) {
         if (observed.visible !== undefined && !expandSeqs(observed.visible as SeqItem[])?.includes(r.seq)) errors.push(`${at}.observe.channels.${name}.records: seq ${r.seq} is not in visible`)
       }
@@ -363,6 +409,8 @@ export function checkFixtures(dir: string = defaultDir): Problems {
         ids.set(scenario.id as string, file)
         if (isDelivery) checkDelivery(scenario, where, errors)
         else checkClient(scenario, where, errors)
+        const planned = scenario.proposed === undefined ? plannedTerm(scenario, '$') : null
+        if (planned) errors.push(`${where}: ${planned} is planned vocabulary; mark the scenario proposed (owner Issue) until it is implemented`)
       })
     }
   }
@@ -394,7 +442,13 @@ type ClientStep = {
   effects?: { required?: Pattern[]; forbidden?: Pattern[]; ordered?: boolean }
   observe?: { session?: string; organization?: string; channels?: Record<string, Record<string, Json>> }
 }
-export type ClientScenario = { id: string; never?: Pattern[]; steps: ClientStep[] }
+export type Proposed = { owner: string[]; note?: string }
+export type ClientScenario = { id: string; proposed?: Proposed; layer?: 'controller'; never?: Pattern[]; steps: ClientStep[] }
+
+/** Scenarios to run, and proposed ones (validated, skipped by runners until their owner implements them). */
+export function partitionScenarios<T extends { proposed?: Proposed }>(all: T[]): { running: T[]; proposed: T[] } {
+  return { running: all.filter((s) => s.proposed === undefined), proposed: all.filter((s) => s.proposed !== undefined) }
+}
 
 export function expandMessage(spec: Record<string, Json>, channel?: string): Message[] {
   const seqs = 'seq' in spec ? [spec.seq as number] : Array.from({ length: (spec.to as number) - (spec.from as number) + 1 }, (_, i) => (spec.from as number) + i)
@@ -563,4 +617,11 @@ if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
     process.exit(1)
   }
   console.log(`realtime fixtures OK (${dir})`)
+  for (const kind of ['delivery', 'client']) {
+    const all = readdirSync(join(dir, kind)).filter((n) => n.endsWith('.json'))
+      .flatMap((n) => (JSON.parse(readFileSync(join(dir, kind, n), 'utf8')) as { scenarios: { id: string; proposed?: Proposed }[] }).scenarios)
+    const { running, proposed } = partitionScenarios(all)
+    console.log(`  ${kind}: ${running.length} running, ${proposed.length} proposed (skipped by runners)`)
+    for (const s of proposed) console.log(`    proposed ${s.id} (owner ${s.proposed!.owner.join(', ')})`)
+  }
 }

@@ -21,6 +21,8 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
   }
   const sync = createSync({
     selfId: 'me', newId: () => nextId,
+    // As in production (session.ts): a pre-connect close asks REST; the fixture answers with membership_check_result.
+    checkMembership: () => request({ type: 'membership_check' }),
     api: {
       listMessages(channel, query) {
         return request({ type: 'fetch_history', channel,
@@ -71,6 +73,9 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
         case 'error_event': socket.onEvent({ type: 'error', channel_id: channel, code: i.code as string }); break
         case 'history_result': resolve({ ok: true, data: { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
         case 'ack': resolve({ ok: true, data: message(i.message, channel) }); break
+        case 'membership_check_result': resolve(i.status === 200 ? { ok: true, data: {} } : typeof i.status === 'number'
+          ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }) }
+          : { ok: false, kind: 'network' }); break
         case 'history_failed': case 'send_failed': resolve(typeof i.status === 'number'
           ? { ok: false, kind: 'http', status: i.status } : { ok: false, kind: 'network' }); break
         case 'watch': void sync.watch(channel); break

@@ -435,6 +435,11 @@ impl Runner {
 }
 
 fn scenarios() -> Vec<Scenario> {
+    fixtures().0
+}
+
+/// Running scenarios, and the proposed ones (validated by web/scripts/realtime-fixtures.ts, not run here).
+fn fixtures() -> (Vec<Scenario>, Vec<Value>) {
     let dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../contract/realtime/delivery");
     let mut paths = std::fs::read_dir(dir)
@@ -444,7 +449,7 @@ fn scenarios() -> Vec<Scenario> {
         .collect::<Vec<_>>();
     paths.sort();
     assert!(!paths.is_empty(), "no delivery fixture files");
-    paths
+    let (proposed, running): (Vec<_>, Vec<_>) = paths
         .into_iter()
         .flat_map(|path| {
             let file: File = serde_json::from_slice(&std::fs::read(&path).unwrap())
@@ -453,13 +458,28 @@ fn scenarios() -> Vec<Scenario> {
             assert!(!file.scenarios.is_empty());
             file.scenarios
         })
-        .collect()
+        .partition(|scenario| scenario.get("proposed").is_some());
+    let running = running
+        .into_iter()
+        .map(|scenario| {
+            let id = scenario["id"].clone();
+            serde_json::from_value(scenario).unwrap_or_else(|error| panic!("{id}: {error}"))
+        })
+        .collect();
+    (running, proposed)
 }
 
 #[sqlx::test]
 async fn delivery_contract_scenarios(pool: PgPool) {
     let filter = std::env::var("REALTIME_CONTRACT_SCENARIO").ok();
-    let scenarios = scenarios()
+    let (scenarios, proposed) = fixtures();
+    for scenario in &proposed {
+        eprintln!(
+            "contract scenario skipped (proposed, owner {}): {}",
+            scenario["proposed"]["owner"], scenario["id"]
+        );
+    }
+    let scenarios = scenarios
         .into_iter()
         .filter(|scenario| filter.as_ref().is_none_or(|id| scenario.id == *id))
         .collect::<Vec<_>>();

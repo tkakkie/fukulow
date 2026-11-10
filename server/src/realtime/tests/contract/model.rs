@@ -4,7 +4,8 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(super) struct File {
     pub kind: String,
-    pub scenarios: Vec<Scenario>,
+    /// Raw, so a proposed scenario (planned vocabulary, not implemented yet) is skipped before typed parsing.
+    pub scenarios: Vec<Value>,
 }
 
 #[derive(Deserialize)]
