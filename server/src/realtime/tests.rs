@@ -334,6 +334,33 @@ async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_token
 }
 
 #[sqlx::test]
+async fn secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie(pool: PgPool) {
+    let organization = organization(&pool).await;
+    let (_, token) = member(&pool, organization).await;
+    let mut secure = state(&pool);
+    secure.cookie_secure = true;
+    let server = Server::start(crate::app(secure)).await;
+    let origin = format!("https://{}", server.address);
+    // The plain listener represents the app behind a TLS terminator.
+    rejected(
+        server.handshake(None, Some(&token), Some(&origin)).await,
+        401,
+    );
+    let mut request = format!("ws://{}/api/v1/orgs/{organization}/ws", server.address)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert(header::ORIGIN, origin.parse().unwrap());
+    request.headers_mut().insert(
+        header::COOKIE,
+        format!("__Host-fukulow_session={token}").parse().unwrap(),
+    );
+    let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    client.close(None).await.unwrap();
+}
+
+#[sqlx::test]
 async fn invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_returns_400(
     pool: PgPool,
 ) {

@@ -295,7 +295,7 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
             Request::post(format!(
                 "/api/v1/orgs/{first}/channels?organization_id={second}"
             ))
-            .header(header::COOKIE, format!("fukulow_session={token_a}"))
+            .header(header::COOKIE, format!("__Host-fukulow_session={token_a}"))
             .header("x-organization-id", second.to_string())
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(

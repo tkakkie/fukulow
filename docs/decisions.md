@@ -17,6 +17,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 ## Rules, CI and AI process
 - Rules have tiers: Absolute (CI only with a reliable check), Default (deviation needs a PR line), Free. Reason: hard rules without a good check push AIs into awkward code; boundaries and tenant isolation are worth enforcing (#29).
 - One crate with module boundaries, each module owning its tables. Reason: cross-crate refactors are costly for AI-driven work; revisit when build time, dependencies or conflicts hurt.
+- #200 adds `docs/ui.md` as a doc kind for web UI rules. Reason: several AIs build screens in parallel; one short rule set keeps look, states, focus and copy consistent without re-deciding per PR.
 - Minimal docs. Reason: AI credit cost. `AGENTS.md` holds always-needed rules, `docs/workflow.md` procedures that change more often, so an AI keeps going alone and stops only on a human decision (#101, #174).
 - `organization_id` exemptions and why: `organizations` (tenant root), `_sqlx_migrations` (SQLx bookkeeping), `accounts` and `account_sessions` (global Account data). The same names in another schema are not exempt.
 - Schema guard discovers migrations at test runtime so cached binaries cannot miss new files. The append-only check compares with the PR base or previous main commit, with rename detection off so moves cannot hide deletions (#31, #40).
@@ -45,7 +46,14 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 ## Auth, Accounts and tenancy
 - #146 splits global Accounts and Account Sessions from Organization Members. Authority is the Account plus the Organization URL on each request. Documented global operations: setup existence, credential/session lookup, active-Organization listing, Session cleanup.
 - Non-Member, unknown Organization and deactivated Member return the same 404 `organization_unavailable` so Membership is not disclosed (#146).
-- Web cookies and native bearer share one opaque random 256-bit credential; only its SHA-256 hash is stored. 30-day expiry; sign-out revokes both. Cookies HttpOnly, SameSite=Strict, Secure (`FUKULOW_COOKIE_SECURE=false` only for local HTTP).
+- #197 web POST /session returns only identity/expiry via HttpOnly cookie; native POST /native/session returns bearer JSON without cookies. Both share verification, issuance, throttle and DELETE /session revocation; only SHA-256 stored, 30-day expiry.
+- #197 endpoint choice is explicit, never a flag or User-Agent boundary. The split limits accidental web token exposure but cannot fully prevent XSS: injected same-origin code can act as the user or call native sign-in with captured credentials.
+- #197 HTTPS uses __Host-fukulow_session (Secure, HttpOnly, Strict, Path=/, no Domain); old fukulow_session is refused and expired on web sign-in/sign-out. Existing web users sign in again. Local HTTP alone keeps the old name (FUKULOW_COOKIE_SECURE=false).
+- #197 migration deletes all existing Account Sessions, following #146: old web JSON exposed bearer credentials, so cookie expiry is insufficient. Every web and native client must sign in once after deployment.
+- #197 FUKULOW_COOKIE_SECURE describes the public HTTPS serving path, including TLS proxies: it selects Secure cookies, CSP wss and default HTTPS cookie Origins. False is only for local HTTP; forwarded headers never select these policies.
+- #197 app-wide CSP allows external same-origin scripts/styles and explicit ws(s)://Host, plus nosniff, strict-origin-when-cross-origin and frame-ancestors none on errors too. Validated Host preserves proxy ports; forwarded headers cannot widen CSP.
+- #197 HSTS max-age=31536000 lives at TLS termination (Caddy; nginx $https map), without includeSubDomains/preload. Caddy skips localhost/loopback to avoid breaking other dev ports. Stock nginx is HTTP-only: its external TLS terminator must set HSTS.
+- #197 Vite manifest outputs alone get one-year immutable caching; HTML, SPA fallback and unhashed files revalidate. API keeps no-store. Caddy zstd/gzip excludes /api and /api/* to avoid compressing secrets; stock nginx gzip covers HTML/CSS/JS/SVG, not JSON or WebSocket frames.
 - Password hashing uses Argon2id on at most four blocking workers to bound memory.
 - Account Session cleanup is opportunistic: one global 1,000-row expired batch per permitted minute, single flight, 2 s deadline / 1 s statement timeout; no scheduler (#146, replacing the #53/#73 per-Organization design).
 - #146 migration refuses duplicate lower(email) across Organizations and reports all of them; it never merges Accounts or compares password hashes. Old sessions are dropped; users sign in again (no compatibility path).
@@ -162,6 +170,9 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #97 Svelte 5 adapters only read the controller and forward intents; `createSubscriber` carries change notifications, so state is never copied into `$state`. Session controllers live from Sign in to sign-out/4001/401/replacement, closed by the auth adapter.
 - #146/#148 client classification: 4001 Sign in; 4003 terminal Organization unavailable; 1001/1011 back off and reconnect; 4008 reconnects with bounded retries. A rejected browser handshake never implies 4003 (`GET .../me` confirms).
 - The auth adapter keeps Account/controller lifetime and Organization selection together (Tier 2 deviation) to avoid an unrelated abstraction in the #146 migration; sync policy stays in the controller/protocol.
+- #200 layout A2 (rail, チャンネル column with トピック accordion, main card, closable right panel), picked by the maintainer from three mockups; surfaces split by tone and radius, not rules. Details in `docs/ui.md`.
+- #200 navigation uses the History API and the existing SPA fallback, with no router dependency: one entry per view or panel layer; in-app back/close controls replace instead of popping, so they never change main or leave the app. URLs are hints; the API decides access.
+- #200 drafts live in controller memory per target for the Account Session, never in web storage; theme and text size are the only planned `ui-settings.ts` keys (enum values, per device, #48).
 - Sprint 1 web acceptance: `npm --prefix web run e2e:compose` against `docker compose --profile caddy up` from an empty database (#19).
 
 ## Load testing and measurement

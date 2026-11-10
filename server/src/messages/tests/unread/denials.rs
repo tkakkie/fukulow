@@ -86,6 +86,7 @@ async fn unread_denials_have_positive_controls_and_never_change_positions(pool: 
             );
         }
         let before: Vec<(Uuid,Uuid,i64)> = sqlx::query_as("SELECT channel_id,member_id,read_seq FROM channel_read_positions ORDER BY organization_id,channel_id,member_id").fetch_all(&pool).await.unwrap();
+        let before_topics: Vec<(Uuid,Uuid,Uuid,i64)> = sqlx::query_as("SELECT channel_id,member_id,topic_id,read_seq FROM topic_read_positions ORDER BY organization_id,channel_id,member_id,topic_id").fetch_all(&pool).await.unwrap();
         for name in SURFACES {
             let response = surface(&app, &viewer, channel, t, name).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{denial}/{name}");
@@ -110,6 +111,8 @@ async fn unread_denials_have_positive_controls_and_never_change_positions(pool: 
         }
         let after: Vec<(Uuid,Uuid,i64)> = sqlx::query_as("SELECT channel_id,member_id,read_seq FROM channel_read_positions ORDER BY organization_id,channel_id,member_id").fetch_all(&pool).await.unwrap();
         assert_eq!(before, after);
+        let after_topics: Vec<(Uuid,Uuid,Uuid,i64)> = sqlx::query_as("SELECT channel_id,member_id,topic_id,read_seq FROM topic_read_positions ORDER BY organization_id,channel_id,member_id,topic_id").fetch_all(&pool).await.unwrap();
+        assert_eq!(before_topics, after_topics);
         if other_org != org {
             // The foreign Account cannot select the target Organization either.
             for name in SURFACES {
