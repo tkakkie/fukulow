@@ -2,12 +2,16 @@ import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { closeSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const repositoryRoot = fileURLToPath(new URL('../', import.meta.url))
+const composeFile = join(repositoryRoot, 'compose.yml')
 
 // Never surface Docker/Compose/Postgres diagnostics: they can contain credentials or data.
 export function docker(args: string[], input: number | 'ignore' = 'ignore', output: number | 'ignore' | 'pipe' = 'ignore'): string {
   const env = { ...process.env }
   delete env.DATABASE_URL
-  const result = spawnSync('docker', args, { env, stdio: [input, output, 'ignore'], encoding: 'utf8' })
+  const result = spawnSync('docker', args, { cwd: repositoryRoot, env, stdio: [input, output, 'ignore'], encoding: 'utf8' })
   if (result.status !== 0) throw new Error('Docker operation failed (diagnostics suppressed)')
   return typeof result.stdout === 'string' ? result.stdout.trim() : ''
 }
@@ -19,7 +23,7 @@ export function backup(directory: string): string {
   if (!info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o700) {
     throw new Error('Backup directory must be owned by this user, mode 0700, and not a symlink')
   }
-  const compose = ['compose', '-f', 'compose.yml', 'exec', '-T', 'db']
+  const compose = ['compose', '-f', composeFile, 'exec', '-T', 'db']
   if (!/^pg_dump \(PostgreSQL\) 18\./.test(docker([...compose, 'pg_dump', '--version'], 'ignore', 'pipe'))) {
     throw new Error('PostgreSQL 18 pg_dump is required')
   }

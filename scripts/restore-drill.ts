@@ -3,6 +3,9 @@ import { closeSync, openSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { docker } from './backup.ts'
 
+// Coupled to compose.yml services.db.image; backup.test.ts checks agreement without loading secrets via Compose.
+export const DRILL_POSTGRES_IMAGE = 'postgres:18'
+
 export function restoreDrill(archive: string): void {
   const started = performance.now()
   const name = `fukulow-restore-drill-${randomUUID()}`
@@ -11,7 +14,7 @@ export function restoreDrill(archive: string): void {
     // No Compose, host ports, bind mounts, shared volumes or production connection string.
     docker(['run', '-d', '--name', name, '--network', 'none', '--tmpfs', '/var/lib/postgresql',
       '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_USER=fukulow',
-      '-e', 'POSTGRES_DB=fukulow', 'postgres:18'])
+      '-e', 'POSTGRES_DB=fukulow', DRILL_POSTGRES_IMAGE])
     created = true
     const exec = ['exec', '-i', name]
     let ready = false

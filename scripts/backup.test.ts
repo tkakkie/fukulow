@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { DRILL_POSTGRES_IMAGE } from './restore-drill.ts'
+
+const repositoryRoot = fileURLToPath(new URL('../', import.meta.url))
 
 function fixture(t: { after: (callback: () => void) => void }) {
   const root = mkdtempSync(join(tmpdir(), 'fukulow-backup-test-'))
@@ -18,6 +21,8 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.TEST_LOG, JSON.stringify(args) + '\n');
 if (process.env.DATABASE_URL) process.exit(91);
 if (args[0] === 'compose') {
+  if (args[1] !== '-f' || args[2] !== process.env.TEST_COMPOSE_FILE ||
+      fs.realpathSync(process.cwd()) !== fs.realpathSync(require('node:path').dirname(args[2]))) process.exit(93);
   const files = fs.readdirSync(process.env.TEST_DIRECTORY);
   if (files.some(name => name !== 'previous.dump' && !name.startsWith('.partial-'))) process.exit(92);
 }
@@ -42,18 +47,21 @@ else if ((args.includes('psql') && process.env.TEST_FAIL === 'sessions') ||
   const run = (script: string, destination: string, fail = '') => spawnSync(process.execPath,
     [fileURLToPath(new URL(script, import.meta.url)), destination], {
       encoding: 'utf8',
+      cwd: root,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_LOG: log, TEST_FAIL: fail,
-        TEST_DIRECTORY: destination, DATABASE_URL: 'postgres://SECRET_SENTINEL@invalid/secret' },
+        TEST_DIRECTORY: destination, TEST_COMPOSE_FILE: join(repositoryRoot, 'compose.yml'),
+        DATABASE_URL: 'postgres://SECRET_SENTINEL@invalid/secret' },
     })
   const calls = (): string[][] => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
   return { root, log, run, calls }
 }
 
-test('backup publishes a private verified archive and preserves older backups', t => {
+test('backup from another directory uses the repository Compose file and publishes a private verified archive', t => {
   const { root, run, calls } = fixture(t)
   const directory = join(root, 'backups')
   mkdirSync(directory, { mode: 0o700 })
   writeFileSync(join(directory, 'previous.dump'), 'previous', { mode: 0o600 })
+  writeFileSync(join(root, 'compose.yml'), 'invalid caller Compose file')
   const result = run('./backup.ts', directory)
   assert.equal(result.status, 0, result.stderr)
   const artifact = result.stdout.trim()
@@ -64,6 +72,14 @@ test('backup publishes a private verified archive and preserves older backups', 
   assert.equal(readFileSync(join(directory, 'previous.dump'), 'utf8'), 'previous')
   assert.equal(readdirSync(directory).length, 2)
   assert.deepEqual(calls().map(args => args.at(-1)), ['--version', '--format=custom', '--list'])
+})
+
+test('drill image agrees with the Compose database image', () => {
+  const compose = readFileSync(new URL('../compose.yml', import.meta.url), 'utf8')
+  const database = compose.match(/^  db:\n((?: {4}[^\n]*\n|\n)*)/m)?.[1]
+  assert.ok(database, 'Compose db service must exist')
+  assert.equal(database.match(/^    image: (\S+)$/m)?.[1], DRILL_POSTGRES_IMAGE,
+    'Update DRILL_POSTGRES_IMAGE and compose.yml services.db.image together')
 })
 
 for (const failure of ['version', 'dump', 'signal', 'list']) {
@@ -107,7 +123,7 @@ for (const failure of ['', 'list', 'restore', 'sessions', 'integrity']) {
     assert.match(name, /^fukulow-restore-drill-/)
     assert.ok(create.includes('--tmpfs'))
     assert.equal(create[create.indexOf('--network') + 1], 'none')
-    assert.equal(create.at(-1), 'postgres:18')
+    assert.equal(create.at(-1), DRILL_POSTGRES_IMAGE)
     assert.ok(!create.some(arg => ['-p', '--publish', '-v', '--volume'].includes(arg)))
     assert.ok(commands.slice(1, -1).every(args => args[0] === 'exec' && args[2] === name))
     assert.deepEqual(commands.at(-1), ['rm', '-f', '-v', name])
