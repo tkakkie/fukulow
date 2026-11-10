@@ -161,6 +161,8 @@ impl Notification {
             // The message is committed: signal reconnect/replay instead of queuing work.
             return;
         };
+        // Global capacity is taken first so the per-Organization map stays bounded by it;
+        // a rejected attempt holds one global permit only until this call returns.
         let Some(organization_slot) = self.delivery.reserve_organization(self.key.0, pending_slot)
         else {
             return;

@@ -428,10 +428,7 @@ async fn measure_organization_notification_reservations(pool: PgPool) {
 async fn organization_cap_preserves_other_organization_live_delivery_and_replays_affected_channel(
     pool: PgPool,
 ) {
-    organization_reservation_probe(
-        pool,
-        messages::MAX_ORGANIZATION_NOTIFICATIONS,
-        messages::MAX_ORGANIZATION_NOTIFICATIONS,
-    )
-    .await;
+    // Offer more than the cap so Organization B's live delivery depends on rejected
+    // attempts not keeping global capacity (offered = cap would pass without the fix).
+    organization_reservation_probe(pool, 2048, messages::MAX_ORGANIZATION_NOTIFICATIONS).await;
 }
