@@ -95,7 +95,7 @@ async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
     f.state.message_delivery.flush().await;
 }
 
-async fn publication_entered(gate: &messages::PublicationGate) {
+pub(super) async fn publication_entered(gate: &messages::PublicationGate) {
     tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
         .await
         .unwrap()

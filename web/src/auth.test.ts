@@ -52,14 +52,14 @@ describe('setupAndSignIn', () => {
   it('signs in right after setup 201', async () => {
     const f = route({
       'POST /api/v1/setup': () => j({}, 201),
-      'POST /api/v1/session': () => j({ token: 't', expires_in: 1, identity }),
+      'POST /api/v1/session': () => j({ expires_in: 1, identity }),
     })
     expect(await setupAndSignIn(req, f)).toEqual({ state: { screen: 'app', identity } })
   })
   it('sends setup_token when given and omits organization_id on sign-in', async () => {
     const f = route({
       'POST /api/v1/setup': () => j({}, 201),
-      'POST /api/v1/session': () => j({ token: 't', expires_in: 1, identity }),
+      'POST /api/v1/session': () => j({ expires_in: 1, identity }),
     })
     await setupAndSignIn({ ...req, setup_token: 'tok' }, f)
     const calls = (f as any).mock.calls
@@ -121,7 +121,7 @@ describe('credentials', () => {
     vi.stubGlobal('sessionStorage', { setItem: s })
     await setupAndSignIn(req, route({
       'POST /api/v1/setup': () => j({}, 201),
-      'POST /api/v1/session': () => j({ token: 't', expires_in: 1, identity }),
+      'POST /api/v1/session': () => j({ expires_in: 1, identity }),
     }))
     expect(s).not.toHaveBeenCalled()
     vi.unstubAllGlobals()

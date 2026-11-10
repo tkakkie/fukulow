@@ -103,6 +103,7 @@ async fn account_migration_preserves_single_organization_and_requires_new_sign_i
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let response = app
@@ -119,7 +120,7 @@ async fn account_migration_preserves_single_organization_and_requires_new_sign_i
     let response = app
         .clone()
         .oneshot(
-            Request::post("/api/v1/session")
+            Request::post("/api/v1/native/session")
                 .extension(axum::extract::ConnectInfo(
                     "192.0.2.1:1234".parse::<std::net::SocketAddr>().unwrap(),
                 ))

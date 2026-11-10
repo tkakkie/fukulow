@@ -122,6 +122,7 @@ fn state(pool: &PgPool) -> AppState {
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     }
 }
@@ -331,6 +332,33 @@ async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_token
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
     }
+}
+
+#[sqlx::test]
+async fn secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie(pool: PgPool) {
+    let organization = organization(&pool).await;
+    let (_, token) = member(&pool, organization).await;
+    let mut secure = state(&pool);
+    secure.cookie_secure = true;
+    let server = Server::start(crate::app(secure)).await;
+    let origin = format!("https://{}", server.address);
+    // The plain listener represents the app behind a TLS terminator.
+    rejected(
+        server.handshake(None, Some(&token), Some(&origin)).await,
+        401,
+    );
+    let mut request = format!("ws://{}/api/v1/orgs/{organization}/ws", server.address)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert(header::ORIGIN, origin.parse().unwrap());
+    request.headers_mut().insert(
+        header::COOKIE,
+        format!("__Host-fukulow_session={token}").parse().unwrap(),
+    );
+    let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    client.close(None).await.unwrap();
 }
 
 #[sqlx::test]
@@ -729,7 +757,10 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
                     let exhausted = exhausted.clone();
                     async move {
                         state.pool = exhausted;
-                        ws.on_upgrade(move |socket| connected(socket, state, auth))
+                        {
+                            let work = state.shutdown.sockets.enter();
+                            ws.on_upgrade(move |socket| connected(socket, state, auth, work))
+                        }
                     }
                 },
             ),
@@ -998,4 +1029,5 @@ async fn cookie_origin_is_checked_before_auth_and_organization_without_database(
 mod fanout;
 mod measurement;
 
+mod shutdown;
 mod topics;
