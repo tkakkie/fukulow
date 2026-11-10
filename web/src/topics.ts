@@ -21,7 +21,8 @@ type Paging = { asOfSeq?: number; before?: number; hasMore: boolean; loading: bo
 type TopicWindow = { messages: Map<number, Message>; before?: number; hasMore: boolean; loading: boolean; error: boolean }
 const paging = (): Paging => ({ hasMore: true, loading: false, error: false })
 const window = () => ({ main: paging(), list: paging(), messages: new Map<number, Message>(),
-  baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(), summaries: new Set<string>(), unavailable: false })
+  mainTopics: new Set<string>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
+  summaries: new Set<string>(), unavailable: false })
 type Window = ReturnType<typeof window>
 
 /** Session-owned projection windows around the existing unfiltered sync controller. No protocol state is copied. */
@@ -29,6 +30,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const windows = new Map<string, Window>()
   const listeners = new Set<() => void>()
   const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>()
+  const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   let closed = false
   let sessionToken = 0
   const cancelReads = () => {
@@ -36,7 +38,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     deadlines.clear()
   }
   let previous = sync.get()
-  const notify = () => listeners.forEach(l => l())
+  const notify = () => { snapshots.clear(); listeners.forEach(l => l()) }
   const getWindow = (channel: string) => {
     let w = windows.get(channel)
     if (!w) windows.set(channel, w = window())
@@ -58,7 +60,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     sync.get().organization === 'available' && windows.get(channel) === w && !w.unavailable &&
     sync.get().channels[channel]?.watched === true
 
-  async function read<T>(channel: string, w: Window, run: () => Promise<Result<T>>): Promise<Result<T>> {
+  async function read<T>(channel: string, w: Window, run: () => Promise<Result<T>>, bootstrap = false): Promise<Result<T>> {
     let timer: ReturnType<typeof setTimeout> | undefined
     // Session replacement fences late authentication failures; same-session late 401 remains authoritative.
     const session = sessionToken
@@ -73,7 +75,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
         deadlines.set(timer, () => resolve({ ok: false, kind: 'network' }))
       })])
-      if (current(channel, w) && !result.ok && result.kind === 'http' &&
+      // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
+      if (!bootstrap && !api.isOrganizationUnavailable(result) && current(channel, w) && !result.ok && result.kind === 'http' &&
         [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
         // C9: stop watching until explicit user selection; projection denial is never a sequence gap.
         void sync.unwatch(channel)
@@ -96,45 +99,72 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   function applyMain(w: Window, page: TimelinePage) {
     for (const item of page.items) {
       if (item.kind === 'message') w.messages.set(item.message.seq, item.message)
-      else mergeBaselines(w, { as_of_seq: page.as_of_seq, topics: [item.topic] })
+      else {
+        w.mainTopics.add(item.topic.id)
+        mergeBaselines(w, { as_of_seq: page.as_of_seq, topics: [item.topic] })
+      }
     }
     w.main.asOfSeq = page.as_of_seq
     w.main.before = page.items[0] && (page.items[0].kind === 'message' ? page.items[0].message.seq : page.items[0].topic.last_seq)
     w.main.hasMore = page.has_more
   }
 
-  async function loadMain(channel: string): Promise<Result<TimelinePage>> {
+  async function loadMainPage(channel: string, bootstrap = false): Promise<Result<TimelinePage>> {
+    if (bootstrap) {
+      const w = getWindow(channel)
+      w.main = paging(); w.messages.clear(); w.mainTopics.clear()
+    }
     const w = getWindow(channel), p = w.main
     if (!current(channel, w) || p.loading || !p.hasMore) return { ok: false, kind: 'network' }
     p.loading = true; p.error = false; notify()
     const query: ListTimelineQuery = p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }
-    const result = await read(channel, w, () => options.api.listTimeline(channel, query))
-    if (current(channel, w)) {
+    const result = await read(channel, w, () => options.api.listTimeline(channel, query), bootstrap)
+    if (current(channel, w) && w.main === p) {
       p.loading = false; p.error = !result.ok
-      if (result.ok) applyMain(w, result.data)
+      if (result.ok) {
+        applyMain(w, result.data)
+        void sync.settleHistory(channel, result.data.items.map(i => i.kind === 'message' ? i.message : i.topic.latest_message))
+      }
       notify()
     }
     return result
   }
+  function snapshot(channel: string) {
+    const w = closed ? window() : getWindow(channel)
+    const c = closed ? undefined : sync.get().channels[channel]
+    const messages = c?.messages ?? []
+    const merged = selectMainTimeline(messages, w.messages.values(), w.baselines.values())
+    // List/summary baselines supply counts, while main pages and sync records supply main membership.
+    const visibleTopics = new Set([...w.mainTopics, ...messages.flatMap(m => m.topic_id ? [m.topic_id] : [])])
+    const lines = merged.filter(l => l.kind === 'message' || visibleTopics.has(l.topicId))
+    const topicSnapshots = new Map<string, ReturnType<typeof topic>>()
+    function topic(topicId: string) {
+      const t = w.topics.get(topicId)
+      return { messages: selectTopicMessages(topicId, messages, t?.messages.values() ?? []),
+        loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false }
+    }
+    return { lines, topics: merged.filter(l => l.kind === 'topic'),
+      main: { ...w.main }, list: { ...w.list }, unavailable: w.unavailable || c?.state === 'unavailable',
+      topic(topicId: string) {
+        let value = topicSnapshots.get(topicId)
+        if (!value) topicSnapshots.set(topicId, value = topic(topicId))
+        return value
+      } }
+  }
   return {
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     get(channel: string) {
-      const w = closed ? window() : getWindow(channel)
-      const c = closed ? undefined : sync.get().channels[channel]
-      const messages = c?.messages ?? []
-      const lines = selectMainTimeline(messages, w.messages.values(), w.baselines.values())
-      return { lines, topics: lines.filter(l => l.kind === 'topic'),
-        main: { ...w.main }, list: { ...w.list }, unavailable: w.unavailable || c?.state === 'unavailable',
-        topic(topicId: string) {
-          const t = w.topics.get(topicId)
-          return { messages: selectTopicMessages(topicId, messages, t?.messages.values() ?? []),
-            loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false }
-        } }
+      let value = snapshots.get(channel)
+      if (!value) snapshots.set(channel, value = snapshot(channel))
+      return value
     },
-    loadMain,
+    async loadMain(channel: string) {
+      if (sync.get().channels[channel]?.cursor === null) await sync.getTimeline(channel).loadLatest()
+      else await loadMainPage(channel)
+    },
     async bootstrap(channel: string): Promise<Result<MessagePage>> {
       const request = sync.get().channels[channel]?.latest
-      const result = await loadMain(channel)
+      const result = await loadMainPage(channel, true)
       if (!result.ok) return result
       // Every Channel position is currently a Message creation (S1). The final line contains the real
       // Message at W, including when it is a Topic summary. Only bootstrap passes this trusted base
@@ -155,6 +185,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         mergeBaselines(w, result.data)
+        void sync.settleHistory(channel, result.data.topics.map(t => t.latest_message))
         p.asOfSeq = result.data.as_of_seq; p.before = result.data.topics[0]?.last_seq; p.hasMore = result.data.has_more
       }
       notify()
@@ -166,7 +197,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       const result = await read(channel, w, () => options.api.getTopicSummary(channel, topicId))
       if (!current(channel, w)) return
       w.summaries.delete(topicId)
-      if (result.ok) mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
+      if (result.ok) {
+        mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
+        void sync.settleHistory(channel, [result.data.topic.latest_message])
+      }
       notify()
       return result
     },
@@ -182,6 +216,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       t.loading = false; t.error = !result.ok
       if (result.ok) {
         for (const m of result.data.messages) t.messages.set(m.seq, m)
+        void sync.settleHistory(channel, result.data.messages)
         t.before = result.data.messages[0]?.seq; t.hasMore = result.data.has_more
       }
       notify()

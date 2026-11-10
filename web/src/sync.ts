@@ -333,6 +333,7 @@ export function createSync(options: SyncOptions) {
     unwatch: (channel: string) => dispatch({ type: 'unwatch', channel }),
     close: () => dispatch({ type: 'stop' }),
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
+    settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     getTimeline(channel: string) {
       let t = timelines.get(channel)
       if (!t) { t = timeline(channel); timelines.set(channel, t) }

@@ -1,5 +1,6 @@
 import type { Result, TimelinePage, TopicSummary } from './api'
-import { createTopics } from './topics'
+import { createTopics, type TopicsApi } from './topics'
+import { createTopicSync } from './topic-sync'
 import { expandMessage } from '../scripts/realtime-fixtures'
 import type { Effect as FixtureEffect, ResolvedInput } from '../scripts/realtime-fixtures'
 import { createSync, type SyncOptions } from './sync'
@@ -8,7 +9,7 @@ import { message, observe, record } from './protocol-test-helpers'
 export { scenarios, record } from './protocol-test-helpers'
 
 export const flush = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
-export function controllerClient(overrides: Partial<SyncOptions> = {}) {
+export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopicSync = false) {
   let emitted: FixtureEffect[] = []
   let nextId = 'unused'
   const sockets: (RealtimeHandlers & { closed: boolean; connection: Connection })[] = []
@@ -21,7 +22,14 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
       emit(effect)
     })
   }
-  const sync = createSync({
+  const topicsApi: TopicsApi = {
+    listTimeline: (channel, query) => request({ type: 'fetch_main_timeline', channel, ...query }),
+    listTopics: (channel, query) => request({ type: 'fetch_topics', channel, ...query }),
+    getTopicSummary: (channel, topic) => request({ type: 'fetch_topic_summary', channel, topic }),
+    listTopicMessages: (channel, topic, query) => request({ type: 'fetch_history', channel, topic,
+      page: query?.before_seq === undefined ? 'latest' : 'before', seq: query?.before_seq }),
+  }
+  const options: SyncOptions = {
     selfId: 'me', newId: () => nextId,
     // As in production (session.ts): a pre-connect close asks REST; the fixture answers with membership_check_result.
     checkMembership: () => request({ type: 'membership_check' }),
@@ -51,14 +59,10 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
       return handle
     },
     ...overrides,
-  })
-  const topics = createTopics(sync, { api: {
-    listTimeline: (channel, query) => request({ type: 'fetch_main_timeline', channel, ...query }),
-    listTopics: (channel, query) => request({ type: 'fetch_topics', channel, ...query }),
-    getTopicSummary: (channel, topic) => request({ type: 'fetch_topic_summary', channel, topic }),
-    listTopicMessages: (channel, topic, query) => request({ type: 'fetch_history', channel, topic,
-      page: query?.before_seq === undefined ? 'latest' : 'before', seq: query?.before_seq }),
-  } })
+  }
+  const composition = withTopicSync ? createTopicSync({ ...options, topicsApi }) : undefined
+  const sync = composition?.sync ?? createSync(options)
+  const topics = composition?.topics ?? createTopics(sync, { api: topicsApi })
   const client = {
     sync, topics, sockets, allEffects,
     observe: () => {

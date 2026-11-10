@@ -43,6 +43,36 @@ function id(effects: Effect[], type: 'fetch_history' | 'wait' | 'send' | 'connec
   return effect.id
 }
 
+it('projection settlement matches Channel and sender without changing the window, cursor, evidence or effects', () => {
+  const d = boot()
+  d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'optimistic' })
+  const before = d.get().channels.A
+  const own = { ...record(102), sender: 'me', client_message_id: 'c1' }
+  for (const message of [{ ...own, channel_id: 'B' }, { ...own, sender: 'other' }]) {
+    expect(d.feed({ type: 'settle_history', channel: 'A', messages: [message] })).toEqual([])
+    expect(d.get().channels.A).toBe(before)
+  }
+  expect(d.feed({ type: 'settle_history', channel: 'A', messages: [own] })).toEqual([])
+  expect(d.get().channels.A).toMatchObject({ pending: [], cursor: 100 })
+  expect(d.get().channels.A.messages).toBe(before.messages)
+  expect(d.get().channels.A.advancing).toBe(before.advancing)
+  d.event(101)
+  expect(d.get().channels.A.cursor).toBe(101)
+})
+
+it('projection settlement cannot change sends for an unwatched or C9-unavailable Channel', () => {
+  for (const denial of ['unwatch', 'C9'] as const) {
+    const d = boot()
+    d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'optimistic' })
+    if (denial === 'unwatch') d.feed({ type: 'unwatch', channel: 'A' })
+    else d.feed({ type: 'event', connection: d.connection,
+      event: { type: 'error', channel_id: 'A', code: 'channel_not_found' } })
+    const before = d.get()
+    expect(d.feed({ type: 'settle_history', channel: 'A', messages: [{ ...record(99), sender: 'me', client_message_id: 'c1' }] })).toEqual([])
+    expect(d.get()).toBe(before)
+  }
+})
+
 it('ack without an echo keeps the cursor and reconnect replay converges to one canonical Message', () => {
   const d = boot()
   const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'optimistic' }), 'send')

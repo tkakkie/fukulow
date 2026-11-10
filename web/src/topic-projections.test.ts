@@ -9,17 +9,19 @@ const projections = scenarios.filter(s => s.id === 'topic-messages-leave-holes-i
   s.id === 'posting-during-main-timeline-paging-loses-and-duplicates-no-topic')
 const { running, proposed } = partitionScenarios(projections)
 it.skip.each(proposed)('proposed: $id', () => {})
-it.each(running)('projection harness: $id', async scenario => {
-  const client = controllerClient()
-  expect(await runClientScenarioAsync(scenario, client)).toEqual([])
-  client.topics.close()
-  await client.sync.close()
-  expect(vi.getTimerCount()).toBe(0)
+it('runs all four shared Topic fixtures through createTopicSync', async () => {
+  expect(running).toHaveLength(4)
+  for (const scenario of running) {
+    const client = controllerClient({}, true)
+    expect(await runClientScenarioAsync(scenario, client), scenario.id).toEqual([])
+    await client.sync.close()
+    expect(vi.getTimerCount()).toBe(0)
+  }
 })
 
 it('rejects incorrect Topic projections from a broken controller harness', async () => {
   for (const change of ['count', 'position', 'order', 'omission', 'duplicate', 'Topic window', 'missing projection'] as const) {
-    const client = controllerClient(), observe = client.observe
+    const client = controllerClient({}, true), observe = client.observe
     const scenario = projections.find(s => s.id === 'posting-during-main-timeline-paging-loses-and-duplicates-no-topic')!
     const filteredScenario = projections.find(s => s.id === 'filtered-page-does-not-move-cursor')!
     client.observe = () => {
