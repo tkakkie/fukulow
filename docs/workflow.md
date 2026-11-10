@@ -1,8 +1,10 @@
 # Workflow (operating procedure for AIs)
 
 Follow this without waiting for a human prompt. Rules: `AGENTS.md`. Rationale: `docs/decisions.md`.
-Run commands for GitHub as your own identity: `/Users/tomoya/.fukulow-ai/run-as.sh <claude|codex|antigravity> <command>` (`< /dev/null`), e.g. `... gh pr list`, `... git push -q origin HEAD:<branch>`.
+Run commands for GitHub as your own identity: `$FUKULOW_RUN_AS <claude|codex|antigravity> <command>` (local helper, configured outside the repo) (`< /dev/null`), e.g. `... gh pr list`, `... git push -q origin HEAD:<branch>`.
 Never push to `main`. Never merge unless the maintainer explicitly says so.
+
+Cloud session (no `$FUKULOW_RUN_AS`, Codex or Antigravity): a Claude Code cloud session does Issues, PRs, labels and reviews through its GitHub integration. Maintainer-only review (no second AI) is allowed only for (a) docs-only changes, or (b) changes limited to a CI script that checks doc length limits and its tests. Excluded: product code, auth, permissions, tenant scoping, real-time delivery, migrations, and anything that weakens an existing CI check. The Issue must state this scope and the maintainer must approve it; all other changes keep section 5. It never replaces CI: required checks `web`, `server`, `docker` must be green on the head, as the `main` ruleset requires.
 
 ## 1. Sweep (run at every wake-up, notification, user message, or finished AI run)
 1. `gh pr list --state open --limit 200 --json number,title,labels,headRefOid,mergeable,statusCheckRollup` and `gh issue list --state open --limit 200 --json number,title,labels,milestone`; if 200 come back, split with `--search 'created:<date'` until the list is exhausted. For cleanup also list recent merges: `gh pr list --state merged --limit 30 --json number,headRefName,labels,mergedAt`.
@@ -57,11 +59,11 @@ Never push to `main`. Never merge unless the maintainer explicitly says so.
   low = small copy, limit or type fixes; medium = new screens or state modules, vitest additions, conflict and CI fixes, browser checks; high = browser-side real-time, auth-screen session handling, new E2E suites, multi-screen state design.
   Size alone does not raise effort. If harder than expected: stop, report, restart higher.
 - Claude: Sonnet by default; Opus only for round 1 of high-risk review or heavy implementation.
-- Launch every AI under its own identity via `/Users/tomoya/.fukulow-ai/run-as.sh <name> <cli ...>` (its own GitHub token). Put the model and effort in the signature line.
+- Launch every AI under its own identity via `$FUKULOW_RUN_AS <name> <cli ...>` (its own GitHub token). Put the model and effort in the signature line.
 - Orchestrator: start each worker with the Bash tool and `run_in_background: true` (not `nohup ... &`): the harness notifies on exit, which resumes the sweep (section 1) with no user prompt. Run from the task worktree; keep the prompt, `-o` result and log in the scratchpad dir, outside the repo. On exit read the result file and the log, then sweep.
-  Codex: `cd <worktree> && /Users/tomoya/.fukulow-ai/run-as.sh codex codex exec -m <gpt-6.1-sol|gpt-6-astra> -c 'model_reasoning_effort="<medium|high>"' --sandbox danger-full-access -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1`
-  Antigravity: `/Users/tomoya/.fukulow-ai/run-as.sh antigravity env HOME=<repo>/agy-home PATH=/usr/local/argon-agy:$PATH GIT_AUTHOR_NAME=Antigravity GIT_AUTHOR_EMAIL=noreply@example.com GIT_COMMITTER_NAME=Antigravity GIT_COMMITTER_EMAIL=noreply@example.com /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model claude-sonnet-5-5-<low|medium|high> --print-timeout 3000s --output-format text < /dev/null > <scratch>/log 2>&1`
-  Claude: the orchestrating session or a subagent works as itself; `run-as.sh claude gh|git ...` (with `< /dev/null`) only gives its GitHub commands the Claude identity. It is not a worker launcher.
+  Codex: `cd <worktree> && $FUKULOW_RUN_AS codex codex exec -m <gpt-6.1-sol|gpt-6-astra> -c 'model_reasoning_effort="<medium|high>"' --sandbox danger-full-access -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1`
+  Antigravity: `$FUKULOW_RUN_AS antigravity env HOME=<repo>/agy-home PATH=/usr/local/argon-agy:$PATH GIT_AUTHOR_NAME=Antigravity GIT_AUTHOR_EMAIL=noreply@example.com GIT_COMMITTER_NAME=Antigravity GIT_COMMITTER_EMAIL=noreply@example.com /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model claude-sonnet-5-5-<low|medium|high> --print-timeout 3000s --output-format text < /dev/null > <scratch>/log 2>&1`
+  Claude: the orchestrating session or a subagent works as itself; `$FUKULOW_RUN_AS claude gh|git ...` (with `< /dev/null`) only gives its GitHub commands the Claude identity. It is not a worker launcher.
 - Exceptions to the area table need a line in the Issue (e.g. Codex implements the sync protocol/controller, H3 high; adapter and components stay with Antigravity).
 
 ## 5. Reviews
@@ -73,7 +75,7 @@ Never push to `main`. Never merge unless the maintainer explicitly says so.
 - Every Issue comment, review and PR body ends with `AI: <name> / model: <id> / effort: <level>`. Everything on GitHub is in English.
 
 ## 6. Conflicts and CI
-- Conflict: in the PR worktree `git fetch origin && git merge origin/main`; resolve; run Commands; push. `docs/decisions.md` conflicts: keep both sides, append-only, never rewrite others' lines.
+- Conflict: in the PR worktree `git fetch origin && git merge origin/main`; resolve; run Commands; push. `docs/decisions.md` conflicts: keep both sides' current decisions (it holds only current decisions and may be rewritten within the `AGENTS.md` writing limits).
 - CI does not start after a conflict-resolving merge push (no permission denial involved): push an empty commit (`git commit --allow-empty -m "Trigger CI"`).
 - If `gh run rerun` is denied, never work around it (no empty commit, no other trigger): set `status:needs-decision` with the exact request for the maintainer.
 - A green check on a conflicting PR is stale: resolve the conflict first, then trust only CI on the new head.
