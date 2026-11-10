@@ -88,7 +88,8 @@ States look the same everywhere (board A2-2):
 | Reconnecting | StatusBanner `再接続しています…` (visual only, no live role; the page status region announces it, §6) | content stays; banner only after 2 s offline; send behaviour unchanged (presentation only) |
 | Sending | Message with `送信中…` in `--text2` | resolved by C5 |
 | Send outcome unknown | `送信を確認できませんでした。` + `再送する` / `破棄` | network error, timeout, lost ack, retryable 503: `再送する` resends with the same `client_message_id` (C6); no `編集` (a new key could duplicate a committed Message) |
-| Send refused | reason + `編集して送り直す` / `破棄` | 400/403/404/409/413/415: never resent (C6); `編集して送り直す` moves the text into the Composer as a new send and removes the failed one; if that Composer already has a draft, it first asks `入力中の下書きを置き換えますか？` (`置き換える` / `キャンセル`), and `キャンセル` keeps both |
+| Send refused | reason + `編集して送り直す` / `破棄` | 400/403/404/409/413/415: never resent (C6); `編集して送り直す` moves the text into the Composer as a new send and removes the failed one; if that Composer already has a draft, it first asks `入力中の下書きを置き換えますか？` (`置き換える` / `キャンセル`), and `キャンセル` keeps both; offered only while that チャンネル still accepts sends |
+| Send failed, target unavailable | text stays visible and selectable on the failed Message + `破棄` | C9/C10 terminal state wins over both rows above: no `再送する` or `編集して送り直す`, not hidden behind a disabled button; C6 unchanged; only that チャンネル or 組織 is affected |
 | After `破棄` | the Message is removed | focus goes to the Composer |
 | New Messages below | `新着 n件 ↓` button | only when not pinned (§8) |
 | Sign in | board A2-3 | an ended Account Session (4001 or 401, S4 and C6) shows `ログインの有効期限が切れました。` |
