@@ -733,8 +733,17 @@ pub async fn organization_me(auth: Auth) -> impl IntoResponse {
     (status = 500, description = "Database or worker failure while resolving or revoking the session", body = ErrorBody)))]
 pub async fn sign_out(
     State(state): State<AppState>,
-    auth: AccountAuth,
+    auth: Result<AccountAuth, ApiError>,
 ) -> Result<Response, ApiError> {
+    let auth = match auth {
+        Ok(auth) => auth,
+        Err(error) if error.0 == StatusCode::UNAUTHORIZED => {
+            let mut response = error.into_response();
+            clear_legacy_cookie(&state, &mut response);
+            return Ok(response);
+        }
+        Err(error) => return Err(error),
+    };
     let pool = state.pool.clone();
     let changes = state.session_changes.clone();
     // Finish revocation + notification even if the HTTP caller disconnects.

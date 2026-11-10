@@ -1592,6 +1592,73 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
 }
 
 #[sqlx::test]
+async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let session = body(
+        sign_in(
+            &app,
+            identity["organization"]["organization_id"]
+                .as_str()
+                .unwrap(),
+            PASSWORD,
+        )
+        .await,
+    )
+    .await;
+    let legacy = format!("fukulow_session={}", session["token"].as_str().unwrap());
+    let before: Value =
+        sqlx::query_scalar("SELECT json_agg(s ORDER BY token_hash) FROM account_sessions s")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    // Any session lookup or revocation would block behind this lock.
+    sqlx::query("LOCK TABLE account_sessions IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        request(
+            &app,
+            "DELETE",
+            "/api/v1/session",
+            Value::Null,
+            &[("cookie", &legacy)],
+        ),
+    )
+    .await
+    .expect("legacy-only sign-out must not access account_sessions");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let cookies: Vec<_> = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .collect();
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(
+        cookies[0],
+        "fukulow_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure"
+    );
+    assert_eq!(
+        body(response).await,
+        json!({"error": "invalid credentials"})
+    );
+    transaction.rollback().await.unwrap();
+    let after: Value =
+        sqlx::query_scalar("SELECT json_agg(s ORDER BY token_hash) FROM account_sessions s")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        before == after,
+        "legacy-only sign-out must preserve every session row"
+    );
+}
+
+#[sqlx::test]
 async fn web_and_native_contracts_cookie_migration_and_revocation(pool: PgPool) {
     setup(&router(&pool)).await;
     for secure in [false, true] {
