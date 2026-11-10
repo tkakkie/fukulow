@@ -88,6 +88,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #57 PR B: notification runs detached after COMMIT; HTTP awaits persistence only. A guard armed before COMMIT makes an incomplete task signal that Organization/Channel's sockets to close with 1011, so reconnect replays (no durable queue).
 - #179: notifications reserve at most 40 tasks per Organization/Channel and 2,048 per Delivery before spawning. Publication takes one of 40 global execution permits only after the cursor lock; saturation latches 1011. HTTP never waits on notification capacity.
 - #179 chooses separate bounded cursor-wait reservations over coalescing to preserve hot-Channel admission and recovery behavior. The 2,048-task ceiling bounds retained work across Channels; the 10 s deadline still includes cursor waiting, and Drop frees reservations on every exit.
+- #190 chooses 512 reservations/Organization over 256: both preserve B in the controlled probe; 512 gives twice the temporary many-Channel headroom while leaving 1,536/2,048 slots beyond any one Organization. A conservative bound, not an optimum.
+- #190 counts reservations under one short mutex for acquisition and final removal, avoiding stale-entry races. Each guard retains its global permit until after removal, bounding Organization entries to 2,048; no async wait or publication lock is added.
 - Authorization reads `channels.visibility` fresh on each REST/replay check and fan-out; nothing is cached or carried from HTTP into fan-out, so a committed visibility change is seen next. Public costs one boundary query (#57 PR B).
 - #135 ambiguous-COMMIT recovery: persistence takes a scoped transaction advisory lock exclusively before COMMIT; watermark reads take it shared, then read in a separate READ COMMITTED statement, so replay recovers every committed Message without a later send.
 - #135: outcome lookups cannot prove rollback from absence, so they are not used. Each watermark is bounded to 10 s including pool acquisition; an unresolved outcome closes that socket with 1011. Cost: one extra statement per send.
@@ -122,7 +124,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 ## Admission and timeouts
 - #88 bounds startup migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
 - Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).
-- The budget is partitioned (#156, #158): sends round up, watermarks round down (8 each in production), no borrowing; per Organization/Channel at most one send and four watermarks. No per-Organization reservation.
+- The budget is partitioned (#156, #158): sends round up, watermarks round down (8 each in production), no borrowing; per Organization/Channel at most one send and four watermarks. No per-Organization DB admission reservation.
 - #156 chose bounded admission outside the pool over short-wait or try advisory locks: a DB lock wait still holds a connection, and try-lock turns normal contention into repeated 1011/reconnect and send failures.
 - Watermark admission waits at most 1 s; send admission 30 s (a queued send holds no connection), then 10 s persistence work, so a send response is bounded by 40 s. Session and Channel authorization still come first (#156).
 - The exclusive barrier precedes counter allocation with transaction-local `lock_timeout=10s` and `transaction_timeout=8s`, so PostgreSQL ends stuck work before the app's 10 s deadline; prevents leftover COMMIT backends/locks (#158).
@@ -137,7 +139,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Admission is a bounded-wait guard, not a dedicated HTTP pool: auth, history, replay and notification share the same pool (#156).
 - Known limits for the 10k target: FIFO budgets can delay unrelated Organizations; four watermarks per Channel cap popular-Channel reconnects (~1,000/s at ~4 ms each); 10,000 simultaneous reconnects need client backoff (#156).
 - #178 keeps send queue caps 256/2,048: smaller caps raised refusals; larger ones roughly doubled accepted HTTP/delivery delay with no shown capacity benefit; RSS did not discriminate. A conservative choice, not an optimality or fairness claim.
-- #179 isolates a held Channel's cursor waiters from global execution capacity, fixing #178's cold-Channel 1011. Many slow Channels can still exhaust the 2,048 reservations or 40 execution permits; this is no general fairness guarantee.
+- #179 isolates held cursor waiters from execution capacity. #190 prevents only one Organization monopolizing reservations; simultaneous multi-Organization exhaustion and contention for the 40 shared execution permits remain. No cross-Organization fairness guarantee.
 - Pending maintainer decision (#158 N1): two stuck Channels with 4+ reconnecting subscribers each can fill all 8 watermark slots; lowering the per-Channel cap to 2 would trade popular-Channel reconnect throughput.
 
 ## Web client

@@ -27,7 +27,8 @@ pub use delivery::Delivery;
 pub(crate) use delivery::LIVE_QUEUE_CAPACITY;
 #[cfg(test)]
 pub(crate) use delivery::{
-    MAX_IN_FLIGHT_NOTIFICATIONS, NOTIFICATION_TIMEOUT, PublicationGate, pause_publication,
+    MAX_IN_FLIGHT_NOTIFICATIONS, MAX_ORGANIZATION_NOTIFICATIONS, NOTIFICATION_TIMEOUT,
+    PublicationGate, pause_publication,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
