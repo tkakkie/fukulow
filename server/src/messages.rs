@@ -24,6 +24,7 @@ mod failure;
 #[cfg(test)]
 pub(crate) use commit::ambiguous_commit;
 pub use delivery::Delivery;
+pub(crate) use delivery::LIVE_QUEUE_CAPACITY;
 #[cfg(test)]
 pub(crate) use delivery::{
     MAX_IN_FLIGHT_NOTIFICATIONS, NOTIFICATION_TIMEOUT, PublicationGate, pause_publication,
@@ -124,7 +125,7 @@ pub async fn list_messages(
         .pool
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await?;
-    match channels::is_visible_in_snapshot(
+    match channels::is_visible(
         &mut *tx,
         organization_id,
         (auth.identity.member.id, auth.membership_revision),
@@ -385,7 +386,13 @@ async fn persist_admitted(
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN").await?;
-    require_visible(tx.connection()?, organization_id, sender, channel_id).await?;
+    match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
+        .await?
+    {
+        Some(true) => {}
+        Some(false) => return Err(MessageError::NotFound),
+        None => return Err(MessageError::OrganizationUnavailable),
+    }
     let sender = sender.0;
     if let Some(message) = existing(
         tx.connection()?,
@@ -418,7 +425,7 @@ async fn persist_admitted(
     if let Some(message) = message {
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
         // connected subscribers silently missing a possibly committed message.
-        let mut notification = delivery.notification(organization_id, channel_id);
+        let mut notification = delivery.notification(organization_id, channel_id, message.seq);
         if let Err(error) = commit::finish(tx, input.client_message_id).await {
             if commit::definitely_rolled_back(&error) {
                 notification.complete();
@@ -461,6 +468,8 @@ async fn latest_seq(
     Ok(seq)
 }
 
+const REPLAY_PAGE_SIZE: i64 = 50;
+
 pub(crate) async fn replay_page(
     pool: &sqlx::PgPool,
     organization: Uuid,
@@ -472,12 +481,13 @@ pub(crate) async fn replay_page(
         "SELECT id, channel_id, seq, client_message_id, sender, body, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
-         ORDER BY seq ASC LIMIT 50",
+         ORDER BY seq ASC LIMIT $5",
     )
     .bind(organization)
     .bind(channel)
     .bind(after)
     .bind(through)
+    .bind(REPLAY_PAGE_SIZE)
     .fetch_all(pool)
     .await
 }

@@ -459,7 +459,9 @@ async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(po
         locks > 0,
         "socket abandonment alone must leave the injected COMMIT unresolved"
     );
-    // The reconnecting watermark's timer starts after the sender's, leaving ordering margin.
+    // Both transactions have an 8 s PostgreSQL timeout. Leave time after the sender's
+    // rollback for the watermark's counter read and COMMIT, not just lock acquisition.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let mut between = f.server.connect(&f.token).await;
     subscribe(&mut between, channel, 0).await;
     tokio::select! {

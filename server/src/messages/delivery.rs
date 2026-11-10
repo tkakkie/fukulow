@@ -12,10 +12,39 @@ use uuid::Uuid;
 
 type ChannelKey = (Uuid, Uuid);
 type Recipients = HashMap<Uuid, Sender>;
+type ChannelRegistry = Arc<Mutex<HashMap<ChannelKey, (usize, Arc<ChannelFanout>)>>>;
+
+struct ChannelLease {
+    registry: ChannelRegistry,
+    key: ChannelKey,
+    fanout: Arc<ChannelFanout>,
+}
+
+impl Drop for ChannelLease {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((leases, _)) = registry.get_mut(&self.key) {
+            *leases -= 1;
+            if *leases == 0 {
+                registry.remove(&self.key);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ChannelFanout {
+    recipients: Mutex<Recipients>,
+    // Initialized before COMMIT while sends still serialize on the Channel barrier.
+    // A new subscriber replays history; it need not seed this publication cursor.
+    first_seq: OnceLock<i64>,
+    published: tokio::sync::Mutex<Option<i64>>,
+}
 
 // Twice the production pool's 20 connections; bound backlog without waiting on sends.
 pub(crate) const MAX_IN_FLIGHT_NOTIFICATIONS: usize = 40;
 pub(crate) const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const LIVE_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 struct Sender {
@@ -36,10 +65,12 @@ impl Sender {
 /// once from that pool on first use.
 #[derive(Clone)]
 pub struct Delivery {
-    recipients: Arc<Mutex<HashMap<ChannelKey, Recipients>>>,
+    recipients: ChannelRegistry,
     notifications: Arc<Semaphore>,
     admission: Arc<OnceLock<Arc<Admission>>>,
     failures: Failures,
+    #[cfg(test)]
+    pub(crate) live_refills: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -52,6 +83,8 @@ impl Default for Delivery {
             admission: Default::default(),
             failures: Default::default(),
             #[cfg(test)]
+            live_refills: Default::default(),
+            #[cfg(test)]
             tasks: Default::default(),
         }
     }
@@ -61,6 +94,7 @@ pub(super) struct Notification {
     delivery: Delivery,
     key: ChannelKey,
     completed: bool,
+    channel: ChannelLease,
 }
 
 impl Notification {
@@ -86,10 +120,11 @@ impl Notification {
             let _permit = permit;
             self.completed = tokio::time::timeout_at(
                 deadline,
-                self.delivery.publish(&pool, self.key.0, &message),
+                self.delivery
+                    .publish(&pool, self.key.0, &message, &self.channel.fanout),
             )
             .await
-            .is_ok();
+            .is_ok_and(|result| result.is_ok());
             drop(self);
         });
         #[cfg(test)]
@@ -117,7 +152,7 @@ pub(crate) struct LiveQueue {
     id: Uuid,
     organization: Uuid,
     sender: Sender,
-    channels: Vec<Uuid>,
+    channels: HashMap<Uuid, ChannelLease>,
     pub events: mpsc::Receiver<Arc<Message>>,
     pub overflow: watch::Receiver<bool>,
     pub notification_failed: FailureWatch,
@@ -173,24 +208,48 @@ impl Delivery {
                 events,
                 overflow,
             },
-            channels: Vec::new(),
+            channels: HashMap::new(),
             events: receiver,
             overflow: closed,
             notification_failed: Default::default(),
         }
     }
 
-    pub(super) fn notification(&self, organization: Uuid, channel: Uuid) -> Notification {
+    fn channel(&self, key: ChannelKey) -> ChannelLease {
+        let mut registry = self.recipients.lock().unwrap_or_else(|e| e.into_inner());
+        let (leases, fanout) = registry.entry(key).or_default();
+        *leases += 1;
+        ChannelLease {
+            registry: self.recipients.clone(),
+            key,
+            fanout: fanout.clone(),
+        }
+    }
+
+    pub(super) fn notification(&self, organization: Uuid, channel: Uuid, seq: i64) -> Notification {
+        let fanout = self.channel((organization, channel));
+        fanout.fanout.first_seq.get_or_init(|| seq);
         Notification {
             delivery: self.clone(),
             key: (organization, channel),
             completed: false,
+            channel: fanout,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_recipients_locked(&self, run: impl FnOnce()) {
-        let _registry = self.recipients.lock().unwrap();
+        let channels: Vec<_> = self
+            .recipients
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, channel)| channel.clone())
+            .collect();
+        let _recipients: Vec<_> = channels
+            .iter()
+            .map(|channel| channel.recipients.lock().unwrap())
+            .collect();
         run();
     }
 
@@ -204,38 +263,101 @@ impl Delivery {
         }
     }
 
-    async fn publish(&self, pool: &sqlx::PgPool, organization: Uuid, message: &Message) {
+    async fn publish(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        message: &Message,
+        channel: &ChannelFanout,
+    ) -> Result<(), sqlx::Error> {
         #[cfg(test)]
         publication_gate(message.client_message_id).await;
-        let recipients = self
+        let mut cursor = channel.published.lock().await;
+        let after = cursor
+            .get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(message.seq) - 1);
+        if message.seq <= *after {
+            return Ok(());
+        }
+        // REPLAY_PAGE_SIZE (50) is the effective bound today; the queue-capacity cap only
+        // matters if the page size is ever raised above LIVE_QUEUE_CAPACITY.
+        let gap = message.seq - *after - 1;
+        if gap > super::REPLAY_PAGE_SIZE || gap > LIVE_QUEUE_CAPACITY as i64 {
+            // Latch before skipping: current subscribers reconnect; later subscribers
+            // register before taking their committed replay watermark.
+            self.failures.signal((organization, message.channel_id));
+            *after = message.seq;
+            return Ok(());
+        }
+        // Recover a committed gap once per Channel, never once per subscriber.
+        // Each bounded page rechecks current Member revisions and private grants.
+        while *after < message.seq - 1 {
+            let page = super::replay_page(
+                pool,
+                organization,
+                message.channel_id,
+                *after,
+                message.seq - 1,
+            )
+            .await?;
+            if page.is_empty() {
+                return Err(sqlx::Error::RowNotFound);
+            }
+            let last = page
+                .last()
+                .map(|message| message.seq)
+                .ok_or(sqlx::Error::RowNotFound)?;
+            self.fan_out(pool, organization, channel, &page).await;
+            *after = last;
+        }
+        self.fan_out(pool, organization, channel, std::slice::from_ref(message))
+            .await;
+        *after = message.seq;
+        Ok(())
+    }
+
+    async fn fan_out(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        channel: &ChannelFanout,
+        messages: &[Message],
+    ) {
+        // Only this Channel's lock covers the O(subscribers) snapshot.
+        let recipients: Vec<_> = channel
             .recipients
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(organization, message.channel_id))
+            .values()
             .cloned()
-            .unwrap_or_default();
+            .collect();
         if recipients.is_empty() {
             return;
         }
         let members: Vec<_> = recipients
-            .values()
+            .iter()
             .map(|s| s.member)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
         let allowed =
-            channels::visible_members(pool, organization, message.channel_id, &members).await;
+            channels::visible_members(pool, organization, messages[0].channel_id, &members).await;
         let Ok(allowed) = allowed else {
             // No protected delivery on a failed authorization query. Reconnect and replay.
-            for sender in recipients.values() {
+            for sender in &recipients {
                 sender.overflow.send_replace(true);
             }
             return;
         };
         let allowed: HashSet<_> = allowed.into_iter().collect();
-        let message = Arc::new(message.clone());
-        for sender in recipients.values().filter(|s| allowed.contains(&s.member)) {
-            sender.send(message.clone());
+        let recipients: Vec<_> = recipients
+            .iter()
+            .filter(|s| allowed.contains(&s.member))
+            .collect();
+        for message in messages {
+            let message = Arc::new(message.clone());
+            for sender in &recipients {
+                sender.send(message.clone());
+            }
         }
     }
 }
@@ -273,42 +395,37 @@ async fn publication_gate(key: Uuid) {
 
 impl LiveQueue {
     pub(crate) fn subscribe(&mut self, channel: Uuid) {
-        if !self.channels.contains(&channel) {
+        if !self.channels.contains_key(&channel) {
             self.delivery
                 .failures
                 .subscribe((self.organization, channel), &self.notification_failed);
-            self.delivery
+            let fanout = self.delivery.channel((self.organization, channel));
+            fanout
+                .fanout
                 .recipients
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .entry((self.organization, channel))
-                .or_default()
                 .insert(self.id, self.sender.clone());
-            self.channels.push(channel);
+            self.channels.insert(channel, fanout);
         }
     }
     pub(crate) fn unsubscribe(&mut self, channel: Uuid) {
         self.delivery
             .failures
             .unsubscribe((self.organization, channel), &self.notification_failed);
-        let mut registry = self
-            .delivery
-            .recipients
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let key = (self.organization, channel);
-        if let Some(recipients) = registry.get_mut(&key) {
-            recipients.remove(&self.id);
-            if recipients.is_empty() {
-                registry.remove(&key);
-            }
+        if let Some(fanout) = self.channels.remove(&channel) {
+            fanout
+                .fanout
+                .recipients
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.id);
         }
-        self.channels.retain(|id| *id != channel);
     }
 }
 impl Drop for LiveQueue {
     fn drop(&mut self) {
-        while let Some(channel) = self.channels.last().copied() {
+        while let Some(channel) = self.channels.keys().next().copied() {
             self.unsubscribe(channel);
         }
     }
@@ -326,7 +443,7 @@ mod tests {
         let channel = Uuid::new_v4();
         let mut queue = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
         queue.subscribe(channel);
-        drop(delivery.notification(organization, channel));
+        drop(delivery.notification(organization, channel, 1));
         assert!(queue.notification_failed.is_failed());
         // A future observer still sees the latch, without needing the skipped wake.
         tokio::runtime::Builder::new_current_thread()
@@ -416,7 +533,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        delivery.notification(organization, channel).spawn(
+        delivery.notification(organization, channel, 1).spawn(
             pool,
             Message {
                 id: Uuid::new_v4(),
@@ -461,7 +578,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        delivery.notification(organization, channel).spawn(
+        delivery.notification(organization, channel, 1).spawn(
             pool,
             Message {
                 id: Uuid::new_v4(),
@@ -507,5 +624,66 @@ mod tests {
         assert_eq!(queue.events.recv().await.unwrap().seq, 1);
         drop(queue);
         assert!(delivery.recipients.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn channel_registry_retains_notifications_and_cleans_concurrent_last_exits() {
+        let delivery = Delivery::default();
+        let key = (Uuid::new_v4(), Uuid::new_v4());
+        for _ in 0..64 {
+            let mut queue = delivery.queue(key.0, (Uuid::new_v4(), 0), 1);
+            queue.subscribe(key.1);
+            let mut notification = delivery.notification(key.0, key.1, 1);
+            notification.complete();
+            let fanout = notification.channel.fanout.clone();
+            drop(queue);
+            assert_eq!(delivery.recipients.lock().unwrap().len(), 1);
+            let mut replacement = delivery.queue(key.0, (Uuid::new_v4(), 0), 1);
+            replacement.subscribe(key.1);
+            assert!(Arc::ptr_eq(&replacement.channels[&key.1].fanout, &fanout));
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    drop(replacement);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    drop(notification);
+                });
+            });
+            assert!(delivery.recipients.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn holding_one_channels_recipients_does_not_lock_the_registry_or_another_channel() {
+        let delivery = Delivery::default();
+        let org = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut queue = delivery.queue(org, (Uuid::new_v4(), 0), 1);
+        queue.subscribe(channel);
+        let fanout = queue.channels[&channel].fanout.clone();
+        let locked = fanout.recipients.lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut notification = delivery.notification(org, channel, 1);
+                notification.complete();
+                let mut other = delivery.queue(org, (Uuid::new_v4(), 0), 1);
+                other.subscribe(Uuid::new_v4());
+                drop(other);
+                drop(notification);
+                sender.send(()).unwrap();
+            });
+            let result = receiver.recv_timeout(Duration::from_secs(2));
+            drop(locked);
+            result.unwrap();
+        });
     }
 }

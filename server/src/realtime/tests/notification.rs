@@ -334,6 +334,78 @@ async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_recon
 }
 
 #[sqlx::test]
+async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_and_replays_in_order(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let mut before_failure = f.server.connect(&f.token).await;
+    subscribe(&mut before_failure, f.channel, 0).await;
+    ready(&mut before_failure, f.channel, 0).await;
+    let first_key = Uuid::new_v4();
+    let dropped = messages::pause_publication(first_key);
+    send(&f, &f.token, f.channel, first_key, "dropped notification").await;
+    publication_entered(&dropped).await;
+    // Retain the Channel's lagging publication cursor across the old socket exit.
+    let late_key = Uuid::new_v4();
+    let late = messages::pause_publication(late_key);
+    send(&f, &f.token, f.channel, late_key, "late notification").await;
+    publication_entered(&late).await;
+    dropped.task.lock().unwrap().as_ref().unwrap().abort();
+    closed(&mut before_failure, 1011).await;
+
+    let through = LIVE_QUEUE_CAPACITY as i64 + 44;
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed backlog' FROM generate_series(3,$4::bigint) n")
+        .bind(f.organization).bind(f.channel).bind(f.member).bind(through).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE channel_message_sequences SET seq=$3 WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(f.organization)
+    .bind(f.channel)
+    .bind(through)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut replayed = f.server.connect(&f.token).await;
+    subscribe(&mut replayed, f.channel, 0).await;
+    for seq in 1..=through {
+        assert_eq!(event(&mut replayed).await["message"]["seq"], seq);
+    }
+    ready(&mut replayed, f.channel, through).await;
+
+    // A replay on another Channel prevents this socket from draining its live queue.
+    let other = channel(&pool, f.organization, f.member, false).await;
+    let parked = pause(other);
+    subscribe(&mut replayed, other, 0).await;
+    entered(&parked).await;
+    // Another subscriber has registered but is still inside this Channel's replay.
+    let mut mid_replay = f.server.connect(&f.token).await;
+    let replay = pause(f.channel);
+    subscribe(&mut mid_replay, f.channel, 0).await;
+    entered(&replay).await;
+    let published = post(&f, f.channel).await;
+    assert_eq!(published["seq"], through + 1);
+    // Overflow has priority over failure: these real closes prove no 4008 was set.
+    closed(&mut replayed, 1011).await;
+    closed(&mut mid_replay, 1011).await;
+
+    // A subscriber after the second latch replays the skipped prefix exactly once.
+    let mut recovered = f.server.connect(&f.token).await;
+    subscribe(&mut recovered, f.channel, 0).await;
+    for seq in 1..=through + 1 {
+        assert_eq!(event(&mut recovered).await["message"]["seq"], seq);
+    }
+    ready(&mut recovered, f.channel, through + 1).await;
+    late.release.add_permits(1);
+    f.state.message_delivery.flush().await;
+    // A late old notification is suppressed, and the advanced cursor permits live delivery.
+    let next = post(&f, f.channel).await;
+    assert_eq!(next["seq"], through + 2);
+    assert_eq!(event(&mut recovered).await["message"], next);
+    f.state.message_delivery.flush().await;
+    silent(&mut recovered).await;
+}
+
+#[sqlx::test]
 async fn notification_authorization_failure_closes_with_4008_and_reconnect_replays(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut socket = f.server.connect(&f.token).await;

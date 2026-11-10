@@ -890,9 +890,13 @@ async fn publication_waits_for_commit_even_when_http_request_is_cancelled(pool: 
 #[sqlx::test]
 async fn out_of_order_publication_fills_committed_gaps_without_duplicate_delivery(pool: PgPool) {
     let f = fixture(&pool).await;
-    let mut socket = f.server.connect(&f.token).await;
-    subscribe(&mut socket, f.channel, 0).await;
-    ready(&mut socket, f.channel, 0).await;
+    let mut sockets = Vec::new();
+    for _ in 0..128 {
+        let mut socket = f.server.connect(&f.token).await;
+        subscribe(&mut socket, f.channel, 0).await;
+        ready(&mut socket, f.channel, 0).await;
+        sockets.push(socket);
+    }
     let key = Uuid::new_v4();
     let gate = messages::pause_publication(key);
     let app = f.app.clone();
@@ -915,15 +919,32 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
         .forget();
     let second = post(&f, f.channel).await;
     assert_eq!(second["seq"], 2);
-    // seq 2 publishes first; the receiver must fill the committed prefix, then dedupe seq 1.
-    let one = event(&mut socket).await;
-    assert_eq!(one["message"]["seq"], 1);
-    assert_eq!(one["message"]["client_message_id"], json!(key));
-    assert_eq!(event(&mut socket).await["message"], second);
+    // seq 2 publishes first; fan-out recovers the prefix once for all subscribers.
+    for socket in &mut sockets {
+        let one = event(socket).await;
+        assert_eq!(one["message"]["seq"], 1);
+        assert_eq!(one["message"]["client_message_id"], json!(key));
+        assert_eq!(event(socket).await["message"], second);
+    }
+    assert_eq!(
+        f.state
+            .message_delivery
+            .live_refills
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
     gate.release.add_permits(1);
     assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
     f.state.message_delivery.flush().await;
-    silent(&mut socket).await;
+    let mut silence = tokio::task::JoinSet::new();
+    for mut socket in sockets {
+        silence.spawn(async move {
+            silent(&mut socket).await;
+        });
+    }
+    while let Some(result) = silence.join_next().await {
+        result.unwrap();
+    }
 }
 
 mod commit;
@@ -973,3 +994,5 @@ async fn cookie_origin_is_checked_before_auth_and_organization_without_database(
         }
     }
 }
+
+mod fanout;
