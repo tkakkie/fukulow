@@ -58,11 +58,12 @@ export type Input =
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
   | { type: 'event'; connection: number; event: ServerEvent; subscription?: number }
-  | { type: 'watch' | 'unwatch' | 'refresh' | 'load_older'; channel: string }
+  | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }
   | { type: 'user_send'; channel: string; clientMessageId: string; body: string }
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
   | { type: 'history_result'; request: number; page: MessagePage }
   | { type: 'history_failed'; request: number; status: Failure }
+  | { type: 'settle_history'; channel: string; messages: Message[] }
   | { type: 'send_failed'; request: number; status: Failure }
   | { type: 'ack'; request: number; message: Message }
   | { type: 'timer_elapsed'; id: number }
@@ -172,6 +173,11 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       history(id, 'after', c.cursor)
     } else if (c.wait === undefined) c.wait = wait('reorder_grace', id)
   }
+  const settle = (id: string, records: Message[]) => {
+    const c = channel(id)
+    const settled = new Set(records.filter(m => m.channel_id === id && m.sender === state.selfId).map(m => m.client_message_id))
+    if (c.pending.some(p => settled.has(p.clientMessageId))) c.pending = c.pending.filter(p => !settled.has(p.clientMessageId))
+  }
   const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream') => {
     const c = channel(id)
     const valid = records.filter(m => m.channel_id === id)
@@ -198,8 +204,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       for (; offset < c.messages.length; offset++) merged.push(c.messages[offset])
       c.messages = merged
     }
-    const settled = new Set(valid.filter(m => m.sender === state.selfId).map(m => m.client_message_id))
-    if (c.pending.some(p => settled.has(p.clientMessageId))) c.pending = c.pending.filter(p => !settled.has(p.clientMessageId))
+    settle(id, valid)
     if (source !== 'window') {
       const added = valid.map(m => m.seq).filter(n => (c.cursor === null || n > c.cursor) && !c.advancing.includes(n))
       if (added.length) c.advancing = [...new Set([...c.advancing, ...added])]
@@ -252,6 +257,11 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   if (!state.running) return finish()
 
   switch (input.type) {
+    case 'settle_history':
+      // Projection pages settle C5 without entering the sync window or contiguity evidence (P1).
+      if (state.channels[input.channel]?.watched && state.channels[input.channel].state !== 'unavailable')
+        settle(input.channel, input.messages)
+      break
     case 'connection_ready':
       if (input.connection !== state.connection || state.connected) break
       state.connected = true
@@ -275,6 +285,9 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       else { subscribe(input.channel); reconcile(input.channel) }
       break
     }
+    case 'channel_unavailable':
+      unavailable(input.channel)
+      break
     case 'unwatch': {
       const c = channel(input.channel)
       if (c.subscription && state.connected) effects.push({ type: 'unsubscribe', channel: input.channel })

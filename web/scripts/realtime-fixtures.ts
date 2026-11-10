@@ -10,6 +10,7 @@
 //    effects and observations with the fixture. It holds no sync logic; the client under test brings it.
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 export const defaultDir = resolve(import.meta.dirname, '../../contract/realtime')
 
@@ -117,25 +118,25 @@ export function expandSeqs(list: SeqItem[]): number[] | null {
 const channelKey = (ref: Json): string =>
   isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
 
-// Planned vocabulary (docs/spec.md 'Planned', P rules): allowed only in scenarios marked proposed.
+// Topic projection vocabulary runs at the controller layer; Reply and Unread rules remain proposed.
 const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
 const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'])
 
 /** The path of the first planned term in a scenario, or null. */
-function plannedTerm(value: Json, path: string, delivery = false): string | null {
+function plannedTerm(value: Json, path: string, delivery = false, controller = false): string | null {
   if (Array.isArray(value)) {
     for (const [i, item] of value.entries()) {
-      const found = plannedTerm(item, `${path}[${i}]`, delivery)
+      const found = plannedTerm(item, `${path}[${i}]`, delivery, controller)
       if (found) return found
     }
     return null
   }
   if (!isObject(value)) return null
   for (const [key, item] of Object.entries(value)) {
-    if (plannedKeys.has(key) && !(delivery && ['topic', 'as_of_seq', 'before_position'].includes(key))) return `${path}.${key}`
-    if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(delivery && ['P2', 'P5'].includes(String(r))))) return `${path}.covers`
-    const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery)
+    if (plannedKeys.has(key) && !(controller && ['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position'].includes(key))) return `${path}.${key}`
+    if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !controller && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5'].includes(String(r))) && !(delivery && ['P2', 'P5'].includes(String(r))))) return `${path}.covers`
+    const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery, controller)
     if (found) return found
   }
   return null
@@ -417,10 +418,10 @@ export function checkFixtures(dir: string = defaultDir): Problems {
         ids.set(scenario.id as string, file)
         if (isDelivery) checkDelivery(scenario, where, errors)
         else checkClient(scenario, where, errors)
-        // Only the implemented delivery rules leave the planned vocabulary gate.
-        // Client projection inputs, observations and even negative patterns stay gated.
+        // Implemented Topic vocabulary is allowed in delivery and controller scenarios.
+        // Pure protocol scenarios and remaining planned rules stay gated.
         const planned = scenario.proposed === undefined
-          ? plannedTerm(scenario, '$', isDelivery)
+          ? plannedTerm(scenario, '$', isDelivery, !isDelivery && scenario.layer === 'controller')
           : null
         if (planned) errors.push(`${where}: ${planned} is planned vocabulary; mark the scenario proposed (owner Issue) until it is implemented`)
       })
@@ -434,7 +435,7 @@ export function checkFixtures(dir: string = defaultDir): Problems {
 // Client scenario runner
 
 export type Effect = { type: string; [field: string]: unknown }
-export type Message = { seq: number; id: string; sender: string; client_message_id: string; body: string; created_at: string }
+export type Message = { seq: number; id: string; sender: string; client_message_id: string; body: string; created_at: string; topic?: string }
 /** The fixture input with respond_to replaced by the effect (as the client emitted it) it answers, and messages expanded. */
 export type ResolvedInput = { type: string; respond_to?: Effect; message?: Message; messages?: Message[]; [field: string]: unknown }
 export type ObservedChannel = {
@@ -442,6 +443,8 @@ export type ObservedChannel = {
   cursor: number | null
   messages: Message[]
   pending: { client_message_id: string; state: string }[]
+  main_timeline?: ({ seq: number } | { topic: string; position: number; message_count: number | null })[]
+  topics?: Record<string, { visible: number[] }>
 }
 export type Observed = { session?: string; organization?: string; channels: Record<string, ObservedChannel> }
 /** What a client must provide to run fixtures. */
@@ -466,6 +469,7 @@ export function expandMessage(spec: Record<string, Json>, channel?: string): Mes
   const seqs = 'seq' in spec ? [spec.seq as number] : Array.from({ length: (spec.to as number) - (spec.from as number) + 1 }, (_, i) => (spec.from as number) + i)
   return seqs.map((seq) => ({
     seq,
+    ...(typeof spec.topic === 'string' ? { topic: spec.topic } : {}),
     id: (spec.id as string | undefined) ?? `id${seq}`,
     sender: (spec.sender as string | undefined) ?? 'other',
     client_message_id: (spec.client_message_id as string | undefined) ?? `auto-${channel ?? 'x'}-${seq}`,
@@ -590,6 +594,14 @@ function checkObservation(expected: NonNullable<ClientStep['observe']>, actual: 
       const wanted = expandSeqs(want.visible as SeqItem[]) ?? []
       const seen = got.messages.map((m) => m.seq)
       if (JSON.stringify(seen) !== JSON.stringify(wanted)) failures.push(`${where} visible is ${JSON.stringify(seen)}, expected ${JSON.stringify(wanted)}`)
+    }
+    if (want.main_timeline !== undefined && !isDeepStrictEqual(got.main_timeline, want.main_timeline)) {
+      failures.push(`${where} main_timeline is ${JSON.stringify(got.main_timeline)}, expected ${JSON.stringify(want.main_timeline)}`)
+    }
+    for (const [topic, view] of Object.entries((want.topics ?? {}) as Record<string, { visible: SeqItem[] }>)) {
+      const visible = got.topics?.[topic]?.visible
+      const wanted = expandSeqs(view.visible)
+      if (JSON.stringify(visible) !== JSON.stringify(wanted)) failures.push(`${where} Topic ${topic} visible is ${JSON.stringify(visible)}, expected ${JSON.stringify(wanted)}`)
     }
     if (want.pending !== undefined) {
       const key = (p: { client_message_id: unknown; state: unknown }) => `${String(p.client_message_id)}:${String(p.state)}`

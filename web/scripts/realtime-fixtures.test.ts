@@ -182,7 +182,7 @@ describe('realtime fixtures: validation', () => {
     expect(partitionScenarios(all)).toEqual({ running: [all[0]], proposed: [all[1]] })
   })
 
-  it('validates implemented delivery timeline vocabulary without enabling client projections', () => {
+  it('validates implemented delivery timeline vocabulary and keeps pure protocol projections gated', () => {
     const timeline = (f: any): any => {
       f.delivery.scenarios[0].covers = ['P2', 'P5']
       const step = {
@@ -204,6 +204,17 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => { f.delivery.scenarios[0].steps.push({ do: 'post', as: 'alice', channel: 'general', topic_name: 'T' }) })).toBe('')
     expect(problemsOf((f) => { f.delivery.scenarios[0].steps[0] = { do: 'post', as: 'alice', channel: 'general', topic_id: 'T' } })).toContain('topic_id: unknown property')
     expect(problemsOf((f) => { f.client.scenarios[0].steps[1].input = { type: 'main_timeline_result', respond_to: 'f0', as_of_seq: 10, items: [], has_more: false } })).toContain('planned vocabulary')
+  })
+
+  it('allows implemented Topic vocabulary only at the controller layer and keeps Reply rules proposed', () => {
+    const topic = (f: any) => {
+      f.client.scenarios[0].layer = 'controller'
+      f.client.scenarios[0].covers = ['P1', 'P2', 'P3', 'P4', 'P5']
+      f.client.scenarios[0].steps[1].input.messages = [{ seq: 1, topic: 'T' }]
+    }
+    expect(problemsOf(topic)).toBe('')
+    expect(problemsOf(f => { topic(f); delete f.client.scenarios[0].layer })).toContain('planned vocabulary')
+    expect(problemsOf(f => { topic(f); f.client.scenarios[0].covers = ['P6'] })).toContain('covers is planned vocabulary')
   })
 
   it('rejects dangling references in delivery scenarios', () => {
