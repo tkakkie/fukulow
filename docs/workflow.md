@@ -123,3 +123,81 @@ Merges; Issue approvals ("OK"); token/secret changes; adding a language, depende
 - Shape: the original path stays as the index (area name, one-line scope, link); parts live in `docs/<kind>/<area>.md`, areas aligned to modules (`auth`, `channels`, `messages`, `realtime`) or product features. No per-decision files; no new doc kinds without maintainer approval. `AGENTS.md` is never split.
 - Move text verbatim, with an old location -> new location table in the PR. Check relative links, heading anchors and file-path references; fix only the reference a move breaks. No spec, decision or invariant change in the same PR; for `docs/spec.md` every guarantee keeps its meaning and scope. A constraint spanning areas is cross-referenced from each affected part.
 - No check gets weaker. Splitting `docs/invariants.md` also requires: `web/scripts/check-invariants.ts` verifies every part and a new part cannot escape it; no `path::test_name` reference is lost; the 160-character Rule limit holds in every part; existence, skip and cargo reconciliation still work; negative tests for the multi-file case; no invariant changes meaning.
+
+## 14. Operations: backup and restore (#198 C)
+
+### Backup and custody
+
+Run from the deployment checkout with its existing private `.env` (0600), the Node version in `.node-version`, Docker Compose, and the same `COMPOSE_PROJECT_NAME` used to deploy. `compose.yml` uses `postgres:18`; the script uses `pg_dump` and `pg_restore` inside that project's `db` container and refuses a non-18 dump client. It does not use `DATABASE_URL`, put credentials in command arguments, or write a connection string into a backup. Do not use `set -x`, print the environment or `docker compose config`, or save raw tool errors: they can disclose credentials. Docker/Compose/PostgreSQL error diagnostics are deliberately suppressed by these scripts.
+
+```sh
+umask 077
+mkdir -p /srv/fukulow-backups
+chmod 700 /srv/fukulow-backups
+node scripts/backup.ts /srv/fukulow-backups
+```
+
+The directory must be owned by the operator, mode 0700, and not a symlink; use a trusted parent outside the checkout and web root. Each archive is 0600. The script streams a custom-format snapshot to `.partial-*/archive` on the destination filesystem, flushes it, requires successful `pg_dump` and `pg_restore --list`, then renames it to a unique `fukulow-*.dump`. Only that final name is a published artifact. Failures preserve older backups and remove their temporary directory; a machine crash/forced kill can leave `.partial-*`, which must never be copied as backups and may be removed after confirming no backup is running. `--list` checks archive structure, not every data block; a successful restore drill is also required. A dump is one database, not cluster roles, server configuration, TLS keys or `.env`; retain those separately in existing protected configuration/secret custody. Match the backup with its application Git revision and applied migration versions in a private operator record. Do not start newer migrations against the only restored copy.
+
+Recommended initial schedule: one successful backup daily (for example 02:15 UTC using the existing host scheduler). Verify success and free disk space daily. Keep at least the latest 14 successful daily archives on the VPS and 30 off the VPS, and always retain the latest successfully drilled archive until its replacement passes. Prune only named final archives whose verified off-VPS copy exists; never prune because the latest attempt merely ran, and never remove the last known good copy. There is no automatic deletion in the script. Provision capacity before enabling the schedule; no paid storage service is introduced here.
+
+Copy each successful archive over existing SSH/SCP to an operator-controlled machine outside this VPS. Use a 0700 destination directory and encrypted storage there; archives contain Message bodies, password hashes, Account Session hashes and Membership/Role history. Example, substituting a real final filename and existing host/account:
+
+```sh
+sha256sum /srv/fukulow-backups/fukulow-EXAMPLE.dump
+scp -p /srv/fukulow-backups/fukulow-EXAMPLE.dump backup@backup-host:/private/backups/.partial-EXAMPLE
+ssh backup@backup-host 'chmod 600 /private/backups/.partial-EXAMPLE && sha256sum /private/backups/.partial-EXAMPLE'
+```
+
+Compare the two hashes, then rename the remote `.partial-EXAMPLE` to `fukulow-EXAMPLE.dump` on that host's same filesystem and record copy success. Never accept an interrupted copy as final. Run the drill on the off-VPS copy too; SCP alone does not prove recoverability. Use existing SSH key custody, never passwords or URLs in cron, arguments or logs. Restrict access to recovery operators and apply the same retention policy to workstation copies. Backups are not encrypted by `pg_dump`; SSH protects transport only.
+
+### Disposable restore drill
+
+```sh
+node scripts/restore-drill.ts /private/backups/fukulow-EXAMPLE.dump
+```
+
+The drill creates a randomly named `fukulow-restore-drill-*` PostgreSQL 18 container with networking disabled, no published port, no host/database mounts and a tmpfs data directory. It never uses Compose or a production URL. It waits for the final PostgreSQL server, verifies the archive list, restores into its fresh `fukulow` database with `--exit-on-error --single-transaction --no-owner --no-acl`, ends every restored Account Session, and runs PostgreSQL's bundled `pg_amcheck --install-missing --heapallindexed` (the bundled `amcheck` extension is installed only in this disposable database). Constraints are recreated/validated during restore. Any failure fails the drill; the container and anonymous volumes are removed in `finally`. An OS crash/forced kill may prevent cleanup: inspect and remove only the exact drill container from that run, never prune Docker globally. Use a trusted archive: a database archive can execute SQL. Tmpfs must fit the restored database; for a larger drill, arrange an explicitly disposable environment with sufficient capacity before running, without mounting existing data.
+
+Record archive size, image/version, dataset counts, elapsed time, machine/resources and check results privately for each drill. Repeat at least monthly and after schema, image, backup or recovery-procedure changes. The initial measured drill and its limits are recorded below; this is a recoverability check, not a benchmark or availability promise.
+
+### Production recovery (maintainer-operated)
+
+1. Select a trusted, successfully drilled final archive and the matching application revision. Verify its off-VPS hash after retrieval. Declare maintenance, stop **all** application instances and other writers (`docker compose -f compose.yml stop app` in the deployment project), and keep public access closed until the checks below finish. Stopping the app disconnects WebSockets; do not rely on an HTTP maintenance page to stop writes. Preserve the current database and take a separate incident backup if readable. Never use `compose down -v`, `pg_restore --clean`, or restore over the only existing database.
+2. Restore to a new, explicitly named database on the production PostgreSQL 18 instance. The following recovery name is an example: choose a fresh incident-specific name. `createdb` must succeed; if it already exists, stop and investigate instead of reusing it. Run each step only after the preceding command succeeds; keep stderr private.
+
+   ```sh
+   docker compose -f compose.yml exec -T db createdb -U fukulow -O fukulow fukulow_restore_20261111
+   docker compose -f compose.yml exec -T db pg_restore --list < /srv/fukulow-backups/fukulow-EXAMPLE.dump > /dev/null
+   docker compose -f compose.yml exec -T db pg_restore -U fukulow -d fukulow_restore_20261111 --exit-on-error --single-transaction --no-owner --no-acl < /srv/fukulow-backups/fukulow-EXAMPLE.dump
+   ```
+
+3. **A restore can revive ended Account Sessions and old Membership/Role/private Channel permission state. Ending every Account Session and re-checking all Membership/permission changes since the snapshot are mandatory before reopening.** The existing API ends one Session only. With every writer still stopped, run the offline global command below (SQL lives in its owning `auth` module). It deletes only `public.account_sessions`, uses a transaction and bounded lock/statement waits, and asserts that none remain; failure means keep the app stopped. This intentionally global recovery operation covers every Account and Organization. It does not emit live revocation signals; stopping every app instance first is essential. Verify zero rows afterwards. All users must Sign in again; clearing only browser cookies or expired Sessions is insufficient.
+
+   ```sh
+   docker compose -f compose.yml exec -T db psql -X -U fukulow -d fukulow_restore_20261111 -v ON_ERROR_STOP=1 < server/src/auth/end-all-sessions.sql
+   docker compose -f compose.yml exec -T db psql -X -U fukulow -d fukulow_restore_20261111 -v ON_ERROR_STOP=1 -Atc 'SELECT count(*) FROM public.account_sessions'
+   ```
+
+   Reconcile against the incident/change record: deactivations/reactivations, Organization Memberships, owner/admin/member/guest Roles, and private Channel grants/removals (including Membership revision). Revocation of Sessions does **not** correct restored permissions. Reapply the intended current state through reviewed, Organization-scoped maintenance changes before admitting users; do not blindly reactivate Members or copy old private grants. If the changes cannot be established, keep affected access closed and ask the maintainer to resolve them.
+4. Check the restored schema/migration versions and checksums against the selected application's migrations (`public._sqlx_migrations`, all `success=true`); compare expected Organization, Account, Member, Channel and Message counts with the snapshot/incident record. Verify representative public/private Channel history and attribution, and tenant-scoped sequence high-water marks against the maximum Message seq. Check that PostgreSQL reports no unvalidated constraints or invalid indexes. Run `pg_amcheck` as in the drill against the recovery database, then `ANALYZE`. These checks do not prove that omitted/lost post-snapshot writes exist. Resolve any failed check before switching. Keep diagnostic output, hashes and permission review records private.
+5. Switch database names while the app is stopped, preserving the original. Connect `psql -X -U fukulow -d postgres -v ON_ERROR_STOP=1` through `docker compose -f compose.yml exec -T db` and execute the following SQL only after confirming the database names. Each statement must succeed. `ALLOW_CONNECTIONS false` blocks new connections to the original; terminating its remaining connections enforces the write stop. Database renames cannot run inside a transaction. If a step fails, inspect names/state and keep the app stopped; never automatically drop or overwrite a database.
+
+   ```sql
+   ALTER DATABASE fukulow WITH ALLOW_CONNECTIONS false;
+   SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'fukulow' AND pid <> pg_backend_pid();
+   ALTER DATABASE fukulow RENAME TO fukulow_before_restore_20261111;
+   ALTER DATABASE fukulow_restore_20261111 RENAME TO fukulow;
+   ```
+
+   The new database keeps `ALLOW_CONNECTIONS true`; the preserved database stays closed. If reverting is necessary, keep writers stopped, preserve both databases, rename deliberately, re-enable connections only on the chosen database, and repeat Session invalidation and permission reconciliation there too. Starting either copy can revive credentials/authority. Never discard the incident copy until the maintainer accepts recovery.
+6. Restart the matching app (`docker compose -f compose.yml up -d --no-deps app`) while public ingress remains closed. Check startup/migration success, liveness, fresh Sign in, rejection of pre-restore cookie/bearer credentials, Organization isolation and private Channel denial. Confirm authorized history, send/retry and live delivery from a fresh browser. Then reopen ingress only after the maintainer accepts the permission reconciliation and checks. Take and drill a new backup after recovery.
+7. Confirm C8 cursor clamp/resync from `docs/spec.md`: in an isolated rehearsal hold a client window with cursor N newer than the backup, restore the older history and reconnect while that Channel remains below N. Verify `subscribed.caught_up_seq=K <` the **sent** `after_seq=N`, invalidation of the old confirmed window/cursor, unsubscribe and fresh latest-history bootstrap, and subsequent live Messages without stale collisions. Unknown sends keep their original `client_message_id`; clamp never resends automatically. The mandatory Session invalidation in production forces Sign in instead of preserving old sockets, so rehearse the clamp independently, without admitting revived production Sessions. The executable server test `malformed_controls_and_future_cursor_do_not_break_subscription_state` and shared client fixture `clamp-recovery-with-cached-messages-then-live-delivery` cover these two sides; run the server and web suites on the recovery revision. **C8 cannot detect a restored history that has already grown beyond the old cursor.** Keep writes paused during the clamp rehearsal and force fresh Sign in/history after production recovery; cursor clamp alone is not a complete recovery procedure.
+
+### Recovery window and measured drill
+
+No guaranteed RPO or RTO. With daily successful snapshots, the nominal recoverable-write gap is up to the backup interval plus dump/copy lag; failed jobs or loss of the latest VPS-only copy can make it longer. Use the timestamp of the newest verified, accessible off-VPS snapshot to assess actual loss, not the scheduler's last start time. Writes after that snapshot may be lost.
+
+The measured drill time covers container startup, restore, ending Sessions and heap/index checks only. It excludes backup creation, download/image pull, incident detection, finding the right archive, permission reconciliation, database switch, app restart, client checks and human approval. Production dataset size, disk, CPU, contention and failure modes differ; measure a representative drill on the recovery hardware before estimating outage duration. No measured drill time is a guaranteed recovery deadline.
+
+Initial drill (2026-11-11 JST, #198 C): **1.82 seconds**, on Apple M5/arm64 macOS, Docker 29.9.3 with 10 CPUs / 8,319,438,848 bytes VM memory, Node 26.13.0, cached `postgres:18` = PostgreSQL 18.6 (`sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722`). A fresh, separately named Compose source had all 9 repository migrations, 2 Organizations, 1 Account, 2 Members with owner/guest Roles, 2 public/private Channels and grants, 2,000 synthetic Messages (seq 1–1,000 per Channel), and 3 Account Sessions. `node scripts/backup.ts` produced a 133,556-byte archive; `node scripts/restore-drill.ts` restored it with constraints, ended all Sessions and passed heap/index checks in a separate network-disabled tmpfs container, then removed it. This tiny synthetic dataset, cached image and memory-backed destination do not estimate VPS disk restore time or a full production outage. The source retained its original 2,000 Messages and 3 Sessions.
