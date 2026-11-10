@@ -70,7 +70,11 @@ BEGIN
         DELETE FROM channel_read_positions WHERE organization_id = NEW.organization_id AND member_id = NEW.id;
     END IF;
     IF NEW.deactivated_at IS NULL THEN
-        FOR c IN SELECT id FROM channels WHERE organization_id = NEW.organization_id AND visibility = 'public' ORDER BY id LOOP
+        FOR c IN SELECT id FROM channels WHERE organization_id = NEW.organization_id AND (
+            visibility = 'public' OR EXISTS (
+                SELECT 1 FROM channel_members cm WHERE cm.organization_id = NEW.organization_id AND cm.channel_id = channels.id
+                    AND cm.member_id = NEW.id AND cm.membership_revision = NEW.membership_revision
+            )) ORDER BY id LOOP
             PERFORM initialize_unread(NEW.organization_id, c.id, NEW.id, NEW.membership_revision);
         END LOOP;
     END IF;
@@ -80,7 +84,6 @@ CREATE TRIGGER unread_member_access AFTER INSERT OR UPDATE OF deactivated_at ON 
 FOR EACH ROW EXECUTE FUNCTION unread_member_access();
 
 CREATE FUNCTION unread_channel_access() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE m record;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(NEW.organization_id::text, 142));
     IF TG_OP = 'UPDATE' THEN
@@ -91,9 +94,15 @@ BEGIN
                     AND cm.member_id = p.member_id AND cm.membership_revision = p.membership_revision);
     END IF;
     IF NEW.visibility = 'public' THEN
-        FOR m IN SELECT id, membership_revision FROM users WHERE organization_id = NEW.organization_id AND deactivated_at IS NULL ORDER BY id LOOP
-            PERFORM initialize_unread(NEW.organization_id, NEW.id, m.id, m.membership_revision);
-        END LOOP;
+        PERFORM pg_advisory_xact_lock_shared(hashtextextended(NEW.organization_id::text || '/' || NEW.id::text, 135));
+        INSERT INTO channel_read_positions
+        SELECT NEW.organization_id, NEW.id, u.id, u.membership_revision, COALESCE(s.seq, 0), COALESCE(s.seq, 0)
+        FROM users u LEFT JOIN channel_message_sequences s ON s.organization_id = NEW.organization_id AND s.channel_id = NEW.id
+        WHERE u.organization_id = NEW.organization_id AND u.deactivated_at IS NULL ON CONFLICT DO NOTHING;
+        INSERT INTO topic_read_positions
+        SELECT p.organization_id, p.channel_id, p.member_id, t.id, p.initial_seq
+        FROM channel_read_positions p JOIN topics t ON t.organization_id = p.organization_id AND t.channel_id = p.channel_id
+        WHERE p.organization_id = NEW.organization_id AND p.channel_id = NEW.id ON CONFLICT DO NOTHING;
     END IF;
     RETURN NEW;
 END $$;

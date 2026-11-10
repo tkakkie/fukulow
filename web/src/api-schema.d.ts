@@ -1275,10 +1275,12 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Watermark admission unavailable; Retry-After gives retry seconds */
+            /** @description Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
-                    /** @description Retry delay in seconds */
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
                     "Retry-After"?: number;
                     [name: string]: unknown;
                 };
@@ -1677,10 +1679,12 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Watermark admission unavailable; Retry-After gives retry seconds */
+            /** @description Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
-                    /** @description Retry delay in seconds */
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
                     "Retry-After"?: number;
                     [name: string]: unknown;
                 };

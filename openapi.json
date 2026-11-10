@@ -920,15 +920,21 @@
             }
           },
           "503": {
-            "description": "Watermark admission unavailable; Retry-After gives retry seconds",
+            "description": "Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
             "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
               "Retry-After": {
                 "schema": {
                   "type": "integer",
                   "format": "int64",
                   "minimum": 1
                 },
-                "description": "Retry delay in seconds"
+                "description": "Jittered retry delay in seconds (1 through 5)"
               }
             },
             "content": {
@@ -1648,15 +1654,21 @@
             }
           },
           "503": {
-            "description": "Watermark admission unavailable; Retry-After gives retry seconds",
+            "description": "Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
             "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
               "Retry-After": {
                 "schema": {
                   "type": "integer",
                   "format": "int64",
                   "minimum": 1
                 },
-                "description": "Retry delay in seconds"
+                "description": "Jittered retry delay in seconds (1 through 5)"
               }
             },
             "content": {

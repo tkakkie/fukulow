@@ -283,8 +283,10 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
     );
 }
 
+mod access;
 mod concurrency;
 mod denials;
+mod measurement;
 
 #[sqlx::test]
 async fn unread_public_access_transitions_preserve_continuous_access_and_reset_new_access(

@@ -29,6 +29,38 @@ pub struct ReadPosition {
     pub read_seq: i64,
 }
 
+// Each aggregate is a parameterized index range from the persisted position.
+// Fully read Topics never touch Messages; a missing position suppresses only
+// that Channel's Unread at its snapshot's committed counter, without persisting.
+pub(super) const LIST_COUNTS_SQL: &str = r#"
+SELECT c.channel_id, COALESCE(p.read_seq, s.seq, 0) AS read_seq,
+    p.channel_id IS NULL AS missing_position,
+    main.unread_count AS main_unread_count,
+    main.unread_count + topic.unread_count AS unread_count
+FROM unnest($4::uuid[]) c(channel_id)
+LEFT JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $2
+    AND p.membership_revision = $3 AND p.channel_id = c.channel_id
+LEFT JOIN channel_message_sequences s ON s.organization_id = $1 AND s.channel_id = c.channel_id
+CROSS JOIN LATERAL (
+    SELECT count(*) AS unread_count FROM messages m
+    WHERE p.channel_id IS NOT NULL AND m.organization_id = $1 AND m.channel_id = c.channel_id
+        AND m.topic_id IS NULL AND m.seq > p.read_seq AND m.sender <> $2
+) main
+CROSS JOIN LATERAL (
+    SELECT COALESCE(sum(unread.unread_count), 0)::bigint AS unread_count
+    FROM topics t
+    LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = c.channel_id
+        AND tr.member_id = $2 AND tr.topic_id = t.id
+    CROSS JOIN LATERAL (
+        SELECT count(*) AS unread_count FROM messages m
+        WHERE m.organization_id = $1 AND m.channel_id = c.channel_id AND m.topic_id = t.id
+            AND m.seq > COALESCE(tr.read_seq, p.initial_seq) AND m.sender <> $2
+    ) unread
+    WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
+        AND t.last_seq > COALESCE(tr.read_seq, p.initial_seq)
+) topic
+"#;
+
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels",
     params(("org" = Uuid, Path)),
     security(("cookie" = []), ("bearer" = [])),
@@ -49,21 +81,23 @@ pub async fn list_channels(
     let ids = channels.iter().map(|c| c.id).collect::<Vec<_>>();
     // Two batched queries in one authorization/data snapshot, independent of the
     // number of Channels or Topics. No Message or position outside ids is read.
-    let rows = sqlx::query(
-        "SELECT p.channel_id, p.read_seq, \
-         count(m.seq) FILTER (WHERE m.topic_id IS NULL AND m.seq > p.read_seq) AS main_unread_count, \
-         count(m.seq) FILTER (WHERE m.seq > CASE WHEN m.topic_id IS NULL THEN p.read_seq \
-             ELSE COALESCE(t.read_seq, p.initial_seq) END) AS unread_count \
-         FROM channel_read_positions p \
-         LEFT JOIN messages m ON m.organization_id = p.organization_id AND m.channel_id = p.channel_id AND m.sender <> p.member_id AND m.seq > p.initial_seq \
-         LEFT JOIN topic_read_positions t ON t.organization_id = p.organization_id AND t.channel_id = p.channel_id \
-             AND t.member_id = p.member_id AND t.topic_id = m.topic_id \
-         WHERE p.organization_id = $1 AND p.member_id = $2 AND p.membership_revision = $3 AND p.channel_id = ANY($4) \
-         GROUP BY p.channel_id, p.read_seq",
-    ).bind(auth.identity.organization.organization_id).bind(auth.identity.member.id)
-        .bind(auth.membership_revision).bind(&ids).fetch_all(&mut *tx).await?;
+    let rows = sqlx::query(LIST_COUNTS_SQL)
+        .bind(auth.identity.organization.organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision)
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await?;
     let mut counts = std::collections::HashMap::new();
     for row in rows {
+        if row.try_get::<bool, _>("missing_position")? {
+            eprintln!(
+                "Visible Channel has no Unread position; suppressing its Unread: organization={} member={} channel={}",
+                auth.identity.organization.organization_id,
+                auth.identity.member.id,
+                row.try_get::<Uuid, _>("channel_id")?
+            );
+        }
         counts.insert(
             row.try_get::<Uuid, _>("channel_id")?,
             (
@@ -174,11 +208,10 @@ async fn mark_inner(
         Some(false) => return Err(MessageError::NotFound),
         Some(true) => {}
     }
-    // Serialize all positions with revocation's cascading delete/reset. A grant
-    // lost while waiting must be checked again in a fresh statement snapshot.
+    // Serialize positions with revocation's cascading delete/reset. If access
+    // is lost while waiting, the deleted position itself makes this return 404.
     let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")
         .bind(organization).bind(channel).bind(member.0).bind(member.1).fetch_optional(&mut *tx).await?.ok_or(MessageError::NotFound)?;
-    require_visible(&mut *tx, organization, member, channel).await?;
     let requested = input.read_seq.min(w).max(initial);
     let read_seq = if let Some(topic) = topic {
         let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id=$1 AND channel_id=$2 AND id=$3)")

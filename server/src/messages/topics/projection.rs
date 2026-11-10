@@ -13,14 +13,14 @@ WITH access AS MATERIALIZED (SELECT ({}) AS visible),
 w AS MATERIALIZED (SELECT $5::bigint AS as_of_seq),
 positions AS (
     SELECT m.topic_id, min(m.seq) AS first_seq, max(m.seq) AS last_seq, count(*) AS message_count,
-        COALESCE(tr.read_seq, cr.initial_seq, 0) AS read_seq,
-        count(*) FILTER (WHERE m.sender <> $2 AND m.seq > COALESCE(tr.read_seq, cr.initial_seq, 0)) AS unread_count
+        COALESCE(tr.read_seq, cr.initial_seq, w.as_of_seq) AS read_seq,
+        count(*) FILTER (WHERE m.sender <> $2 AND m.seq > COALESCE(tr.read_seq, cr.initial_seq, w.as_of_seq)) AS unread_count
     FROM messages m CROSS JOIN w CROSS JOIN access
     LEFT JOIN channel_read_positions cr ON cr.organization_id = m.organization_id AND cr.channel_id = m.channel_id AND cr.member_id = $2
     LEFT JOIN topic_read_positions tr ON tr.organization_id = m.organization_id AND tr.channel_id = m.channel_id AND tr.topic_id = m.topic_id AND tr.member_id = $2
     WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NOT NULL
         AND m.seq <= w.as_of_seq AND access.visible AND ($9::uuid IS NULL OR m.topic_id = $9)
-    GROUP BY m.topic_id, tr.read_seq, cr.initial_seq
+    GROUP BY m.topic_id, tr.read_seq, cr.initial_seq, w.as_of_seq
 ),
 candidates AS (
     SELECT * FROM positions
