@@ -581,7 +581,7 @@ mod tests {
             sender: Uuid::new_v4(),
             body: "committed".into(),
             created_at: "now".into(),
-            topic_id: (),
+            topic_id: None,
         }
     }
 
@@ -974,7 +974,7 @@ mod tests {
                 sender: Uuid::new_v4(),
                 body: "committed".into(),
                 created_at: "now".into(),
-                topic_id: (),
+                topic_id: None,
             },
         );
         gate.entered.acquire().await.unwrap().forget();
@@ -1036,7 +1036,7 @@ mod tests {
                 sender: Uuid::new_v4(),
                 body: "committed".into(),
                 created_at: "now".into(),
-                topic_id: (),
+                topic_id: None,
             },
         );
         // The current-thread runtime cannot poll the spawned future until we yield.
@@ -1072,7 +1072,7 @@ mod tests {
             sender: Uuid::new_v4(),
             body: "hello".into(),
             created_at: "now".into(),
-            topic_id: (),
+            topic_id: None,
         });
         queue.sender.send(message.clone());
         queue.sender.send(message);

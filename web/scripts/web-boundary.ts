@@ -2,10 +2,10 @@
 // no web storage that could hold credentials. Found by parsing code, not by text search.
 //
 // Detected (per file, by name; no scope analysis):
-//   - network: fetch, XMLHttpRequest, WebSocket, EventSource, Worker, SharedWorker, navigator.sendBeacon;
-//     allowed only in NETWORK_FILES. Workers are forbidden elsewhere because they can hold
+//   - network: fetch, XMLHttpRequest, WebSocket, WebTransport, EventSource, BroadcastChannel, Worker, SharedWorker,
+//     navigator.sendBeacon; allowed only in NETWORK_FILES. Workers are forbidden elsewhere because they can hold
 //     communication this scan cannot see; when a real need appears, allow it and scan the Worker script.
-//   - storage: localStorage, sessionStorage, indexedDB, cookieStore, document.cookie; forbidden everywhere
+//   - storage: localStorage, sessionStorage, indexedDB, caches, cookieStore, document.cookie; forbidden everywhere
 //     until a ui-settings helper exists (its exemption must land with a typed key/value allow-list guard).
 //   - forms: bare name (`const f = fetch`), member of window / globalThis / self (also chained, cast,
 //     `!`, parenthesised), string-literal or constant-concatenation keys (`window['local' + 'Storage']`),
@@ -36,8 +36,18 @@ import ts from 'typescript'
 /** The only files that may open connections (the API layer). */
 export const NETWORK_FILES = ['src/api.ts', 'src/realtime.ts']
 
-const NETWORK = new Set(['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Worker', 'SharedWorker', 'navigator.sendBeacon'])
-const STORAGE = new Set(['localStorage', 'sessionStorage', 'indexedDB', 'cookieStore'])
+const NETWORK = new Set([
+  'fetch',
+  'XMLHttpRequest',
+  'WebSocket',
+  'WebTransport',
+  'EventSource',
+  'BroadcastChannel',
+  'Worker',
+  'SharedWorker',
+  'navigator.sendBeacon',
+])
+const STORAGE = new Set(['localStorage', 'sessionStorage', 'indexedDB', 'caches', 'cookieStore'])
 const GLOBAL_OBJECTS = new Set(['window', 'globalThis', 'self', 'top', 'parent'])
 /** Vite worker import queries (`./w?worker&inline`), reported as `?worker` / `?sharedworker`. */
 const WORKER_QUERIES = ['worker', 'sharedworker']
