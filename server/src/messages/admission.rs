@@ -9,12 +9,53 @@ use uuid::Uuid;
 type ChannelKey = (Uuid, Uuid);
 const ADMISSION_WAIT: Duration = Duration::from_secs(1);
 const SEND_ADMISSION_WAIT: Duration = Duration::from_secs(30);
+pub(super) const CHANNEL_QUEUE_CAP: usize = 256;
+pub(super) const GLOBAL_QUEUE_CAP: usize = 2_048;
 pub(super) const WORK_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) struct Admission {
     send: Arc<Semaphore>,
     watermark: Arc<Semaphore>,
     channels: Mutex<HashMap<ChannelKey, Arc<Slots>>>,
+    queued: Mutex<Queued>,
+}
+
+#[derive(Default)]
+struct Queued {
+    total: usize,
+    channels: HashMap<ChannelKey, usize>,
+}
+
+pub(super) struct SendWaiter {
+    admission: Arc<Admission>,
+    key: ChannelKey,
+}
+
+impl SendWaiter {
+    pub(super) async fn acquire(self) -> Result<Permit, super::MessageError> {
+        self.admission
+            .acquire(self.key.0, self.key.1, true)
+            .await
+            .map_err(|_| super::MessageError::AdmissionRejected)
+        // Drop the queue reservation once work is admitted (or rejected).
+    }
+}
+
+impl Drop for SendWaiter {
+    fn drop(&mut self) {
+        let mut queued = self
+            .admission
+            .queued
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        queued.total -= 1;
+        if let Some(count) = queued.channels.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                queued.channels.remove(&self.key);
+            }
+        }
+    }
 }
 
 struct Slots {
@@ -36,6 +77,11 @@ impl Admission {
         self.send.available_permits() + self.watermark.available_permits()
     }
 
+    #[cfg(test)]
+    pub(super) fn queued_sends(&self) -> usize {
+        self.queued.lock().unwrap().total
+    }
+
     pub(super) fn new(connections: u32) -> Arc<Self> {
         let budget = (connections - connections.div_ceil(5)).min(16) as usize;
         // Separate FIFO budgets reserve half for watermarks while keeping >=20%
@@ -46,6 +92,36 @@ impl Admission {
             send: Arc::new(Semaphore::new(budget.div_ceil(2))),
             watermark: Arc::new(Semaphore::new(budget / 2)),
             channels: Default::default(),
+            queued: Default::default(),
+        })
+    }
+
+    // Reserve before spawning or registering a work-admission Channel entry.
+    pub(super) fn reserve_send(
+        self: &Arc<Self>,
+        organization: Uuid,
+        channel: Uuid,
+    ) -> Result<SendWaiter, super::MessageError> {
+        let key = (organization, channel);
+        let mut queued = self.queued.lock().unwrap_or_else(|e| e.into_inner());
+        let scope = if queued.total >= GLOBAL_QUEUE_CAP {
+            Some("global_queue")
+        } else if queued.channels.get(&key).copied().unwrap_or(0) >= CHANNEL_QUEUE_CAP {
+            Some("channel_queue")
+        } else {
+            None
+        };
+        if let Some(scope) = scope {
+            eprintln!(
+                "admission_rejected operation=send scope={scope} organization={organization} channel={channel}"
+            );
+            return Err(super::MessageError::AdmissionRejected);
+        }
+        queued.total += 1;
+        *queued.channels.entry(key).or_default() += 1;
+        Ok(SendWaiter {
+            admission: self.clone(),
+            key,
         })
     }
 
@@ -142,6 +218,137 @@ impl Drop for Permit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_queue_empty(admission: &Admission) {
+        let queued = admission.queued.lock().unwrap();
+        assert_eq!(queued.total, 0);
+        assert!(queued.channels.is_empty());
+        assert!(admission.channels.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn send_queue_caps_are_exact_and_rejections_never_register_channels() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut queued = Vec::new();
+        for _ in 0..CHANNEL_QUEUE_CAP - 1 {
+            queued.push(admission.reserve_send(organization, channel).unwrap());
+        }
+        queued.push(admission.reserve_send(organization, channel).unwrap());
+        assert!(matches!(
+            admission.reserve_send(organization, channel),
+            Err(super::super::MessageError::AdmissionRejected)
+        ));
+        // Same Channel id in another Organization and another Channel are independent.
+        drop(admission.reserve_send(Uuid::new_v4(), channel).unwrap());
+        drop(
+            admission
+                .reserve_send(organization, Uuid::new_v4())
+                .unwrap(),
+        );
+        // One Organization can consume every global slot across its Channels.
+        for _ in CHANNEL_QUEUE_CAP..GLOBAL_QUEUE_CAP - 1 {
+            queued.push(
+                admission
+                    .reserve_send(organization, Uuid::new_v4())
+                    .unwrap(),
+            );
+        }
+        queued.push(
+            admission
+                .reserve_send(organization, Uuid::new_v4())
+                .unwrap(),
+        );
+        let keys = admission.queued.lock().unwrap().channels.len();
+        assert!(
+            admission
+                .reserve_send(Uuid::new_v4(), Uuid::new_v4())
+                .is_err()
+        );
+        assert_eq!(admission.queued.lock().unwrap().channels.len(), keys);
+        assert!(admission.channels.lock().unwrap().is_empty());
+        drop(queued.pop());
+        drop(
+            admission
+                .reserve_send(Uuid::new_v4(), Uuid::new_v4())
+                .unwrap(),
+        );
+        drop(queued);
+        assert_queue_empty(&admission);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_queue_slots_release_on_admission_completion_and_wait_expiry() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let held = admission
+            .reserve_send(organization, channel)
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        assert_eq!(admission.queued.lock().unwrap().total, 0);
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            admission
+                .reserve_send(organization, channel)
+                .unwrap()
+                .acquire()
+                .await,
+            Err(super::super::MessageError::AdmissionRejected)
+        ));
+        assert_eq!(started.elapsed(), SEND_ADMISSION_WAIT);
+        assert_eq!(admission.queued.lock().unwrap().total, 0);
+        drop(held);
+        assert_queue_empty(&admission);
+    }
+
+    #[tokio::test]
+    async fn send_queue_slots_release_on_cancellation_and_panic() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let held = admission
+            .reserve_send(organization, channel)
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        let waiter = admission.reserve_send(organization, channel).unwrap();
+        let task = tokio::spawn(async move { waiter.acquire().await });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert_eq!(admission.queued.lock().unwrap().total, 0);
+        let waiter = admission.reserve_send(organization, channel).unwrap();
+        let task = tokio::spawn(async move {
+            let _waiter = waiter;
+            panic!("queue reservation panic regression");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert_eq!(admission.queued.lock().unwrap().total, 0);
+        drop(held);
+        // An admitted task panic must also release work permits and registry entries.
+        let permit = admission
+            .reserve_send(organization, channel)
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        assert!(
+            tokio::spawn(async move {
+                let _permit = permit;
+                panic!("admitted panic regression");
+            })
+            .await
+            .unwrap_err()
+            .is_panic()
+        );
+        assert_eq!(admission.available_permits(), 16);
+        assert_queue_empty(&admission);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn send_admission_has_a_separate_longer_budget_without_holding_global_capacity() {

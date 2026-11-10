@@ -21,8 +21,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// Account / Member split adds the Organization identity and scoped denial responses.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 58;
+// Account / Member split adds scoped responses; send admission adds 503.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 59;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {
@@ -57,6 +57,12 @@ fn added_error_responses_have_error_body_and_meaningful_descriptions() {
                 "/api/v1/orgs/{org}/channels/{id}/messages",
                 "500",
                 "persisting the Message",
+            ),
+            (
+                "post",
+                "/api/v1/orgs/{org}/channels/{id}/messages",
+                "503",
+                "admission",
             ),
             (
                 "get",
@@ -351,6 +357,15 @@ fn sign_in_retry_after_is_at_least_one_second() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let schema = &document["paths"]["/api/v1/session"]["post"]["responses"]["429"]["headers"]["Retry-After"]
         ["schema"];
+    assert_eq!(schema["type"], "integer");
+    assert_eq!(schema["minimum"], 1);
+}
+
+#[test]
+fn send_admission_retry_after_is_at_least_one_second() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schema = &document["paths"]["/api/v1/orgs/{org}/channels/{id}/messages"]["post"]["responses"]
+        ["503"]["headers"]["Retry-After"]["schema"];
     assert_eq!(schema["type"], "integer");
     assert_eq!(schema["minimum"], 1);
 }

@@ -768,9 +768,20 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message */
+            /** @description Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id */
             500: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id */
+            503: {
+                headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {

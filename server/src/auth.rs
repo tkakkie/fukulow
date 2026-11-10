@@ -343,7 +343,7 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
         .into_response())
 }
 
-struct RetryAfterSeconds;
+pub(crate) struct RetryAfterSeconds;
 
 impl utoipa::PartialSchema for RetryAfterSeconds {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
