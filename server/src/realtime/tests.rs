@@ -890,3 +890,4 @@ mod commit;
 mod contract;
 mod notification;
 mod session;
+mod watermark;
