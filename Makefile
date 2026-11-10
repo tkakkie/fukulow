@@ -21,7 +21,9 @@ load:
 		-e $(call shell_quote,BASE_URL=$(BASE_URL)) -e LOAD_EMAIL -e LOAD_PASSWORD -e LOAD_ORGANIZATION_ID \
 		-e LOAD_BOOTSTRAP -e LOAD_SETUP_TOKEN -e CHANNELS -e SUBSCRIBERS -e PUBLISHERS \
 		-e DURATION_SECONDS -e PUBLISH_INTERVAL_MS -e READY_TIMEOUT_SECONDS -e DRAIN_TIMEOUT_SECONDS \
-		-e CHANNEL_VISIBILITY -e SOCKETS_PER_SESSION -e LOAD_MEASURE $(call shell_quote,$(K6_IMAGE)) run load/scenario.ts
+		-e CHANNEL_VISIBILITY -e SOCKETS_PER_SESSION -e LOAD_MEASURE \
+		-e LOAD_LEGACY -e LOAD_ALLOW_REJECTIONS -e LOAD_RECONNECT -e CONNECT_BATCH \
+		-e CONNECT_INTERVAL_MS -e REQUEST_TIMEOUT_SECONDS -e PUBLISH_CHANNELS $(call shell_quote,$(K6_IMAGE)) run load/scenario.ts
 
 # Isolated Docker baseline with resource/SQL snapshots; artifacts default to /private/tmp.
 load-record:

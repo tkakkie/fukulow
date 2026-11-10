@@ -1,6 +1,6 @@
 import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { cpus, totalmem, platform, arch } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -18,8 +18,11 @@ const inherited = { ...process.env };
 delete inherited.LOAD_ORGANIZATION_ID;
 delete inherited.LOAD_SETUP_TOKEN;
 const env = { ...inherited, LOAD_PROJECT: project, LOAD_PORT: port, LOAD_DB_PASSWORD: randomUUID(),
-  LOAD_CONTAINER_NAME: `${project}-generator`, LOAD_DOCKER_NETWORK: 'bridge',
-  BASE_URL: `http://host.docker.internal:${port}`, LOAD_BOOTSTRAP: '1',
+  LOAD_CONTAINER_NAME: `${project}-generator`,
+  LOAD_DOCKER_NETWORK: process.env.LOAD_DIRECT_NETWORK === '1' ? `${project}_default` : 'bridge',
+  BASE_URL: process.env.LOAD_DIRECT_NETWORK === '1' ? 'http://app:8080' : `http://host.docker.internal:${port}`, LOAD_BOOTSTRAP: '1',
+  LOAD_APP_IMAGE: process.env.LOAD_APP_IMAGE || `${project}-app`,
+  LOAD_SERVER_SOURCE: resolve(process.env.LOAD_SERVER_SOURCE || '.'),
   LOAD_EMAIL: 'baseline@example.invalid', LOAD_PASSWORD: randomUUID(), LOAD_MEASURE: '1' };
 const compose = ['compose', '-p', project, '-f', 'load/compose.yml'];
 const command = (file: string, args: string[]) => execFileSync(file, args, { env, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).trim();
@@ -41,6 +44,7 @@ let timer: ReturnType<typeof setInterval> | undefined;
 let sampling: Promise<void> | undefined;
 let log = '';
 let summary: unknown;
+let progress: unknown;
 let rate: { startedAt: number; offered: number; [key: string]: unknown } | undefined;
 let measurementError: unknown;
 let exitCode = 1;
@@ -59,12 +63,22 @@ process.on('SIGTERM', onSignal);
 try {
   console.log(`Measurement project: ${project}; artifacts: ${output}`);
   // Build with this checkout; never retag the shared fukulow-app image.
-  docker(...compose, 'up', '-d', '--build', '--wait');
+  docker(...compose, 'up', '-d', ...(process.env.LOAD_APP_IMAGE ? ['--no-build'] : ['--build']), '--wait');
   sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
   const app = docker(...compose, 'ps', '-q', 'app');
   const db = docker(...compose, 'ps', '-q', 'db');
+  writeFileSync(`${output}/server-source.patch`, command('git', ['-C', env.LOAD_SERVER_SOURCE, 'diff', 'HEAD']));
   const metadata = {
+    hostNode: process.version,
+    harness: Object.fromEntries(['Makefile', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
+      'load/sessions.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
+      [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
+    serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
+    serverDirty: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'status', '--porcelain']),
+    configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
+      'SOCKETS_PER_SESSION', 'CONNECT_BATCH', 'CONNECT_INTERVAL_MS', 'READY_TIMEOUT_SECONDS', 'DRAIN_TIMEOUT_SECONDS',
+      'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'REQUEST_TIMEOUT_SECONDS'].map(key => [key, env[key as keyof typeof env] ?? null])),
     project, port, started: new Date().toISOString(), platform: platform(), arch: arch(),
     hostCpuModel: cpus()[0]?.model, hostCpus: cpus().length, hostMemory: totalmem(),
     docker: JSON.parse(docker('info', '--format', '{"ServerVersion":{{json .ServerVersion}},"NCPU":{{json .NCPU}},"MemTotal":{{json .MemTotal}},"OperatingSystem":{{json .OperatingSystem}}}')),
@@ -76,10 +90,13 @@ try {
   writeFileSync(`${output}/metadata.json`, JSON.stringify(metadata, null, 2));
   const sample = () => {
     if (sampling) return;
-    sampling = execAsync('docker', ['stats', '--no-stream', '--format', '{{json .}}', app, db, env.LOAD_CONTAINER_NAME], { env })
-      .then(({ stdout }) => {
+    sampling = Promise.all([
+      execAsync('docker', ['stats', '--no-stream', '--format', '{{json .}}', app, db, env.LOAD_CONTAINER_NAME], { env }),
+      ...[app, env.LOAD_CONTAINER_NAME].map(id => execAsync('docker', ['exec', id, 'cat', '/proc/1/status'], { env })
+        .then(({ stdout }) => ({ id, rssKiB: Number(stdout.match(/^VmRSS:\s+(\d+)/m)?.[1]) }), () => ({ id, rssKiB: null }))),
+    ]).then(([{ stdout }, ...rss]) => {
         const rows = stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
-        resources.push({ at: new Date().toISOString(), rows });
+        resources.push({ at: new Date().toISOString(), rows, rss });
       }, () => { /* generator may not exist yet, or may already have exited */ })
       .finally(() => { sampling = undefined; });
   };
@@ -109,6 +126,7 @@ try {
         // console.log messages are JSON-quoted in k6's text log output.
         const message = line.includes('msg=') ? JSON.parse(line.match(/msg=("(?:[^"\\]|\\.)*")/)?.[1] || 'null') : line;
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
+        if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) progress = JSON.parse(message.slice(14));
         if (line.startsWith('LOAD_SUMMARY ')) summary = JSON.parse(line.slice(13));
       } catch (error) { measurementError = String(error); }
     }
@@ -153,10 +171,15 @@ try {
     const sqlPerSend = rate && { calls, topLevelCalls, queries,
       allStatementsPerSend: (calls ?? 0) / rate.offered,
       topLevelStatementsPerSend: (topLevelCalls ?? 0) / rate.offered,
-      topLevelQueriesPerSend: (queries ?? 0) / rate.offered };
+      topLevelQueriesPerSend: (queries ?? 0) / rate.offered,
+      topLevelQueriesPerAcceptedSend: (queries ?? 0) / Number(rate.accepted ?? rate.offered) };
     writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, summary, snapshots, statementDeltas, sqlPerSend,
-      resources, measurementError }, null, 2));
+      resources, progress, measurementError }, null, 2));
   });
+  attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));
+  attempt(() => writeFileSync(`${output}/database.log`, docker(...compose, 'logs', '--no-color', 'db')));
+  attempt(() => writeFileSync(`${output}/container-state.json`, docker(...compose, 'ps', '-aq').split('\n').filter(Boolean)
+    .map(id => docker('inspect', '--format', '{{json .State}}', id)).join('\n')));
   // These exact names/project were created above; never prune or touch other projects.
   attempt(() => {
     if (docker('ps', '-aq', '--filter', 'name=^/' + env.LOAD_CONTAINER_NAME + '$')) {
@@ -166,7 +189,7 @@ try {
   attempt(() => { docker(...compose, 'down', '--volumes'); });
   // Compose --rmi local excludes our explicitly tagged image; remove its unique tag only.
   attempt(() => {
-    if (docker('image', 'ls', '-q', `${project}-app`)) docker('image', 'rm', `${project}-app`);
+    if (!process.env.LOAD_APP_IMAGE && docker('image', 'ls', '-q', `${project}-app`)) docker('image', 'rm', `${project}-app`);
   });
   process.off('SIGINT', onSignal);
   process.off('SIGTERM', onSignal);

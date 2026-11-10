@@ -14,6 +14,10 @@ export class Deliveries {
     return latency;
   }
 
+  cancel(id: string): void {
+    this.pending.delete(id);
+  }
+
   get missing(): number {
     let missing = 0;
     for (const send of this.pending.values()) missing += send.remaining;
