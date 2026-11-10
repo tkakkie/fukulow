@@ -49,6 +49,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     for (const [id] of windows) {
       const before = previous.channels[id], after = next.channels[id]
       if (!next.running || !after || after.state === 'unavailable' ||
+        before?.state === 'unavailable' ||
         (before?.watched && !after.watched) || (!before?.watched && after.watched && windows.get(id)?.unavailable) ||
         (before?.cursor != null && after.cursor === null)) windows.delete(id)
     }
@@ -78,8 +79,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
       if (!bootstrap && !api.isOrganizationUnavailable(result) && current(channel, w) && !result.ok && result.kind === 'http' &&
         [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
-        // C9: stop watching until explicit user selection; projection denial is never a sequence gap.
-        void sync.unwatch(channel)
+        // C9: refuse sends and resubscription until explicit user selection.
+        void sync.channelUnavailable(channel)
         w.unavailable = true
         windows.set(channel, w)
         w.main.loading = w.list.loading = false

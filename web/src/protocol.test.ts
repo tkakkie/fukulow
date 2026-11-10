@@ -43,6 +43,32 @@ function id(effects: Effect[], type: 'fetch_history' | 'wait' | 'send' | 'connec
   return effect.id
 }
 
+it('channel_unavailable fences history, refuses sends and retries, and recovers only on watch after reconnect', () => {
+  const d = boot()
+  const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'unknown' }), 'send')
+  d.feed({ type: 'send_failed', request: send, status: 'network' })
+  const history = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
+  expect(d.feed({ type: 'channel_unavailable', channel: 'A' })).toContainEqual({ type: 'unsubscribe', channel: 'A' })
+  expect(d.get().channels.A.state).toBe('unavailable')
+  d.feed({ type: 'history_result', request: history, page: { messages: [record(99)], has_more: false } })
+  expect(d.get().channels.A.messages).toEqual([record(100)])
+  expect(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c2', body: 'refused' })).toEqual([])
+  expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toEqual([])
+  const wait = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1006 }), 'wait')
+  const connection = id(d.feed({ type: 'timer_elapsed', id: wait }), 'connect')
+  expect(d.feed({ type: 'connection_ready', connection })).toEqual([])
+  expect(d.get().channels.A.state).toBe('unavailable')
+  expect(d.feed({ type: 'watch', channel: 'A' })).toContainEqual(
+    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }),
+  )
+  expect(d.get().channels.A.state).toBe('loading')
+  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } })
+  expect(d.get().channels.A.state).toBe('ready')
+  expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toContainEqual(
+    expect.objectContaining({ type: 'send', channel: 'A', client_message_id: 'c1' }),
+  )
+})
+
 it('projection settlement matches Channel and sender without changing the window, cursor, evidence or effects', () => {
   const d = boot()
   d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'optimistic' })

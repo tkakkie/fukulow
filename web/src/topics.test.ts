@@ -245,18 +245,51 @@ it.each(['unwatch', 'subscription refusal', 'Organization loss', 'session replac
   },
 )
 
-it.each([403, 404])('a current projection %s stops watching; only explicit selection recovers', async status => {
+it('a late projection response after replaceSession never reaches settleHistory', async () => {
   const c = topicClient()
   await c.boot()
-  c.topicsApi.listTimeline.mockResolvedValueOnce({ ok: false, kind: 'http', status })
-  await c.topics.loadMain('A')
-  expect(c.topics.get('A').unavailable).toBe(true)
-  expect(c.sync.get().channels.A.watched).toBe(false)
-  await vi.advanceTimersByTimeAsync(60_000)
-  expect(c.topicsApi.listTimeline).toHaveBeenCalledTimes(2)
+  const topics = createTopics(c.sync, { api: c.topicsApi })
+  const settle = vi.spyOn(c.sync, 'settleHistory')
+  const older = deferred<Result<TimelinePage>>()
+  c.topicsApi.listTimeline.mockReturnValueOnce(older.promise)
+  const loading = topics.loadMain('A'); await flush()
+  await c.sync.replaceSession('next')
+  c.handlers.at(-1)!.onReady()
   await c.sync.watch('A')
-  expect(c.topics.get('A').unavailable).toBe(false)
+  settle.mockClear()
+  older.resolve(ok(page())); await loading
+  expect(settle).not.toHaveBeenCalled()
+  expect(topics.get('A').main.asOfSeq).toBeUndefined()
+  topics.close()
   await c.sync.close()
+})
+
+it('current projection 403 and 404 refuse Channel sends and retries while other Channels remain usable', async () => {
+  for (const status of [403, 404]) {
+    const c = topicClient()
+    await c.boot()
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 0, items: [], has_more: false }))
+    await c.sync.watch('B')
+    c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'B', caught_up_seq: 0 })
+    const other = c.sync.get().channels.B
+    c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
+    await c.sync.getTimeline('A').send('unknown')
+    const pending = c.sync.get().channels.A.pending[0]!
+    c.topicsApi.listTimeline.mockResolvedValueOnce({ ok: false, kind: 'http', status })
+    await c.topics.loadMain('A')
+    expect(c.topics.get('A').unavailable).toBe(true)
+    expect(await c.sync.getTimeline('A').send('refused')).toBe(false)
+    await c.sync.getTimeline('A').retry(pending.clientMessageId)
+    expect(c.sendMessage).toHaveBeenCalledTimes(1)
+    expect(c.sync.get().channels.A.state).toBe('unavailable')
+    expect(c.sync.get().channels.B).toBe(other)
+    expect(await c.sync.getTimeline('B').send('still available')).toBe(true)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(c.topicsApi.listTimeline).toHaveBeenCalledTimes(3)
+    await c.sync.watch('A')
+    expect(c.topics.get('A').unavailable).toBe(false)
+    await c.sync.close()
+  }
 })
 
 it('bootstrap 403 and 404 end in sync C9 unavailable and refuse sends', async () => {
@@ -292,12 +325,12 @@ it('organization_unavailable bypasses C9 even before the C10 handler runs', asyn
   await c.boot()
   const unavailable = c.sync.unavailable
   const ending = vi.spyOn(c.sync, 'unavailable').mockImplementationOnce(async () => { await gate.promise; await unavailable() })
-  const unwatch = vi.spyOn(c.sync, 'unwatch')
+  const channelUnavailable = vi.spyOn(c.sync, 'channelUnavailable')
   const topics = createTopics(c.sync, { api: c.topicsApi })
   c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
   await topics.loadSummary('A', 'T')
   expect(ending).toHaveBeenCalledOnce()
-  expect(unwatch).not.toHaveBeenCalled()
+  expect(channelUnavailable).not.toHaveBeenCalled()
   expect(c.sync.get().channels.A).toMatchObject({ watched: true, state: 'ready' })
   expect(topics.get('A').unavailable).toBe(false)
   gate.resolve(); await ending.mock.results[0]!.value

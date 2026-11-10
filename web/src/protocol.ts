@@ -58,7 +58,7 @@ export type Input =
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
   | { type: 'event'; connection: number; event: ServerEvent; subscription?: number }
-  | { type: 'watch' | 'unwatch' | 'refresh' | 'load_older'; channel: string }
+  | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }
   | { type: 'user_send'; channel: string; clientMessageId: string; body: string }
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
   | { type: 'history_result'; request: number; page: MessagePage }
@@ -285,6 +285,9 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       else { subscribe(input.channel); reconcile(input.channel) }
       break
     }
+    case 'channel_unavailable':
+      unavailable(input.channel)
+      break
     case 'unwatch': {
       const c = channel(input.channel)
       if (c.subscription && state.connected) effects.push({ type: 'unsubscribe', channel: input.channel })
