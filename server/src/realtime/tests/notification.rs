@@ -1,16 +1,21 @@
 use super::*;
 
-// Manual before/after probe; includes the idle loopback clients in process CPU.
+// Manual before/after probe; includes the idle loopback clients in process CPU/RSS.
 #[sqlx::test]
-#[ignore = "manual release-mode socket CPU and notification-failure latency measurement"]
+#[ignore = "manual release-mode socket CPU/RSS and notification-failure latency measurement"]
 async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
     let count: usize = std::env::var("MEASURE_SOCKETS")
         .unwrap_or_else(|_| "10000".into())
         .parse()
         .unwrap();
+    let subscriptions: usize = std::env::var("MEASURE_SUBSCRIPTIONS")
+        .unwrap_or_else(|_| "10".into())
+        .parse()
+        .unwrap();
+    assert!((1..=256).contains(&subscriptions));
     let f = fixture(&pool).await;
     let mut channels = vec![f.channel];
-    for _ in 1..10 {
+    for _ in 1..subscriptions {
         channels.push(channel(&pool, f.organization, f.member, false).await);
     }
     let mut clients = tokio::task::JoinSet::new();
@@ -44,7 +49,7 @@ async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
     eprintln!(
-        "MEASURE_IDLE_START pid={} sockets={count} subscriptions=10",
+        "MEASURE_IDLE_START pid={} sockets={count} subscriptions={subscriptions}",
         std::process::id()
     );
     let idle = std::time::Instant::now();

@@ -143,7 +143,8 @@ async fn connected_with_lifecycle(
         LIVE_QUEUE_CAPACITY,
     );
     let mut overflow = queue.overflow.clone();
-    let notification_failed = queue.notification_failed.clone();
+    // Frame/live/heartbeat wakes must only poll a oneshot, not every epoch wait.
+    let mut notification_failed = queue.notification_failed.clone().spawn();
     let mut connection = connection::Connection {
         state: &state,
         auth: &auth,

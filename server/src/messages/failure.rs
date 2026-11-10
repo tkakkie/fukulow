@@ -22,17 +22,24 @@ struct ChannelFailure {
 struct Signal {
     failed: AtomicBool,
     changed: watch::Sender<bool>,
+    #[cfg(test)]
+    wait_polls: std::sync::atomic::AtomicUsize,
 }
 
 impl Signal {
     fn fail(self: &Arc<Self>) {
-        if !self.failed.swap(true, Ordering::SeqCst) {
-            let signal = self.clone();
-            // watch wakes its receivers inline: keep that fan-out off the publish path.
-            tokio::spawn(async move {
-                signal.changed.send_replace(true);
-            });
+        if self.failed.swap(true, Ordering::SeqCst) {
+            return;
         }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            // Outside a runtime only retain the latch; sockets are being dropped too.
+            return;
+        };
+        let signal = self.clone();
+        // watch wakes its receivers inline: keep that fan-out off the publish path.
+        runtime.spawn(async move {
+            signal.changed.send_replace(true);
+        });
     }
 }
 
@@ -47,7 +54,34 @@ pub(crate) struct FailureWatch {
     subscriptions_changed: watch::Sender<()>,
 }
 
+/// Owns the socket's isolated monitor; dropping the socket scope cancels its waits.
+pub(crate) struct FailureWait {
+    ready: tokio::sync::oneshot::Receiver<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FailureWait {
+    pub(crate) async fn failed(&mut self) {
+        // A panicked monitor also fails closed when its sender drops.
+        let _ = (&mut self.ready).await;
+    }
+}
+
+impl Drop for FailureWait {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl Failures {
+    #[cfg(test)]
+    pub(super) fn wait_polls(&self, key: ChannelKey) -> usize {
+        self.0.lock().unwrap()[&key]
+            .signal
+            .wait_polls
+            .load(Ordering::SeqCst)
+    }
+
     pub(super) fn signal(&self, key: ChannelKey) {
         let registry = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(channel) = registry.get(&key) {
@@ -95,6 +129,15 @@ impl Failures {
 }
 
 impl FailureWatch {
+    pub(crate) fn spawn(self) -> FailureWait {
+        let (send, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            self.failed().await;
+            let _ = send.send(());
+        });
+        FailureWait { ready, task }
+    }
+
     pub(crate) fn is_failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
             || self
@@ -133,7 +176,9 @@ impl FailureWatch {
             tokio::select! {
                 _ = subscriptions.changed() => {},
                 _ = poll_fn(|cx| {
-                    for wait in &mut waits {
+                    for (_signal, wait) in signals.iter().zip(&mut waits) {
+                        #[cfg(test)]
+                        _signal.wait_polls.fetch_add(1, Ordering::SeqCst);
                         if wait.as_mut().poll(cx).is_ready() {
                             return Poll::Ready(());
                         }
@@ -262,6 +307,88 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), watch.failed())
             .await
             .expect("latched failure was lost");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spawned_wait_keeps_topology_and_epoch_races_latched() {
+        for register_first in [false, true] {
+            for unsubscribe_after_failure in [false, true] {
+                let failures = Failures::default();
+                let key = (Uuid::new_v4(), Uuid::new_v4());
+                let watch = FailureWatch::default();
+                let other = FailureWatch::default();
+                let mut wait = watch.clone().spawn();
+                failures.subscribe(key, &watch);
+                failures.subscribe(key, &other);
+                if register_first {
+                    tokio::task::yield_now().await;
+                }
+                failures.unsubscribe(key, &watch);
+                failures.signal(key);
+                tokio::task::yield_now().await;
+                assert!(
+                    matches!(
+                        wait.ready.try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "stale epoch closed an unsubscribed socket"
+                );
+                failures.subscribe(key, &watch);
+                if register_first {
+                    tokio::task::yield_now().await;
+                }
+                failures.signal(key);
+                if unsubscribe_after_failure {
+                    failures.unsubscribe(key, &watch);
+                    failures.subscribe(key, &watch);
+                }
+                tokio::time::timeout(Duration::from_secs(1), wait.failed())
+                    .await
+                    .expect("spawned monitor lost a latched failure");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn spawned_wait_is_aborted_on_return_cancellation_and_panic() {
+        for exit in 0..3 {
+            let failures = Failures::default();
+            let key = (Uuid::new_v4(), Uuid::new_v4());
+            let watch = FailureWatch::default();
+            failures.subscribe(key, &watch);
+            let signal = watch.signals.lock().unwrap()[&key.1].clone();
+            let wait = watch.clone().spawn();
+            let monitor = wait.task.abort_handle();
+            let (release, released) = tokio::sync::oneshot::channel::<()>();
+            let owner = tokio::spawn(async move {
+                let _wait = wait;
+                let _ = released.await;
+                if exit == 2 {
+                    panic!("test socket owner panicked");
+                }
+            });
+            tokio::task::yield_now().await;
+            assert_eq!(signal.changed.receiver_count(), 1);
+            if exit == 1 {
+                owner.abort();
+            } else {
+                release.send(()).unwrap();
+            }
+            let result = owner.await;
+            match exit {
+                0 => result.unwrap(),
+                1 => assert!(result.unwrap_err().is_cancelled()),
+                _ => assert!(result.unwrap_err().is_panic()),
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !monitor.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(signal.changed.receiver_count(), 0, "leaked epoch receiver");
+        }
     }
 
     #[tokio::test(start_paused = true)]
