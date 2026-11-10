@@ -3,6 +3,7 @@ pub mod channels;
 pub mod messages;
 pub mod openapi;
 pub mod realtime;
+pub mod shutdown;
 
 use axum::{
     Router,
@@ -19,6 +20,7 @@ struct Assets;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::PgPool,
+    pub shutdown: shutdown::Shutdown,
     pub cookie_secure: bool,
     pub setup_token: Option<String>,
     pub sign_in_throttle: auth::SignInThrottle,
@@ -39,6 +41,7 @@ impl AppState {
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
+            shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
         }
     }
@@ -68,6 +71,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/orgs/{org}/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .fallback(static_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.shutdown.clone(),
+            shutdown::reject_new_requests,
+        ))
         .with_state(state)
 }
 
@@ -120,6 +127,7 @@ mod tests {
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
+            shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
         })
         .oneshot(Request::get(path).body(Body::empty()).unwrap())

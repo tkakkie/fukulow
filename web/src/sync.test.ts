@@ -46,6 +46,69 @@ async function ready(client: ReturnType<typeof controllerClient>) {
   await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
 }
 
+it('reconnect full jitter stays in range and capped across repeated failures including the first 4008', async () => {
+  for (const random of [0, 0.25, 0.999999]) {
+    const client = controllerClient({ random: () => random })
+    await ready(client)
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const count = client.sockets.length
+      const effects = await client.feed({ type: 'socket_closed', code: 4008 })
+      const wait = effects.find(e => e.type === 'wait')!
+      const cap = Math.min(10_000, 500 * 2 ** Math.min(attempt, 5))
+      expect(wait).toMatchObject({ purpose: 'reconnect_backoff', ms: Math.floor(random * cap) })
+      expect(Number(wait.ms)).toBeGreaterThanOrEqual(0)
+      expect(Number(wait.ms)).toBeLessThan(cap)
+      expect(client.sockets).toHaveLength(count)
+      await client.feed({ type: 'timer_elapsed', respond_to: wait })
+      await client.feed({ type: 'connection_ready' })
+    }
+    await client.sync.close()
+    expect(vi.getTimerCount()).toBe(0)
+  }
+})
+
+it('reconnect jitter resets only on confirmed subscription and cancels timers on terminal close or replacement', async () => {
+  for (const end of ['close', 'replace', '4001', '4003']) {
+    const client = controllerClient({ random: () => 0.5 })
+    await ready(client)
+    for (const ms of [250, 500, 1000]) {
+      const wait = (await client.feed({ type: 'socket_closed', code: 1001 })).find(e => e.type === 'wait')!
+      expect(wait.ms).toBe(ms)
+      await client.feed({ type: 'timer_elapsed', respond_to: wait })
+      await client.feed({ type: 'connection_ready' })
+    }
+    await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+    const wait = (await client.feed({ type: 'socket_closed', code: 1011 })).find(e => e.type === 'wait')!
+    expect(wait.ms).toBe(250)
+    if (end === 'close') await client.sync.close()
+    else if (end === 'replace') await client.sync.replaceSession('other')
+    else {
+      await client.feed({ type: 'timer_elapsed', respond_to: wait })
+      await client.feed({ type: 'connection_ready' })
+      const effects = await client.feed({ type: 'socket_closed', code: Number(end) })
+      expect(effects.some(e => e.type === 'wait' || e.type === 'connect')).toBe(false)
+    }
+    const count = client.sockets.length
+    await client.feed({ type: 'timer_elapsed', respond_to: wait })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(client.sockets).toHaveLength(count)
+    await client.sync.close()
+    expect(vi.getTimerCount()).toBe(0)
+  }
+})
+
+it('injected reconnect randomness never changes deterministic fill backoff', async () => {
+  const random = vi.fn(() => 0.125)
+  const client = controllerClient({ random })
+  await ready(client)
+  const grace = (await client.feed({ type: 'message', channel: 'A', message: record(102) })).find(e => e.type === 'wait')!
+  const fill = (await client.feed({ type: 'timer_elapsed', respond_to: grace })).find(e => e.type === 'fetch_history')!
+  const wait = (await client.feed({ type: 'history_failed', respond_to: fill, status: 'network' })).find(e => e.type === 'wait')!
+  expect(wait).toMatchObject({ purpose: 'fill_backoff', ms: 500 })
+  expect(random).not.toHaveBeenCalled()
+  await client.sync.close()
+})
+
 it('controller keeps admission 503 retryable and retries manually with the same key', async () => {
   const message = { ...record(101), sender: 'me', client_message_id: 'c1', body: 'hello' }
   const fetchMock = vi.fn<typeof fetch>()
@@ -249,12 +312,12 @@ it('history timeout backs off, and shutdown cancels every protocol and request t
 
 it('failed connection construction uses bounded reconnect backoff', async () => {
   let attempts = 0
-  const client = controllerClient({ connect: () => { attempts++; throw new Error('offline') } })
+  const client = controllerClient({ random: () => 0.999999, connect: () => { attempts++; throw new Error('offline') } })
   await client.sync.start()
   expect(attempts).toBe(1)
-  await vi.advanceTimersByTimeAsync(500)
+  await vi.advanceTimersByTimeAsync(499)
   expect(attempts).toBe(2)
-  await vi.advanceTimersByTimeAsync(999)
+  await vi.advanceTimersByTimeAsync(998)
   expect(attempts).toBe(2)
   await vi.advanceTimersByTimeAsync(1)
   expect(attempts).toBe(3)

@@ -37,7 +37,6 @@ export type State = {
   connection: number | null
   connected: boolean
   reconnectAttempt: number
-  overflows: number
   reconnectWait?: number
   channels: Record<string, ChannelState>
   requests: Record<number, Request>
@@ -70,7 +69,7 @@ export type Input =
 
 export function initialState(selfId = ''): State {
   return { selfId, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
-    reconnectAttempt: 0, overflows: 0, channels: {}, requests: {}, timers: {} }
+    reconnectAttempt: 0, channels: {}, requests: {}, timers: {} }
 }
 const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [],
   advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 })
@@ -263,9 +262,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         if (state.channels[id].subscription) channel(id).subscription = undefined
       }
       if (input.code === 4001) { stop(true); break }
-      // One immediate overflow retry per session; overflows is intentionally never reset within a session.
-      if (input.code === 4008 && state.overflows++ === 0) connect()
-      else state.reconnectWait = wait('reconnect_backoff', undefined, state.reconnectAttempt++)
+      state.reconnectWait = wait('reconnect_backoff', undefined, state.reconnectAttempt++)
       break
     case 'watch': {
       const c = channel(input.channel)

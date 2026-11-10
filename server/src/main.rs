@@ -1,4 +1,4 @@
-use fukulow_server::{AppState, app};
+use fukulow_server::AppState;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
@@ -32,10 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on {addr}");
-    axum::serve(
+    let signal = fukulow_server::shutdown::signal()?;
+    let completed = fukulow_server::shutdown::serve(
         listener,
-        app(AppState {
+        AppState {
             pool,
+            shutdown: Default::default(),
             cookie_secure,
             setup_token,
             sign_in_throttle,
@@ -43,10 +45,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             session_changes: Default::default(),
             session_cleanup: Default::default(),
             ws_allowed_origins,
-        })
-        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        },
+        signal,
+        fukulow_server::shutdown::DRAIN_TIMEOUT,
     )
     .await?;
+    if !completed {
+        eprintln!("shutdown drain deadline expired; send outcomes may be unknown; exiting");
+        // Runtime destruction can wait indefinitely for blocking tasks.
+        std::process::exit(0);
+    }
     Ok(())
 }
 

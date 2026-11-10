@@ -1,4 +1,5 @@
 import * as api from './api'
+import { reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { initialState, step, type ChannelState, type Effect, type Input } from './protocol'
@@ -18,6 +19,7 @@ export type SyncOptions = {
   onSessionEnded?: () => void
   graceMs?: number
   delay?: (attempt: number) => number
+  random?: () => number
   requestTimeoutMs?: number
   schedule?: (fn: () => void, ms: number, effect: Wait) => unknown
   cancel?: (handle: unknown) => void
@@ -30,6 +32,8 @@ export type TimelineState = {
   loadingOlder: boolean
 }
 
+const backoffCap = (attempt: number) => Math.min(10_000, 500 * 2 ** Math.min(attempt, 5))
+
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
   const transport = options.api ?? {
@@ -38,7 +42,8 @@ export function createSync(options: SyncOptions) {
   }
   const connect = options.connect ?? (handlers => connectRealtime(handlers, undefined, options.organizationId))
   const newId = options.newId ?? (() => crypto.randomUUID())
-  const delay = options.delay ?? (n => Math.min(10_000, 500 * 2 ** Math.min(n, 5)))
+  const fillDelay = options.delay ?? backoffCap
+  const random = options.random ?? Math.random
   const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms))
   const cancel = options.cancel ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
   let state = initialState(options.selfId)
@@ -172,7 +177,8 @@ export function createSync(options: SyncOptions) {
         break
       }
       case 'wait': {
-        const ms = effect.purpose === 'reorder_grace' ? options.graceMs ?? 100 : delay(effect.attempt)
+        const ms = effect.purpose === 'reorder_grace' ? options.graceMs ?? 100
+          : effect.purpose === 'reconnect_backoff' ? reconnectDelay(effect.attempt, random) : fillDelay(effect.attempt)
         timers.set(effect.id, schedule(() => {
           timers.delete(effect.id)
           void dispatch({ type: 'timer_elapsed', id: effect.id })

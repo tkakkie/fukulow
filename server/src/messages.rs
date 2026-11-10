@@ -22,7 +22,7 @@ mod commit;
 mod delivery;
 mod failure;
 #[cfg(test)]
-pub(crate) use commit::ambiguous_commit;
+pub(crate) use commit::{ambiguous_commit, pause_commit};
 pub use delivery::Delivery;
 pub(crate) use delivery::LIVE_QUEUE_CAPACITY;
 #[cfg(test)]
@@ -211,7 +211,9 @@ pub async fn send_message(
         .admission(&state.pool)
         .reserve_send(organization_id, channel_id)?;
     // Finish persistence even if the HTTP caller disconnects; notification is detached.
+    let work = state.message_delivery.work.enter();
     let message = tokio::spawn(async move {
+        let _work = work;
         persist(
             &state.pool,
             &state.message_delivery,

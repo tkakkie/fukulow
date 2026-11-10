@@ -14,6 +14,7 @@ import { schedule, sessionIndex } from './scheduler.ts';
 import { revokeSessions } from './sessions.ts';
 import { summaryForReport } from './summary.ts';
 import { legacyOrganization, organizationPath } from './compat.ts';
+import { reconnectDelay } from '../web/src/reconnect.ts';
 
 const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const channels = positiveInteger(__ENV.CHANNELS, 1);
@@ -29,7 +30,8 @@ const drainTimeout = positiveInteger(__ENV.DRAIN_TIMEOUT_SECONDS, 5);
 const socketsPerSession = positiveInteger(__ENV.SOCKETS_PER_SESSION, 1);
 const legacy = __ENV.LOAD_LEGACY === '1';
 const allowRejections = __ENV.LOAD_ALLOW_REJECTIONS === '1';
-const reconnect = __ENV.LOAD_RECONNECT === '1';
+const storm = __ENV.LOAD_RECONNECT_STORM === '1';
+const reconnect = storm || __ENV.LOAD_RECONNECT === '1';
 const connectBatch = positiveInteger(__ENV.CONNECT_BATCH, channels * subscribers);
 const connectInterval = positiveInteger(__ENV.CONNECT_INTERVAL_MS, 100);
 const requestTimeout = positiveInteger(__ENV.REQUEST_TIMEOUT_SECONDS, 45);
@@ -59,12 +61,14 @@ const retryAfter = new Trend('retry_after_seconds');
 const invalidRetryAfter = new Counter('invalid_retry_after');
 const closed = new Counter('socket_closes');
 const reconnected = new Counter('socket_reconnects');
+const reconnectTime = new Trend('reconnect_attempt_ms', true);
+const recoveryTime = new Trend('all_subscribed_ms', true);
 
 export const options: Options = {
   scenarios: {
     // One event loop owns every socket/request so gauges are actual totals, not per-VU samples.
     chat: { executor: 'shared-iterations', vus: 1, iterations: 1,
-      maxDuration: `${readyTimeout + duration + drainTimeout + requestTimeout + Math.ceil(channels * subscribers / connectBatch) * connectInterval / 1000 + 10}s`, gracefulStop: '0s' },
+      maxDuration: `${readyTimeout * (storm ? 2 : 1) + duration + drainTimeout + requestTimeout + Math.ceil(channels * subscribers / connectBatch) * connectInterval / 1000 + 10}s`, gracefulStop: '0s' },
   },
   // Reserve time for provisioning and revoking every session if setup fails.
   setupTimeout: `${Math.max(1, Math.ceil(channels * subscribers / socketsPerSession)) * 10 + channels * 5 + 25}s`,
@@ -172,6 +176,11 @@ export default async function (data: Setup): Promise<void> {
   let sendStartedAt = 0;
   let sendCompletedAt = 0;
   let failed = false;
+  let stormStarted = 0;
+  const recovered = new Set<number>();
+  const attempts = Array<number>(channels * subscribers).fill(0);
+  const reconnectAttempts: number[] = [];
+  const firstClose: number[] = [];
   attempted.add(0);
   rejected.add(0);
   invalidRetryAfter.add(0);
@@ -213,6 +222,8 @@ export default async function (data: Setup): Promise<void> {
             throw new Error('Unexpected subscription acknowledgement');
           }
           subscribed = true;
+          attempts[socketIndex] = 0; // Like the controller: only subscribed resets backoff.
+          if (stormStarted && firstClose[socketIndex] !== undefined) recovered.add(socketIndex);
           subscriptions.add(++perChannel[channel], tags);
         } else if (event.type === 'message') {
           const message = event.message;
@@ -242,9 +253,18 @@ export default async function (data: Setup): Promise<void> {
       if (subscribed) subscriptions.add(--perChannel[channel], tags);
       if (!closing) {
         if (reconnect && [1001, 1006, 1011, 4008].includes(code)) {
+          if (stormStarted) firstClose[socketIndex] ??= Date.now() - stormStarted;
           setTimeout(() => {
-            if (!closing) { reconnected.add(1); connect(channelId, channel, socketIndex, lastSeq); }
-          }, 1000 + socketIndex % 1000);
+            if (!closing) {
+              reconnected.add(1);
+              if (stormStarted) {
+                const at = Date.now() - stormStarted;
+                reconnectAttempts.push(at);
+                reconnectTime.add(at);
+              }
+              connect(channelId, channel, socketIndex, lastSeq);
+            }
+          }, reconnectDelay(attempts[socketIndex]++));
         } else recordError('WebSocket closed before delivery completed');
       }
     };
@@ -309,6 +329,17 @@ export default async function (data: Setup): Promise<void> {
     }
     console.log('LOAD_MEASUREMENT_START');
     await pause(measurementPause);
+    if (storm) {
+      stormStarted = Date.now();
+      console.log('LOAD_RECONNECT_STORM_READY'); // load-record restarts only its isolated app.
+      const deadline = stormStarted + readyTimeout * 1000;
+      while (!failed && recovered.size !== channels * subscribers && Date.now() < deadline) await pause(10);
+      if (failed || recovered.size !== channels * subscribers) throw new Error('Reconnect storm did not recover every subscription');
+      const allSubscribedMs = Date.now() - stormStarted;
+      recoveryTime.add(allSubscribedMs);
+      console.log('LOAD_RECONNECT_STORM ' + JSON.stringify({ allSubscribedMs, sockets: recovered.size,
+        reconnectAttempts, firstClose, policy: 'full jitter [0, min(10000, 500 * 2^attempt)) ms; reset on subscribed' }));
+    }
     sendStartedAt = Date.now();
     const result = await schedule(duration * 1000, interval, publishers, Date.now, pause, publish);
     console.log('LOAD_RATE ' + JSON.stringify({ ...result, offeredSendRate: result.offered / (result.elapsedMs / 1000),
