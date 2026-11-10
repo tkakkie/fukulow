@@ -309,6 +309,30 @@ Reproduce with `DATABASE_URL` pointing at that PostgreSQL: `MEASURE_SOCKETS=9999
 
 This confirms cold live progress under a held hot cursor, with unchanged hot admission, cursor, large-gap latch and two-cycle recovery outcomes in this probe. It does not establish latency distributions, production throughput/capacity, peak memory for the new 2,048-task ceiling, natural reorder frequency, or fairness when many Channels exhaust the shared reservation/execution budgets. One completed pair on a host with background activity cannot attribute timing differences to the change or establish latency guarantees. Raw logs were kept outside Git (temporary, not retained).
 
+### #190 per-Organization notification reservations (2026-11-10)
+
+Controlled #178/#189 held-cursor method, extended in `server/src/realtime/tests/measurement.rs::measure_organization_notification_reservations`: baseline `4f56630` (only test instrumentation added), temporary 256 candidate, then final 512 implementation. Apple M5, 10 CPU, 32 GiB, macOS 27.0.1 arm64, Rust 1.99.0, Docker PostgreSQL 18.6 on loopback. Native release SQLx current-thread runtime, real loopback WebSockets, in-process Router sends, production 20-connection pool and unchanged 256/2,048 send admission caps. Each run used a fresh SQLx database. No other build, test suite or load probe ran concurrently; desktop, agent and background processes remained, so this was not a machine-wide idle or isolated production-server measurement.
+
+Reproduce with `DATABASE_URL` set: `MEASURE_RESERVATIONS=2048 MEASURE_ORG_CAP=512 cargo test --release -q -p fukulow-server --lib measure_organization_notification_reservations -- --ignored --nocapture --test-threads=1`. Use `MEASURE_RESERVATIONS=512` for the chosen-cap workload; baseline uses `MEASURE_ORG_CAP=2048`. To evaluate 256, change `MAX_ORGANIZATION_NOTIFICATIONS` to 256 and use `MEASURE_ORG_CAP=256`, then restore 512. The test-only snapshot on baseline reports global usage; its absent Organization map is marked n/a below.
+
+Before each fault, send 320 concurrent Messages across 16 healthy A Channels on one draining socket; assert every per-Channel seq 1..20 and all HTTP 201. Then hold real A publication cursors across ceil(offered/40) Channels, commit the offered burst (all 201), and snapshot reservations before any release. B uses the same Channel UUID as A's affected Channel, another Organization and the same Delivery. Send on B, then on a fresh A Channel, asserting either live delivery or 1011 as appropriate; reconnect/replay A's affected Message before releasing the hot cursors. Drain tasks, check zero reservations/entries, and verify A and B resume live. Healthy traffic has no injected delay; the held-cursor workload is artificial.
+
+| Observation | Before, 512 offered | Before, 2,048 offered | 256 candidate, 2,048 offered | 512 chosen, 512 offered | 512 chosen, 2,048 offered |
+|---|---:|---:|---:|---:|---:|
+| Healthy deliveries / healthy completion ms | 320 / 212.402 | 320 / 214.177 | 320 / 254.938 | 320 / 342.768 | 320 / 216.952 |
+| Held-burst HTTP completion ms | 267.186 | 1,054.916 | 1,434.383 | 340.965 | 1,149.989 |
+| Held reservations / Organization entries | 512 / n/a | 2,048 / n/a | 256 / 1 | 512 / 1 | 512 / 1 |
+| Free global execution permits | 40 | 40 | 40 | 40 | 40 |
+| B outcome / ms from send start | Live / 2.134 | 1011 / 1.847 | Live / 2.612 | Live / 2.745 | Live / 2.199 |
+| A affected Channel outcome / ms | Live / 2.121 | 1011 / 1.789 | 1011 / 2.221 | 1011 / 2.800 | 1011 / 2.543 |
+| A affected Channel replay ms | n/a | 4.701 | 4.891 | 4.914 | 5.357 |
+| Reservations / entries after drain | 0 / n/a | 0 / n/a | 0 / 0 | 0 / 0 | 0 / 0 |
+| A and B subsequent live delivery | yes | yes | yes | yes | yes |
+
+Both candidates stop A's reservation monopoly. Chosen 512 leaves at least 1,536 global slots beyond A, versus 1,792 for 256, and allows twice the transient Channel backlog (12 full 40-task Channels plus 32 slots versus six plus 16). All five healthy runs delivered every Message without 1011/4008; these single samples do not show a latency benefit or regression. A's earlier 1011 at 512 is the intended bounded-overload trade-off; its affected Channel replayed and resumed live.
+
+This proves only the controlled single-Organization reservation scenario. Simultaneous multi-Organization exhaustion, the 40 shared execution permits, DB/send admission contention and reconnect costs remain; no cross-Organization fairness is established. The probe does not replay all held Channels or repeat the old 9,999-socket reconnect measurement; existing gap, >50-gap, no-4008 and denial tests guard those contracts. CPU/RSS, SQL counts, peak memory, natural cursor-stall frequency, latency distributions, production performance/capacity and an optimal cap were not measured or proven. Logs stayed outside Git; no raw artifacts or machine-local paths are published.
+
 ## Module-direction check cost (#80)
 
 ### #80 cost evaluation

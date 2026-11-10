@@ -237,3 +237,198 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     f.state.message_delivery.flush().await;
     pool.close().await;
 }
+
+// Same held-cursor/Router/WebSocket method as #178/#189, across Organizations.
+// The configurable expected cap allows the identical probe to run on the baseline.
+async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let f = fixture(&pool).await;
+    let b = organization(&pool).await;
+    let (_, b_token) = member(&pool, b).await;
+    // Reusing A's Channel UUID also checks that failure scope includes Organization.
+    sqlx::query("INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $2, 'B', 'public')")
+        .bind(b).bind(f.channel).execute(&pool).await.unwrap();
+    let mut b_socket = f.server.connect(&b_token).await;
+    subscribe(&mut b_socket, f.channel, 0).await;
+    ready(&mut b_socket, f.channel, 0).await;
+    let mut affected = f.server.connect(&f.token).await;
+    subscribe(&mut affected, f.channel, 0).await;
+    ready(&mut affected, f.channel, 0).await;
+
+    // Healthy many-Channel traffic, without injected delay: 320 concurrent sends,
+    // 16 Channels and one real socket with independent ascending cursors.
+    let mut healthy = f.server.connect(&f.token).await;
+    let mut channels = Vec::new();
+    for _ in 0..16 {
+        let channel = channel(&pool, f.organization, f.member, false).await;
+        subscribe(&mut healthy, channel, 0).await;
+        ready(&mut healthy, channel, 0).await;
+        channels.push(channel);
+    }
+    let start = std::time::Instant::now();
+    let mut requests = tokio::task::JoinSet::new();
+    for &channel in &channels {
+        for _ in 0..20 {
+            let app = f.app.clone();
+            let token = f.token.clone();
+            requests.spawn(async move {
+                let response = request(
+                    &app,
+                    "POST",
+                    &format!("/api/v1/channels/{channel}/messages"),
+                    &token,
+                    json!({"client_message_id":Uuid::new_v4(),"body":"healthy many-Channel"}),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::CREATED);
+            });
+        }
+    }
+    // Read concurrently, keeping the shared 256-event queue drained.
+    let reader = tokio::spawn(async move {
+        let mut cursors = HashMap::new();
+        for _ in 0..320 {
+            let message = event(&mut healthy).await;
+            let channel = message["message"]["channel_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let cursor = cursors.entry(channel).or_insert(0);
+            *cursor += 1;
+            assert_eq!(message["message"]["seq"], *cursor);
+        }
+        assert_eq!(cursors.len(), 16);
+        assert!(cursors.values().all(|&seq| seq == 20));
+    });
+    while let Some(result) = requests.join_next().await {
+        result.unwrap();
+    }
+    reader.await.unwrap();
+    f.state.message_delivery.flush().await;
+    let healthy_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    let mut holders = Vec::new();
+    let mut hot = Vec::new();
+    for _ in 0..offered.div_ceil(40) {
+        let channel = channel(&pool, f.organization, f.member, false).await;
+        let gate = Arc::new(Gate {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let holder = {
+            let delivery = f.state.message_delivery.clone();
+            let gate = gate.clone();
+            let organization = f.organization;
+            tokio::spawn(async move {
+                delivery
+                    .hold_publication_cursor(organization, channel, &gate.entered, &gate.release)
+                    .await;
+            })
+        };
+        entered(&gate).await;
+        holders.push((gate, holder));
+        hot.push(channel);
+    }
+    let start = std::time::Instant::now();
+    for index in 0..offered {
+        let app = f.app.clone();
+        let token = f.token.clone();
+        let channel = hot[index / 40];
+        requests.spawn(async move {
+            let response = request(
+                &app,
+                "POST",
+                &format!("/api/v1/channels/{channel}/messages"),
+                &token,
+                json!({"client_message_id":Uuid::new_v4(),"body":"held Organization"}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        });
+    }
+    while let Some(result) = requests.join_next().await {
+        result.unwrap();
+    }
+    let fill_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let reserved = f.state.message_delivery.notification_reservations();
+    assert_eq!(reserved.0, offered.min(cap));
+    assert_eq!(f.state.message_delivery.notification_permits(), 40);
+
+    let start = std::time::Instant::now();
+    let b_message = send(&f, &b_token, f.channel, Uuid::new_v4(), "B while A held").await;
+    let b_closed = reserved.0 == 2048;
+    if b_closed {
+        closed(&mut b_socket, 1011).await;
+    } else {
+        assert_eq!(event(&mut b_socket).await["message"], b_message);
+    }
+    let b_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let start = std::time::Instant::now();
+    let a_message = post(&f, f.channel).await;
+    let a_closed = reserved.0 >= cap;
+    if a_closed {
+        closed(&mut affected, 1011).await;
+    } else {
+        assert_eq!(event(&mut affected).await["message"], a_message);
+    }
+    let a_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let start = std::time::Instant::now();
+    if a_closed {
+        affected = f.server.connect(&f.token).await;
+        subscribe(&mut affected, f.channel, 0).await;
+        assert_eq!(event(&mut affected).await["message"], a_message);
+        ready(&mut affected, f.channel, 1).await;
+    }
+    let replay_ms = start.elapsed().as_secs_f64() * 1000.0;
+    for (gate, holder) in holders {
+        gate.release.add_permits(1);
+        holder.await.unwrap();
+    }
+    f.state.message_delivery.flush().await;
+    assert_eq!(f.state.message_delivery.notification_reservations(), (0, 0));
+    let next = post(&f, f.channel).await;
+    assert_eq!(event(&mut affected).await["message"], next);
+    if b_closed {
+        b_socket = f.server.connect(&b_token).await;
+        subscribe(&mut b_socket, f.channel, 0).await;
+        assert_eq!(event(&mut b_socket).await["message"], b_message);
+        ready(&mut b_socket, f.channel, 1).await;
+    }
+    let next = send(&f, &b_token, f.channel, Uuid::new_v4(), "B after release").await;
+    assert_eq!(event(&mut b_socket).await["message"], next);
+    f.state.message_delivery.flush().await;
+    eprintln!(
+        "MEASURE_ORG offered={offered} cap={cap} healthy_deliveries=320 healthy_ms={healthy_ms:.3} fill_ms={fill_ms:.3} reservations={} org_entries={} execution_free=40 b_1011={b_closed} b_ms={b_ms:.3} a_1011={a_closed} a_ms={a_ms:.3} a_replay_ms={replay_ms:.3} released={:?} a_live_recovered=true b_live_recovered=true",
+        reserved.0,
+        reserved.1,
+        f.state.message_delivery.notification_reservations()
+    );
+    pool.close().await;
+}
+
+#[sqlx::test]
+#[ignore = "manual release per-Organization reservation comparison"]
+async fn measure_organization_notification_reservations(pool: PgPool) {
+    let offered = std::env::var("MEASURE_RESERVATIONS")
+        .unwrap_or_else(|_| "2048".into())
+        .parse()
+        .unwrap();
+    let cap = std::env::var("MEASURE_ORG_CAP")
+        .unwrap_or_else(|_| "512".into())
+        .parse()
+        .unwrap();
+    organization_reservation_probe(pool, offered, cap).await;
+}
+
+#[sqlx::test]
+async fn organization_cap_preserves_other_organization_live_delivery_and_replays_affected_channel(
+    pool: PgPool,
+) {
+    // Offer more than the cap so Organization B's live delivery depends on rejected
+    // attempts not keeping global capacity (offered = cap would pass without the fix).
+    organization_reservation_probe(pool, 2048, messages::MAX_ORGANIZATION_NOTIFICATIONS).await;
+}

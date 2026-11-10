@@ -13,6 +13,26 @@ use uuid::Uuid;
 type ChannelKey = (Uuid, Uuid);
 type Recipients = HashMap<Uuid, Sender>;
 type ChannelRegistry = Arc<Mutex<HashMap<ChannelKey, (usize, Arc<ChannelFanout>)>>>;
+type OrganizationReservations = Arc<Mutex<HashMap<Uuid, usize>>>;
+
+struct OrganizationReservation {
+    registry: OrganizationReservations,
+    organization: Uuid,
+    // Keep global capacity until Drop has removed the Organization's count.
+    _global: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for OrganizationReservation {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = registry.get_mut(&self.organization) {
+            *count -= 1;
+            if *count == 0 {
+                registry.remove(&self.organization);
+            }
+        }
+    }
+}
 
 struct ChannelLease {
     registry: ChannelRegistry,
@@ -53,10 +73,11 @@ impl Default for ChannelFanout {
 }
 
 // Execution is twice the production pool's 20 connections. Cursor waiters reserve
-// separate capacity before spawning: at most 40 per Channel and 2,048 in total.
+// separate capacity before spawning, bounded per Channel, Organization and Delivery.
 pub(crate) const MAX_IN_FLIGHT_NOTIFICATIONS: usize = 40;
 const MAX_CHANNEL_NOTIFICATIONS: usize = 40;
 const MAX_PENDING_NOTIFICATIONS: usize = 2048;
+pub(crate) const MAX_ORGANIZATION_NOTIFICATIONS: usize = 512;
 pub(crate) const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const LIVE_QUEUE_CAPACITY: usize = 256;
 
@@ -82,6 +103,7 @@ pub struct Delivery {
     recipients: ChannelRegistry,
     notifications: Arc<Semaphore>,
     pending_notifications: Arc<Semaphore>,
+    organization_notifications: OrganizationReservations,
     admission: Arc<OnceLock<Arc<Admission>>>,
     failures: Failures,
     #[cfg(test)]
@@ -96,6 +118,7 @@ impl Default for Delivery {
             recipients: Default::default(),
             notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
             pending_notifications: Arc::new(Semaphore::new(MAX_PENDING_NOTIFICATIONS)),
+            organization_notifications: Default::default(),
             admission: Default::default(),
             failures: Default::default(),
             #[cfg(test)]
@@ -138,6 +161,12 @@ impl Notification {
             // The message is committed: signal reconnect/replay instead of queuing work.
             return;
         };
+        // Global capacity is taken first so the per-Organization map stays bounded by it;
+        // a rejected attempt holds one global permit only until this call returns.
+        let Some(organization_slot) = self.delivery.reserve_organization(self.key.0, pending_slot)
+        else {
+            return;
+        };
         let deadline = tokio::time::Instant::now() + NOTIFICATION_TIMEOUT;
         #[cfg(test)]
         let delivery = self.delivery.clone();
@@ -148,7 +177,7 @@ impl Notification {
             .get(&message.client_message_id)
             .cloned();
         let task = tokio::spawn(async move {
-            let _slots = (channel_slot, pending_slot);
+            let _slots = (channel_slot, organization_slot);
             self.completed = tokio::time::timeout_at(
                 deadline,
                 self.delivery
@@ -218,6 +247,38 @@ impl Delivery {
     #[cfg(test)]
     pub(crate) fn notification_permits(&self) -> usize {
         self.notifications.available_permits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notification_reservations(&self) -> (usize, usize) {
+        (
+            MAX_PENDING_NOTIFICATIONS - self.pending_notifications.available_permits(),
+            self.organization_notifications.lock().unwrap().len(),
+        )
+    }
+
+    fn reserve_organization(
+        &self,
+        organization: Uuid,
+        global: tokio::sync::OwnedSemaphorePermit,
+    ) -> Option<OrganizationReservation> {
+        // Admission and final removal share one short lock: a concurrent release
+        // cannot remove a replacement entry. No lock is held during publication.
+        // Acquiring global capacity first bounds this map to 2,048 live entries.
+        let mut registry = self
+            .organization_notifications
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let count = registry.entry(organization).or_default();
+        if *count == MAX_ORGANIZATION_NOTIFICATIONS {
+            return None;
+        }
+        *count += 1;
+        Some(OrganizationReservation {
+            registry: self.organization_notifications.clone(),
+            organization,
+            _global: global,
+        })
     }
 
     #[cfg(test)]
@@ -535,9 +596,13 @@ mod tests {
         for _ in 0..MAX_PENDING_NOTIFICATIONS {
             let message = committed_message(Uuid::new_v4());
             delivery
-                .notification(organization, message.channel_id, 1)
+                .notification(Uuid::new_v4(), message.channel_id, 1)
                 .spawn(pool.clone(), message);
         }
+        assert_eq!(
+            delivery.notification_reservations(),
+            (MAX_PENDING_NOTIFICATIONS, MAX_PENDING_NOTIFICATIONS)
+        );
         assert_eq!(delivery.pending_notifications.available_permits(), 0);
         assert_eq!(delivery.notification_permits(), MAX_IN_FLIGHT_NOTIFICATIONS);
         let channel = Uuid::new_v4();
@@ -548,6 +613,10 @@ mod tests {
             .spawn(pool, committed_message(channel));
         assert!(affected.notification_failed.is_failed());
         assert!(!*affected.overflow.borrow());
+        assert_eq!(
+            delivery.organization_notifications.lock().unwrap().len(),
+            MAX_PENDING_NOTIFICATIONS
+        );
         let tasks = std::mem::take(&mut *delivery.tasks.lock().unwrap());
         assert_eq!(tasks.len(), MAX_PENDING_NOTIFICATIONS);
         for task in &tasks {
@@ -561,6 +630,7 @@ mod tests {
             MAX_PENDING_NOTIFICATIONS
         );
         assert_eq!(delivery.recipients.lock().unwrap().len(), 1);
+        assert_eq!(delivery.notification_reservations(), (0, 0));
     }
 
     #[tokio::test]
@@ -596,6 +666,7 @@ mod tests {
         );
         drop(executing);
         assert_eq!(delivery.notification_permits(), MAX_IN_FLIGHT_NOTIFICATIONS);
+        assert_eq!(delivery.notification_reservations(), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]
@@ -636,6 +707,7 @@ mod tests {
                 MAX_IN_FLIGHT_NOTIFICATIONS - 1
             );
             assert!(!affected.notification_failed.is_failed());
+            assert_eq!(delivery.notification_reservations(), (1, 1));
             if cancel {
                 let task = delivery.tasks.lock().unwrap().pop().unwrap();
                 task.abort();
@@ -647,6 +719,7 @@ mod tests {
                 delivery.flush().await;
             }
             assert!(affected.notification_failed.is_failed());
+            assert_eq!(delivery.notification_reservations(), (0, 0));
             assert!(!*affected.overflow.borrow());
             assert!(affected.events.try_recv().is_err());
             assert_eq!(
@@ -662,6 +735,135 @@ mod tests {
             drop(affected);
             assert!(delivery.recipients.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn organization_cap_rejection_is_channel_scoped_and_releases_partial_reservations() {
+        let delivery = Delivery::default();
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+        affected.subscribe(channel);
+        let mut other_channel = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+        other_channel.subscribe(Uuid::new_v4());
+        let mut other_organization = delivery.queue(Uuid::new_v4(), (Uuid::new_v4(), 0), 1);
+        other_organization.subscribe(channel);
+        let slots: Vec<_> = (0..MAX_ORGANIZATION_NOTIFICATIONS)
+            .map(|_| {
+                let global = delivery
+                    .pending_notifications
+                    .clone()
+                    .try_acquire_owned()
+                    .unwrap();
+                delivery.reserve_organization(organization, global).unwrap()
+            })
+            .collect();
+        // A cap rejection must not spawn a publication task.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        delivery
+            .notification(organization, channel, 1)
+            .spawn(pool, committed_message(channel));
+        assert!(affected.notification_failed.is_failed());
+        assert!(!other_channel.notification_failed.is_failed());
+        assert!(!other_organization.notification_failed.is_failed());
+        assert!(!*affected.overflow.borrow());
+        assert!(delivery.tasks.lock().unwrap().is_empty());
+        assert_eq!(
+            delivery.notification_reservations(),
+            (MAX_ORGANIZATION_NOTIFICATIONS, 1)
+        );
+        assert_eq!(
+            delivery.channel_notification_permits(organization, channel),
+            MAX_CHANNEL_NOTIFICATIONS
+        );
+        drop(slots);
+        assert_eq!(delivery.notification_reservations(), (0, 0));
+    }
+
+    #[test]
+    fn organization_reservations_reclaim_concurrent_last_exits_and_replacements() {
+        let delivery = Delivery::default();
+        let organization = Uuid::new_v4();
+        let reserve = || {
+            let global = delivery
+                .pending_notifications
+                .clone()
+                .try_acquire_owned()
+                .ok()?;
+            delivery.reserve_organization(organization, global)
+        };
+        for _ in 0..64 {
+            let first = reserve().unwrap();
+            let second = reserve().unwrap();
+            let barrier = std::sync::Barrier::new(3);
+            let replacement = std::thread::scope(|scope| {
+                let first_exit = scope.spawn(|| {
+                    barrier.wait();
+                    drop(first);
+                });
+                let second_exit = scope.spawn(|| {
+                    barrier.wait();
+                    drop(second);
+                });
+                let acquire = scope.spawn(|| {
+                    barrier.wait();
+                    reserve().unwrap()
+                });
+                first_exit.join().unwrap();
+                second_exit.join().unwrap();
+                acquire.join().unwrap()
+            });
+            assert_eq!(delivery.notification_reservations(), (1, 1));
+            assert_eq!(
+                delivery.organization_notifications.lock().unwrap()[&organization],
+                1
+            );
+            let mut slots = vec![replacement];
+            for _ in 1..MAX_ORGANIZATION_NOTIFICATIONS {
+                slots.push(reserve().unwrap());
+            }
+            // Removal must not have created a second budget for this Organization.
+            assert!(reserve().is_none());
+            assert_eq!(
+                delivery.notification_reservations(),
+                (MAX_ORGANIZATION_NOTIFICATIONS, 1)
+            );
+            drop(slots);
+            assert_eq!(delivery.notification_reservations(), (0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_panic_releases_organization_reservation_and_latches_failure() {
+        let delivery = Delivery::default();
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+        affected.subscribe(channel);
+        let message = committed_message(channel);
+        let gate = pause_publication(message.client_message_id);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        delivery
+            .notification(organization, channel, 1)
+            .spawn(pool, message);
+        gate.entered.acquire().await.unwrap().forget();
+        assert_eq!(delivery.notification_reservations(), (1, 1));
+        // The test-only publication gate unwraps a closed semaphore, unwinding the task.
+        gate.release.close();
+        let task = delivery.tasks.lock().unwrap().pop().unwrap();
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(affected.notification_failed.is_failed());
+        assert!(!*affected.overflow.borrow());
+        assert_eq!(delivery.notification_reservations(), (0, 0));
+        assert_eq!(
+            delivery.channel_notification_permits(organization, channel),
+            MAX_CHANNEL_NOTIFICATIONS
+        );
+        assert_eq!(delivery.notification_permits(), MAX_IN_FLIGHT_NOTIFICATIONS);
     }
 
     #[test]
@@ -807,6 +1009,7 @@ mod tests {
             delivery.channel_notification_permits(organization, channel),
             MAX_IN_FLIGHT_NOTIFICATIONS
         );
+        assert_eq!(delivery.notification_reservations(), (0, 0));
     }
 
     #[tokio::test]
