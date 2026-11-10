@@ -17,6 +17,7 @@ use crate::{
     channels,
 };
 
+mod admission;
 mod commit;
 mod delivery;
 mod failure;
@@ -322,6 +323,25 @@ async fn persist(
     channel_id: Uuid,
     input: SendMessageRequest,
 ) -> Result<Message, MessageError> {
+    tokio::time::timeout(admission::WORK_TIMEOUT, async {
+        let _permit = delivery
+            .admission(pool)
+            .acquire(organization_id, channel_id, true)
+            .await?;
+        persist_admitted(pool, delivery, organization_id, sender, channel_id, input).await
+    })
+    .await
+    .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
+}
+
+async fn persist_admitted(
+    pool: &sqlx::PgPool,
+    delivery: &Delivery,
+    organization_id: Uuid,
+    sender: Uuid,
+    channel_id: Uuid,
+    input: SendMessageRequest,
+) -> Result<Message, MessageError> {
     let mut tx = pool.begin().await?;
     if let Some(message) =
         existing(&mut *tx, organization_id, sender, input.client_message_id).await?
@@ -329,6 +349,8 @@ async fn persist(
         tx.rollback().await?;
         return canonical(message, channel_id, &input);
     }
+    // Bound every subsequent lock wait, including the counter and idempotency key.
+    commit::lock(&mut tx, organization_id, channel_id, false).await?;
     // Row locking serializes only sends in this channel. Both allocation and insertion
     // roll back together, including a concurrent duplicate that loses the unique-key race.
     let seq: i64 = sqlx::query_scalar(
@@ -345,7 +367,6 @@ async fn persist(
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
         .bind(input.client_message_id).bind(&input.body).fetch_optional(&mut *tx).await?;
     if let Some(message) = message {
-        commit::lock(&mut tx, organization_id, channel_id, false).await?;
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
         // connected subscribers silently missing a possibly committed message.
         let mut notification = delivery.notification(organization_id, channel_id);
@@ -368,31 +389,27 @@ async fn persist(
 
 pub(crate) use delivery::LiveQueue;
 
-pub(crate) async fn latest_seq(
+async fn latest_seq(
     pool: &sqlx::PgPool,
     organization: Uuid,
     channel: Uuid,
 ) -> Result<i64, sqlx::Error> {
     // A post-failure subscription must not snapshot behind an unresolved COMMIT.
     // Take a fresh READ COMMITTED snapshot *after* acquiring the shared barrier.
-    tokio::time::timeout(delivery::NOTIFICATION_TIMEOUT, async {
-        let mut tx = pool
-            .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
-            .await?;
-        commit::lock(&mut tx, organization, channel, true).await?;
-        let sql = "SELECT seq FROM channel_message_sequences \
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .await?;
+    commit::lock(&mut tx, organization, channel, true).await?;
+    let sql = "SELECT seq FROM channel_message_sequences \
                    WHERE organization_id = $1 AND channel_id = $2";
-        let seq = sqlx::query_scalar::<_, i64>(sql)
-            .bind(organization)
-            .bind(channel)
-            .fetch_optional(&mut *tx)
-            .await?
-            .unwrap_or(0);
-        tx.commit().await?;
-        Ok(seq)
-    })
-    .await
-    .map_err(|_| sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))?
+    let seq = sqlx::query_scalar::<_, i64>(sql)
+        .bind(organization)
+        .bind(channel)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(0);
+    tx.commit().await?;
+    Ok(seq)
 }
 
 pub(crate) async fn replay_page(

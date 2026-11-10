@@ -13,7 +13,9 @@ pub(super) async fn lock(
          SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) \
          FROM timeout"
     } else {
-        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135))"
+        "WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true)) \
+         SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) \
+         FROM timeout"
     };
     sqlx::query(sql)
         .bind(organization)
@@ -71,6 +73,32 @@ pub(crate) fn ambiguous_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test]
+    async fn both_barriers_set_transaction_local_lock_timeout(pool: sqlx::PgPool) {
+        let mut connection = pool.acquire().await.unwrap();
+        let original: String = sqlx::query_scalar("SHOW lock_timeout")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        for shared in [true, false] {
+            let mut tx = sqlx::Connection::begin(&mut *connection).await.unwrap();
+            lock(&mut tx, Uuid::new_v4(), Uuid::new_v4(), shared)
+                .await
+                .unwrap();
+            let timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(timeout, "10s");
+            tx.rollback().await.unwrap();
+            let restored: String = sqlx::query_scalar("SHOW lock_timeout")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+            assert_eq!(restored, original);
+        }
+    }
 
     #[test]
     fn only_known_rollback_codes_suppress_commit_failure_signals() {

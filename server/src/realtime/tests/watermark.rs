@@ -31,11 +31,22 @@ async fn http_json(
     channel: Uuid,
     input: Option<Value>,
 ) -> Value {
-    let (method, status) = if input.is_some() {
-        ("POST", "201 Created")
+    let status = if input.is_some() {
+        "201 Created"
     } else {
-        ("GET", "200 OK")
+        "200 OK"
     };
+    http_status(address, token, channel, input, status).await
+}
+
+async fn http_status(
+    address: std::net::SocketAddr,
+    token: &str,
+    channel: Uuid,
+    input: Option<Value>,
+    status: &str,
+) -> Value {
+    let method = if input.is_some() { "POST" } else { "GET" };
     let body = input.map(|value| value.to_string()).unwrap_or_default();
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream
@@ -92,7 +103,8 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         .unwrap();
 
     let mut waiting = Vec::new();
-    for count in 1..=16 {
+    let first_admission = tokio::time::Instant::now();
+    for count in 1..=4 {
         let mut socket = f.server.connect(&f.token).await;
         subscribe(&mut socket, f.channel, 0).await;
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -105,7 +117,30 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         waiting.push(socket);
     }
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(65));
+    // One send holds a connection; every other same-Channel send/retry waits outside
+    // the pool. Preserve the admitted retry to check canonical recovery after COMMIT.
+    let address = f.server.address;
+    let token = f.token.clone();
+    let stuck_channel = f.channel;
+    let admitted_retry = tokio::spawn(async move {
+        http_json(
+            address,
+            &token,
+            stuck_channel,
+            Some(json!({"client_message_id": key, "body": "unresolved"})),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%SELECT pg_advisory_xact_lock(%' AND $1 = ANY(pg_blocking_pids(pid))")
+                .bind(pid).fetch_one(&pool).await.unwrap();
+            if count == 1 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(97));
     let mut reconnecting = tokio::task::JoinSet::new();
     for _ in 0..64 {
         let address = f.server.address;
@@ -129,10 +164,52 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
             }
         });
     }
+    for index in 0..32 {
+        let token = f.token.clone();
+        let barrier = barrier.clone();
+        reconnecting.spawn(async move {
+            barrier.wait().await;
+            for attempt in 0..3 {
+                let send_key = if index % 2 == 0 { key } else { Uuid::new_v4() };
+                let body = if index % 2 == 0 {
+                    "unresolved"
+                } else {
+                    "new send"
+                };
+                let response = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    http_status(
+                        address,
+                        &token,
+                        stuck_channel,
+                        Some(json!({"client_message_id": send_key, "body": body})),
+                        "500 Internal Server Error",
+                    ),
+                )
+                .await
+                .expect("send admission must reject without occupying a connection");
+                assert_eq!(
+                    response,
+                    json!({"error": "internal error"}),
+                    "attempt {attempt}"
+                );
+            }
+        });
+    }
     tokio::time::timeout(Duration::from_secs(5), barrier.wait())
         .await
         .expect("all storm clients must finish their authenticated handshakes");
     let probes = async {
+        // Both another Channel and another Organization can still subscribe.
+        for (token, channel) in [(&f.token, other_channel), (&other_token, foreign_channel)] {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let mut socket = connect(address, token).await;
+                subscribe(&mut socket, channel, 0).await;
+                ready(&mut socket, channel, 0).await;
+            })
+            .await
+            .expect("a stuck Channel must not consume unrelated subscription slots");
+        }
         for seq in 1..=10 {
             for (token, channel) in [(&f.token, other_channel), (&other_token, foreign_channel)] {
                 tokio::time::timeout(Duration::from_secs(2), async {
@@ -163,9 +240,23 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     })
     .await
     .expect("load/fault phase must finish before the 10s watermark deadline");
-    assert_eq!(lock_waiters(&pool, pid).await, 16);
+    assert!(
+        first_admission.elapsed() < Duration::from_secs(8),
+        "fault phase must finish within 8s since FIRST admission, before any 10s waiter deadline: {:?}",
+        first_admission.elapsed()
+    );
+    assert_eq!(lock_waiters(&pool, pid).await, 4);
+    // One unresolved COMMIT + four watermark waiters + one send; no storm work
+    // may have acquired the remaining fourteen connections.
+    assert!(
+        app_pool.size() - app_pool.num_idle() as u32 <= 6,
+        "storm occupied extra pool connections"
+    );
 
     tx.commit().await.unwrap();
+    let canonical = admitted_retry.await.unwrap();
+    assert_eq!(canonical["client_message_id"], json!(key));
+    assert_eq!(canonical["seq"], 1);
     for socket in &mut waiting {
         let message = event(socket).await;
         assert_eq!(message["message"]["client_message_id"], json!(key));
@@ -179,4 +270,63 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         json!(key)
     );
     ready(&mut recovered, f.channel, 1).await;
+}
+
+#[sqlx::test]
+async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: PgPool) {
+    let app_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let f = fixture(&app_pool).await;
+    let mut channels = vec![f.channel];
+    for _ in 0..31 {
+        channels.push(channel(&pool, f.organization, f.member, false).await);
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(513));
+    // Bound TCP handshakes to avoid testing the OS listen backlog; all 512
+    // authenticated sockets issue their subscriptions together below.
+    let handshakes = Arc::new(Semaphore::new(32));
+    let mut clients = tokio::task::JoinSet::new();
+    for index in 0..512 {
+        let address = f.server.address;
+        let token = f.token.clone();
+        // A popular Channel and a burst across many Channels exercise both caps.
+        let channel = if index < 256 {
+            f.channel
+        } else {
+            channels[index % channels.len()]
+        };
+        let barrier = barrier.clone();
+        let handshakes = handshakes.clone();
+        clients.spawn(async move {
+            let permit = handshakes.acquire().await.unwrap();
+            let mut socket = connect(address, &token).await;
+            drop(permit);
+            barrier.wait().await;
+            subscribe(&mut socket, channel, 0).await;
+            ready(&mut socket, channel, 0).await;
+            (channel, socket)
+        });
+    }
+    tokio::time::timeout(Duration::from_secs(10), barrier.wait())
+        .await
+        .unwrap();
+    let mut connected = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(result) = clients.join_next().await {
+            connected.push(result.unwrap());
+        }
+    })
+    .await
+    .expect("all 512 simultaneous subscriptions must be accepted without 1011");
+    assert_eq!(connected.len(), 512);
+    let mut canonical = HashMap::new();
+    for channel in channels {
+        canonical.insert(channel, post(&f, channel).await);
+    }
+    for (channel, socket) in &mut connected {
+        assert_eq!(event(socket).await["message"], canonical[channel]);
+    }
 }

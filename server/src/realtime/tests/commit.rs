@@ -99,7 +99,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
             loop {
                 let blocked: bool = sqlx::query_scalar(
                     "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE \
-                     query LIKE 'INSERT INTO channel_message_sequences%' \
+                     query LIKE '%SELECT pg_advisory_xact_lock(%' \
                      AND $1 = ANY(pg_blocking_pids(pid)))",
                 )
                 .bind(pid)
@@ -133,7 +133,9 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
             canonical
         );
         assert_eq!(
-            messages::latest_seq(&pool, f.organization, f.channel)
+            f.state
+                .message_delivery
+                .latest_seq(&pool, f.organization, f.channel)
                 .await
                 .unwrap(),
             initial_seq + 1
@@ -179,7 +181,9 @@ async fn ambiguous_commit_rollback_allows_gap_free_same_key_retry(pool: PgPool) 
         canonical
     );
     assert_eq!(
-        messages::latest_seq(&pool, f.organization, f.channel)
+        f.state
+            .message_delivery
+            .latest_seq(&pool, f.organization, f.channel)
             .await
             .unwrap(),
         1
@@ -210,7 +214,9 @@ async fn definite_commit_failure_does_not_signal_or_consume_sequence(pool: PgPoo
     assert!(!queue.notification_failed.is_failed());
     assert!(queue.events.try_recv().is_err());
     assert_eq!(
-        messages::latest_seq(&pool, f.organization, f.channel)
+        f.state
+            .message_delivery
+            .latest_seq(&pool, f.organization, f.channel)
             .await
             .unwrap(),
         0
@@ -330,4 +336,68 @@ async fn ambiguous_commit_recovery_preserves_organization_and_private_channel_de
     f.state.message_delivery.flush().await;
     silent(&mut denied_socket).await;
     silent(&mut recovery).await;
+}
+
+#[sqlx::test]
+async fn send_deadline_during_commit_signals_and_reconnect_waits_for_final_message(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let mut before = f.server.connect(&f.token).await;
+    subscribe(&mut before, f.channel, 0).await;
+    ready(&mut before, f.channel, 0).await;
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(156::bigint)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION pause_commit_deadline() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(156::bigint); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER pause_commit_deadline AFTER INSERT ON messages DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION pause_commit_deadline();").execute(&pool).await.unwrap();
+    let key = Uuid::new_v4();
+    let app = f.app.clone();
+    let token = f.token.clone();
+    let channel = f.channel;
+    let sending = tokio::spawn(async move {
+        request(
+            &app,
+            "POST",
+            &format!("/api/v1/channels/{channel}/messages"),
+            &token,
+            json!({"client_message_id": key, "body": "deadline"}),
+        )
+        .await
+    });
+    let committing = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE query = 'COMMIT' AND $1 = ANY(pg_blocking_pids(pid))")
+                .bind(holder).fetch_optional(&pool).await.unwrap();
+            if let Some(pid) = pid { break pid; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(messages::NOTIFICATION_TIMEOUT).await;
+    tokio::time::resume();
+    assert_eq!(
+        sending.await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    closed(&mut before, 1011).await;
+    let mut recovered = f.server.connect(&f.token).await;
+    subscribe(&mut recovered, f.channel, 0).await;
+    tokio::select! {
+        _ = waiting_for_commit(&pool, committing) => {},
+        stale = event(&mut recovered) => panic!("handoff before timed-out COMMIT resolved: {stale}"),
+    }
+    blocker.commit().await.unwrap();
+    let canonical = event(&mut recovered).await["message"].clone();
+    assert_eq!(canonical["client_message_id"], json!(key));
+    assert_eq!(canonical["seq"], 1);
+    ready(&mut recovered, f.channel, 1).await;
+    assert_eq!(
+        send(&f, &f.token, f.channel, key, "deadline").await,
+        canonical
+    );
+    silent(&mut recovered).await;
 }
