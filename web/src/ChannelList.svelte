@@ -1,16 +1,43 @@
 <script lang="ts">
   import type { Channel } from './channels.svelte'
-  let { channels, selectedId, onselect }: { channels: Channel[]; selectedId: string | null; onselect: (id: string) => void } = $props()
+  import ListRow from './ui/ListRow.svelte'
+
+  let {
+    channels,
+    selectedId,
+    onselect,
+  }: {
+    channels: Channel[]
+    selectedId: string | null
+    onselect: (id: string) => void
+  } = $props()
 </script>
 
-<nav aria-label="チャンネル">
-  <ul>
-    {#each channels as c (c.id)}
-      <li>
-        <button type="button" aria-current={c.id === selectedId ? 'true' : undefined} onclick={() => onselect(c.id)}>
-          {c.visibility === 'private' ? '🔒' : '#'} {c.name}
-        </button>
-      </li>
-    {/each}
-  </ul>
-</nav>
+<ul class="channel-list">
+  {#each channels as c (c.id)}
+    <li class="channel-list__item">
+      <ListRow
+        kind="channel"
+        prefix={c.visibility === 'private' ? '🔒' : '#'}
+        name={c.name}
+        selected={c.id === selectedId}
+        onclick={() => onselect(c.id)}
+      />
+    </li>
+  {/each}
+</ul>
+
+<style>
+  .channel-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
+  }
+
+  .channel-list__item {
+    min-width: 0;
+  }
+</style>
