@@ -121,7 +121,16 @@ pub async fn upgrade(
         .on_upgrade(move |socket| connected(socket, state, auth))
 }
 
-async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
+async fn connected(socket: WebSocket, state: AppState, auth: Auth) {
+    connected_with_lifecycle(socket, state, auth, connection::Lifecycle::default()).await;
+}
+
+async fn connected_with_lifecycle(
+    mut socket: WebSocket,
+    state: AppState,
+    auth: Auth,
+    lifecycle: connection::Lifecycle,
+) {
     let mut session = match auth.watch_session(&state).await {
         Ok(Some(session)) => session,
         Ok(None) => {
@@ -153,7 +162,7 @@ async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
         result = session.ended() => Some(if result.is_ok() { CLOSE_SESSION_ENDED } else { 1011 }),
         _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
         _ = notification_failed.failed() => Some(1011),
-        result = connection.run(&mut socket) => result.err(),
+        result = connection.run(&mut socket, lifecycle) => result.err(),
     };
     if let Some(code) = code {
         close(&mut socket, code).await;

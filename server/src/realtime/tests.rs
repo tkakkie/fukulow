@@ -246,7 +246,12 @@ async fn frame(client: &mut Client) -> tungstenite::Message {
         .unwrap()
 }
 async fn event(client: &mut Client) -> Value {
-    serde_json::from_str(frame(client).await.to_text().unwrap()).unwrap()
+    loop {
+        match frame(client).await {
+            tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
+            frame => return serde_json::from_str(frame.to_text().unwrap()).unwrap(),
+        }
+    }
 }
 async fn ready(client: &mut Client, channel: Uuid, seq: i64) {
     assert_eq!(
@@ -888,6 +893,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 
 mod commit;
 mod contract;
+mod lifecycle;
 mod notification;
 mod session;
 mod watermark;
