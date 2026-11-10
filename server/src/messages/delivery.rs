@@ -278,6 +278,8 @@ impl Delivery {
         if message.seq <= *after {
             return Ok(());
         }
+        // REPLAY_PAGE_SIZE (50) is the effective bound today; the queue-capacity cap only
+        // matters if the page size is ever raised above LIVE_QUEUE_CAPACITY.
         let gap = message.seq - *after - 1;
         if gap > super::REPLAY_PAGE_SIZE || gap > LIVE_QUEUE_CAPACITY as i64 {
             // Latch before skipping: current subscribers reconnect; later subscribers
