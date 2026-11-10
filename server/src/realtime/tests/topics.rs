@@ -152,3 +152,52 @@ async fn topic_live_replay_member_revision_and_removed_grant_denials_have_positi
         ready(&mut control, target, 2).await;
     }
 }
+
+#[sqlx::test]
+async fn websocket_subscribe_succeeds_while_topic_projection_queries_are_in_flight(pool: PgPool) {
+    let app_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let f = fixture(&app_pool).await;
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE topics IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let mut reads = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let app = f.app.clone();
+        let token = f.token.clone();
+        let channel = f.channel;
+        reads.spawn(async move {
+            request(
+                &app,
+                "GET",
+                &format!("/api/v1/channels/{channel}/timeline"),
+                &token,
+                Value::Null,
+            )
+            .await
+        });
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND relation='topics'::regclass AND NOT granted")
+                .fetch_one(&pool).await.unwrap();
+            if waiting == 4 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let mut socket = f.server.connect(&f.token).await;
+    subscribe(&mut socket, f.channel, 0).await;
+    tokio::time::timeout(Duration::from_secs(2), ready(&mut socket, f.channel, 0))
+        .await
+        .expect("projection queries must not occupy subscription watermark slots");
+    assert_eq!(reads.len(), 4);
+    held.commit().await.unwrap();
+    while let Some(result) = reads.join_next().await {
+        assert_eq!(result.unwrap().status(), StatusCode::OK);
+    }
+}

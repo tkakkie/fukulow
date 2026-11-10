@@ -272,6 +272,7 @@ pub enum MessageError {
     OrganizationUnavailable,
     Conflict,
     AdmissionRejected,
+    ProjectionAdmissionRejected,
     Database(sqlx::Error),
 }
 
@@ -293,7 +294,7 @@ impl IntoResponse for MessageError {
                 "client message id reused with different body, channel or Topic",
             ),
             Self::Database(error) => return ApiError::from(error).into_response(),
-            Self::AdmissionRejected => {
+            rejection @ (Self::AdmissionRejected | Self::ProjectionAdmissionRejected) => {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     [
@@ -304,7 +305,11 @@ impl IntoResponse for MessageError {
                         ),
                     ],
                     Json(ErrorBody {
-                        error: "send admission unavailable".into(),
+                        error: match rejection {
+                            Self::ProjectionAdmissionRejected => "projection admission unavailable",
+                            _ => "send admission unavailable",
+                        }
+                        .into(),
                     }),
                 )
                     .into_response();

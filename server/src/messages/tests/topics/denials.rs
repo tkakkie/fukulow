@@ -70,10 +70,17 @@ async fn topic_rest_denial_matrix_has_positive_controls_and_authorization_before
         let topic = canonical["topic_id"].as_str().unwrap();
         for name in SURFACES {
             assert!(
-                surface(&app, &owner_token, channel, topic, key, name)
-                    .await
-                    .status()
-                    .is_success(),
+                surface(
+                    &app,
+                    if other == org { &token } else { &owner_token },
+                    channel,
+                    topic,
+                    key,
+                    name
+                )
+                .await
+                .status()
+                .is_success(),
                 "positive {denial}/{name}"
             );
         }

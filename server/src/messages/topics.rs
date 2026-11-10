@@ -139,7 +139,8 @@ pub(super) async fn record(
         (status = 400, description = "Invalid Organization id, Channel id, Topic id, conflicting cursors or limit", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical", body = ErrorBody),
-        (status = 500, description = "Database failure reading Topic history", body = ErrorBody)))]
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 500, description = "Database failure or barrier timeout reading Topic history", body = ErrorBody)))]
 pub async fn topic_history(
     State(state): State<AppState>,
     auth: Auth,
@@ -150,6 +151,14 @@ pub async fn topic_history(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization = auth.identity.organization.organization_id;
+    require_visible(
+        &state.pool,
+        organization,
+        (auth.identity.member.id, auth.membership_revision),
+        channel,
+    )
+    .await?;
+    let w = watermark(&state, organization, channel).await?;
     let mut tx = state
         .pool
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -179,7 +188,7 @@ pub async fn topic_history(
     let sql = format!(
         "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-        FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 \
+        FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
         ORDER BY seq {order} LIMIT $5"
     );
     let mut messages = sqlx::query_as::<_, Message>(&sql)
@@ -188,6 +197,7 @@ pub async fn topic_history(
         .bind(topic)
         .bind(cursor)
         .bind(i64::from(limit) + 1)
+        .bind(w)
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -201,4 +211,19 @@ pub async fn topic_history(
         Json(MessagePage { messages, has_more }),
     )
         .into_response())
+}
+
+// Keep HTTP admission rejection distinct from database/barrier work timeouts.
+async fn watermark(
+    state: &AppState,
+    organization: Uuid,
+    channel: Uuid,
+) -> Result<i64, MessageError> {
+    state.message_delivery.latest_seq(&state.pool, organization, channel).await.map_err(|error| {
+        if matches!(&error, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock) {
+            MessageError::ProjectionAdmissionRejected
+        } else {
+            MessageError::Database(error)
+        }
+    })
 }

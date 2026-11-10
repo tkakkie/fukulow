@@ -135,7 +135,7 @@ async fn waiting(pool: &PgPool, pid: i32) {
 async fn topic_projection_ambiguous_commit_waits_before_snapshot_and_recovers_without_later_send(
     pool: PgPool,
 ) {
-    for route in ["timeline", "topics", "summary"] {
+    for route in ["timeline", "topics", "summary", "history"] {
         let (app, org, _, channel, token) = fixture(&pool).await;
         let key = Uuid::new_v4();
         let pending = commit::ambiguous_commit(key);
@@ -157,7 +157,9 @@ async fn topic_projection_ambiguous_commit_waits_before_snapshot_and_recovers_wi
         .fetch_one(tx.connection().unwrap())
         .await
         .unwrap();
-        let suffix = if route == "summary" {
+        let suffix = if route == "history" {
+            format!("topics/{topic}/messages")
+        } else if route == "summary" {
             format!("topics/{topic}")
         } else {
             route.into()
@@ -174,6 +176,12 @@ async fn topic_projection_ambiguous_commit_waits_before_snapshot_and_recovers_wi
         );
         tx.commit().await.unwrap();
         let page = read.await.unwrap();
+        if route == "history" {
+            let canonical = sent(&app, &token, channel, topic_input(key, "PENDING")).await;
+            assert_eq!(page["messages"], json!([canonical]));
+            assert_eq!(counts(&pool, org, channel).await, (1, 1, 1));
+            continue;
+        }
         assert_eq!(page["as_of_seq"], 1);
         let summary = match route {
             "timeline" => &page["items"][0]["topic"],
@@ -293,6 +301,10 @@ async fn topic_database_constraints_bind_organization_channel_and_preserve_null_
     ] {
         let error=sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES ($1,$2,$3,1,$4,$5,'forged',$6)")
             .bind(scope).bind(Uuid::new_v4()).bind(ch).bind(sender).bind(Uuid::new_v4()).bind(topic).execute(&pool).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().constraint(),
+            Some("messages_topic_channel_fk")
+        );
         assert!(
             error
                 .as_database_error()

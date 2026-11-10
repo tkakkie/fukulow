@@ -655,7 +655,17 @@
             }
           },
           "500": {
-            "description": "Database failure, admission or commit barrier timeout reading the projection",
+            "description": "Database failure or commit barrier timeout reading the projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
             "content": {
               "application/json": {
                 "schema": {
@@ -778,7 +788,17 @@
             }
           },
           "500": {
-            "description": "Database failure, admission or barrier timeout listing Topics",
+            "description": "Database failure or barrier timeout listing Topics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
             "content": {
               "application/json": {
                 "schema": {
@@ -876,7 +896,17 @@
             }
           },
           "500": {
-            "description": "Database failure, admission or barrier timeout reading the Topic summary",
+            "description": "Database failure or barrier timeout reading the Topic summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
             "content": {
               "application/json": {
                 "schema": {
@@ -1009,7 +1039,17 @@
             }
           },
           "500": {
-            "description": "Database failure reading Topic history",
+            "description": "Database failure or barrier timeout reading Topic history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
             "content": {
               "application/json": {
                 "schema": {

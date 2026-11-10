@@ -21,8 +21,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// Topic projections add four routes with five described responses each.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 81;
+// Topic projections add four routes with six described responses each.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 85;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {

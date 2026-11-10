@@ -1003,8 +1003,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Database failure, admission or commit barrier timeout reading the projection */
+            /** @description Database failure or commit barrier timeout reading the projection */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1068,8 +1077,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Database failure, admission or barrier timeout listing Topics */
+            /** @description Database failure or barrier timeout listing Topics */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1128,8 +1146,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Database failure, admission or barrier timeout reading the Topic summary */
+            /** @description Database failure or barrier timeout reading the Topic summary */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1195,8 +1222,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Database failure reading Topic history */
+            /** @description Database failure or barrier timeout reading Topic history */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

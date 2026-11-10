@@ -8,11 +8,7 @@ fn page_sql() -> String {
     format!(
         r#"
 WITH access AS MATERIALIZED (SELECT ({}) AS visible),
-anchor AS MATERIALIZED (
-    SELECT COALESCE((SELECT seq FROM channel_message_sequences
-        WHERE organization_id = $1 AND channel_id = $4), 0) AS committed_seq
-),
-w AS MATERIALIZED (SELECT committed_seq, COALESCE($5, committed_seq) AS as_of_seq FROM anchor),
+w AS MATERIALIZED (SELECT $5::bigint AS as_of_seq),
 positions AS (
     SELECT topic_id, min(seq) AS first_seq, max(seq) AS last_seq, count(*) AS message_count
     FROM messages, w, access
@@ -31,7 +27,7 @@ page AS MATERIALIZED (
     SELECT * FROM candidates WHERE ($6::bigint IS NULL OR last_seq < $6)
     ORDER BY last_seq DESC LIMIT $7
 )
-SELECT access.visible, w.committed_seq, w.as_of_seq, p.first_seq, p.last_seq,
+SELECT access.visible, w.as_of_seq, p.first_seq, p.last_seq,
     p.message_count, t.name, m.id, m.channel_id, m.seq, m.client_message_id,
     m.sender, m.body, m.topic_id,
     to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
@@ -69,30 +65,25 @@ async fn read(
     )
     .await?;
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        let permit = state
-            .message_delivery
-            .admission(&state.pool)
-            .acquire(organization, channel, false)
-            .await?;
-        let mut tx =
-            commit::Transaction::begin(&state.pool, permit, "BEGIN ISOLATION LEVEL READ COMMITTED")
-                .await?;
-        commit::lock(tx.connection()?, organization, channel, true).await?;
-        // The next statement gets a fresh snapshot AFTER the barrier. Authorization,
-        // W, positions, counts and latest payloads all belong to that one snapshot.
+        let w = super::watermark(state, organization, channel).await?;
+        if query.as_of_seq.is_some_and(|requested| requested > w) {
+            return Err(MessageError::InvalidInput);
+        }
+        let w = query.as_of_seq.unwrap_or(w);
+        // The barrier and its permit are released. Immutable seq <= W is complete;
+        // this fresh statement snapshots authorization and projection data together.
         let rows = sqlx::query(&page_sql())
             .bind(organization)
             .bind(auth.identity.member.id)
             .bind(auth.membership_revision)
             .bind(channel)
-            .bind(query.as_of_seq)
+            .bind(w)
             .bind(query.before_position)
             .bind(i64::from(limit) + 1)
             .bind(topics_only)
             .bind(topic)
-            .fetch_all(tx.connection()?)
+            .fetch_all(&state.pool)
             .await?;
-        tx.commit().await?;
         let first = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         match first.try_get::<Option<bool>, _>("visible")? {
             None => return Err(MessageError::OrganizationUnavailable),
@@ -100,9 +91,6 @@ async fn read(
             Some(true) => {}
         }
         let w: i64 = first.try_get("as_of_seq")?;
-        if w > first.try_get::<i64, _>("committed_seq")? {
-            return Err(MessageError::InvalidInput);
-        }
         let mut items = Vec::new();
         for row in &rows {
             if row.try_get::<Option<Uuid>, _>("id")?.is_none() {
@@ -140,7 +128,8 @@ async fn read(
         (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found; private and unknown Channels are identical", body = ErrorBody),
-        (status = 500, description = "Database failure, admission or commit barrier timeout reading the projection", body = ErrorBody)))]
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 500, description = "Database failure or commit barrier timeout reading the projection", body = ErrorBody)))]
 pub async fn list_timeline(
     State(state): State<AppState>,
     auth: Auth,
@@ -169,7 +158,8 @@ pub async fn list_timeline(
         (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found", body = ErrorBody),
-        (status = 500, description = "Database failure, admission or barrier timeout listing Topics", body = ErrorBody)))]
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 500, description = "Database failure or barrier timeout listing Topics", body = ErrorBody)))]
 pub async fn list_topics(
     State(state): State<AppState>,
     auth: Auth,
@@ -206,7 +196,8 @@ pub async fn list_topics(
         (status = 400, description = "Invalid Organization id, Channel id or Topic id", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical", body = ErrorBody),
-        (status = 500, description = "Database failure, admission or barrier timeout reading the Topic summary", body = ErrorBody)))]
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 500, description = "Database failure or barrier timeout reading the Topic summary", body = ErrorBody)))]
 pub async fn topic_summary(
     State(state): State<AppState>,
     auth: Auth,
