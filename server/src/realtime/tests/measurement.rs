@@ -60,6 +60,29 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     let mut cold_socket = f.server.connect(&f.token).await;
     subscribe(&mut cold_socket, cold, 0).await;
     ready(&mut cold_socket, cold, 0).await;
+    // Replay takes longer than the heartbeat grace. Keep this client reading,
+    // including Pings, while the hot sockets reconnect sequentially.
+    let (cold_events, mut cold_received) = tokio::sync::mpsc::channel(3);
+    let cold_reader = tokio::spawn(async move {
+        let mut received = 0;
+        while let Some(frame) = cold_socket.next().await {
+            match frame.unwrap() {
+                tungstenite::Message::Ping(_) => cold_socket.flush().await.unwrap(),
+                tungstenite::Message::Text(text) => {
+                    cold_events
+                        .send(serde_json::from_str::<Value>(&text).unwrap())
+                        .await
+                        .unwrap();
+                    received += 1;
+                    if received == 3 {
+                        return;
+                    }
+                }
+                frame => panic!("unexpected cold measurement frame: {frame:?}"),
+            }
+        }
+        panic!("cold measurement socket ended before all live Messages");
+    });
     let gate = Arc::new(Gate {
         entered: Semaphore::new(0),
         release: Semaphore::new(0),
@@ -114,11 +137,26 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
         accepted > 100,
         "probe needs a >50 gap beyond the first 40 notifications"
     );
-    assert_eq!(f.state.message_delivery.notification_permits(), 0);
+    assert_eq!(
+        f.state
+            .message_delivery
+            .channel_notification_permits(f.organization, f.channel),
+        0
+    );
+    assert_eq!(
+        f.state.message_delivery.notification_permits(),
+        messages::MAX_IN_FLIGHT_NOTIFICATIONS
+    );
     let send_ms = start.elapsed().as_secs_f64() * 1000.0;
     let cold_start = std::time::Instant::now();
     let own = post(&f, cold).await;
-    closed(&mut cold_socket, 1011).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), cold_received.recv())
+            .await
+            .unwrap()
+            .unwrap()["message"],
+        own
+    );
     let cold_ms = cold_start.elapsed().as_secs_f64() * 1000.0;
     all_closed(&mut clients).await;
     let first_close_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -177,14 +215,20 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     let final_hot = post(&f, f.channel).await;
     assert_eq!(final_hot["seq"], accepted + 2);
     assert_eq!(event(&mut recovered_hot).await["message"], final_hot);
+    // The original cold socket stays live through both hot reconnect cycles.
+    let next_cold = post(&f, cold).await;
+    assert_eq!(cold_received.recv().await.unwrap()["message"], next_cold);
     let mut recovered_cold = f.server.connect(&f.token).await;
     subscribe(&mut recovered_cold, cold, 0).await;
     assert_eq!(event(&mut recovered_cold).await["message"], own);
-    ready(&mut recovered_cold, cold, 1).await;
+    assert_eq!(event(&mut recovered_cold).await["message"], next_cold);
+    ready(&mut recovered_cold, cold, 2).await;
     let own = post(&f, cold).await;
     assert_eq!(event(&mut recovered_cold).await["message"], own);
+    assert_eq!(cold_received.recv().await.unwrap()["message"], own);
+    cold_reader.await.unwrap();
     eprintln!(
-        "MEASURE_CURSOR sockets={count} offered={sends} accepted={accepted} recovered_cursor={cursor} next_gap={gap} rejected={} burst_http_ms={send_ms:.3} cold_1011_ms={cold_ms:.3} hot_first_1011_ms={first_close_ms:.3} first_replay_ms={first_replay_ms:.3} hot_second_1011_ms={second_close_ms:.3} second_replay_ms={second_replay_ms:.3} reconnects={} cold_recovered=true hot_recovered=true",
+        "MEASURE_CURSOR sockets={count} offered={sends} accepted={accepted} recovered_cursor={cursor} next_gap={gap} rejected={} burst_http_ms={send_ms:.3} cold_live_ms={cold_ms:.3} cold_1011=0 hot_first_1011_ms={first_close_ms:.3} first_replay_ms={first_replay_ms:.3} hot_second_1011_ms={second_close_ms:.3} second_replay_ms={second_replay_ms:.3} reconnects={} cold_recovered=true hot_recovered=true",
         sends - accepted,
         count * 2
     );
