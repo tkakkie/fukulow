@@ -370,7 +370,27 @@
             }
           },
           "500": {
-            "description": "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message",
+            "description": "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

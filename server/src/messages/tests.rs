@@ -663,15 +663,22 @@ async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: Pg
     let (app, _, _, channel_id, token) = fixture(&app_pool).await;
     let mut seqs = Vec::new();
     let mut keys = std::collections::HashSet::new();
-    for response in concurrent_sends(&app, &token, &[channel_id; 128], false).await {
+    for response in concurrent_sends(&app, &token, &[channel_id; 256], false).await {
         assert_eq!(response.status(), StatusCode::CREATED);
         let message = body(response).await;
         seqs.push(message["seq"].as_i64().unwrap());
         assert!(keys.insert(message["client_message_id"].as_str().unwrap().to_owned()));
     }
     seqs.sort_unstable();
-    assert_eq!(seqs, (1..=128).collect::<Vec<_>>());
-    let page = list(&app, &token, channel_id, "?after_seq=0&limit=200").await;
+    assert_eq!(seqs, (1..=256).collect::<Vec<_>>());
+    let mut page = list(&app, &token, channel_id, "?after_seq=0&limit=200").await;
+    assert_eq!(page["has_more"], true);
+    let next = list(&app, &token, channel_id, "?after_seq=200&limit=200").await;
+    assert_eq!(next["has_more"], false);
+    page["messages"]
+        .as_array_mut()
+        .unwrap()
+        .extend(next["messages"].as_array().unwrap().iter().cloned());
     assert_eq!(
         page["messages"]
             .as_array()

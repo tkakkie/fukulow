@@ -32,6 +32,24 @@ async function ready(client: ReturnType<typeof controllerClient>) {
   await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
 }
 
+it('controller keeps admission 503 retryable and retries manually with the same key', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hello' }))
+    .find(e => e.type === 'send')!
+  const effects = await client.feed({ type: 'send_failed', respond_to: send, status: 503 })
+  expect(effects).toEqual([])
+  expect(client.sync.get().channels.A.pending[0].state).toBe('unknown')
+  expect(client.sync.getTimeline('A').get().pending[0]).toMatchObject({ clientMessageId: 'c1', retryable: true })
+  const retry = (await client.feed({ type: 'user_retry', channel: 'A', client_message_id: 'c1' }))
+    .find(e => e.type === 'send')!
+  expect(retry).toMatchObject({ channel: 'A', client_message_id: 'c1', body: 'hello' })
+  await client.feed({ type: 'ack', respond_to: retry, message: { ...record(101), sender: 'me', client_message_id: 'c1', body: 'hello' } })
+  expect(client.sync.getTimeline('A').get().pending).toEqual([])
+  await client.sync.close()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
 it('controller resumes from the pre-ack cursor after a lost echo and replay converges to one Message', async () => {
   const client = controllerClient()
   await ready(client)

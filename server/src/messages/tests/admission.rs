@@ -1,6 +1,103 @@
 use super::*;
 use std::time::Duration;
 
+fn assert_unavailable(response: &Response) {
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let retry: u64 = response.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=5).contains(&retry));
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+}
+
+#[sqlx::test]
+async fn send_queue_cap_returns_503_and_same_key_retry_is_idempotent(pool: PgPool) {
+    let (_, organization, _, channel, token) = fixture(&pool).await;
+    let state = AppState::for_test(pool.clone());
+    let delivery = state.message_delivery.clone();
+    let app = crate::app(state);
+    let mut queued = Vec::new();
+    for _ in 0..super::super::admission::CHANNEL_QUEUE_CAP {
+        queued.push(
+            delivery
+                .admission(&pool)
+                .reserve_send(organization, channel)
+                .unwrap(),
+        );
+    }
+    let key = Uuid::new_v4();
+    let response = send(&app, &token, channel, input(key, "retry after saturation")).await;
+    assert_unavailable(&response);
+    assert_eq!(
+        body(response).await,
+        json!({"error": "send admission unavailable"})
+    );
+    assert!(
+        list(&app, &token, channel, "").await["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    drop(queued);
+    let canonical = sent(&app, &token, channel, input(key, "retry after saturation")).await;
+    assert_eq!(canonical["seq"], 1);
+    assert_eq!(
+        sent(&app, &token, channel, input(key, "retry after saturation")).await,
+        canonical
+    );
+    // Downstream rejection (conflicting key) also releases the reservation.
+    assert_error(
+        send(&app, &token, channel, input(key, "different")).await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(delivery.admission(&pool).queued_sends(), 0);
+}
+
+#[sqlx::test]
+async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(pool: PgPool) {
+    let (_, organization, sender, channel, _) = fixture(&pool).await;
+    let delivery = Delivery::default();
+    let held = delivery
+        .admission(&pool)
+        .acquire(organization, channel, true)
+        .await
+        .unwrap();
+    let key = Uuid::new_v4();
+    let waiter = delivery
+        .admission(&pool)
+        .reserve_send(organization, channel)
+        .unwrap();
+    tokio::time::pause();
+    let response = persist(
+        &pool,
+        &delivery,
+        organization,
+        sender,
+        channel,
+        SendMessageRequest {
+            client_message_id: key,
+            body: "expired".into(),
+        },
+        waiter,
+    )
+    .await
+    .unwrap_err()
+    .into_response();
+    tokio::time::resume();
+    assert_unavailable(&response);
+    assert_eq!(delivery.admission(&pool).queued_sends(), 0);
+    assert!(
+        existing(&pool, organization, sender, key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(held);
+}
+
 #[sqlx::test]
 async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
     let (_, organization, sender, channel, _) = fixture(&pool).await;
@@ -20,6 +117,10 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
             client_message_id: Uuid::new_v4(),
             body: "wait longer than the work deadline".into(),
         },
+        delivery
+            .admission(&pool)
+            .reserve_send(organization, channel)
+            .unwrap(),
     );
     tokio::pin!(sending);
     tokio::time::pause();
@@ -35,6 +136,7 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
     drop(held);
     tokio::time::resume();
     assert_eq!(sending.await.unwrap().seq, 1);
+    assert_eq!(delivery.admission(&pool).queued_sends(), 0);
 }
 
 #[sqlx::test]
@@ -62,6 +164,10 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
                     client_message_id: Uuid::new_v4(),
                     body: "pool wait".into(),
                 },
+                delivery
+                    .admission(&pool)
+                    .reserve_send(organization, channel)
+                    .unwrap(),
             )
             .await
         })
@@ -80,6 +186,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
         matches!(task.await.unwrap(), Err(MessageError::Database(sqlx::Error::Io(error))) if error.kind() == std::io::ErrorKind::TimedOut)
     );
     assert_eq!(delivery.admission(&app_pool).available_permits(), 1);
+    assert_eq!(delivery.admission(&app_pool).queued_sends(), 0);
     drop((first, second));
     let message = persist(
         &app_pool,
@@ -91,6 +198,10 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
             client_message_id: Uuid::new_v4(),
             body: "after timeout".into(),
         },
+        delivery
+            .admission(&app_pool)
+            .reserve_send(organization, channel)
+            .unwrap(),
     )
     .await
     .unwrap();

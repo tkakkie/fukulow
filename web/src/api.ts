@@ -14,7 +14,8 @@ export type Identity = components['schemas']['Identity']
 export type SetupRequest = components['schemas']['SetupRequest']
 export type SignInRequest = components['schemas']['SignInRequest']
 
-/** Result of an API call. `network` covers fetch failures and 5xx (retryable, never "signed out"). */
+/** Result of an API call. `network` covers fetch failures and 5xx, including admission 503
+ * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
 export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number } | { ok: false; kind: 'network' }
 
 async function call<T>(
