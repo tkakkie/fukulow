@@ -3,7 +3,7 @@ use super::failure::{FailureWatch, Failures};
 use crate::channels;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -35,6 +35,7 @@ impl Sender {
 pub struct Delivery {
     recipients: Arc<Mutex<HashMap<ChannelKey, Recipients>>>,
     notifications: Arc<Semaphore>,
+    watermarks: Arc<OnceLock<Semaphore>>,
     failures: Failures,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -45,6 +46,7 @@ impl Default for Delivery {
         Self {
             recipients: Default::default(),
             notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
+            watermarks: Default::default(),
             failures: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
@@ -119,6 +121,25 @@ pub(crate) struct LiveQueue {
 }
 
 impl Delivery {
+    pub(crate) async fn latest_seq(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        channel: Uuid,
+    ) -> Result<i64, sqlx::Error> {
+        // One Delivery belongs to one application pool. Reserve headroom before
+        // acquiring a connection, including on reconnect storms across Channels.
+        let waiters = self.watermarks.get_or_init(|| {
+            let connections = pool.options().get_max_connections();
+            let limit = (connections - connections.div_ceil(5)).min(16);
+            Semaphore::new(limit as usize)
+        });
+        let _permit = waiters
+            .try_acquire()
+            .map_err(|_| sqlx::Error::PoolTimedOut)?;
+        super::latest_seq(pool, organization, channel).await
+    }
+
     pub(crate) fn queue(&self, organization: Uuid, member: Uuid, capacity: usize) -> LiveQueue {
         let (events, receiver) = mpsc::channel(capacity);
         let (overflow, closed) = watch::channel(false);
@@ -275,6 +296,71 @@ impl Drop for LiveQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test]
+    async fn watermark_capacity_covers_pool_wait_and_releases_on_every_exit(pool: sqlx::PgPool) {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let delivery = Delivery::default();
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        for cancel in [true, false] {
+            let first = pool.acquire().await.unwrap();
+            let second = pool.acquire().await.unwrap();
+            let waiting = {
+                let pool = pool.clone();
+                let delivery = delivery.clone();
+                tokio::spawn(async move { delivery.latest_seq(&pool, organization, channel).await })
+            };
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while delivery
+                    .watermarks
+                    .get()
+                    .is_none_or(|waiters| waiters.available_permits() != 0)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            // The cap is shared across clones and Channels, before pool acquisition.
+            assert!(matches!(
+                delivery
+                    .clone()
+                    .latest_seq(&pool, organization, Uuid::new_v4())
+                    .await,
+                Err(sqlx::Error::PoolTimedOut)
+            ));
+            if cancel {
+                waiting.abort();
+                assert!(waiting.await.unwrap_err().is_cancelled());
+            } else {
+                tokio::time::pause();
+                tokio::time::advance(NOTIFICATION_TIMEOUT).await;
+                tokio::time::resume();
+                assert!(matches!(waiting.await.unwrap(), Err(sqlx::Error::Io(_))));
+            }
+            assert_eq!(delivery.watermarks.get().unwrap().available_permits(), 1);
+            drop((first, second));
+            assert_eq!(
+                delivery
+                    .latest_seq(&pool, organization, channel)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(delivery.watermarks.get().unwrap().available_permits(), 1);
+        }
+        pool.close().await;
+        assert!(matches!(
+            delivery.latest_seq(&pool, organization, channel).await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        assert_eq!(delivery.watermarks.get().unwrap().available_permits(), 1);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn notification_timeout_signals_and_releases_capacity() {

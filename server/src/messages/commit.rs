@@ -8,7 +8,10 @@ pub(super) async fn lock(
     shared: bool,
 ) -> Result<(), sqlx::Error> {
     let sql = if shared {
-        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135))"
+        // Materialization makes the transaction-local timeout precede the lock.
+        "WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true)) \
+         SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) \
+         FROM timeout"
     } else {
         "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135))"
     };
