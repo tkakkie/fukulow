@@ -73,7 +73,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #63 accepted lock: the plain CHECK validates rows under ACCESS EXCLUSIVE during ALTER, also blocking reads; acceptable at current scale.
 - Channel names with leading/trailing `str::trim()` whitespace are rejected (400), never trimmed: trimming changes what was typed, invisible differences allow look-alikes (#72). Checked in the API, not a DB CHECK: PostgreSQL whitespace differs from Rust (#77).
 - Per-Channel seq comes from a messages-owned counter row updated in the insert transaction, not a PostgreSQL sequence, so a rollback consumes no number. Cost: it serializes writes to a hot Channel (#17).
-- Idempotency key (organization_id, sender, client_message_id): a match returns the canonical Message, a different body/Channel 409; a concurrent duplicate rolls back its allocation before reading the winner (#17).
+- Idempotency key (organization_id, sender, client_message_id): a match returns the canonical Message, a different body/Channel/Topic name_key 409; a concurrent duplicate rolls back its allocation before reading the winner (#17).
 - Message body: 1..=4000 Unicode scalars (the spec sets no limit), no NUL, not whitespace-only, never trimmed (whitespace counts for idempotency); 400 before seq allocation (#17, maintainer-approved).
 - Sends re-check Member/revision/private grant after BEGIN and hold a shared Member row lock through COMMIT, so deactivation cannot commit between authorization and persistence. Channel creation keeps the same lock (#146 review).
 - History reads authorization and its page in one read-only REPEATABLE READ transaction without row locks: loss committed before the snapshot denies; an authorized page sees no later Messages (#146).
@@ -170,3 +170,10 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #178 before/after: 6 -> 8 top-level queries per send is #146 Membership/revision authorization, not a hardening regression. The 10,000-socket HTTP p95 drop spans #134-#173 and #146, so it is not attributable to one change.
 - #178 harness: `make load-record` with `LOAD_DIRECT_NETWORK=1` (port-forwarding failed at 9,990 sockets), `LOAD_SERVER_SOURCE` for the worktree, `LOAD_LEGACY=1` only for pre-#146 builds; short windows are rejected. Never attach the raw artifact directory publicly (server logs, source patch).
 - Measurements so far are modest single-host runs: none establishes the 10k-connection target, a capacity or a latency guarantee. Heavy run: `CHANNELS=1 SUBSCRIBERS=10000 ... make load` with `nofile` 65536; one generator loop can saturate (#20).
+
+## Topics (#137)
+- Messages owns Topics, nullable messages.topic_id and their atomic send updates; composite FKs bind a Message's Topic to its Organization and Channel. #139 appends its own migration, preserving #137's migration.
+- Topic names: 1..=60 Unicode scalars; reject empty, NUL, whitespace-only or surrounding str::trim() whitespace (400), never trim. Per-Channel lower(name COLLATE "C") uniqueness folds ASCII only; keep the first display name. This differs from Channel rules.
+- Topic creation/join, Message, seq and summary commit together inside existing bounded send admission. Retry identity adds the Topic name_key (null without Topic); changed intent is 409. Lost-response retries need no server Topic UUID.
+- Projection reads share watermark admission and the #135 barrier; a fresh single-statement snapshot then reads authorization, W and all projection data together. Immutable Message aggregates reconstruct position_W and count_W before exclusive paging; W never expires.
+- #137 paging gate met: preselected p95 <=100 ms at concurrency 4, 50 items, 10k Topics/100k pre-W Messages, all Topics moved after W. Recent/deep p95 64.806/37.373 ms in release; accept prefix aggregation plus Topic/seq index for this scale. Conditions: measurements.md.
