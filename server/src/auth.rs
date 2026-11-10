@@ -355,7 +355,7 @@ impl From<IdentityRow> for Identity {
     }
 }
 
-struct RetryAfterSeconds;
+pub(crate) struct RetryAfterSeconds;
 
 impl utoipa::PartialSchema for RetryAfterSeconds {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {

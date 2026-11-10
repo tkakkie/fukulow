@@ -178,7 +178,9 @@ pub async fn list_messages(
         (status = 409, description = "Client message id reused with different body or channel", body = ErrorBody),
         (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody),
-        (status = 500, description = "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message", body = ErrorBody)))]
+        (status = 500, description = "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id", body = ErrorBody),
+        (status = 503, description = "Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)")))))]
 pub async fn send_message(
     State(state): State<AppState>,
     auth: Auth,
@@ -190,6 +192,10 @@ pub async fn send_message(
     let organization_id = auth.identity.organization.organization_id;
     let sender = auth.identity.member.id;
     require_visible(&state.pool, organization_id, sender, channel_id).await?;
+    let waiter = state
+        .message_delivery
+        .admission(&state.pool)
+        .reserve_send(organization_id, channel_id)?;
     // Finish persistence even if the HTTP caller disconnects; notification is detached.
     let message = tokio::spawn(async move {
         persist(
@@ -199,6 +205,7 @@ pub async fn send_message(
             sender,
             channel_id,
             input,
+            waiter,
         )
         .await
     })
@@ -243,6 +250,7 @@ pub enum MessageError {
     InvalidInput,
     NotFound,
     Conflict,
+    AdmissionRejected,
     Database(sqlx::Error),
 }
 
@@ -262,6 +270,22 @@ impl IntoResponse for MessageError {
                 "client message id reused with different body or channel",
             ),
             Self::Database(error) => return ApiError::from(error).into_response(),
+            Self::AdmissionRejected => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [
+                        (header::CACHE_CONTROL, "no-store".to_owned()),
+                        (
+                            header::RETRY_AFTER,
+                            rand::random_range(1..=5_u64).to_string(),
+                        ),
+                    ],
+                    Json(ErrorBody {
+                        error: "send admission unavailable".into(),
+                    }),
+                )
+                    .into_response();
+            }
         };
         (
             status,
@@ -322,11 +346,9 @@ async fn persist(
     sender: Uuid,
     channel_id: Uuid,
     input: SendMessageRequest,
+    waiter: admission::SendWaiter,
 ) -> Result<Message, MessageError> {
-    let _permit = delivery
-        .admission(pool)
-        .acquire(organization_id, channel_id, true)
-        .await?;
+    let _permit = waiter.acquire().await?;
     tokio::time::timeout(
         admission::WORK_TIMEOUT,
         persist_admitted(pool, delivery, organization_id, sender, channel_id, input, _permit),

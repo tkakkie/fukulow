@@ -47,4 +47,12 @@ describe('channel and message calls', () => {
     expect(m.mock.calls[0][0]).toBe('/api/v1/channels/c/messages')
     expect(m.mock.calls[0][1].method).toBe('POST')
   })
+  it('treats admission 503 as retryable and preserves the send key', async () => {
+    const m = vi.fn().mockResolvedValue(new Response('{"error":"send admission unavailable"}', {
+      status: 503, headers: { 'Retry-After': '3' },
+    }))
+    const input = { body: 'x', client_message_id: 'same-key' }
+    expect(await sendMessage('c', input, m)).toEqual({ ok: false, kind: 'network' })
+    expect(JSON.parse(m.mock.calls[0][1].body)).toEqual(input)
+  })
 })
