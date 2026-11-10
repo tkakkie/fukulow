@@ -349,7 +349,7 @@ async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: P
 }
 
 #[sqlx::test]
-async fn repeated_send_deadlines_abandon_connections_and_preserve_other_organization_progress(
+async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_organization_progress(
     pool: PgPool,
 ) {
     let app_pool = sqlx::postgres::PgPoolOptions::new()
@@ -470,14 +470,22 @@ async fn repeated_send_deadlines_abandon_connections_and_preserve_other_organiza
         .expect("timed-out work retained pool connections");
         let remaining = sleeping_commits(&pool).await;
         fault_pids.extend(remaining.iter().copied());
-        let (backends, locks): (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)), \
-             (SELECT count(*) FROM pg_locks WHERE pid = ANY($1))",
-        )
-        .bind(fault_pids.iter().copied().collect::<Vec<_>>())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        // PostgreSQL can send FATAL before clearing its backend and locks.
+        let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let (backends, locks) = loop {
+            let counts: (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)), \
+                 (SELECT count(*) FROM pg_locks WHERE pid = ANY($1))",
+            )
+            .bind(fault_pids.iter().copied().collect::<Vec<_>>())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if counts == (0, 0) || std::time::Instant::now() >= cleanup_deadline {
+                break counts;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         residue.push((backends, locks));
         eprintln!(
             "commit_residue round={round} elapsed_ms={} peak_sleeping_backends={peak_backends} remaining_backends={backends} remaining_locks={locks} held_pool_connections=0 probes={probes}",

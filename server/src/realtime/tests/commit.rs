@@ -456,6 +456,7 @@ async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(po
         locks > 0,
         "socket abandonment alone must leave the injected COMMIT unresolved"
     );
+    // The reconnecting watermark's timer starts after the sender's, leaving ordering margin.
     let mut between = f.server.connect(&f.token).await;
     subscribe(&mut between, channel, 0).await;
     tokio::select! {
