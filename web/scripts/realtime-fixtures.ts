@@ -134,7 +134,7 @@ function plannedTerm(value: Json, path: string, delivery = false): string | null
   for (const [key, item] of Object.entries(value)) {
     if (plannedKeys.has(key) && !(delivery && ['topic', 'as_of_seq', 'before_position'].includes(key))) return `${path}.${key}`
     if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(delivery && ['P2', 'P5'].includes(String(r))))) return `${path}.covers`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(delivery && ['P2', 'P5', 'P8'].includes(String(r))))) return `${path}.covers`
     const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery)
     if (found) return found
   }
@@ -267,6 +267,11 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
         break
       case 'sign_out':
         member(step.member)
+        break
+      case 'mark_read':
+      case 'unread':
+        member(step.as)
+        checkChannel(step.channel, at, false)
         break
       case 'history':
         member(step.as)

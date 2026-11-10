@@ -21,8 +21,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// Topic projections add four routes with six described responses each.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 85;
+// Unread adds two mark-read routes with eight described responses each.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 101;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {
@@ -620,7 +620,7 @@ fn topic_openapi_contract_includes_all_shapes_and_discriminators() {
             .as_array()
             .unwrap()
             .len(),
-        6
+        8
     );
     for (route, shape) in [
         ("timeline", "TimelinePage"),
@@ -635,4 +635,47 @@ fn topic_openapi_contract_includes_all_shapes_and_discriminators() {
             format!("#/components/schemas/{shape}")
         );
     }
+}
+
+#[test]
+fn unread_openapi_exposes_positions_counts_and_scoped_monotonic_updates() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(schemas["MarkReadRequest"]["additionalProperties"], false);
+    assert_eq!(
+        schemas["MarkReadRequest"]["properties"]["read_seq"]["minimum"],
+        0
+    );
+    assert_eq!(schemas["ReadPosition"]["required"], json!(["read_seq"]));
+    for field in ["read_seq", "unread_count"] {
+        assert!(
+            schemas["TopicSummary"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field))
+        );
+    }
+    for suffix in ["read", "topics/{topic_id}/read"] {
+        let path = format!("/api/v1/orgs/{{org}}/channels/{{id}}/{suffix}");
+        let operation = &document["paths"][path]["put"];
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/MarkReadRequest"
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ReadPosition"
+        );
+        assert_eq!(operation["security"], json!([{"cookie":[]},{"bearer":[]}]));
+        assert!(
+            operation["responses"]["404"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("organization_unavailable")
+        );
+    }
+    assert_eq!(
+        schemas["ChannelList"]["properties"]["channels"]["items"]["$ref"],
+        "#/components/schemas/UnreadChannel"
+    );
 }

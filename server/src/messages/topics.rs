@@ -12,6 +12,10 @@ pub struct TopicSummary {
     pub last_seq: i64,
     /// Absolute count at the enclosing as_of_seq, excluding later Messages.
     pub message_count: i64,
+    /// Current Member position, independent of the Channel main timeline.
+    pub read_seq: i64,
+    /// Other senders' Messages above read_seq, bounded by the enclosing as_of_seq.
+    pub unread_count: i64,
     pub latest_message: Message,
 }
 
@@ -215,7 +219,7 @@ pub async fn topic_history(
 }
 
 // Keep HTTP admission rejection distinct from database/barrier work timeouts.
-async fn watermark(
+pub(super) async fn watermark(
     state: &AppState,
     organization: Uuid,
     channel: Uuid,

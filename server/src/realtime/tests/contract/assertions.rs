@@ -7,6 +7,9 @@ pub(super) enum Failure {
     Timeline {
         step: usize,
     },
+    Unread {
+        step: usize,
+    },
     Expectation {
         step: usize,
         event: usize,

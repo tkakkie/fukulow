@@ -12,16 +12,20 @@ fn page_sql() -> String {
 WITH access AS MATERIALIZED (SELECT ({}) AS visible),
 w AS MATERIALIZED (SELECT $5::bigint AS as_of_seq),
 positions AS (
-    SELECT topic_id, min(seq) AS first_seq, max(seq) AS last_seq, count(*) AS message_count
-    FROM messages, w, access
-    WHERE organization_id = $1 AND channel_id = $4 AND topic_id IS NOT NULL
-        AND seq <= w.as_of_seq AND access.visible AND ($9::uuid IS NULL OR topic_id = $9)
-    GROUP BY topic_id
+    SELECT m.topic_id, min(m.seq) AS first_seq, max(m.seq) AS last_seq, count(*) AS message_count,
+        COALESCE(tr.read_seq, cr.initial_seq, 0) AS read_seq,
+        count(*) FILTER (WHERE m.sender <> $2 AND m.seq > COALESCE(tr.read_seq, cr.initial_seq, 0)) AS unread_count
+    FROM messages m CROSS JOIN w CROSS JOIN access
+    LEFT JOIN channel_read_positions cr ON cr.organization_id = m.organization_id AND cr.channel_id = m.channel_id AND cr.member_id = $2
+    LEFT JOIN topic_read_positions tr ON tr.organization_id = m.organization_id AND tr.channel_id = m.channel_id AND tr.topic_id = m.topic_id AND tr.member_id = $2
+    WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NOT NULL
+        AND m.seq <= w.as_of_seq AND access.visible AND ($9::uuid IS NULL OR m.topic_id = $9)
+    GROUP BY m.topic_id, tr.read_seq, cr.initial_seq
 ),
 candidates AS (
     SELECT * FROM positions
     UNION ALL
-    SELECT topic_id, seq, seq, 1::bigint FROM messages, w, access
+    SELECT topic_id, seq, seq, 1::bigint, 0::bigint, 0::bigint FROM messages, w, access
     WHERE organization_id = $1 AND channel_id = $4 AND topic_id IS NULL
         AND seq <= w.as_of_seq AND access.visible AND NOT $8 AND $9::uuid IS NULL
 ),
@@ -30,7 +34,7 @@ page AS MATERIALIZED (
     ORDER BY last_seq DESC LIMIT $7
 )
 SELECT access.visible, w.as_of_seq, p.first_seq, p.last_seq,
-    p.message_count, t.name, m.id, m.channel_id, m.seq, m.client_message_id,
+    p.message_count, p.read_seq, p.unread_count, t.name, m.id, m.channel_id, m.seq, m.client_message_id,
     m.sender, m.body, m.topic_id,
     to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
 FROM access CROSS JOIN w LEFT JOIN page p ON true
@@ -108,6 +112,8 @@ async fn read(
                         first_seq: row.try_get("first_seq")?,
                         last_seq: row.try_get("last_seq")?,
                         message_count: row.try_get("message_count")?,
+                        read_seq: row.try_get("read_seq")?,
+                        unread_count: row.try_get("unread_count")?,
                         latest_message: message,
                     },
                 },

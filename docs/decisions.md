@@ -64,7 +64,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Cookie WebSockets require one matching Origin: same Host over HTTPS (HTTP when cookie_secure=false) or `FUKULOW_WS_ALLOWED_ORIGINS`; forwarded headers never decide it. Origin is checked before Auth and Organization parsing; Bearer needs no Origin.
 
 ## Channels and Messages
-- Private Channel creation adds the creator in the same transaction; composite FKs bind memberships to a Channel and Member of the same Organization. Listing is one scoped query, `no-store` (#22).
+- Private Channel creation adds the creator atomically; composite FKs bind grants to the same Organization. Listing uses batched visibility/Unread queries in one snapshot, `no-store` (#22, #142).
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
 - Channel names are unique per Organization across visibility, `lower(name COLLATE "C")` (ASCII folds, non-ASCII as-is); duplicates 409. Existing duplicates fail the migration for the operator to resolve; no auto-rename (#51).
 - Accepted (#51): a 409 on creation lets an Organization Member infer a private Channel name exists (names only, no members or messages).
@@ -114,6 +114,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Main-timeline paging correctness (`position_W`, W as page anchor) is fixed in the spec; its cost is a measured feasibility gate in #137 that stops and asks on a miss, not a guarantee (maintainer, 2026-11-11, #148).
 - Topic counts are an as-of-W baseline plus deduplicated live Messages with `seq` > W; a Topic seen only live has no count until a summary fetch. Reason: replay below W or late older pages must neither double-count nor drop the baseline (#148).
 - Unread keeps a Channel position (Messages without Topic) and per-Topic positions; badge = sum. Initial position = latest committed `seq` when the Member gains access; older history is not unread (maintainer, 2026-11-11, #148, #142).
+- #142 Messages owns read positions. Migration/grant triggers capture the committed counter at access time, discard revoked positions and initialize existing Topics; later Topics inherit the grant baseline. Reason: first-fetch initialization loses Messages sent after a grant.
+- #142 access triggers serialize per Organization with advisory key seed 142; concurrent Member/Channel creation must not both miss initialization. Sends do not take this lock. Mark-read uses the #135 watermark, then locks the Member/position and rechecks visibility.
 - Move, Edit, Delete (principles only, #148): clients apply entries idempotently; a later change takes a Channel log position. Open: replay of a changed Message (current or as it was), of a deleted one, read positions after a Move. `channel_events` vs `channel_log`: Sprint 3 (#160).
 - DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
 

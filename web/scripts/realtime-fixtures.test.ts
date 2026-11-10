@@ -89,6 +89,19 @@ describe('realtime fixtures: validation', () => {
     expect(checkFixtures(fixtureDir())).toEqual([])
   })
 
+  it('runs P8 server vocabulary and rejects invalid Unread steps and references', () => {
+    const steps = [
+      { do: 'mark_read', as: 'alice', channel: 'general', read_seq: 2, expect_read_seq: 2 },
+      { do: 'unread', as: 'alice', channel: 'general', expect: { read_seq: 2, main_unread_count: 0, unread_count: 0, topic_counts: {} } },
+    ]
+    const unread = (f: any) => { f.delivery.scenarios[0].covers = ['P8']; f.delivery.scenarios[0].steps = structuredClone(steps) }
+    expect(problemsOf(unread)).toBe('')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].read_seq = -1 })).toContain('below the minimum')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[1].as = 'unknown' })).toContain('undeclared member unknown')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].channel = 'unknown' })).toContain('undeclared channel unknown')
+    expect(problemsOf((f) => { unread(f); delete f.delivery.scenarios[0].steps[1].expect.unread_count })).toContain('missing required property "unread_count"')
+  })
+
   it('rejects malformed JSON', () => {
     expect(problemsOf(() => {}, { file: 'client/broken.json', text: '{ "kind": "client", ' })).toContain('client/broken.json: invalid JSON')
   })

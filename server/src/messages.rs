@@ -22,6 +22,7 @@ mod commit;
 mod delivery;
 mod failure;
 pub(crate) mod topics;
+pub(crate) mod unread;
 #[cfg(test)]
 pub(crate) use commit::ambiguous_commit;
 pub use delivery::Delivery;
@@ -34,6 +35,10 @@ pub(crate) use delivery::{
 pub use topics::{
     ListProjectionQuery, TimelineItem, TimelinePage, TopicPage, TopicSummary, TopicSummaryResponse,
     list_timeline, list_topics, topic_history, topic_summary,
+};
+pub use unread::{
+    ChannelList, MarkReadRequest, ReadPosition, UnreadChannel, list_channels, mark_channel_read,
+    mark_topic_read,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
