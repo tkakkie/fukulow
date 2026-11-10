@@ -160,6 +160,35 @@ pub(crate) struct LiveQueue {
 
 impl Delivery {
     #[cfg(test)]
+    pub(crate) async fn hold_publication_cursor(
+        &self,
+        organization: Uuid,
+        channel: Uuid,
+        entered: &Semaphore,
+        release: &Semaphore,
+    ) {
+        let lease = self.channel((organization, channel));
+        let _cursor = lease.fanout.published.lock().await;
+        entered.add_permits(1);
+        release.acquire().await.unwrap().forget();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publication_cursor(
+        &self,
+        organization: Uuid,
+        channel: Uuid,
+    ) -> Option<i64> {
+        let lease = self.channel((organization, channel));
+        *lease.fanout.published.lock().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notification_permits(&self) -> usize {
+        self.notifications.available_permits()
+    }
+
+    #[cfg(test)]
     pub(crate) fn failure_wait_polls(&self, organization: Uuid, channel: Uuid) -> usize {
         self.failures.wait_polls((organization, channel))
     }

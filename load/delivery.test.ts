@@ -31,3 +31,11 @@ test('invalid load settings fail instead of silently disabling traffic', () => {
     assert.throws(() => positiveInteger(value, 5));
   }
 });
+
+test('refused sends do not count as missing deliveries', () => {
+  const deliveries = new Deliveries();
+  deliveries.start('refused', 100, 5);
+  deliveries.start('accepted', 100, 2);
+  deliveries.cancel('refused');
+  assert.equal(deliveries.missing, 2);
+});
