@@ -802,6 +802,15 @@ async fn offline_restore_ends_every_account_session_and_preserves_members(pool: 
             .next()
             .unwrap()
             .to_owned();
+        let response = request(
+            &app,
+            "POST",
+            "/api/v1/native/session",
+            json!({"email": email, "password": PASSWORD}),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
         let session = body(response).await;
         credentials.push((
             cookie,
