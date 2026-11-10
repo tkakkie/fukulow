@@ -83,6 +83,14 @@ pub(super) async fn lock(
 pub(super) async fn finish(tx: Transaction, _key: Uuid) -> Result<(), sqlx::Error> {
     #[cfg(test)]
     {
+        let gate = COMMIT_GATES.lock().unwrap().remove(&_key);
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
+    }
+    #[cfg(test)]
+    {
         let sender = AMBIGUOUS_COMMITS.lock().unwrap().remove(&_key);
         if let Some(sender) = sender {
             // Model a lost COMMIT response while PostgreSQL still owns the transaction.
@@ -118,6 +126,24 @@ pub(crate) fn ambiguous_commit(key: Uuid) -> tokio::sync::oneshot::Receiver<Tran
     let (sender, receiver) = tokio::sync::oneshot::channel();
     AMBIGUOUS_COMMITS.lock().unwrap().insert(key, sender);
     receiver
+}
+
+#[cfg(test)]
+static COMMIT_GATES: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<Uuid, std::sync::Arc<super::delivery::PublicationGate>>,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(crate) fn pause_commit(key: Uuid) -> std::sync::Arc<super::delivery::PublicationGate> {
+    let gate = std::sync::Arc::new(super::delivery::PublicationGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        task: std::sync::Mutex::new(None),
+    });
+    COMMIT_GATES.lock().unwrap().insert(key, gate.clone());
+    gate
 }
 
 #[cfg(test)]
