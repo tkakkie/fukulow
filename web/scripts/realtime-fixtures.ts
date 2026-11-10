@@ -119,7 +119,7 @@ const channelKey = (ref: Json): string =>
 
 // Planned vocabulary (docs/spec.md 'Planned', P rules): allowed only in scenarios marked proposed.
 const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
-const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq'])
+const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before'])
 
 /** The path of the first planned term in a scenario, or null. */
 function plannedTerm(value: Json, path: string): string | null {

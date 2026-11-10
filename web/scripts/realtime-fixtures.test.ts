@@ -166,6 +166,8 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf(topicPage)).toContain('input.messages[0].topic is planned vocabulary; mark the scenario proposed')
     expect(problemsOf((f) => (f.delivery.scenarios[0].steps[0] = { do: 'main_timeline', as: 'alice', channel: 'general', query: {}, expect: { status: 200 } }))).toContain('do main_timeline is planned vocabulary')
     expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P1']))).toContain('covers is planned vocabulary')
+    // A planned key inside a forbidden or never pattern would silently match nothing; it must fail too.
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].effects = { forbidden: [{ type: 'fetch_history', before: 4 }] }))).toContain('before is planned vocabulary')
     expect(problemsOf((f) => (topicPage(f), propose(f)))).toBe('')
     expect(problemsOf((f) => (f.delivery.scenarios[0].proposed = { owner: ['#137'] }))).toBe('')
     // A proposed scenario is still fully validated.
