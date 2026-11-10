@@ -85,7 +85,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
         let app = f.app.clone();
         let token = f.token.clone();
         let channel = f.channel;
-        let retry = tokio::spawn(async move {
+        let mut retry = tokio::spawn(async move {
             request(
                 &app,
                 "POST",
@@ -95,9 +95,12 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
             )
             .await
         });
-        tokio::task::yield_now().await;
+        // The original transaction still owns Channel admission, so the retry
+        // cannot reach PostgreSQL's lock wait until that permit is released.
         assert!(
-            !retry.is_finished(),
+            tokio::time::timeout(Duration::from_millis(100), &mut retry)
+                .await
+                .is_err(),
             "the original transaction owns admission"
         );
         tx.commit().await.unwrap();

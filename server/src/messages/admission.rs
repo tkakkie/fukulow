@@ -39,7 +39,9 @@ impl Admission {
     pub(super) fn new(connections: u32) -> Arc<Self> {
         let budget = (connections - connections.div_ceil(5)).min(16) as usize;
         // Separate FIFO budgets reserve half for watermarks while keeping >=20%
-        // of the pool outside both workloads. Tiny pools prefer one send slot.
+        // of the pool outside both workloads. Serving both workloads with that
+        // headroom requires >=3 connections: then each budget is at least 1.
+        // Pools of 1/2 have 0 watermark slots (and 0/1 send slots); production uses 20.
         Arc::new(Self {
             send: Arc::new(Semaphore::new(budget.div_ceil(2))),
             watermark: Arc::new(Semaphore::new(budget / 2)),
@@ -236,8 +238,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn separate_budgets_preserve_pool_headroom_without_queueing_for_a_connection() {
-        for (connections, limit) in [(1, 0), (2, 1), (20, 16), (100, 16)] {
+        for (connections, limit) in [(1, 0), (2, 1), (3, 2), (20, 16), (100, 16)] {
             let admission = Admission::new(connections);
+            if connections >= 3 {
+                assert!(admission.watermark.available_permits() >= 1);
+            }
             let organization = Uuid::new_v4();
             let mut work = Vec::new();
             for index in 0..limit {

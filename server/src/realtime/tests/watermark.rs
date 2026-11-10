@@ -502,11 +502,11 @@ async fn sixteen_concurrent_sends_leave_reserved_capacity_for_new_subscription(p
     for _ in 0..16 {
         channels.push(channel(&pool, f.organization, f.member, false).await);
     }
-    // A finite 1.5 s COMMIT delay represents ordinary slow work, below the 10 s
+    // A finite 3 s COMMIT delay represents ordinary slow work, below the 10 s
     // work deadline but above watermark admission's 1 s. All sends must succeed.
     sqlx::raw_sql(
         "CREATE FUNCTION slow_send() RETURNS trigger LANGUAGE plpgsql AS $$ \
-        BEGIN PERFORM pg_sleep(1.5); RETURN NEW; END $$; \
+        BEGIN PERFORM pg_sleep(3); RETURN NEW; END $$; \
         CREATE CONSTRAINT TRIGGER slow_send AFTER INSERT ON messages \
         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION slow_send();",
     )
