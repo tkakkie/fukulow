@@ -209,13 +209,15 @@ export default async function (data: Setup): Promise<void> {
         const event = JSON.parse(String(frame?.data)) as ServerEvent;
         if (event.type === 'error') throw new Error('Subscription refused');
         if (event.type === 'subscribed') {
-          if (subscribed || event.channel_id !== channelId || event.caught_up_seq < afterSeq) {
+          if (subscribed || event.channel_id !== channelId || (reconnect ? event.caught_up_seq < afterSeq : event.caught_up_seq !== 0)) {
             throw new Error('Unexpected subscription acknowledgement');
           }
           subscribed = true;
           subscriptions.add(++perChannel[channel], tags);
         } else if (event.type === 'message') {
           const message = event.message;
+          // Reconnect replay events may precede the subscribed acknowledgement; the default scenario stays strict.
+          if (!reconnect && !subscribed) throw new Error('Unexpected Channel');
           if (message.channel_id !== channelId) throw new Error('Unexpected Channel');
           if (message.seq <= lastSeq) return; // Contract permits duplicate events.
           if (message.seq !== lastSeq + 1) throw new Error('Sequence gap');
