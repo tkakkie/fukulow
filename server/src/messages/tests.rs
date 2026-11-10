@@ -1,3 +1,4 @@
+use super::admission::CHANNEL_QUEUE_CAP;
 use super::*;
 use axum::{
     Router,
@@ -663,22 +664,26 @@ async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: Pg
     let (app, _, _, channel_id, token) = fixture(&app_pool).await;
     let mut seqs = Vec::new();
     let mut keys = std::collections::HashSet::new();
-    for response in concurrent_sends(&app, &token, &[channel_id; 256], false).await {
+    // Couple normal load to the queue cap with 1/8 headroom; currently 224 sends (~256).
+    let count = 256.min(CHANNEL_QUEUE_CAP - CHANNEL_QUEUE_CAP.div_ceil(8));
+    for response in concurrent_sends(&app, &token, &vec![channel_id; count], false).await {
         assert_eq!(response.status(), StatusCode::CREATED);
         let message = body(response).await;
         seqs.push(message["seq"].as_i64().unwrap());
         assert!(keys.insert(message["client_message_id"].as_str().unwrap().to_owned()));
     }
     seqs.sort_unstable();
-    assert_eq!(seqs, (1..=256).collect::<Vec<_>>());
+    assert_eq!(seqs, (1..=count as i64).collect::<Vec<_>>());
     let mut page = list(&app, &token, channel_id, "?after_seq=0&limit=200").await;
-    assert_eq!(page["has_more"], true);
-    let next = list(&app, &token, channel_id, "?after_seq=200&limit=200").await;
-    assert_eq!(next["has_more"], false);
-    page["messages"]
-        .as_array_mut()
-        .unwrap()
-        .extend(next["messages"].as_array().unwrap().iter().cloned());
+    assert_eq!(page["has_more"], count > 200);
+    if count > 200 {
+        let next = list(&app, &token, channel_id, "?after_seq=200&limit=200").await;
+        assert_eq!(next["has_more"], false);
+        page["messages"]
+            .as_array_mut()
+            .unwrap()
+            .extend(next["messages"].as_array().unwrap().iter().cloned());
+    }
     assert_eq!(
         page["messages"]
             .as_array()

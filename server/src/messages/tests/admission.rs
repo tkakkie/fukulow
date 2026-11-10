@@ -57,6 +57,55 @@ async fn send_queue_cap_returns_503_and_same_key_retry_is_idempotent(pool: PgPoo
 }
 
 #[sqlx::test]
+async fn saturated_send_queue_preserves_organization_and_private_channel_denials(pool: PgPool) {
+    let organization_a = organization(&pool).await;
+    let creator = Uuid::new_v4();
+    let creator_token = member(&pool, organization_a, creator).await;
+    let nonmember = member(&pool, organization_a, Uuid::new_v4()).await;
+    let organization_b = organization(&pool).await;
+    let outsider = member(&pool, organization_b, Uuid::new_v4()).await;
+    let channel_id = Uuid::new_v4();
+    channel(&pool, organization_a, channel_id, creator, true).await;
+    let state = AppState::for_test(pool.clone());
+    let delivery = state.message_delivery.clone();
+    let app = crate::app(state);
+    let admission = delivery.admission(&pool);
+    let mut queued = Vec::new();
+    for _ in 0..super::super::admission::CHANNEL_QUEUE_CAP {
+        queued.push(admission.reserve_send(organization_a, channel_id).unwrap());
+    }
+    assert_unavailable(
+        &send(
+            &app,
+            &creator_token,
+            channel_id,
+            input(Uuid::new_v4(), "full"),
+        )
+        .await,
+    );
+    for token in [&outsider, &nonmember] {
+        assert_error(
+            send(&app, token, channel_id, input(Uuid::new_v4(), "denied")).await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        assert_eq!(admission.queued_sends(), queued.len());
+    }
+    drop(queued);
+    assert_eq!(admission.queued_sends(), 0);
+    assert_eq!(
+        sent(
+            &app,
+            &creator_token,
+            channel_id,
+            input(Uuid::new_v4(), "allowed")
+        )
+        .await["seq"],
+        1
+    );
+}
+
+#[sqlx::test]
 async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(pool: PgPool) {
     let (_, organization, sender, channel, _) = fixture(&pool).await;
     let delivery = Delivery::default();

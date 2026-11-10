@@ -23,6 +23,7 @@ describe('controller shared client fixtures with fake transport and timers', () 
 
 import { flush, record } from './sync-test-helpers'
 import { connectRealtime, type SocketLike } from './realtime'
+import * as api from './api'
 
 async function ready(client: ReturnType<typeof controllerClient>) {
   await client.feed({ type: 'session_start' })
@@ -33,19 +34,36 @@ async function ready(client: ReturnType<typeof controllerClient>) {
 }
 
 it('controller keeps admission 503 retryable and retries manually with the same key', async () => {
-  const client = controllerClient()
-  await ready(client)
-  const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hello' }))
-    .find(e => e.type === 'send')!
-  const effects = await client.feed({ type: 'send_failed', respond_to: send, status: 503 })
-  expect(effects).toEqual([])
+  const message = { ...record(101), sender: 'me', client_message_id: 'c1', body: 'hello' }
+  const fetchMock = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ messages: [record(100)], has_more: true }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'send admission unavailable' }), {
+      status: 503, headers: { 'Retry-After': '3' },
+    }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(message), { status: 201 }))
+  const client = controllerClient({ api: {
+    listMessages: (channel, query) => api.listMessages(channel, query, fetchMock),
+    sendMessage: (channel, body) => api.sendMessage(channel, body, fetchMock),
+  } })
+  await client.sync.start()
+  await client.feed({ type: 'connection_ready' })
+  await client.sync.watch('A')
+  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hello' })
+  expect(fetchMock).toHaveBeenCalledTimes(2)
   expect(client.sync.get().channels.A.pending[0].state).toBe('unknown')
   expect(client.sync.getTimeline('A').get().pending[0]).toMatchObject({ clientMessageId: 'c1', retryable: true })
-  const retry = (await client.feed({ type: 'user_retry', channel: 'A', client_message_id: 'c1' }))
-    .find(e => e.type === 'send')!
-  expect(retry).toMatchObject({ channel: 'A', client_message_id: 'c1', body: 'hello' })
-  await client.feed({ type: 'ack', respond_to: retry, message: { ...record(101), sender: 'me', client_message_id: 'c1', body: 'hello' } })
+  await vi.advanceTimersByTimeAsync(3_000)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  await client.sync.getTimeline('A').retry('c1')
+  expect(fetchMock).toHaveBeenCalledTimes(3)
+  for (const [path, init] of fetchMock.mock.calls.slice(1)) {
+    expect(path).toBe('/api/v1/channels/A/messages')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(init?.body as string)).toEqual({ client_message_id: 'c1', body: 'hello' })
+  }
   expect(client.sync.getTimeline('A').get().pending).toEqual([])
+  expect(client.sync.getTimeline('A').get().messages).toContainEqual(message)
   await client.sync.close()
   expect(vi.getTimerCount()).toBe(0)
 })
