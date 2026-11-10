@@ -28,6 +28,16 @@ impl Gate {
     }
 }
 impl SessionChanges {
+    pub(crate) fn assert_no_default_fatal(&self) {
+        if let Some(calls) = &self.default_fatal_calls {
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "default fatal hook called; use with_on_fatal"
+            );
+        }
+    }
+
     pub(crate) fn pause_fallback(&self) -> Arc<Gate> {
         self.pause(Phase::Started)
     }
@@ -46,6 +56,11 @@ impl SessionChanges {
     }
 
     pub(crate) async fn panic_worker(&self) {
+        self.assert_no_default_fatal();
+        assert!(
+            self.default_fatal_calls.is_none(),
+            "worker panic tests must call with_on_fatal"
+        );
         let mut registration = self.register((Uuid::new_v4(), vec![]));
         let gate = self.pause(Phase::Worker);
         gate.entered.acquire().await.unwrap().forget();
@@ -298,7 +313,8 @@ async fn failed_epoch_closes_but_new_epoch_checks_current_database(pool: PgPool)
 async fn worker_failure_during_initial_check_is_not_admitted(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     state.session_changes =
-        SessionChanges::with_recheck_timing(Duration::from_millis(50), CHECK_TIMEOUT);
+        SessionChanges::with_recheck_timing(Duration::from_millis(50), CHECK_TIMEOUT)
+            .with_on_fatal(Arc::new(|| {}));
     let checked = state.session_changes.pause(Phase::Checked);
     let watch = auth.watch_session(&state);
     tokio::pin!(watch);
