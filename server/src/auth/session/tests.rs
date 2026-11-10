@@ -53,14 +53,14 @@ async fn session_signals_are_scoped_latched_and_released_with_last_socket() {
     }
     tokio::time::timeout(
         Duration::from_secs(1),
-        first.changed.wait_for(|revoked| *revoked),
+        first.changed.wait_for(|status| status.revoked),
     )
     .await
     .unwrap()
     .unwrap();
     tokio::time::timeout(
         Duration::from_secs(1),
-        second.changed.wait_for(|revoked| *revoked),
+        second.changed.wait_for(|status| status.revoked),
     )
     .await
     .unwrap()
@@ -70,7 +70,7 @@ async fn session_signals_are_scoped_latched_and_released_with_last_socket() {
     drop(first);
     assert!(changes.sessions.lock().unwrap().contains_key(&key));
     let third = changes.register(key.clone());
-    assert!(*third.changed.borrow());
+    assert!(third.changed.borrow().revoked);
     drop(second);
     drop(third);
     assert!(!changes.sessions.lock().unwrap().contains_key(&key));
@@ -79,7 +79,7 @@ async fn session_signals_are_scoped_latched_and_released_with_last_socket() {
     assert!(changes.sessions.lock().unwrap().is_empty());
 }
 
-async fn fixture(pool: &PgPool) -> (AppState, Auth) {
+pub(super) async fn fixture(pool: &PgPool) -> (AppState, Auth) {
     let organization = Uuid::new_v4();
     let member = Uuid::new_v4();
     let hash = vec![1; 32];
@@ -180,16 +180,15 @@ async fn fallback_database_timeout_is_bounded_and_does_not_claim_session_ended(p
         .await
         .unwrap();
     state.pool = exhausted.clone();
+    state.session_changes =
+        SessionChanges::with_recheck_timing(Duration::from_millis(200), Duration::from_millis(100));
     let mut watch = auth.watch_session(&state).await.unwrap().unwrap();
     let _held = exhausted.acquire().await.unwrap();
     let started = Instant::now();
-    let error = tokio::time::timeout(
-        RECHECK_INTERVAL + CHECK_TIMEOUT + Duration::from_secs(1),
-        watch.ended(),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let error = tokio::time::timeout(Duration::from_secs(2), watch.ended())
+        .await
+        .unwrap()
+        .unwrap_err();
     assert!(matches!(error, sqlx::Error::PoolTimedOut));
-    assert!(started.elapsed() >= RECHECK_INTERVAL);
+    assert!(started.elapsed() >= Duration::from_millis(200));
 }

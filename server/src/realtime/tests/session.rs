@@ -1,7 +1,7 @@
 use super::*;
 
 async fn fallback_close(socket: &mut Client, code: u16) {
-    let frame = tokio::time::timeout(Duration::from_secs(36), socket.next())
+    let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
         .await
         .unwrap()
         .unwrap()
@@ -70,15 +70,23 @@ async fn sign_out_burst_over_1024_keeps_unrelated_sessions_open(pool: PgPool) {
 #[sqlx::test]
 async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(pool: PgPool) {
     let f = fixture(&pool).await;
+    let server = Server::start(crate::app(AppState {
+        session_changes: crate::auth::SessionChanges::with_recheck_timing(
+            Duration::from_secs(1),
+            Duration::from_millis(500),
+        ),
+        ..f.state.clone()
+    }))
+    .await;
     let other_token = another_session(&pool, f.organization, f.member).await;
-    let mut idle = f.server.connect(&f.token).await;
+    let mut idle = server.connect(&f.token).await;
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
-    let mut replay = f.server.connect(&f.token).await;
+    let mut replay = server.connect(&f.token).await;
     let gate = pause(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
     entered(&gate).await;
-    let mut other = f.server.connect(&other_token).await;
+    let mut other = server.connect(&other_token).await;
     subscribe(&mut other, f.channel, 0).await;
     ready(&mut other, f.channel, 0).await;
     // Inject a lost notification: sign-out commits using an isolated notification registry.
@@ -106,7 +114,7 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
         fallback_close(&mut idle, CLOSE_SESSION_ENDED),
         fallback_close(&mut replay, CLOSE_SESSION_ENDED)
     );
-    assert!(started.elapsed() <= Duration::from_secs(36));
+    assert!(started.elapsed() <= Duration::from_secs(3));
     let canonical = send(
         &f,
         &other_token,
@@ -127,6 +135,10 @@ async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
         .unwrap();
     let server = Server::start(crate::app(AppState {
         pool: isolated_pool.clone(),
+        session_changes: crate::auth::SessionChanges::with_recheck_timing(
+            Duration::from_millis(200),
+            Duration::from_millis(100),
+        ),
         ..f.state.clone()
     }))
     .await;

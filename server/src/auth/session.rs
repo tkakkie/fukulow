@@ -3,7 +3,7 @@ use crate::AppState;
 use sqlx::PgPool;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Once},
     time::Duration,
 };
 use tokio::{sync::watch, time::Instant};
@@ -13,19 +13,41 @@ const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 type SessionKey = (Uuid, Vec<u8>);
 
+#[derive(Clone, Copy, Default)]
+struct SessionStatus {
+    revoked: bool,
+    failed: bool,
+}
+
 /// Only connected sessions retain a signal; sign-out never wakes unrelated sessions.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SessionChanges {
-    sessions: Arc<Mutex<HashMap<SessionKey, watch::Sender<bool>>>>,
+    sessions: Arc<Mutex<HashMap<SessionKey, watch::Sender<SessionStatus>>>>,
+    worker: Arc<Once>,
+    interval: Duration,
+    timeout: Duration,
     #[cfg(test)]
     gate: Arc<Mutex<Option<Arc<tests::Gate>>>>,
 }
+impl Default for SessionChanges {
+    fn default() -> Self {
+        Self {
+            sessions: Default::default(),
+            worker: Arc::new(Once::new()),
+            interval: RECHECK_INTERVAL,
+            timeout: CHECK_TIMEOUT,
+            #[cfg(test)]
+            gate: Default::default(),
+        }
+    }
+}
+
 impl SessionChanges {
     fn register(&self, key: SessionKey) -> Registration {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let changed = sessions
             .entry(key.clone())
-            .or_insert_with(|| watch::channel(false).0)
+            .or_insert_with(|| watch::channel(SessionStatus::default()).0)
             .subscribe();
         Registration {
             changed,
@@ -39,14 +61,14 @@ impl SessionChanges {
     pub(super) fn revoked(&self, organization: Uuid, hash: Vec<u8>) {
         let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(signal) = sessions.get(&(organization, hash)) {
-            signal.send_replace(true);
+            signal.send_modify(|status| status.revoked = true);
         }
     }
 }
 
 struct Registration {
     // Drop the receiver before checking for last-socket cleanup, including concurrent drops.
-    changed: watch::Receiver<bool>,
+    changed: watch::Receiver<SessionStatus>,
     guard: RegistrationGuard,
 }
 struct RegistrationGuard {
@@ -71,9 +93,7 @@ impl Drop for RegistrationGuard {
 }
 pub(crate) struct SessionWatch {
     registration: Registration,
-    pool: PgPool,
     deadline: Instant,
-    next_check: Instant,
 }
 
 async fn deadline(pool: &PgPool, key: &SessionKey) -> Result<Option<Instant>, sqlx::Error> {
@@ -108,7 +128,7 @@ impl Auth {
             .session_changes
             .pause_check(tests::Phase::Registered)
             .await;
-        let next_check = Instant::now() + RECHECK_INTERVAL;
+        state.session_changes.start_rechecks(&state.pool);
         let deadline = deadline(&state.pool, &registration.guard.key).await?;
         #[cfg(test)]
         state
@@ -117,34 +137,27 @@ impl Auth {
             .await;
         Ok(deadline.map(|deadline| SessionWatch {
             registration,
-            pool: state.pool.clone(),
             deadline,
-            next_check,
         }))
     }
 }
 
 impl SessionWatch {
     pub(crate) async fn ended(&mut self) -> Result<(), sqlx::Error> {
-        loop {
-            tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(self.deadline) => return Ok(()),
-                _ = self.registration.changed.wait_for(|revoked| *revoked) => return Ok(()),
-                result = async {
-                    tokio::time::sleep_until(self.next_check).await;
-                    let next_check = Instant::now() + RECHECK_INTERVAL;
-                    (next_check, deadline(&self.pool, &self.registration.guard.key).await)
-                } => {
-                    let (next_check, result) = result;
-                    let Some(deadline) = result? else { return Ok(()) };
-                    self.deadline = self.deadline.min(deadline);
-                    self.next_check = next_check;
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(self.deadline) => Ok(()),
+            status = self.registration.changed.wait_for(|status| status.revoked || status.failed) => {
+                match status {
+                    Ok(status) if status.revoked => Ok(()),
+                    _ => Err(sqlx::Error::PoolTimedOut),
                 }
             }
         }
     }
 }
+
+mod recheck;
 
 #[cfg(test)]
 mod tests;
