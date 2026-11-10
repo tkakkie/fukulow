@@ -23,12 +23,33 @@ export type SyncOptions = {
   cancel?: (handle: unknown) => void
 }
 export type TimelineState = {
-  status: 'loading' | 'ready' | 'error'
+  status: 'loading' | 'ready' | 'unavailable' | 'error'
   messages: Message[]
   pending: { clientMessageId: string; body: string; status: 'sending' | 'failed'; retryable: boolean }[]
   hasOlder: boolean
   loadingOlder: boolean
+  olderError: boolean
+  draft: string
+  composerError: string | null
 }
+
+/** Max Message body length in Unicode scalar values (API rule; a test compares it to openapi.json). */
+export const MESSAGE_BODY_MAX = 4000
+
+/** Japanese message when the Message body violates API scalar/NUL rules, else null. */
+export function messageBodyError(body: string): string | null {
+  if (body.includes('\0')) return 'メッセージにNUL文字は含められません。'
+  let count = 0
+  for (const ch of body) {
+    const cp = ch.codePointAt(0)!
+    if (cp >= 0xd800 && cp <= 0xdfff) return 'メッセージに使用できない文字が含まれています。'
+    if (++count > MESSAGE_BODY_MAX) return `メッセージは${MESSAGE_BODY_MAX}文字以内にしてください。`
+  }
+  return null
+}
+
+type ChannelExtra = { olderError: boolean; draft: string; composerError: string | null }
+const emptyExtra: ChannelExtra = { olderError: false, draft: '', composerError: null }
 
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
@@ -48,17 +69,59 @@ export function createSync(options: SyncOptions) {
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const timelines = new Map<string, ReturnType<typeof timeline>>()
+  const extras = new Map<string, ChannelExtra>()
+
+  const getExtra = (channel: string): ChannelExtra => extras.get(channel) ?? emptyExtra
+  function putExtra(channel: string, patch: Partial<ChannelExtra>): boolean {
+    const prev = getExtra(channel)
+    const next: ChannelExtra = { ...prev, ...patch }
+    if (next.olderError === prev.olderError && next.draft === prev.draft && next.composerError === prev.composerError) {
+      return false
+    }
+    if (!next.olderError && next.draft === '' && next.composerError === null) extras.delete(channel)
+    else extras.set(channel, next)
+    return true
+  }
+  function setExtra(channel: string, patch: Partial<ChannelExtra>) {
+    if (putExtra(channel, patch)) channelListeners.get(channel)?.forEach(l => l())
+  }
 
   function dispatch(input: Input): Promise<void> {
     const previous = state
     const result = step(state, input)
     state = result.state
-    if (state !== previous) {
-      listeners.forEach(l => l())
-      channelListeners.forEach((listeners, channel) => {
-        if (state.channels[channel] !== previous.channels[channel]) listeners.forEach(l => l())
-      })
+    const extraChanged = new Set<string>()
+    if (input.type === 'session_start' || input.type === 'session_replaced' || input.type === 'stop') {
+      for (const channel of extras.keys()) extraChanged.add(channel)
+      extras.clear()
+    } else {
+      if (input.type === 'history_failed') {
+        const req = previous.requests[input.request]
+        if (req?.type === 'history' && req.page === 'before' && !req.stale) {
+          const next = state.channels[req.channel]
+          if (state.running && next && next.state !== 'unavailable' && putExtra(req.channel, { olderError: true })) {
+            extraChanged.add(req.channel)
+          }
+        }
+      }
+      if (state !== previous) {
+        for (const channel of new Set([...Object.keys(previous.channels), ...Object.keys(state.channels)])) {
+          const prev = previous.channels[channel]
+          const next = state.channels[channel]
+          if (((prev?.older === undefined && next?.older !== undefined) ||
+            !next?.watched || next.state === 'unavailable' || next.cursor === null || !next.hasOlder) &&
+            putExtra(channel, { olderError: false })) {
+            extraChanged.add(channel)
+          }
+        }
+      }
     }
+    if (state !== previous) listeners.forEach(l => l())
+    channelListeners.forEach((listeners, channel) => {
+      if (state.channels[channel] !== previous.channels[channel] || extraChanged.has(channel)) {
+        listeners.forEach(l => l())
+      }
+    })
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 
@@ -189,36 +252,74 @@ export function createSync(options: SyncOptions) {
   function timeline(channel: string) {
     let snapshot: TimelineState
     let last: ChannelState | undefined | null = null
+    let lastExtra: ChannelExtra | null = null
     const listeners = new Set<() => void>()
     channelListeners.set(channel, listeners)
+    async function send(body: string) {
+      if (!body.trim() || messageBodyError(body) !== null || !state.running || state.organization === 'unavailable') {
+        return false
+      }
+      const clientMessageId = newId()
+      const before = state.channels[channel]?.pending
+      const completion = dispatch({ type: 'user_send', channel, clientMessageId, body })
+      const accepted = state.channels[channel]?.pending !== before
+      await completion
+      return accepted
+    }
     return {
       get(): TimelineState {
         const c = state.channels[channel]
-        if (last === c) return snapshot
+        const extra = getExtra(channel)
+        if (last === c && lastExtra === extra) return snapshot
         last = c
+        lastExtra = extra
         snapshot = {
           // Content visibility depends on the base; subscription confirmation drives the separate live indicator.
-          status: c?.state === 'unavailable' || c?.historyError ? 'error' : c && c.cursor !== null ? 'ready' : 'loading',
+          status: c?.state === 'unavailable' ? 'unavailable' : c?.historyError ? 'error' : c && c.cursor !== null ? 'ready' : 'loading',
           messages: c?.messages ?? [],
           pending: (c?.pending ?? []).map(p => ({ clientMessageId: p.clientMessageId, body: p.body,
             status: p.state === 'sending' ? 'sending' : 'failed', retryable: p.state !== 'failed' })),
           hasOlder: c?.hasOlder ?? false, loadingOlder: c?.older !== undefined,
+          olderError: extra.olderError,
+          draft: extra.draft,
+          composerError: extra.composerError,
         }
         return snapshot
       },
       subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
       loadLatest: () => dispatch({ type: 'refresh', channel }),
       loadOlder: () => dispatch({ type: 'load_older', channel }),
-      async send(body: string) {
-        const text = body.trim()
-        if (!text || !state.running || state.organization === 'unavailable') return false
-        const clientMessageId = newId()
-        const completion = dispatch({ type: 'user_send', channel, clientMessageId, body: text })
-        const accepted = state.channels[channel]?.pending.some(p => p.clientMessageId === clientMessageId) ?? false
-        await completion
+      setDraft(draft: string) {
+        if (draft === getExtra(channel).draft) return
+        setExtra(channel, { draft, composerError: null })
+      },
+      async submit() {
+        const text = getExtra(channel).draft
+        if (!text.trim()) return false
+        const error = messageBodyError(text)
+        if (error !== null) {
+          setExtra(channel, { composerError: error })
+          return false
+        }
+        if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
+          return false
+        }
+        putExtra(channel, { draft: '', composerError: null })
+        const accepted = await send(text)
+        if (!accepted && getExtra(channel).draft === '') setExtra(channel, { draft: text })
         return accepted
       },
+      send,
       retry: (clientMessageId: string) => dispatch({ type: 'user_retry', channel, clientMessageId }),
+      restore(clientMessageId: string): boolean {
+        if (!state.running) return false
+        const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
+        if (p?.state !== 'failed') return false
+        const current = getExtra(channel).draft
+        putExtra(channel, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
+        void dispatch({ type: 'user_discard', channel, clientMessageId })
+        return true
+      },
       discard: (clientMessageId: string) => { void dispatch({ type: 'user_discard', channel, clientMessageId }) },
     }
   }

@@ -190,7 +190,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
       void a.loadLatest()
     }
     await settle()
-    expect(view.last.status).toBe('error')
+    expect(view.last.status).toBe('unavailable')
     return { net, session, a, view }
   }
 
@@ -200,7 +200,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
     const subscribes = net.subscribeCount('A')
     await vi.advanceTimersByTimeAsync(10 * 60_000)
     await settle()
-    expect(view.last.status).toBe('error')
+    expect(view.last.status).toBe('unavailable')
     expect(net.history).toHaveLength(history)
     expect(net.subscribeCount('A')).toBe(subscribes)
     expect(net.sockets).toHaveLength(1)
@@ -220,13 +220,58 @@ describe('sync adapter and the unavailable state (C9)', () => {
 
     net.event({ type: 'error', channel_id: 'A', code: 'subscription_limit' })
     await settle()
-    expect(view.last.status).toBe('error')
+    expect(view.last.status).toBe('unavailable')
     const subscribes = net.subscribeCount('A')
     session.channels.select('B')
     await settle()
     session.channels.select('A') // reselect
     await settle()
     expect(net.subscribeCount('A')).toBe(subscribes + 1)
+    await view.unmount()
+    session.close()
+  })
+
+  it('distinguishes unavailable from load error, keeps messages and drafts visible, and disables Composer submit when unavailable', async () => {
+    const net = fakeNetwork()
+    net.pages.A = ok({ messages: [record(100)], has_more: true })
+    const { session, sync } = start(net)
+    const a = sync.channel('A')
+    const view = await mount(() => a.timeline)
+    await loadChannels(net)
+    net.subscribed('A', 100)
+    await settle()
+
+    a.setDraft('draft kept across failures')
+    await settle()
+
+    // Transient history load failure: status is 'error', loaded messages & draft stay visible.
+    net.pages.A = { ok: false, kind: 'http', status: 500 }
+    await a.loadLatest()
+    await settle()
+    expect(view.last).toMatchObject({
+      status: 'error',
+      messages: [record(100)],
+      draft: 'draft kept across failures',
+    })
+
+    // Terminal Channel refusal (C9): status is 'unavailable', messages & draft stay visible, Composer submit is refused.
+    net.pages.A = { ok: false, kind: 'http', status: 404 }
+    await a.loadLatest()
+    await settle()
+    expect(view.last).toMatchObject({
+      status: 'unavailable',
+      messages: [record(100)],
+      draft: 'draft kept across failures',
+    })
+    expect(await a.submit()).toBe(false)
+    expect(net.sends).toHaveLength(0)
+    expect(view.last.draft).toBe('draft kept across failures')
+
+    // Replacing the session clears drafts as well as loaded records.
+    void session.sync.replaceSession('other')
+    await settle()
+    expect(view.last.draft).toBe('')
+
     await view.unmount()
     session.close()
   })
