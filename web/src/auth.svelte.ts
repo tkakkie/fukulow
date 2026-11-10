@@ -49,6 +49,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   }
   async function selectOrganization(id: string) {
     if (view.screen !== 'app') return
+    error = ''
     closeOrganization()
     selectedOrganizationId = id
     organizationStatus = 'loading'
@@ -106,10 +107,16 @@ export function createAuth(deps: AuthDeps = defaults) {
       return true
     },
     async signOut(): Promise<boolean> {
-      busy = true
+      const account = accountGeneration, selection = selectionGeneration
+      busy = true; error = ''
       const ok = await deps.signOut()
       busy = false
-      if (!ok) { error = errorMessage({ ok: false, kind: 'network' }, 'signin'); return false }
+      if (!ok) {
+        if (account === accountGeneration && selection === selectionGeneration) {
+          error = errorMessage({ ok: false, kind: 'network' }, 'signin')
+        }
+        return false
+      }
       await show({ screen: 'signin' })
       return true
     },

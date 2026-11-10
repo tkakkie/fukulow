@@ -1,5 +1,7 @@
 import { createSubscriber } from 'svelte/reactivity'
-import type { createSync, TimelineState } from './sync'
+import { MESSAGE_BODY_MAX, messageBodyError, type createSync, type TimelineState } from './sync'
+
+export { MESSAGE_BODY_MAX, messageBodyError }
 
 type Sync = ReturnType<typeof createSync>
 
@@ -24,8 +26,11 @@ function channelAdapter(sync: Sync, channel: string) {
     },
     loadLatest: () => timeline.loadLatest(),
     loadOlder: () => timeline.loadOlder(),
+    setDraft: (draft: string) => timeline.setDraft(draft),
+    submit: () => timeline.submit(),
     send: (body: string) => timeline.send(body),
     retry: (clientMessageId: string) => timeline.retry(clientMessageId),
+    restore: (clientMessageId: string) => timeline.restore(clientMessageId),
     discard: (clientMessageId: string) => timeline.discard(clientMessageId),
   }
 }

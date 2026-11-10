@@ -13,22 +13,34 @@ describe('web boundary: network', () => {
 
   it('allows network use in the API layer', () => {
     expect(uses('export const f = () => fetch("/x"); new WebSocket("/ws")', 'src/api.ts')).toEqual([])
-    expect(uses('new WebSocket("/ws")', 'src/realtime.ts')).toEqual([])
+    expect(uses('new WebSocket("/ws"); new WebTransport("https://example.com"); new BroadcastChannel("c")', 'src/realtime.ts')).toEqual([])
+    expect(uses('new WebTransport("https://example.com"); new BroadcastChannel("c")', 'src/api.ts')).toEqual([])
   })
 
   it('rejects network use elsewhere (negative)', () => {
     expect(uses('fetch("/x")', 'src/auth.ts')).toEqual(['fetch'])
     expect(uses('new XMLHttpRequest()', 'src/auth.ts')).toEqual(['XMLHttpRequest'])
     expect(uses('new WebSocket("/ws")', 'src/auth.ts')).toEqual(['WebSocket'])
+    expect(uses('new WebTransport("https://example.com")', 'src/auth.ts')).toEqual(['WebTransport'])
     expect(uses('new EventSource("/e")', 'src/auth.ts')).toEqual(['EventSource'])
+    expect(uses('new BroadcastChannel("c")', 'src/auth.ts')).toEqual(['BroadcastChannel'])
     expect(uses('window.fetch("/x")', 'src/auth.ts')).toEqual(['fetch'])
+    expect(uses('window.WebTransport', 'src/auth.ts')).toEqual(['WebTransport'])
+    expect(uses('globalThis["Broadcast" + "Channel"]', 'src/auth.ts')).toEqual(['BroadcastChannel'])
     expect(uses('globalThis["fetch"]("/x")', 'src/auth.ts')).toEqual(['fetch'])
     expect(uses('const f = fetch; f("/x")', 'src/auth.ts')).toEqual(['fetch'])
   })
 
   it('rejects network use in a Svelte script and in the template (negative)', () => {
     expect(uses('<script lang="ts">const r = fetch("/x")</script>')).toEqual(['fetch'])
+    expect(uses('<script lang="ts">new BroadcastChannel("c"); new WebTransport("https://example.com")</script>')).toEqual([
+      'BroadcastChannel',
+      'WebTransport',
+    ])
     expect(uses('<script lang="ts"></script><button onclick={() => fetch("/x")}>x</button>')).toEqual(['fetch'])
+    expect(uses('<script lang="ts"></script><button onclick={() => new BroadcastChannel("c")}>x</button>')).toEqual([
+      'BroadcastChannel',
+    ])
   })
 
   it('does not flag unrelated names, comments, strings or types', () => {
@@ -38,21 +50,29 @@ describe('web boundary: network', () => {
 })
 
 describe('web boundary: storage', () => {
-  it('rejects web storage, IndexedDB and document.cookie outside the helper (negative)', () => {
+  it('rejects web storage, IndexedDB, caches and document.cookie outside the helper (negative)', () => {
     expect(uses('localStorage.setItem("token", t)', 'src/auth.ts')).toEqual(['localStorage'])
     expect(uses('window.sessionStorage.getItem("a")', 'src/auth.ts')).toEqual(['sessionStorage'])
     expect(uses('indexedDB.open("db")', 'src/auth.ts')).toEqual(['indexedDB'])
+    expect(uses('caches.open("v1")', 'src/auth.ts')).toEqual(['caches'])
+    expect(uses('window.caches.open("v1")', 'src/auth.ts')).toEqual(['caches'])
+    expect(uses('globalThis["ca" + "ches"].open("v1")', 'src/auth.ts')).toEqual(['caches'])
+    expect(uses('const { caches: c } = window', 'src/auth.ts')).toEqual(['caches'])
     expect(uses('document.cookie = "s=1"', 'src/auth.ts')).toEqual(['document.cookie'])
     expect(uses('<script>localStorage.x = 1</script>')).toEqual(['localStorage'])
+    expect(uses('<script>caches.open("v1")</script>')).toEqual(['caches'])
   })
 
   it('has no file-name exemption until the ui-settings helper exists (negative)', () => {
     expect(uses('localStorage.setItem("theme", "dark")', 'src/ui-settings.ts')).toEqual(['localStorage'])
+    expect(uses('caches.open("ui")', 'src/ui-settings.ts')).toEqual(['caches'])
     expect(uses('fetch("/x")', 'src/ui-settings.ts')).toEqual(['fetch'])
   })
 
   it('does not allow storage in the API layer (negative)', () => {
     expect(uses('localStorage.x = 1', 'src/api.ts')).toEqual(['localStorage'])
+    expect(uses('caches.open("v1")', 'src/api.ts')).toEqual(['caches'])
+    expect(uses('window.caches.open("v1")', 'src/realtime.ts')).toEqual(['caches'])
   })
 })
 
@@ -242,6 +262,9 @@ describe('web boundary: destructuring (#60)', () => {
     ['document cookie', 'const { cookie } = document', ['document.cookie']],
     ['navigator sendBeacon', 'const { sendBeacon: b } = navigator', ['navigator.sendBeacon']],
     ['Worker', 'const { Worker: W } = window', ['Worker']],
+    ['BroadcastChannel', 'const { BroadcastChannel: BC } = window', ['BroadcastChannel']],
+    ['WebTransport', 'const { WebTransport: WT } = globalThis', ['WebTransport']],
+    ['caches', 'const { caches: c } = self', ['caches']],
     ['assignment shorthand', 'let fetch; ({ fetch } = window)', ['fetch']],
     ['assignment renamed', 'let f; ({ fetch: f } = window)', ['fetch']],
     ['alias via destructuring', 'const { document: d } = window; d.cookie', ['document.cookie']],
