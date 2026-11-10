@@ -70,11 +70,13 @@ async fn sign_out_burst_over_1024_keeps_unrelated_sessions_open(pool: PgPool) {
 #[sqlx::test]
 async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(pool: PgPool) {
     let f = fixture(&pool).await;
+    let changes = crate::auth::SessionChanges::with_recheck_timing(
+        Duration::from_millis(50),
+        Duration::from_millis(500),
+    );
+    let fallback = changes.pause_fallback();
     let server = Server::start(crate::app(AppState {
-        session_changes: crate::auth::SessionChanges::with_recheck_timing(
-            Duration::from_secs(1),
-            Duration::from_millis(500),
-        ),
+        session_changes: changes,
         ..f.state.clone()
     }))
     .await;
@@ -89,6 +91,7 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
     let mut other = server.connect(&other_token).await;
     subscribe(&mut other, f.channel, 0).await;
     ready(&mut other, f.channel, 0).await;
+    fallback.entered().await;
     // Inject a lost notification: sign-out commits using an isolated notification registry.
     let isolated = crate::app(AppState {
         session_changes: Default::default(),
@@ -107,9 +110,9 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
         .status(),
         StatusCode::NO_CONTENT
     );
-    // Prove this exercises the fallback, rather than an immediate revocation/expiry signal.
-    silent(&mut idle).await;
-    silent(&mut replay).await;
+    // The first fallback pass cannot run until this barrier releases; the sign-out
+    // used an isolated registry and the sessions have not reached their expiry.
+    fallback.release();
     tokio::join!(
         fallback_close(&mut idle, CLOSE_SESSION_ENDED),
         fallback_close(&mut replay, CLOSE_SESSION_ENDED)
@@ -151,4 +154,40 @@ async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
     let mut reconnect = f.server.connect(&f.token).await;
     subscribe(&mut reconnect, f.channel, 0).await;
     ready(&mut reconnect, f.channel, 0).await;
+}
+
+#[sqlx::test]
+async fn worker_panic_closes_existing_and_new_sockets_with_internal_error(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let changes = crate::auth::SessionChanges::with_recheck_timing(
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    );
+    let server = Server::start(crate::app(AppState {
+        session_changes: changes.clone(),
+        ..f.state.clone()
+    }))
+    .await;
+    let mut idle = server.connect(&f.token).await;
+    subscribe(&mut idle, f.channel, 0).await;
+    ready(&mut idle, f.channel, 0).await;
+    let mut replay = server.connect(&f.token).await;
+    let gate = pause(f.channel);
+    subscribe(&mut replay, f.channel, 0).await;
+    entered(&gate).await;
+    tokio::time::timeout(Duration::from_secs(3), changes.panic_worker())
+        .await
+        .unwrap();
+    tokio::join!(
+        fallback_close(&mut idle, 1011),
+        fallback_close(&mut replay, 1011)
+    );
+    // The DB session remains valid, but no normal subscription is admitted.
+    for _ in 0..2 {
+        let mut new = server.connect(&f.token).await;
+        fallback_close(&mut new, 1011).await;
+    }
+    let mut healthy = f.server.connect(&f.token).await;
+    subscribe(&mut healthy, f.channel, 0).await;
+    ready(&mut healthy, f.channel, 0).await;
 }

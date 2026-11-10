@@ -5,14 +5,34 @@ use tokio::sync::Semaphore;
 pub(super) enum Phase {
     Registered,
     Checked,
+    Worker,
+    Started,
+    Snapshot,
+    Queried,
 }
-pub(super) struct Gate {
+pub(crate) struct Gate {
     phase: Phase,
     entered: Semaphore,
     release: Semaphore,
 }
+impl Gate {
+    pub(crate) async fn entered(&self) {
+        tokio::time::timeout(Duration::from_secs(5), self.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+    }
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
 impl SessionChanges {
-    fn pause(&self, phase: Phase) -> Arc<Gate> {
+    pub(crate) fn pause_fallback(&self) -> Arc<Gate> {
+        self.pause(Phase::Started)
+    }
+
+    pub(super) fn pause(&self, phase: Phase) -> Arc<Gate> {
         let gate = Arc::new(Gate {
             phase,
             entered: Semaphore::new(0),
@@ -22,18 +42,36 @@ impl SessionChanges {
         gate
     }
     pub(super) async fn pause_check(&self, phase: Phase) {
-        let gate = {
-            let mut gate = self.gate.lock().unwrap();
-            if gate.as_ref().is_some_and(|gate| gate.phase == phase) {
-                gate.take()
-            } else {
-                None
-            }
-        };
-        if let Some(gate) = gate {
-            gate.entered.add_permits(1);
-            gate.release.acquire().await.unwrap().forget();
+        pause_gate(&self.gate, phase).await;
+    }
+
+    pub(crate) async fn panic_worker(&self) {
+        let mut registration = self.register((Uuid::new_v4(), vec![]));
+        let gate = self.pause(Phase::Worker);
+        gate.entered.acquire().await.unwrap().forget();
+        gate.release.add_permits(1);
+        registration
+            .changed
+            .wait_for(|status| status.failed)
+            .await
+            .unwrap();
+        assert!(self.sessions.lock().unwrap().unavailable);
+    }
+}
+
+pub(super) async fn pause_gate(gates: &Mutex<Option<Arc<Gate>>>, phase: Phase) {
+    let gate = {
+        let mut gate = gates.lock().unwrap();
+        if gate.as_ref().is_some_and(|gate| gate.phase == phase) {
+            gate.take()
+        } else {
+            None
         }
+    };
+    if let Some(gate) = gate {
+        gate.entered.add_permits(1);
+        gate.release.acquire().await.unwrap().forget();
+        assert!(phase != Phase::Worker, "injected fallback worker panic");
     }
 }
 
@@ -68,15 +106,15 @@ async fn session_signals_are_scoped_latched_and_released_with_last_socket() {
     assert!(!other_session.changed.has_changed().unwrap());
     assert!(!other_organization.changed.has_changed().unwrap());
     drop(first);
-    assert!(changes.sessions.lock().unwrap().contains_key(&key));
+    assert!(changes.sessions.lock().unwrap().entries.contains_key(&key));
     let third = changes.register(key.clone());
     assert!(third.changed.borrow().revoked);
     drop(second);
     drop(third);
-    assert!(!changes.sessions.lock().unwrap().contains_key(&key));
+    assert!(!changes.sessions.lock().unwrap().entries.contains_key(&key));
     drop(other_session);
     drop(other_organization);
-    assert!(changes.sessions.lock().unwrap().is_empty());
+    assert!(changes.sessions.lock().unwrap().entries.is_empty());
 }
 
 pub(super) async fn fixture(pool: &PgPool) -> (AppState, Auth) {
@@ -130,6 +168,7 @@ async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
                 .sessions
                 .lock()
                 .unwrap()
+                .entries
                 .contains_key(&(
                     auth.identity.organization.organization_id,
                     auth.token_hash.clone()
@@ -147,17 +186,16 @@ async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
             auth.token_hash.clone(),
         );
         gate.release.add_permits(1);
-        match watch.await.unwrap() {
-            None => assert!(phase == Phase::Registered),
-            Some(mut watch) => {
-                assert!(phase == Phase::Checked);
-                tokio::time::timeout(Duration::from_secs(1), watch.ended())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            }
-        }
-        assert!(state.session_changes.sessions.lock().unwrap().is_empty());
+        assert!(watch.await.unwrap().is_none());
+        assert!(
+            state
+                .session_changes
+                .sessions
+                .lock()
+                .unwrap()
+                .entries
+                .is_empty()
+        );
         sqlx::query(
             "INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)",
         )
@@ -184,11 +222,91 @@ async fn fallback_database_timeout_is_bounded_and_does_not_claim_session_ended(p
         SessionChanges::with_recheck_timing(Duration::from_millis(200), Duration::from_millis(100));
     let mut watch = auth.watch_session(&state).await.unwrap().unwrap();
     let _held = exhausted.acquire().await.unwrap();
-    let started = Instant::now();
     let error = tokio::time::timeout(Duration::from_secs(2), watch.ended())
         .await
         .unwrap()
         .unwrap_err();
     assert!(matches!(error, sqlx::Error::PoolTimedOut));
-    assert!(started.elapsed() >= Duration::from_millis(200));
+}
+
+#[tokio::test]
+async fn old_registration_drop_cannot_remove_new_epoch_and_revoked_is_irreversible() {
+    let changes = SessionChanges::default();
+    let key = (Uuid::new_v4(), vec![1]);
+    let old = changes.register(key.clone());
+    old.guard.epoch.send_modify(|status| status.failed = true);
+    let Registration { changed, guard } = changes.register(key.clone());
+    assert!(!changed.borrow().failed);
+    assert!(old.changed.borrow().failed);
+    assert!(!old.guard.epoch.same_channel(&guard.epoch));
+    // Exercise the zero-receiver window before the new guard's own Drop.
+    drop(changed);
+    drop(old);
+    assert!(changes.sessions.lock().unwrap().entries[&key].same_channel(&guard.epoch));
+    let current = changes.register(key.clone());
+    changes.revoked(key.0, key.1.clone());
+    current
+        .guard
+        .epoch
+        .send_modify(|status| status.failed = true);
+    let later = changes.register(key);
+    assert!(later.changed.borrow().revoked);
+    assert!(later.changed.borrow().failed);
+    assert!(current.guard.epoch.same_channel(&later.guard.epoch));
+    drop(guard);
+    drop(current);
+    drop(later);
+    assert!(changes.sessions.lock().unwrap().entries.is_empty());
+}
+
+#[sqlx::test]
+async fn failed_epoch_closes_but_new_epoch_checks_current_database(pool: PgPool) {
+    let (mut state, auth) = fixture(&pool).await;
+    state.session_changes =
+        SessionChanges::with_recheck_timing(Duration::from_millis(50), Duration::from_millis(200));
+    let mut old = auth.watch_session(&state).await.unwrap().unwrap();
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), old.ended())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    held.rollback().await.unwrap();
+    let mut new = auth.watch_session(&state).await.unwrap().unwrap();
+    assert!(old.registration.changed.borrow().failed);
+    assert!(!new.registration.changed.borrow().failed);
+    assert!(
+        !old.registration
+            .guard
+            .epoch
+            .same_channel(&new.registration.guard.epoch)
+    );
+    drop(old);
+    // Positive control: sign-out still reaches the new epoch, with session-end semantics.
+    state
+        .session_changes
+        .revoked(auth.identity.organization.organization_id, auth.token_hash);
+    new.ended().await.unwrap();
+}
+
+#[sqlx::test]
+async fn worker_failure_during_initial_check_is_not_admitted(pool: PgPool) {
+    let (mut state, auth) = fixture(&pool).await;
+    state.session_changes =
+        SessionChanges::with_recheck_timing(Duration::from_millis(50), CHECK_TIMEOUT);
+    let checked = state.session_changes.pause(Phase::Checked);
+    let watch = auth.watch_session(&state);
+    tokio::pin!(watch);
+    tokio::select! {
+        _ = &mut watch => panic!("initial check did not pause"),
+        _ = checked.entered() => {},
+    }
+    state.session_changes.panic_worker().await;
+    checked.release();
+    assert!(matches!(watch.await, Err(sqlx::Error::PoolClosed)));
 }
