@@ -288,6 +288,27 @@ Polling (before) versus event-driven watches (after), on one current-thread runt
 
 Review-note fault probe (three release runs, 9,999 hot sockets + one cold socket; 512 concurrent Router sends, real WebSockets, production 20-connection pool and 256/2,048 caps): holding the hot publication cursor occupies all 40 notification permits. Each run accepts 257/rejects 255; the cold send returns 201 and reaches 1011 within 2.113–2.209 ms of send start. Reconnect overlap retains cursor 40; after replaying all 257 commits, the next publication crosses a 217-Message gap and forces a second hot reconnect cycle: 19,998 forced hot reconnects/run. First/second sequential replay takes 71.138–71.371 / 32.065–32.076 s; every seq is checked and both Channels resume live delivery. No Message is lost (replay delivers every seq once); the cold Channel only suffers a spurious disconnect. This controlled same-runtime probe measures failure/recovery, not natural reorder frequency or isolated server resource use.
 
+### #179 notification execution isolation (2026-11-10)
+
+One completed before/after pair: baseline `8d6c916` versus this #179 change. Apple M5/macOS 27.0.1 arm64, Rust 1.99.0, Docker PostgreSQL 18.6 at `127.0.0.1:55432`; native release SQLx current-thread probe, real loopback WebSockets and Router sends in the same process. Each run starts 9,999 hot sockets plus one cold socket, a 20-connection pool and unchanged 256/2,048 send queue caps. No other build, test suite or load probe ran concurrently; ordinary desktop/background processes remained active.
+
+Reproduce with `DATABASE_URL` pointing at that PostgreSQL: `MEASURE_SOCKETS=9999 MEASURE_SENDS=512 cargo test --release -p fukulow-server --lib realtime::tests::measurement -- --ignored --nocapture --test-threads=1`. Hold the hot publication cursor, commit a 512-send concurrent burst, send on the cold Channel, then release the cursor after overlapping the first hot replay. Check every replay seq and the subsequent >50-gap latch. The after probe continuously reads the original cold socket (answering Pings during the long replays), rejects any Close frame, and checks three live Messages through both hot recovery cycles. Baseline expects a cold 1011 and later replays its committed Message.
+
+| Observation | Before | After |
+|---|---:|---:|
+| Accepted / rejected hot sends | 257 / 255 | 257 / 255 |
+| Hot burst HTTP completion (ms) | 741.419 | 658.275 |
+| Cold send outcome, elapsed from send start | 1011 at 2.319 ms | Live Message at 3.038 ms; zero 1011 |
+| Available global execution permits during held cursor | 0 | 40 |
+| Recovered hot cursor / next gap | 40 / 217 | 40 / 217 |
+| First hot close completion from burst start (ms) | 746.707 | 664.265 |
+| First sequential hot replay (ms) | 80,484.031 | 74,885.677 |
+| Second hot close completion from next send (ms) | 129.589 | 128.758 |
+| Second sequential hot replay (ms) | 33,673.199 | 33,985.937 |
+| Forced hot reconnects | 19,998 | 19,998 |
+
+This confirms cold live progress under a held hot cursor, with unchanged hot admission, cursor, large-gap latch and two-cycle recovery outcomes in this probe. It does not establish latency distributions, production throughput/capacity, peak memory for the new 2,048-task ceiling, natural reorder frequency, or fairness when many Channels exhaust the shared reservation/execution budgets. One completed pair on a host with background activity cannot attribute timing differences to the change or establish latency guarantees. Raw logs remain outside Git at `/private/tmp/fukulow-179-{before,after}.log`.
+
 ## Module-direction check cost (#80)
 
 ### #80 cost evaluation

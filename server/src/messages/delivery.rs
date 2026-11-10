@@ -32,17 +32,30 @@ impl Drop for ChannelLease {
     }
 }
 
-#[derive(Default)]
 struct ChannelFanout {
     recipients: Mutex<Recipients>,
     // Initialized before COMMIT while sends still serialize on the Channel barrier.
     // A new subscriber replays history; it need not seed this publication cursor.
     first_seq: OnceLock<i64>,
     published: tokio::sync::Mutex<Option<i64>>,
+    notifications: Arc<Semaphore>,
 }
 
-// Twice the production pool's 20 connections; bound backlog without waiting on sends.
+impl Default for ChannelFanout {
+    fn default() -> Self {
+        Self {
+            recipients: Default::default(),
+            first_seq: Default::default(),
+            published: Default::default(),
+            notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
+        }
+    }
+}
+
+// Execution is twice the production pool's 20 connections. Cursor waiters reserve
+// separate capacity before spawning: at most 40 per Channel and 2,048 in total.
 pub(crate) const MAX_IN_FLIGHT_NOTIFICATIONS: usize = 40;
+const MAX_PENDING_NOTIFICATIONS: usize = 2048;
 pub(crate) const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const LIVE_QUEUE_CAPACITY: usize = 256;
 
@@ -67,6 +80,7 @@ impl Sender {
 pub struct Delivery {
     recipients: ChannelRegistry,
     notifications: Arc<Semaphore>,
+    pending_notifications: Arc<Semaphore>,
     admission: Arc<OnceLock<Arc<Admission>>>,
     failures: Failures,
     #[cfg(test)]
@@ -80,6 +94,7 @@ impl Default for Delivery {
         Self {
             recipients: Default::default(),
             notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
+            pending_notifications: Arc::new(Semaphore::new(MAX_PENDING_NOTIFICATIONS)),
             admission: Default::default(),
             failures: Default::default(),
             #[cfg(test)]
@@ -103,7 +118,21 @@ impl Notification {
     }
 
     pub(super) fn spawn(mut self, pool: sqlx::PgPool, message: Message) {
-        let Ok(permit) = self.delivery.notifications.clone().try_acquire_owned() else {
+        let Ok(channel_slot) = self
+            .channel
+            .fanout
+            .notifications
+            .clone()
+            .try_acquire_owned()
+        else {
+            return;
+        };
+        let Ok(pending_slot) = self
+            .delivery
+            .pending_notifications
+            .clone()
+            .try_acquire_owned()
+        else {
             // The message is committed: signal reconnect/replay instead of queuing work.
             return;
         };
@@ -117,7 +146,7 @@ impl Notification {
             .get(&message.client_message_id)
             .cloned();
         let task = tokio::spawn(async move {
-            let _permit = permit;
+            let _slots = (channel_slot, pending_slot);
             self.completed = tokio::time::timeout_at(
                 deadline,
                 self.delivery
@@ -186,6 +215,14 @@ impl Delivery {
     #[cfg(test)]
     pub(crate) fn notification_permits(&self) -> usize {
         self.notifications.available_permits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn channel_notification_permits(&self, organization: Uuid, channel: Uuid) -> usize {
+        self.channel((organization, channel))
+            .fanout
+            .notifications
+            .available_permits()
     }
 
     #[cfg(test)]
@@ -302,6 +339,13 @@ impl Delivery {
         #[cfg(test)]
         publication_gate(message.client_message_id).await;
         let mut cursor = channel.published.lock().await;
+        // Cursor waiters hold only their bounded reservations, so one slow Channel
+        // cannot exhaust execution capacity needed by unrelated Channels.
+        let _permit = self
+            .notifications
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into()))?;
         let after = cursor
             .get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(message.seq) - 1);
         if message.seq <= *after {
@@ -464,6 +508,159 @@ impl Drop for LiveQueue {
 mod tests {
     use super::*;
 
+    fn committed_message(channel: Uuid) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            channel_id: channel,
+            seq: 1,
+            client_message_id: Uuid::new_v4(),
+            sender: Uuid::new_v4(),
+            body: "committed".into(),
+            created_at: "now".into(),
+            topic_id: (),
+        }
+    }
+
+    #[tokio::test]
+    async fn global_notification_reservations_bound_tasks_and_release_on_cancel() {
+        let delivery = Delivery::default();
+        let organization = Uuid::new_v4();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        // No task can be polled on this current-thread runtime until we yield.
+        for _ in 0..MAX_PENDING_NOTIFICATIONS {
+            let message = committed_message(Uuid::new_v4());
+            delivery
+                .notification(organization, message.channel_id, 1)
+                .spawn(pool.clone(), message);
+        }
+        assert_eq!(delivery.pending_notifications.available_permits(), 0);
+        assert_eq!(delivery.notification_permits(), MAX_IN_FLIGHT_NOTIFICATIONS);
+        let channel = Uuid::new_v4();
+        let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+        affected.subscribe(channel);
+        delivery
+            .notification(organization, channel, 1)
+            .spawn(pool, committed_message(channel));
+        assert!(affected.notification_failed.is_failed());
+        assert!(!*affected.overflow.borrow());
+        let tasks = std::mem::take(&mut *delivery.tasks.lock().unwrap());
+        assert_eq!(tasks.len(), MAX_PENDING_NOTIFICATIONS);
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        assert_eq!(
+            delivery.pending_notifications.available_permits(),
+            MAX_PENDING_NOTIFICATIONS
+        );
+        assert_eq!(delivery.recipients.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn global_notification_execution_saturation_latches_without_leaking_reservations() {
+        let delivery = Delivery::default();
+        let executing = delivery
+            .notifications
+            .clone()
+            .acquire_many_owned(MAX_IN_FLIGHT_NOTIFICATIONS as u32)
+            .await
+            .unwrap();
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+        affected.subscribe(channel);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        delivery
+            .notification(organization, channel, 1)
+            .spawn(pool, committed_message(channel));
+        delivery.flush().await;
+        assert!(affected.notification_failed.is_failed());
+        assert!(!*affected.overflow.borrow());
+        assert!(affected.events.try_recv().is_err());
+        assert_eq!(
+            delivery.pending_notifications.available_permits(),
+            MAX_PENDING_NOTIFICATIONS
+        );
+        assert_eq!(
+            delivery.channel_notification_permits(organization, channel),
+            MAX_IN_FLIGHT_NOTIFICATIONS
+        );
+        drop(executing);
+        assert_eq!(delivery.notification_permits(), MAX_IN_FLIGHT_NOTIFICATIONS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cursor_wait_cancellation_and_deadline_release_bounded_reservations() {
+        for cancel in [true, false] {
+            let delivery = Delivery::default();
+            let organization = Uuid::new_v4();
+            let channel = Uuid::new_v4();
+            let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+            affected.subscribe(channel);
+            let entered = Arc::new(Semaphore::new(0));
+            let release = Arc::new(Semaphore::new(0));
+            let holder = {
+                let delivery = delivery.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                tokio::spawn(async move {
+                    delivery
+                        .hold_publication_cursor(organization, channel, &entered, &release)
+                        .await;
+                })
+            };
+            entered.acquire().await.unwrap().forget();
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+                .unwrap();
+            delivery
+                .notification(organization, channel, 1)
+                .spawn(pool, committed_message(channel));
+            tokio::task::yield_now().await;
+            assert_eq!(delivery.notification_permits(), MAX_IN_FLIGHT_NOTIFICATIONS);
+            assert_eq!(
+                delivery.pending_notifications.available_permits(),
+                MAX_PENDING_NOTIFICATIONS - 1
+            );
+            assert_eq!(
+                delivery.channel_notification_permits(organization, channel),
+                MAX_IN_FLIGHT_NOTIFICATIONS - 1
+            );
+            assert!(!affected.notification_failed.is_failed());
+            if cancel {
+                let task = delivery.tasks.lock().unwrap().pop().unwrap();
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                tokio::time::advance(NOTIFICATION_TIMEOUT - Duration::from_millis(1)).await;
+                assert!(!affected.notification_failed.is_failed());
+                tokio::time::advance(Duration::from_millis(1)).await;
+                delivery.flush().await;
+            }
+            assert!(affected.notification_failed.is_failed());
+            assert!(!*affected.overflow.borrow());
+            assert!(affected.events.try_recv().is_err());
+            assert_eq!(
+                delivery.pending_notifications.available_permits(),
+                MAX_PENDING_NOTIFICATIONS
+            );
+            assert_eq!(
+                delivery.channel_notification_permits(organization, channel),
+                MAX_IN_FLIGHT_NOTIFICATIONS
+            );
+            release.add_permits(1);
+            holder.await.unwrap();
+            drop(affected);
+            assert!(delivery.recipients.lock().unwrap().is_empty());
+        }
+    }
+
     #[test]
     fn notification_drop_without_runtime_latches_failure_without_panicking() {
         assert!(tokio::runtime::Handle::try_current().is_err());
@@ -578,6 +775,14 @@ mod tests {
         gate.entered.acquire().await.unwrap().forget();
         assert_eq!(
             delivery.notifications.available_permits(),
+            MAX_IN_FLIGHT_NOTIFICATIONS
+        );
+        assert_eq!(
+            delivery.pending_notifications.available_permits(),
+            MAX_PENDING_NOTIFICATIONS - 1
+        );
+        assert_eq!(
+            delivery.channel_notification_permits(organization, channel),
             MAX_IN_FLIGHT_NOTIFICATIONS - 1
         );
         tokio::time::advance(NOTIFICATION_TIMEOUT - Duration::from_millis(1)).await;
@@ -589,6 +794,14 @@ mod tests {
         assert!(affected.events.try_recv().is_err());
         assert_eq!(
             delivery.notifications.available_permits(),
+            MAX_IN_FLIGHT_NOTIFICATIONS
+        );
+        assert_eq!(
+            delivery.pending_notifications.available_permits(),
+            MAX_PENDING_NOTIFICATIONS
+        );
+        assert_eq!(
+            delivery.channel_notification_permits(organization, channel),
             MAX_IN_FLIGHT_NOTIFICATIONS
         );
     }
@@ -629,6 +842,14 @@ mod tests {
         assert!(!other_channel.notification_failed.is_failed());
         assert!(!other_org.notification_failed.is_failed());
         assert!(affected.events.try_recv().is_err());
+        assert_eq!(
+            delivery.pending_notifications.available_permits(),
+            MAX_PENDING_NOTIFICATIONS
+        );
+        assert_eq!(
+            delivery.channel_notification_permits(organization, channel),
+            MAX_IN_FLIGHT_NOTIFICATIONS
+        );
     }
 
     #[tokio::test]

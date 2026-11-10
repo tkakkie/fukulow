@@ -86,7 +86,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Future subscription cursors are clamped to the committed high-water seq so clients resume live delivery after a database restore (#18).
 - One shared FIFO queue per connection: an accepted subscribe sends `subscribed` only after every event queued before it, across Channels (used by contract silence barriers). Not a cross-Channel order guarantee; preserve or replace with its proof (#116).
 - #57 PR B: notification runs detached after COMMIT; HTTP awaits persistence only. A guard armed before COMMIT makes an incomplete task signal that Organization/Channel's sockets to close with 1011, so reconnect replays (no durable queue).
-- Detached notifications: at most 40 per Delivery (twice the 20-connection pool) with a 10 s deadline from creation; excess is rejected without queuing and signals 1011. HTTP never waits on a permit or fan-out (#57 PR B).
+- #179: notifications reserve at most 40 tasks per Organization/Channel and 2,048 per Delivery before spawning. Publication takes one of 40 global execution permits only after the cursor lock; saturation latches 1011. HTTP never waits on notification capacity.
+- #179 chooses separate bounded cursor-wait reservations over coalescing to preserve hot-Channel admission and recovery behavior. The 2,048-task ceiling bounds retained work across Channels; the 10 s deadline still includes cursor waiting, and Drop frees reservations on every exit.
 - Authorization reads `channels.visibility` fresh on each REST/replay check and fan-out; nothing is cached or carried from HTTP into fan-out, so a committed visibility change is seen next. Public costs one boundary query (#57 PR B).
 - #135 ambiguous-COMMIT recovery: persistence takes a scoped transaction advisory lock exclusively before COMMIT; watermark reads take it shared, then read in a separate READ COMMITTED statement, so replay recovers every committed Message without a later send.
 - #135: outcome lookups cannot prove rollback from absence, so they are not used. Each watermark is bounded to 10 s including pool acquisition; an unresolved outcome closes that socket with 1011. Cost: one extra statement per send.
@@ -136,7 +137,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Admission is a bounded-wait guard, not a dedicated HTTP pool: auth, history, replay and notification share the same pool (#156).
 - Known limits for the 10k target: FIFO budgets can delay unrelated Organizations; four watermarks per Channel cap popular-Channel reconnects (~1,000/s at ~4 ms each); 10,000 simultaneous reconnects need client backoff (#156).
 - #178 keeps send queue caps 256/2,048: smaller caps raised refusals; larger ones roughly doubled accepted HTTP/delivery delay with no shown capacity benefit; RSS did not discriminate. A conservative choice, not an optimality or fairness claim.
-- #178 confirmed hot-Channel notification-permit starvation (a held cursor can take all 40 permits; a cold Channel gets a spurious 1011, no loss), left unchanged and tracked in #179: releasing permits while waiting would remove the waiter bound.
+- #179 isolates a held Channel's cursor waiters from global execution capacity, fixing #178's cold-Channel 1011. Many slow Channels can still exhaust the 2,048 reservations or 40 execution permits; this is no general fairness guarantee.
 - Pending maintainer decision (#158 N1): two stuck Channels with 4+ reconnecting subscribers each can fill all 8 watermark slots; lowering the per-Channel cap to 2 would trade popular-Channel reconnect throughput.
 
 ## Web client

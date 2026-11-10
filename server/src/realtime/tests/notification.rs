@@ -157,6 +157,77 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
 }
 
 #[sqlx::test]
+async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturation(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let cold = channel(&pool, f.organization, f.member, false).await;
+    let mut hot_socket = f.server.connect(&f.token).await;
+    subscribe(&mut hot_socket, f.channel, 0).await;
+    ready(&mut hot_socket, f.channel, 0).await;
+    let mut cold_sockets = Vec::new();
+    for _ in 0..2 {
+        let mut socket = f.server.connect(&f.token).await;
+        subscribe(&mut socket, cold, 0).await;
+        ready(&mut socket, cold, 0).await;
+        cold_sockets.push(socket);
+    }
+    let gate = Arc::new(Gate {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let holder = {
+        let delivery = f.state.message_delivery.clone();
+        let gate = gate.clone();
+        let organization = f.organization;
+        let channel = f.channel;
+        tokio::spawn(async move {
+            delivery
+                .hold_publication_cursor(organization, channel, &gate.entered, &gate.release)
+                .await;
+        })
+    };
+    entered(&gate).await;
+    for _ in 0..messages::MAX_IN_FLIGHT_NOTIFICATIONS {
+        post(&f, f.channel).await;
+    }
+    assert_eq!(
+        f.state
+            .message_delivery
+            .channel_notification_permits(f.organization, f.channel),
+        0
+    );
+    assert_eq!(
+        f.state.message_delivery.notification_permits(),
+        messages::MAX_IN_FLIGHT_NOTIFICATIONS
+    );
+    let own = post(&f, cold).await;
+    for socket in &mut cold_sockets {
+        assert_eq!(event(socket).await["message"], own);
+    }
+    // Excess hot work still fails closed, without closing the cold sockets.
+    post(&f, f.channel).await;
+    closed(&mut hot_socket, 1011).await;
+    let own = post(&f, cold).await;
+    for socket in &mut cold_sockets {
+        assert_eq!(event(socket).await["message"], own);
+    }
+    gate.release.add_permits(1);
+    holder.await.unwrap();
+    f.state.message_delivery.flush().await;
+    let mut recovered = f.server.connect(&f.token).await;
+    subscribe(&mut recovered, f.channel, 0).await;
+    for seq in 1..=41 {
+        assert_eq!(event(&mut recovered).await["message"]["seq"], seq);
+    }
+    ready(&mut recovered, f.channel, 41).await;
+    let next = post(&f, f.channel).await;
+    assert_eq!(event(&mut recovered).await["message"], next);
+    f.state.message_delivery.flush().await;
+    for socket in &mut cold_sockets {
+        silent(socket).await;
+    }
+}
+
+#[sqlx::test]
 async fn saturated_notifications_close_only_affected_sockets_and_reconnect_replays(pool: PgPool) {
     let f = fixture(&pool).await;
     let other_channel = channel(&pool, f.organization, f.member, false).await;
