@@ -506,7 +506,7 @@
         "tags": [
           "crate::messages"
         ],
-        "summary": "Send a message to a visible channel; topic_id is always null.\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body or channel returns 409.",
+        "summary": "Send a Message, optionally joining/creating a Topic by name in the same transaction.\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body, Channel or normalized Topic name returns 409.",
         "operationId": "send_message",
         "parameters": [
           {
@@ -552,7 +552,7 @@
             }
           },
           "400": {
-            "description": "Malformed Organization id, invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values",
+            "description": "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden",
             "content": {
               "application/json": {
                 "schema": {
@@ -582,7 +582,7 @@
             }
           },
           "409": {
-            "description": "Client message id reused with different body or channel",
+            "description": "Client message id reused with different body, Channel or normalized Topic name",
             "content": {
               "application/json": {
                 "schema": {
@@ -623,6 +623,563 @@
           },
           "503": {
             "description": "Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels/{id}/timeline": {
+      "get": {
+        "tags": [
+          "crate::messages::topics::projection"
+        ],
+        "summary": "Main timeline projection at a fixed W. Topic Messages are represented once by their summary.",
+        "operationId": "list_timeline",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "as_of_seq",
+            "in": "query",
+            "description": "Omit on the initial page to choose W under the commit barrier; future W is invalid.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before_position",
+            "in": "query",
+            "description": "Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ascending W-relative positions; initial page fixes W, exclusive older continuation uses as_of_seq and before_position; cursor-neutral",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelinePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found; private and unknown Channels are identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or commit barrier timeout reading the projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels/{id}/topics": {
+      "get": {
+        "tags": [
+          "crate::messages::topics::projection"
+        ],
+        "summary": "Topic summaries as of W, ordered by their W-relative latest activity.",
+        "operationId": "list_topics",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "as_of_seq",
+            "in": "query",
+            "description": "Omit on the initial page to choose W under the commit barrier; future W is invalid.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before_position",
+            "in": "query",
+            "description": "Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "W-relative Topic summaries; default 50/max 200, ascending positions and exclusive older continuation; cursor-neutral",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or barrier timeout listing Topics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}": {
+      "get": {
+        "tags": [
+          "crate::messages::topics::projection"
+        ],
+        "summary": "Current bounded baseline for a Topic first encountered through live delivery.",
+        "operationId": "topic_summary",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "topic_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One absolute Topic baseline as of a barrier-protected W; cursor-neutral",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicSummaryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Organization id, Channel id or Topic id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or barrier timeout reading the Topic summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/messages": {
+      "get": {
+        "tags": [
+          "crate::messages::topics"
+        ],
+        "summary": "Topic-filtered history is cursor-neutral; use unfiltered GET /messages for gap fill.",
+        "operationId": "topic_history",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "topic_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before_seq",
+            "in": "query",
+            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, default 50, maximum 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ascending Topic Messages; exclusive after_seq XOR before_seq, default 50/max 200, directional has_more; never advances the sync cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Organization id, Channel id, Topic id, conflicting cursors or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or barrier timeout reading Topic history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
             "headers": {
               "Retry-After": {
                 "schema": {
@@ -1303,6 +1860,39 @@
           }
         }
       },
+      "ListProjectionQuery": {
+        "type": "object",
+        "description": "A fixed immutable-Message projection; never an unfiltered sync-cursor page.",
+        "properties": {
+          "as_of_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Omit on the initial page to choose W under the commit barrier; future W is invalid.",
+            "minimum": 0
+          },
+          "before_position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.",
+            "minimum": 1
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "maximum": 200,
+            "minimum": 1
+          }
+        }
+      },
       "Member": {
         "type": "object",
         "required": [
@@ -1367,7 +1957,11 @@
             "minimum": 1
           },
           "topic_id": {
-            "type": "null"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -1459,7 +2053,7 @@
       },
       "SendMessageRequest": {
         "type": "object",
-        "description": "Idempotency key: (organization, sender, client_message_id), derived from the session.\nA retry with the same body and channel returns the same canonical message and sequence;\nreusing the key with a different body or channel returns 409.",
+        "description": "Idempotency key: (organization, sender, client_message_id), derived from the session.\nMatching body, Channel and normalized Topic name returns the canonical Message/sequence;\nchanging any of them returns 409.",
         "required": [
           "client_message_id",
           "body"
@@ -1474,6 +2068,15 @@
           "client_message_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "topic_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Join or create a Topic in this Channel. Omitted/null sends without a Topic.\n1..=60 Unicode scalars, no NUL or surrounding/only trim whitespace; ASCII case folds.",
+            "maxLength": 60,
+            "minLength": 1
           }
         },
         "additionalProperties": false
@@ -1637,6 +2240,159 @@
             "enum": [
               "subscribed"
             ]
+          }
+        }
+      },
+      "TimelineItem": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TimelineMessage"
+          },
+          {
+            "$ref": "#/components/schemas/TimelineTopic"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "message": "#/components/schemas/TimelineMessage",
+            "topic": "#/components/schemas/TimelineTopic"
+          }
+        }
+      },
+      "TimelineMessage": {
+        "type": "object",
+        "required": [
+          "message",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "message"
+            ]
+          },
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          }
+        }
+      },
+      "TimelinePage": {
+        "type": "object",
+        "required": [
+          "as_of_seq",
+          "items",
+          "has_more"
+        ],
+        "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineItem"
+            },
+            "description": "Ascending W-relative positions, newest last. Continue older with the first position."
+          }
+        }
+      },
+      "TimelineTopic": {
+        "type": "object",
+        "required": [
+          "topic",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "topic"
+            ]
+          },
+          "topic": {
+            "$ref": "#/components/schemas/TopicSummary"
+          }
+        }
+      },
+      "TopicPage": {
+        "type": "object",
+        "required": [
+          "as_of_seq",
+          "topics",
+          "has_more"
+        ],
+        "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicSummary"
+            }
+          }
+        }
+      },
+      "TopicSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "first_seq",
+          "last_seq",
+          "message_count",
+          "latest_message"
+        ],
+        "properties": {
+          "first_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "W-relative display position; unaffected by Messages after the enclosing as_of_seq."
+          },
+          "latest_message": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "message_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Absolute count at the enclosing as_of_seq, excluding later Messages."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TopicSummaryResponse": {
+        "type": "object",
+        "required": [
+          "as_of_seq",
+          "topic"
+        ],
+        "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "topic": {
+            "$ref": "#/components/schemas/TopicSummary"
           }
         }
       },

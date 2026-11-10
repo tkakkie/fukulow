@@ -11,10 +11,10 @@ use utoipa::{
 #[openapi(
     paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::native_sign_in, crate::auth::sign_out, crate::auth::me, crate::auth::organization_me,
         crate::channels::list_channels, crate::channels::create_channel,
-        crate::messages::list_messages, crate::messages::send_message, crate::realtime::upgrade),
+        crate::messages::list_messages, crate::messages::send_message, crate::messages::topics::projection::list_timeline, crate::messages::topics::projection::list_topics, crate::messages::topics::projection::topic_summary, crate::messages::topics::topic_history, crate::realtime::upgrade),
     components(schemas(crate::auth::Account, crate::auth::AccountIdentity, crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::NativeSessionResponse, crate::auth::ErrorBody,
         crate::channels::Channel, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::channels::ChannelList,
-        crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage,
+        crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage, crate::messages::ListProjectionQuery, crate::messages::TimelineItem, crate::messages::TimelinePage, crate::messages::TopicPage, crate::messages::TopicSummary, crate::messages::TopicSummaryResponse,
         crate::realtime::ClientMessage, crate::realtime::ServerEvent)),
     modifiers(&Security, &WebSocketDiscriminators)
 )]
@@ -43,18 +43,25 @@ impl Modify for WebSocketDiscriminators {
     )]
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         let components = openapi.components.get_or_insert_with(Default::default);
-        for (root, variants) in [
+        for (root, property, variants) in [
             (
                 "ClientMessage",
+                "type",
                 &[("subscribe", "Subscribe"), ("unsubscribe", "Unsubscribe")][..],
             ),
             (
                 "ServerEvent",
+                "type",
                 &[
                     ("message", "MessageEvent"),
                     ("subscribed", "Subscribed"),
                     ("error", "ErrorEvent"),
                 ][..],
+            ),
+            (
+                "TimelineItem",
+                "kind",
+                &[("message", "TimelineMessage"), ("topic", "TimelineTopic")][..],
             ),
         ] {
             // utoipa derives the serde-tagged oneOf items but not a discriminator.
@@ -64,7 +71,7 @@ impl Modify for WebSocketDiscriminators {
                 panic!("{root} must be a oneOf");
             };
             assert_eq!(schema.items.len(), variants.len());
-            let mut discriminator = Discriminator::new("type");
+            let mut discriminator = Discriminator::new(property);
             for (item, (tag, name)) in schema.items.iter_mut().zip(variants) {
                 let reference = Ref::from_schema_name(*name);
                 discriminator

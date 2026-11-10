@@ -68,3 +68,12 @@ it('ignores malformed payloads for every forwarded event without throwing or clo
   expect(handlers.onEvent).toHaveBeenCalledTimes(5)
   connection.close()
 })
+
+it('forwards Topic Messages without losing their generated topic_id', () => {
+  const socket: SocketLike = { send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null, onclose: null }
+  const handlers = { onReady: vi.fn(), onEvent: vi.fn(), onClose: vi.fn() }
+  connectRealtime(handlers, () => socket)
+  const event = { type: 'message', message: { ...record(1), topic_id: '01955bc2-4fd1-4000-8000-000000000001' } }
+  socket.onmessage?.({ data: JSON.stringify(event) })
+  expect(handlers.onEvent).toHaveBeenCalledWith(event)
+})

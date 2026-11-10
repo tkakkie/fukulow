@@ -92,12 +92,80 @@ export interface paths {
         get: operations["list_messages"];
         put?: never;
         /**
-         * Send a message to a visible channel; topic_id is always null.
+         * Send a Message, optionally joining/creating a Topic by name in the same transaction.
          *     The session supplies organization and sender. A successful retry returns the same
          *     canonical message with 201, allocating no new sequence and publishing no new event.
-         *     A reused client_message_id with different body or channel returns 409.
+         *     A reused client_message_id with different body, Channel or normalized Topic name returns 409.
          */
         post: operations["send_message"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels/{id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Main timeline projection at a fixed W. Topic Messages are represented once by their summary. */
+        get: operations["list_timeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels/{id}/topics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Topic summaries as of W, ordered by their W-relative latest activity. */
+        get: operations["list_topics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Current bounded baseline for a Topic first encountered through live delivery. */
+        get: operations["topic_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Topic-filtered history is cursor-neutral; use unfiltered GET /messages for gap fill. */
+        get: operations["topic_history"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -267,6 +335,21 @@ export interface components {
              */
             limit?: number | null;
         };
+        /** @description A fixed immutable-Message projection; never an unfiltered sync-cursor page. */
+        ListProjectionQuery: {
+            /**
+             * Format: int64
+             * @description Omit on the initial page to choose W under the commit barrier; future W is invalid.
+             */
+            as_of_seq?: number | null;
+            /**
+             * Format: int64
+             * @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.
+             */
+            before_position?: number | null;
+            /** Format: int32 */
+            limit?: number | null;
+        };
         Member: {
             /** Format: uuid */
             id: string;
@@ -293,7 +376,8 @@ export interface components {
              * @description Per-channel sequence, starting at 1.
              */
             seq: number;
-            topic_id: null;
+            /** Format: uuid */
+            topic_id: string | null;
         };
         /** @description Live and replayed messages have exactly the same canonical shape. */
         MessageEvent: {
@@ -330,14 +414,19 @@ export interface components {
         Role: "owner" | "admin" | "member" | "guest";
         /**
          * @description Idempotency key: (organization, sender, client_message_id), derived from the session.
-         *     A retry with the same body and channel returns the same canonical message and sequence;
-         *     reusing the key with a different body or channel returns 409.
+         *     Matching body, Channel and normalized Topic name returns the canonical Message/sequence;
+         *     changing any of them returns 409.
          */
         SendMessageRequest: {
             /** @description 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming. */
             body: string;
             /** Format: uuid */
             client_message_id: string;
+            /**
+             * @description Join or create a Topic in this Channel. Omitted/null sends without a Topic.
+             *     1..=60 Unicode scalars, no NUL or surrounding/only trim whitespace; ASCII case folds.
+             */
+            topic_name?: string | null;
         };
         /** @description Server -> client events. Clients dedupe messages by (channel_id, seq). */
         ServerEvent: components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ErrorEvent"];
@@ -398,6 +487,59 @@ export interface components {
              */
             type: "subscribed";
         };
+        TimelineItem: components["schemas"]["TimelineMessage"] | components["schemas"]["TimelineTopic"];
+        TimelineMessage: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "message";
+            message: components["schemas"]["Message"];
+        };
+        TimelinePage: {
+            /** Format: int64 */
+            as_of_seq: number;
+            has_more: boolean;
+            /** @description Ascending W-relative positions, newest last. Continue older with the first position. */
+            items: components["schemas"]["TimelineItem"][];
+        };
+        TimelineTopic: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "topic";
+            topic: components["schemas"]["TopicSummary"];
+        };
+        TopicPage: {
+            /** Format: int64 */
+            as_of_seq: number;
+            has_more: boolean;
+            topics: components["schemas"]["TopicSummary"][];
+        };
+        TopicSummary: {
+            /** Format: int64 */
+            first_seq: number;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int64
+             * @description W-relative display position; unaffected by Messages after the enclosing as_of_seq.
+             */
+            last_seq: number;
+            latest_message: components["schemas"]["Message"];
+            /**
+             * Format: int64
+             * @description Absolute count at the enclosing as_of_seq, excluding later Messages.
+             */
+            message_count: number;
+            name: string;
+        };
+        TopicSummaryResponse: {
+            /** Format: int64 */
+            as_of_seq: number;
+            topic: components["schemas"]["TopicSummary"];
+        };
         Unsubscribe: {
             /** Format: uuid */
             channel_id: string;
@@ -425,6 +567,7 @@ export type ErrorBody = components['schemas']['ErrorBody'];
 export type ErrorEvent = components['schemas']['ErrorEvent'];
 export type Identity = components['schemas']['Identity'];
 export type ListMessagesQuery = components['schemas']['ListMessagesQuery'];
+export type ListProjectionQuery = components['schemas']['ListProjectionQuery'];
 export type Member = components['schemas']['Member'];
 export type Message = components['schemas']['Message'];
 export type MessageEvent = components['schemas']['MessageEvent'];
@@ -440,6 +583,13 @@ export type SetupStatus = components['schemas']['SetupStatus'];
 export type SignInRequest = components['schemas']['SignInRequest'];
 export type Subscribe = components['schemas']['Subscribe'];
 export type Subscribed = components['schemas']['Subscribed'];
+export type TimelineItem = components['schemas']['TimelineItem'];
+export type TimelineMessage = components['schemas']['TimelineMessage'];
+export type TimelinePage = components['schemas']['TimelinePage'];
+export type TimelineTopic = components['schemas']['TimelineTopic'];
+export type TopicPage = components['schemas']['TopicPage'];
+export type TopicSummary = components['schemas']['TopicSummary'];
+export type TopicSummaryResponse = components['schemas']['TopicSummaryResponse'];
 export type Unsubscribe = components['schemas']['Unsubscribe'];
 export type $defs = Record<string, never>;
 export interface operations {
@@ -825,7 +975,7 @@ export interface operations {
                     "application/json": components["schemas"]["Message"];
                 };
             };
-            /** @description Malformed Organization id, invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
+            /** @description Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -852,7 +1002,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Client message id reused with different body or channel */
+            /** @description Client message id reused with different body, Channel or normalized Topic name */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -889,6 +1039,307 @@ export interface operations {
                 };
             };
             /** @description Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id */
+            503: {
+                headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_timeline: {
+        parameters: {
+            query?: {
+                /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
+                as_of_seq?: number;
+                /** @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position. */
+                before_position?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ascending W-relative positions; initial page fixes W, exclusive older continuation uses as_of_seq and before_position; cursor-neutral */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelinePage"];
+                };
+            };
+            /** @description Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found; private and unknown Channels are identical */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or commit barrier timeout reading the projection */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
+            503: {
+                headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_topics: {
+        parameters: {
+            query?: {
+                /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
+                as_of_seq?: number;
+                /** @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position. */
+                before_position?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description W-relative Topic summaries; default 50/max 200, ascending positions and exclusive older continuation; cursor-neutral */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicPage"];
+                };
+            };
+            /** @description Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or barrier timeout listing Topics */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
+            503: {
+                headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    topic_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+                topic_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One absolute Topic baseline as of a barrier-protected W; cursor-neutral */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicSummaryResponse"];
+                };
+            };
+            /** @description Invalid Organization id, Channel id or Topic id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or barrier timeout reading the Topic summary */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
+            503: {
+                headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    topic_history: {
+        parameters: {
+            query?: {
+                /** @description Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
+                after_seq?: number;
+                /** @description Return seq < before_seq. Cannot combine with after_seq. */
+                before_seq?: number;
+                /** @description Page size, default 50, maximum 200. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+                topic_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ascending Topic Messages; exclusive after_seq XOR before_seq, default 50/max 200, directional has_more; never advances the sync cursor */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagePage"];
+                };
+            };
+            /** @description Invalid Organization id, Channel id, Topic id, conflicting cursors or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or barrier timeout reading Topic history */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
             503: {
                 headers: {
                     /** @description Jittered retry delay in seconds (1 through 5) */
