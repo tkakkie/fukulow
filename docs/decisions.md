@@ -1,6 +1,6 @@
 # Decisions
 
-Current decisions only: what + why, at most 300 characters each; details in the linked Issue/PR. Superseded entries and raw measurements were removed in #175; the full former text is in git (`docs/decisions.md` at 5023c62).
+Current decisions only: what + why, at most 300 characters each; details in the linked Issue/PR. Superseded entries and raw measurements were removed in #175; the full former text is at [5023c62](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md); #178 measurement tables at [2599d3b](https://github.com/tkakkie/fukulow/blob/2599d3b9c0e79f336b5726c6f6fbbc31e5db08da/docs/decisions.md).
 
 ## Product, stack and delivery
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.
@@ -93,7 +93,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #135 suppresses 1011 only for COMMIT errors known to roll back: SQLSTATE class 23 and 40000/40001/40002/40P01. I/O, shutdown, 40003 and timeouts (incl. 25P04) stay conservative.
 - #147 watermark: a materialized `set_config('lock_timeout', ...)` CTE precedes the shared lock in one statement (5 -> 4 round trips); the counter SELECT stays separate to keep #135's fresh snapshot.
 - #57 item 4: fan-out snapshots recipients under a per-Channel mutex; the global registry only hands out counted Channel leases. One publication cursor per Channel recovers missing committed Messages once in 50-Message pages and reauthorizes each page.
-- #57 item 4 evidence: under a forced reorder with 128 sockets, SQL fell from 779 to 12 statements (no per-socket refills). Item 6 and queue-cap tuning remain open.
+- #57 item 4 evidence: under a forced reorder with 128 sockets, SQL fell from 779 to 12 statements (no per-socket refills). Item 6 (fixed offered-load comparison and queue caps) is #178.
 - #57 item 4: `auth` owns the active-Member predicate; `channels` owns one public/private grant predicate and query builder. Reads, subscribe, replay and fan-out are non-locking; batched candidates are bounded by `id = ANY($3)`.
 - #173: shared recovery covers at most one 50-Message page (also bounded by the 256 queue). A larger gap latches Channel failure (1011) and advances the cursor; replay itself stays paginated without this limit.
 - #173 safety: subscribers before the latch keep their failed epoch and reconnect from their cursor; later ones register live before the barrier-protected watermark. Cursors discard overlap: ascending at-least-once, no omissions while authorized.
@@ -129,12 +129,14 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Exactly one Delivery per application pool (shared by its clones) sizes the budget once; only Delivery exposes watermark access outside `messages`. A stuck Channel holds at most four watermark and one send connection (#156).
 - `transaction_timeout` starts only at the barrier: pool acquisition and the initial canonical lookup come first, so up to 8 s of server work can outlive app abandonment; not an absolute HTTP bound. No prepared transactions (#158).
 - Socket abandonment does not prove rollback (PostgreSQL may still COMMIT), so #135's shared barrier, current authorization and canonical same-key retry stay necessary (#158).
-- #161 caps queued send waiters at 256 per Organization/Channel and 2,048 globally, reserved before spawning. Initial values need tuning; one Organization can still consume all global slots.
+- #161 caps queued send waiters at 256 per Organization/Channel and 2,048 globally, reserved before spawning. #178 kept these values; one Organization can still consume all global slots.
 - #161: queue-cap rejection and 30 s admission expiry return 503 `ErrorBody` with a random 1-5 s Retry-After (shared saturation, so not 429). DB failures, unknown COMMIT and the 10 s work deadline stay 500/unknown outcome.
 - A dropped connection or response timeout is not evidence of non-persistence (detached work may run 30 s + 10 s): clients retry with the same client_message_id, never a new key (#158, #161).
 - Admission rejections log `admission_rejected operation=watermark|send scope=channel|global organization=... channel=...` to stderr, unthrottled for now (counters/rate limiting deferred); no logging dependency (#156).
 - Admission is a bounded-wait guard, not a dedicated HTTP pool: auth, history, replay and notification share the same pool (#156).
 - Known limits for the 10k target: FIFO budgets can delay unrelated Organizations; four watermarks per Channel cap popular-Channel reconnects (~1,000/s at ~4 ms each); 10,000 simultaneous reconnects need client backoff (#156).
+- #178 keeps send queue caps 256/2,048: smaller caps raised refusals; larger ones roughly doubled accepted HTTP/delivery delay with no shown capacity benefit; RSS did not discriminate. A conservative choice, not an optimality or fairness claim.
+- #178 confirmed hot-Channel notification-permit starvation (a held cursor can take all 40 permits; a cold Channel gets a spurious 1011, no loss), left unchanged and tracked in #179: releasing permits while waiting would remove the waiter bound.
 - Pending maintainer decision (#158 N1): two stuck Channels with 4+ reconnecting subscribers each can fill all 8 watermark slots; lowering the per-Channel cap to 2 would trade popular-Channel reconnect throughput.
 
 ## Web client
@@ -152,4 +154,6 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #57 PR A: a fixed offered rate replaces response-paced sends: `PUBLISHERS` sends every `PUBLISH_INTERVAL_MS`; a missed deadline fails the run instead of reducing or bursting traffic. Missing deliveries, gaps and unexpected closes fail; no reconnect masking.
 - Compare before/after only with `make load-record` (isolated Compose project, dedicated PostgreSQL with pg_stat_statements, own cleanup, never the shared test DB), e.g. `CHANNELS=1 SUBSCRIBERS=20 PUBLISHERS=2 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=30` (#57).
 - Report SQL per offered send as top-level queries, all statements and statements incl. nested FK checks; pg_stat_database is supporting evidence only. Keep raw artifacts outside Git; reuse identical conditions for comparisons (#57).
+- #178 before/after: 6 -> 8 top-level queries per send is #146 Membership/revision authorization, not a hardening regression. The 10,000-socket HTTP p95 drop spans #134-#173 and #146, so it is not attributable to one change.
+- #178 harness: `make load-record` with `LOAD_DIRECT_NETWORK=1` (port-forwarding failed at 9,990 sockets), `LOAD_SERVER_SOURCE` for the worktree, `LOAD_LEGACY=1` only for pre-#146 builds; short windows are rejected. Never attach the raw artifact directory publicly (server logs, source patch).
 - Measurements so far are modest single-host runs: none establishes the 10k-connection target, a capacity or a latency guarantee. Heavy run: `CHANNELS=1 SUBSCRIBERS=10000 ... make load` with `nofile` 65536; one generator loop can saturate (#20).

@@ -5,13 +5,17 @@ export async function schedule(
   send: (index: number) => Promise<void>,
 ): Promise<{ startedAt: number; offered: number; elapsedMs: number; maxLagMs: number }> {
   const started = clock();
+  // Recheck absolute deadlines even when a runtime timer wakes prematurely.
+  const until = async (deadline: number) => {
+    do { await wait(Math.max(0, deadline - clock())); } while (clock() < deadline);
+  };
   const pending = new Set<Promise<void>>();
   let offered = 0;
   let rejected = false;
   let rejection: unknown;
   let maxLagMs = 0;
   for (let offset = 0; offset < durationMs; offset += intervalMs) {
-    await wait(Math.max(0, started + offset - clock()));
+    await until(started + offset);
     // Do not catch up by bursting after generator starvation; invalidate the run instead.
     const lag = clock() - started - offset;
     if (lag >= intervalMs) throw new Error('Load generator missed a send deadline');
@@ -26,7 +30,7 @@ export async function schedule(
       });
     }
   }
-  await wait(Math.max(0, started + durationMs - clock()));
+  await until(started + durationMs);
   const elapsedMs = clock() - started;
   await Promise.allSettled(pending);
   if (rejected) throw rejection;
