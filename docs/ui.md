@@ -1,26 +1,33 @@
 # UI rules
 
-Shared rules for the web UI (#200). Layout A2, chosen by the maintainer: [mockups](https://claude.ai/artifact/DsU9pFNvLgGfBkimjCSZm5), boards A2 to A2-4. When this doc and a mockup disagree, this doc wins. Behaviour is in `docs/spec.md` (C1-C10, P1-P8); this doc only says how the UI shows it. UI text uses `docs/spec.md` Terms (チャンネル, トピック, 返信のつながり, 組織, ログイン).
+Shared rules for the web UI (#200). Layout A2, chosen by the maintainer: [mockups](https://claude.ai/artifact/DsU9pFNvLgGfBkimjCSZm5), boards A2 to A2-4. When this doc and a mockup disagree, this doc wins. Behaviour is in `docs/spec.md` (C1-C10, P1-P8); this doc only says how the UI shows it and changes no sync or send policy. UI text uses `docs/spec.md` Terms (チャンネル, トピック, 返信のつながり, 組織, ログイン).
 
 ## 1. Layout
-- Regions, left to right: **rail** (68px: logo, navigation, presence, settings, self), **チャンネル column** (284px, a rounded `--navbox` box), **main** (rounded card, fluid, min 480px), **right panel** (360px, rounded card, opens and closes).
+- Regions, left to right: **rail** (68px: logo, navigation, presence, settings, self), **チャンネル column** (284px, a rounded `--navbox` box), **main** (rounded card, fluid; at least 480px only at widths >= 960px), **right panel** (360px, rounded card, opens and closes).
 - Surfaces are separated by tone, radius and spacing, never by rules (lines). Gap between regions: 8px.
 - チャンネル column: each チャンネル is an accordion row. When open, it shows its recent and Unread トピック first (at most 5), then `すべてのトピック(n)›`, which opens the right panel's トピック tab. Room is left for personal sections (#204).
 - Main shows one **view**: a チャンネル's main timeline, or one トピック (トピック view). The Composer is part of the view and posts to it.
-- Right panel holds one **layer** at a time: the tabs トピック / 概要 / メンバー, or a 返信のつながり (§2).
+- Right panel holds one **layer** at a time: the tabs トピック / 概要 / メンバー, or a 返信のつながり.
 - Each timeline (main and panel) is its own scroll container; the page itself never scrolls. Text never forces width: `min-width: 0` on flex/grid children, `overflow-wrap: anywhere` in Message bodies.
 
 ## 2. Navigation: トピック and 返信のつながり
-- Open a トピック view from: a トピック in the チャンネル column, a トピック summary line in the main timeline, the panel's トピック tab, or the command palette. It replaces the main timeline; the header shows `# チャンネル ›` and a back button to the main timeline.
-- The panel's トピック tab lists the チャンネル's トピック; selecting one opens it in main. The panel stays open.
-- Open a 返信のつながり from a Message's `返信 n件›` or the reply action. It opens in the right panel, over the current tab: the header has `‹` (back to the tab, shown only if a tab was open before) and `×` (close the panel). Opening another 返信のつながり replaces it (no deeper stack).
-- History: a view change and opening a panel layer push one browser history entry; switching tabs replaces it. Browser Back (and `Alt+←`/`⌘[`, which the browser owns) therefore goes back one level: 返信のつながり -> tab or closed panel -> previous view.
-- URL shape: `/o/{organization_id}/c/{channel_id}` plus `/t/{topic_id}` for a トピック view and `?panel=topics|overview|members|reply:{message_id}`. A URL is only a navigation hint: access is always decided by the API (C9, C10); an unavailable target shows the unavailable state (§5).
-- Focus:
-  - Opening a view focuses its Composer and announces `# チャンネル` or `トピック名` through the page live region (§6).
-  - Opening a panel tab focuses the panel heading (`tabindex="-1"`); opening a 返信のつながり focuses its reply Composer.
-  - Closing (`×`, `Esc`, Back) returns focus to the control that opened it; if it is gone, to the main Composer.
-  - Back from a トピック view to the main timeline focuses that トピック's summary line if it is rendered, else the Composer.
+- A トピック view opens from a トピック in the チャンネル column, a トピック summary line, the panel's トピック tab or the command palette, and replaces the main timeline. Its header shows `# チャンネル ›` and a back button to the main timeline.
+- A 返信のつながり opens from a Message's `返信 n件›` or the reply action, in the right panel over the current tab. Header: `‹` (back to the tab, only if a tab was open before) and `×` (close the panel). There is no deeper stack.
+- URL: `/o/{organization_id}/c/{channel_id}`, plus `/t/{topic_id}` for a トピック view and `?panel=topics|overview|members|reply:{message_id}`. A URL is only a navigation hint: the API decides access (C9, C10); an unavailable target shows its unavailable state (§5).
+
+| Action | History | Main | Panel | Focus |
+|---|---|---|---|---|
+| Select a チャンネル (column, palette, `Alt+↓`) | push | its main timeline | a tab stays open, re-scoped; a 返信のつながり closes | Composer |
+| Open a トピック view (any source) | push | that トピック | unchanged; phone: the panel layer is dropped | Composer |
+| Back button in a トピック view | `history.back()` if the previous entry is this チャンネル's timeline, else replace with it | main timeline | unchanged | that トピック's summary line if rendered, else Composer |
+| Open a tab (header button, `⌘.`) | push | unchanged | tab | panel heading (`tabindex="-1"`) |
+| Switch tab | replace | unchanged | other tab | the tab |
+| Open a 返信のつながり | push; replace if one is already open | unchanged | 返信のつながり | its reply Composer |
+| `‹` in a 返信のつながり | `history.back()` | unchanged | the tab | the tab |
+| `×`, `Esc` | go back over the panel entries this page pushed; replace if there are none (direct link) | unchanged | closed | the control that opened the panel; if gone, the main Composer |
+| Browser/OS Back | the browser pops | from the URL | from the URL | as for the matching row above |
+| Direct link or reload | one entry, no synthetic parents | from the URL | from the URL | Composer; phone `‹` at view level replaces with the チャンネル list |
+- Every view change is announced once through the page live region (§6): `# チャンネル名` or `トピック名`.
 - Wide screens (§3): the panel pushes main narrower. Narrower: the panel overlays main, with no scrim; main stays usable and scrollable.
 
 ## 3. Responsive
@@ -30,10 +37,14 @@ Shared rules for the web UI (#200). Layout A2, chosen by the maintainer: [mockup
 | 960-1279px | shown | shown | shown | overlays main from the right |
 | 600-959px | shown | drawer, opened from the rail's チャンネル button; closes on selection or `Esc` | shown | overlays, `min(420px, 100%)` wide |
 | < 600px (phone) | becomes a bottom tab bar | its own screen | its own screen | its own full screen |
-- Phone (board A2-4): one screen at a time, three levels: チャンネル list -> view -> panel layer. The header's `‹` and browser/OS Back go up one level; the bottom tab bar shows only at the チャンネル list level.
-- Drafts: the controller keeps one draft per target (Organization, チャンネル, トピック or none, reply root or none) in memory for the Account Session. Navigation, resizing and changing levels keep it; a successful send clears it; sign-out, session replacement and switching Account clear all. Drafts are never written to web storage (Message text stays out of storage). Leaving the page with a non-empty draft or a pending send shows the browser's leave prompt (`beforeunload`).
-- Pending and failed sends keep their text and resolve by C5 and C6; they belong to the target, not the screen.
-- Touch targets at least 44 x 44px on phone, 32 x 32px elsewhere. Text zoom to 200 % keeps every action reachable (regions may stack).
+- Phone (board A2-4): one screen at a time, three levels: チャンネル list -> view -> panel layer. The header's `‹` and browser/OS Back go up one level (§2 table); the bottom tab bar shows only at the チャンネル list level.
+- Reflow: at 320 CSS px wide, cards, dialogs and Composers fit without horizontal scrolling or clipped actions (WCAG 1.4.10); text zoom to 200 % keeps every action reachable.
+- Touch targets at least 44 x 44px on phone, 32 x 32px elsewhere.
+- Drafts:
+  - One draft per target (Organization, チャンネル, トピック or none, reply root or none), held in memory by a store owned by the Account Session, outside the per-Organization controllers, so switching Organization keeps it. Adapters only read it and forward intents (#97).
+  - Navigation, resizing and changing levels keep it. Submitting moves that text into the pending send and empties the Composer in one step; an acknowledgement never touches the draft, so text typed meanwhile stays.
+  - Sign-out, session replacement and switching Account drop all drafts. Drafts are never written to web storage.
+  - Reload or browser termination loses drafts. A `beforeunload` prompt for non-empty drafts and pending sends is best effort (browsers, especially on phones, may skip it).
 
 ## 4. Design tokens
 CSS custom properties in `web/src/app.css` on `:root`, overridden for dark under `prefers-color-scheme: dark` and by the manual theme (§7). Components use tokens only: no literal colours, radii or font sizes.
@@ -44,10 +55,10 @@ CSS custom properties in `web/src/app.css` on `:root`, overridden for dark under
 | `--navbox` | `#F5F8F7` | `#121918` | チャンネル column box |
 | `--surface` | `#FFFFFF` | `#161E1D` | main and panel cards, dialogs |
 | `--bg` | `#F6F8F7` | `#0F1514` | Composer, summary lines, chips inside cards |
-| `--hover` | `#DEE7E4` | `#1A2423` | hover fill |
+| `--hover` | `#E3EBE8` | `#1A2423` | hover fill of rows and quiet buttons |
 | `--text` / `--text2` / `--muted` | `#15201E` / `#46534F` / `#5F6C68` | `#E5ECEA` / `#A8B5B1` / `#93A19D` | body / secondary / meta |
 | `--border` | `#DDE5E2` | `#26312F` | decorative separators only |
-| `--border-input` | `#7E8C88` | `#66736F` | input and control boundaries (3:1) |
+| `--border-input` | `#7E8C88` | `#66736F` | input and control boundaries |
 | `--primary` / `--on-primary` | `#0B6B63` / `#FFFFFF` | `#3CC4B1` / `#04211D` | buttons, Unread badge, selection |
 | `--tint` / `--on-tint` | `#DDF0EC` / `#0A5650` | `#133430` / `#9DE6D9` | selected row, active tab |
 | `--link` | `#0A5E57` | `#6FD9C9` | links |
@@ -56,8 +67,7 @@ CSS custom properties in `web/src/app.css` on `:root`, overridden for dark under
 | `--mention` / `--on-mention` | `#FFF3D6` / `#6B3F00` | `#36290C` / `#FCE3A6` | Message that mentions you |
 | `--danger` / `--danger-bg` | `#B42318` / `#FDECEA` | `#F97066` / `#3A1714` | errors |
 | `--info-bg` / `--on-info` | `#E6F1F8` / `#0B4A6F` | `#10283A` / `#B9DDF5` | connection status, notices (not amber) |
-- Contrast (computed): every text pair above is at least 4.5:1 on its surface (lowest: `--muted` on `--app` 4.71 light); `--border-input` and `--focus` are at least 3:1. A new pair needs the same check in its PR.
-- Text on `--amber` uses `#3B2300` (6.9:1).
+- Allowed pairs (computed, both themes): `--text`, `--text2` and `--muted` on `--app`, `--navbox`, `--surface`, `--bg`, `--hover`, `--tint` and `--mention` (lowest 4.52:1, `--muted` on `--hover` light); each `--on-*` on its own fill; `--link`, `--primary` and `--danger` on `--surface` and `--bg`; `--danger` on `--danger-bg`. Text on `--amber` uses `#3B2300` (6.9:1). `--border-input` and `--focus` reach 3:1 on `--surface`, `--bg` and `--app`; inputs never sit on `--hover`. Any other pair needs the same check in its PR.
 - Type: Inter for Latin and digits, then `'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', Meiryo, sans-serif`. Sizes in `rem` from a 15px base: 12 (meta), 13, 14, 15 (body), 17 (view title), 20 (page title); line height 1.6 for Messages. Weights 400/500/600.
 - Spacing: 4px steps (4, 8, 12, 16, 24). Radius: 8 (rows, inputs), 10-12 (buttons, chips, Messages), 16 (regions, Composer), 50 % (avatars).
 - Focus ring: `2px solid var(--focus)`, offset 2px, on `:focus-visible` only; never removed.
@@ -74,19 +84,22 @@ States look the same everywhere (board A2-2):
 | Error, retryable | message + `再試行` | network/5xx/1011; keeps what is already shown |
 | Error, not retryable | message + where to go | no retry button |
 | チャンネル unavailable (C9) | `このチャンネルは利用できません` + `チャンネル一覧へ` | Composer disabled; never retried in a loop; reselecting tries again |
-| 組織 unavailable (C10) | full main state + `組織を切り替える` | terminal; states that pending sends were not sent |
-| Reconnecting | StatusBanner `再接続しています…`, `role="status"` | content stays; sends queue as `送信待ち`; banner only after 2 s offline |
-| Pending send | Message with `送信中…` / `送信待ち` in `--text2` | resolved by C5/C6 |
-| Failed send | `送信できませんでした。` + `再送する` / `編集` / `破棄` | text kept; focus after `破棄` goes to the Composer |
+| 組織 unavailable (C10) | full main state + `組織を切り替える` | terminal: no reconnect, resubscribe or send retry for that 組織; other 組織 unaffected. Copy says access was lost and pending Messages could not be confirmed, never that they were not sent |
+| Reconnecting | StatusBanner `再接続しています…`, `role="status"` | content stays; banner only after 2 s offline; send behaviour unchanged (presentation only) |
+| Sending | Message with `送信中…` in `--text2` | resolved by C5 |
+| Send outcome unknown | `送信を確認できませんでした。` + `再送する` / `破棄` | network error, timeout, lost ack, retryable 503: `再送する` resends with the same `client_message_id` (C6); no `編集` (a new key could duplicate a committed Message) |
+| Send refused | reason + `編集して送り直す` / `破棄` | 400/403/404/409/413/415: never resent (C6); `編集して送り直す` moves the text into the Composer as a new send and removes the failed one |
+| After `破棄` | the Message is removed | focus goes to the Composer |
 | New Messages below | `新着 n件 ↓` button | only when not pinned (§8) |
 | Sign in | board A2-3 | an ended Account Session (4001 or 401, S4 and C6) shows `ログインの有効期限が切れました。` |
 
 ## 6. Accessibility baseline
-- WCAG 2.2 AA. Landmarks: rail and チャンネル column are `nav` with labels, main is `main`, the panel is `aside` with a label; one `h1` per view.
+- WCAG 2.2 AA. Landmarks: rail and チャンネル column are `nav` with labels, main is `main`, the panel is `aside` with a label; one `h1` per view; a skip link `メッセージへ移動` first in the page.
+- Timeline semantics: the timeline is a labelled list of `article` Messages without live-region roles; it is not `role="log"`, because older pages, gap fills, reordering and トピック summary moves change it outside the end, where ARIA `log` expects additions only.
+- Announcements: one polite `role="status"` region per page. It announces each Message received live from someone else in the current view once (`田中 美咲: 本文の先頭 80 文字`; several within 2 s become `新着メッセージ n件`), view changes (§2) and connection changes (after the 2 s delay). It never announces initial history, older pages, gap fills, replay after reconnect, reordering, summary-line moves, own sends or their confirmations. Errors that need action use `role="alert"` once.
 - Full keyboard use (§9); visible focus (§4); focus after actions as in §2 and §5; after send, focus stays in the Composer.
-- One page live region (`role="status"`, polite) for view changes and connection state; errors that need action use `role="alert"`.
 - IME: Enter never sends while composing (`isComposing` or `keyCode 229`).
-- Icon-only buttons have `aria-label` with the shortcut, for example `パネルを閉じる(Esc)`.
+- Icon-only buttons have an `aria-label` that includes the shortcut, for example `パネルを閉じる(Esc)`.
 
 ## 7. Theme and text size
 - Theme: `システムに合わせる` (default, `prefers-color-scheme`), `ライト`, `ダーク`. Text size: `小` 14px, `標準` 15px (default), `大` 17px, `特大` 19px, applied by scaling the root font size; browser zoom still works.
@@ -101,21 +114,21 @@ States look the same everywhere (board A2-2):
 - First Unread positioning and the read marker belong to #143.
 
 ## 9. Keyboard and command palette
-Keyboard first: every action has a keyboard path; frequent ones have shortcuts. `⌘` on macOS is `Ctrl` elsewhere.
+Keyboard first: every action has a keyboard path; frequent ones have shortcuts and a visible control. `⌘` on macOS is `Ctrl` elsewhere.
 | Keys | Action | Where |
 |---|---|---|
-| `⌘K` | command palette (search and move, actions) | everywhere, also in text fields |
+| `⌘K` | command palette (search and move, actions); also the rail's 検索 button | everywhere, also in text fields |
 | `⌘/` | shortcut list | everywhere |
-| `⌘.` | open or close the right panel | everywhere |
+| `⌘.` | open or close the right panel; also the header buttons | everywhere |
 | `Alt+↑` / `Alt+↓` | previous / next チャンネル or トピック in column order | not in a text field that has text |
 | `Alt+Shift+↑` / `Alt+Shift+↓` | previous / next with Unread | same |
-| `F6` / `Shift+F6` | next / previous region (rail, column, main, panel) | everywhere |
 | `Esc` | close the topmost layer: menu, palette or dialog, then the panel; from a Message row, back to the Composer | not while the IME is composing |
-| `↑` / `↓`, `Home` / `End` | move between Messages (roving `tabindex`) | timeline |
-| `Enter` or `R` | open the 返信のつながり of the focused Message | Message row |
-| `↑` in an empty Composer | focus the latest Message | Composer |
+| `↑` / `↓`, `Home` / `End` | move between Messages (roving `tabindex`) | a focused Message row |
+| `Enter` or `R` | open the 返信のつながり of the focused Message | a focused Message row |
+| `↑` | focus the latest Message | an empty Composer, no IME |
 | `Enter` / `Shift+Enter` | send / new line | Composer |
-- Conflicts: never override browser or OS shortcuts (`⌘W/T/N/L/R/F`, `⌘[ ]`, `Alt+←/→`, `Tab`) or screen-reader keys. In text fields, text editing wins for every key without `⌘`; the IME wins while composing. Single-letter keys work only on a focused Message row.
+- Conflicts: browser, OS and screen-reader shortcuts are not overridden (`⌘W/T/N/L/R/F`, `⌘[ ]`, `Alt+←/→`, `Tab`, `F6`). One deliberate exception: `Ctrl+K`/`⌘K`, which Chrome on Windows uses for address-bar search; a chat convention, always paired with the visible 検索 button. Regions are reached by landmarks and the skip link, not by a shortcut.
+- Matching: exact modifiers only; ignore events with `defaultPrevented`; the IME wins while composing (`isComposing`, `keyCode 229`); in text fields text editing wins for every key without `⌘`, except `↑` in an empty Composer. Row keys act only when the row itself is the event target, never a control inside it.
 - One keymap module is the source for handlers, the shortcut list and the hints shown in the palette and labels. No remapping for now.
 - Palette (board A2-1, Tweaks): a modal `dialog`; input is a `combobox` with a `listbox` and `aria-activedescendant`; results grouped as チャンネル, トピック (from lists already loaded; server Search is separate) and 操作, each with its shortcut. Focus is trapped; `Esc` closes and restores focus to the invoker; a move command applies the destination focus rule (§2).
 - Individual commands beyond moving, panel and shortcut list come in follow-up Issues.
