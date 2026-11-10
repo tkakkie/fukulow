@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 type ChannelKey = (Uuid, Uuid);
 const ADMISSION_WAIT: Duration = Duration::from_secs(1);
+const SEND_ADMISSION_WAIT: Duration = Duration::from_secs(30);
 pub(super) const WORK_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) struct Admission {
@@ -76,7 +77,14 @@ impl Admission {
             channel: None,
             global: None,
         };
-        let deadline = tokio::time::Instant::now() + ADMISSION_WAIT;
+        // Send waiters hold no connection, so absorb ordinary hot-Channel bursts
+        // for as long as the pool's former acquire budget allowed.
+        let wait = if send {
+            SEND_ADMISSION_WAIT
+        } else {
+            ADMISSION_WAIT
+        };
+        let deadline = tokio::time::Instant::now() + wait;
         let operation = if send { "send" } else { "watermark" };
         permit.channel = Some(acquire(&semaphore, deadline, operation, "channel", key).await?);
         permit.global = Some(acquire(&self.global, deadline, operation, "global", key).await?);
@@ -129,6 +137,43 @@ impl Drop for Permit<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn send_admission_has_a_separate_longer_budget_without_holding_global_capacity() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let held = admission
+            .acquire(organization, channel, true)
+            .await
+            .unwrap();
+        let waiting = admission.acquire(organization, channel, true);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert_eq!(admission.available_permits(), 15);
+        drop(held);
+        drop(waiting.await.unwrap());
+
+        let held = admission
+            .acquire(organization, channel, true)
+            .await
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(
+            admission
+                .acquire(organization, channel, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(started.elapsed(), SEND_ADMISSION_WAIT);
+        drop(held);
+        assert_eq!(admission.available_permits(), 16);
+        assert!(admission.channels.lock().unwrap().is_empty());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn channel_caps_isolate_organizations_and_release_cancelled_and_rejected_waiters() {

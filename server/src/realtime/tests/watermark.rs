@@ -140,7 +140,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         }
     }).await.unwrap();
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(97));
+    let barrier = Arc::new(tokio::sync::Barrier::new(161));
     let mut reconnecting = tokio::task::JoinSet::new();
     for _ in 0..64 {
         let address = f.server.address;
@@ -151,49 +151,38 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
             let mut socket = connect(address, &token).await;
             barrier.wait().await;
             for attempt in 0..3 {
-                // A queued permit or an uncapped lock wait cannot meet this bound.
+                // An uncapped database lock wait cannot meet this bound.
                 tokio::time::timeout(Duration::from_secs(2), async {
                     subscribe(&mut socket, channel, 0).await;
                     closed(&mut socket, 1011).await;
                 })
                 .await
-                .expect("saturation must close immediately, without queuing");
+                .expect("watermark saturation must close after bounded admission");
                 if attempt < 2 {
                     socket = connect(address, &token).await;
                 }
             }
         });
     }
-    for index in 0..32 {
+    let mut sending = tokio::task::JoinSet::new();
+    for index in 0..96 {
         let token = f.token.clone();
         let barrier = barrier.clone();
-        reconnecting.spawn(async move {
+        sending.spawn(async move {
             barrier.wait().await;
-            for attempt in 0..3 {
-                let send_key = if index % 2 == 0 { key } else { Uuid::new_v4() };
-                let body = if index % 2 == 0 {
-                    "unresolved"
-                } else {
-                    "new send"
-                };
-                let response = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    http_status(
-                        address,
-                        &token,
-                        stuck_channel,
-                        Some(json!({"client_message_id": send_key, "body": body})),
-                        "500 Internal Server Error",
-                    ),
-                )
-                .await
-                .expect("send admission must reject without occupying a connection");
-                assert_eq!(
-                    response,
-                    json!({"error": "internal error"}),
-                    "attempt {attempt}"
-                );
-            }
+            let send_key = if index % 2 == 0 { key } else { Uuid::new_v4() };
+            let body = if index % 2 == 0 {
+                "unresolved"
+            } else {
+                "new send"
+            };
+            http_json(
+                address,
+                &token,
+                stuck_channel,
+                Some(json!({"client_message_id": send_key, "body": body})),
+            )
+            .await
         });
     }
     tokio::time::timeout(Duration::from_secs(5), barrier.wait())
@@ -246,6 +235,10 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         first_admission.elapsed()
     );
     assert_eq!(lock_waiters(&pool, pid).await, 4);
+    assert!(
+        sending.try_join_next().is_none(),
+        "send waiters must remain queued until COMMIT resolves"
+    );
     // One unresolved COMMIT + four watermark waiters + one send; no storm work
     // may have acquired the remaining fourteen connections.
     assert!(
@@ -257,19 +250,48 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     let canonical = admitted_retry.await.unwrap();
     assert_eq!(canonical["client_message_id"], json!(key));
     assert_eq!(canonical["seq"], 1);
+    let mut seqs = std::collections::BTreeSet::from([1]);
+    while let Some(result) = sending.join_next().await {
+        let message = result.unwrap();
+        if message["client_message_id"] == json!(key) {
+            assert_eq!(message, canonical);
+        } else {
+            assert!(seqs.insert(message["seq"].as_i64().unwrap()));
+        }
+    }
+    assert_eq!(
+        seqs.into_iter().collect::<Vec<_>>(),
+        (1..=49).collect::<Vec<_>>()
+    );
     for socket in &mut waiting {
-        let message = event(socket).await;
-        assert_eq!(message["message"]["client_message_id"], json!(key));
-        assert_eq!(message["message"]["seq"], 1);
-        ready(socket, f.channel, 1).await;
+        // COMMIT resolution can race the queued sends and the handoff snapshot.
+        let mut seq = 0;
+        let mut subscribed = false;
+        while seq < 49 || !subscribed {
+            let value = event(socket).await;
+            if value["type"] == "subscribed" {
+                assert!(!subscribed);
+                assert_eq!(value["caught_up_seq"], seq);
+                subscribed = true;
+            } else {
+                seq += 1;
+                assert_eq!(value["message"]["seq"], seq);
+                if seq == 1 {
+                    assert_eq!(value["message"], canonical);
+                }
+            }
+        }
     }
     let mut recovered = f.server.connect(&f.token).await;
     subscribe(&mut recovered, f.channel, 0).await;
-    assert_eq!(
-        event(&mut recovered).await["message"]["client_message_id"],
-        json!(key)
-    );
-    ready(&mut recovered, f.channel, 1).await;
+    for seq in 1..=49 {
+        let value = event(&mut recovered).await;
+        assert_eq!(value["message"]["seq"], seq);
+        if seq == 1 {
+            assert_eq!(value["message"], canonical);
+        }
+    }
+    ready(&mut recovered, f.channel, 49).await;
 }
 
 #[sqlx::test]
@@ -292,9 +314,10 @@ async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: P
     for index in 0..512 {
         let address = f.server.address;
         let token = f.token.clone();
-        // A popular Channel and a burst across many Channels exercise both caps.
+        // Four popular Channels exercise repeated cap handoffs with more scheduling
+        // margin than 264 reads serialized four at a time under the 1s deadline.
         let channel = if index < 256 {
-            f.channel
+            channels[index % 4]
         } else {
             channels[index % channels.len()]
         };

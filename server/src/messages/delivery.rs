@@ -145,7 +145,10 @@ impl Delivery {
             super::latest_seq(pool, organization, channel).await
         })
         .await
-        .map_err(|_| sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))?
+        .map_err(|_| {
+            eprintln!("work_deadline_expired operation=watermark organization={organization} channel={channel}");
+            sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
+        })?
     }
 
     pub(crate) fn queue(&self, organization: Uuid, member: Uuid, capacity: usize) -> LiveQueue {

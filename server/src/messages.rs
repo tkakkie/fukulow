@@ -323,15 +323,19 @@ async fn persist(
     channel_id: Uuid,
     input: SendMessageRequest,
 ) -> Result<Message, MessageError> {
-    tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        let _permit = delivery
-            .admission(pool)
-            .acquire(organization_id, channel_id, true)
-            .await?;
-        persist_admitted(pool, delivery, organization_id, sender, channel_id, input).await
-    })
+    let _permit = delivery
+        .admission(pool)
+        .acquire(organization_id, channel_id, true)
+        .await?;
+    tokio::time::timeout(
+        admission::WORK_TIMEOUT,
+        persist_admitted(pool, delivery, organization_id, sender, channel_id, input),
+    )
     .await
-    .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
+    .map_err(|_| {
+        eprintln!("work_deadline_expired operation=send organization={organization_id} channel={channel_id}");
+        MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))
+    })?
 }
 
 async fn persist_admitted(

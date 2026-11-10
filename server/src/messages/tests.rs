@@ -655,15 +655,23 @@ async fn concurrent_cross_channel_duplicate_conflicts_without_sequence_gap(pool:
 
 #[sqlx::test]
 async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: PgPool) {
-    let (app, _, _, channel_id, token) = fixture(&pool).await;
+    let app_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let (app, _, _, channel_id, token) = fixture(&app_pool).await;
     let mut seqs = Vec::new();
-    for response in concurrent_sends(&app, &token, &[channel_id; 32], false).await {
+    let mut keys = std::collections::HashSet::new();
+    for response in concurrent_sends(&app, &token, &[channel_id; 128], false).await {
         assert_eq!(response.status(), StatusCode::CREATED);
-        seqs.push(body(response).await["seq"].as_i64().unwrap());
+        let message = body(response).await;
+        seqs.push(message["seq"].as_i64().unwrap());
+        assert!(keys.insert(message["client_message_id"].as_str().unwrap().to_owned()));
     }
     seqs.sort_unstable();
-    assert_eq!(seqs, (1..=32).collect::<Vec<_>>());
-    let page = list(&app, &token, channel_id, "?after_seq=0").await;
+    assert_eq!(seqs, (1..=128).collect::<Vec<_>>());
+    let page = list(&app, &token, channel_id, "?after_seq=0&limit=200").await;
     assert_eq!(
         page["messages"]
             .as_array()
