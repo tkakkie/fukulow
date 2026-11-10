@@ -148,7 +148,7 @@ async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
     };
     let code = tokio::select! {
         biased;
-        _ = session.ended() => Some(CLOSE_SESSION_ENDED),
+        result = session.ended() => Some(if result.is_ok() { CLOSE_SESSION_ENDED } else { 1011 }),
         _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
         _ = notification_failed.failed() => Some(1011),
         result = connection.run(&mut socket) => result.err(),
