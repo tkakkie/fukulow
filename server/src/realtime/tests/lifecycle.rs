@@ -50,6 +50,47 @@ async fn advance(duration: Duration) {
 }
 
 #[sqlx::test]
+async fn frame_live_and_ping_traffic_does_not_repoll_failure_waits(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
+    tokio::task::yield_now().await;
+    let polls = || {
+        f.state
+            .message_delivery
+            .failure_wait_polls(f.organization, f.channel)
+    };
+    let initial = polls();
+    assert!(initial > 0, "failure monitor has not registered its wait");
+    for _ in 0..64 {
+        socket
+            .send(tungstenite::Message::Text("invalid".into()))
+            .await
+            .unwrap();
+        assert_eq!(event(&mut socket).await["code"], "invalid_input");
+        socket
+            .send(tungstenite::Message::Ping(Default::default()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            frame(&mut socket).await,
+            tungstenite::Message::Pong(_)
+        ));
+    }
+    for _ in 0..3 {
+        advance(PING_INTERVAL).await;
+        assert!(matches!(
+            frame(&mut socket).await,
+            tungstenite::Message::Ping(_)
+        ));
+        socket.flush().await.unwrap();
+        let message = post(&f, f.channel).await;
+        assert_eq!(event(&mut socket).await["message"], message);
+        f.state.message_delivery.flush().await;
+    }
+    assert_eq!(polls(), initial, "socket traffic re-polled epoch waits");
+}
+
+#[sqlx::test]
 async fn missing_pong_disconnects_idle_websocket(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, finished) = lifecycle_socket(&f).await;

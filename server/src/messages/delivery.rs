@@ -124,6 +124,11 @@ pub(crate) struct LiveQueue {
 }
 
 impl Delivery {
+    #[cfg(test)]
+    pub(crate) fn failure_wait_polls(&self, organization: Uuid, channel: Uuid) -> usize {
+        self.failures.wait_polls((organization, channel))
+    }
+
     // Exactly one Delivery (and its clones) belongs to one application pool.
     // Lazily size its shared budget from that pool, including in small test pools.
     pub(super) fn admission(&self, pool: &sqlx::PgPool) -> &Arc<Admission> {
@@ -312,6 +317,30 @@ impl Drop for LiveQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_drop_without_runtime_latches_failure_without_panicking() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let delivery = Delivery::default();
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut queue = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+        queue.subscribe(channel);
+        drop(delivery.notification(organization, channel));
+        assert!(queue.notification_failed.is_failed());
+        // A future observer still sees the latch, without needing the skipped wake.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut wait = queue.notification_failed.clone().spawn();
+                tokio::time::timeout(Duration::from_secs(1), wait.failed())
+                    .await
+                    .unwrap();
+            });
+        drop(queue);
+    }
 
     #[sqlx::test]
     async fn watermark_capacity_covers_pool_wait_and_releases_on_every_exit(pool: sqlx::PgPool) {
