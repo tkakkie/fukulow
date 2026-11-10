@@ -2,7 +2,7 @@ use super::*;
 
 mod measurement;
 
-fn topic_input(key: Uuid, name: &str) -> Value {
+pub(super) fn topic_input(key: Uuid, name: &str) -> Value {
     json!({"client_message_id": key, "body": "Topic Message", "topic_name": name})
 }
 
@@ -20,7 +20,7 @@ async fn get(app: &Router, token: &str, channel: Uuid, suffix: &str) -> Value {
     body(response).await
 }
 
-mod atomicity;
+pub(super) mod atomicity;
 mod denials;
 mod paging;
 mod sends;

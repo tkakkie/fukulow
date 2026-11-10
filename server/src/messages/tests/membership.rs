@@ -93,9 +93,10 @@ async fn deactivation_after_auth_is_organization_unavailable_for_history_and_sen
         );
         let response = send_message(
             State(state),
-            send_auth,
+            DeferredOrganizationAuth(Some(send_auth)),
             Ok(Path((organization, channel))),
             ApiJson(SendMessageRequest {
+                reply_to: None,
                 topic_name: None,
                 client_message_id: Uuid::new_v4(),
                 body: "denied".into(),
@@ -148,6 +149,7 @@ async fn queued_send_rechecks_member_revision_and_private_grant_after_begin(pool
             (sender, 0),
             channel,
             SendMessageRequest {
+                reply_to: None,
                 topic_name: None,
                 client_message_id: key,
                 body: "must not commit".into(),

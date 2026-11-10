@@ -109,7 +109,7 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
     assert!(queue.events.try_recv().is_err());
 }
 
-async fn waiting(pool: &PgPool, pid: i32) {
+pub(crate) async fn waiting(pool: &PgPool, pid: i32) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let blocked: bool = sqlx::query_scalar(
@@ -369,6 +369,12 @@ async fn topic_migration_preserves_existing_messages_as_null(pool: PgPool) {
         .unwrap();
     sqlx::raw_sql(include_str!(
         "../../../../migrations/202611110001_topics.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/202611110198_replies.sql"
     ))
     .execute(&pool)
     .await

@@ -135,7 +135,7 @@ function plannedTerm(value: Json, path: string, delivery = false, controller = f
   for (const [key, item] of Object.entries(value)) {
     if (plannedKeys.has(key) && !(controller && ['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position'].includes(key))) return `${path}.${key}`
     if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !controller && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5'].includes(String(r))) && !(delivery && ['P2', 'P5'].includes(String(r))))) return `${path}.covers`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7'].includes(String(r))))) return `${path}.covers`
     const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery, controller)
     if (found) return found
   }
@@ -247,6 +247,7 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
       case 'post':
         member(step.as)
         checkChannel(step.channel, at, false)
+        if (typeof step.reply_to === 'string' && !postLabels.has(step.reply_to)) errors.push(`${at}: reply_to ${step.reply_to} is not a label of an earlier post`)
         if (typeof step.label === 'string') {
           if (postLabels.has(step.label)) errors.push(`${at}: duplicate post label ${step.label}`)
           postLabels.add(step.label)
@@ -274,6 +275,17 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
         checkChannel(step.channel, at)
         checkSeqList((step.expect as Record<string, Json>).seqs, `${at}.expect.seqs`, errors)
         break
+      case 'reply_chain': {
+        member(step.as)
+        checkChannel(step.channel, at, false)
+        const expected = step.expect as Record<string, Json>
+        for (const key of ['anchor', 'root']) {
+          const label = key === 'anchor' ? step.anchor : expected.root
+          if (typeof label === 'string' && !postLabels.has(label)) errors.push(`${at}: ${key} ${label} is not a label of an earlier post`)
+        }
+        checkSeqList(expected.seqs, `${at}.expect.seqs`, errors)
+        break
+      }
       case 'main_timeline':
         member(step.as)
         checkChannel(step.channel, at, false)

@@ -33,7 +33,9 @@ function isMessage(value: unknown): value is Message {
   return isObject(value) && typeof value.channel_id === 'string' && isSequence(value.seq, 1) &&
     typeof value.id === 'string' && typeof value.sender === 'string' &&
     typeof value.client_message_id === 'string' && typeof value.body === 'string' &&
-    typeof value.created_at === 'string' && (value.topic_id === null || typeof value.topic_id === 'string')
+    typeof value.created_at === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') &&
+    (value.reply_to === null || typeof value.reply_to === 'string') &&
+    (value.reply_root_id === null || typeof value.reply_root_id === 'string')
 }
 
 function isServerEvent(value: unknown): value is ServerEvent {
