@@ -8,21 +8,25 @@ import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwo
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 
-const identity = (id: string) => ({
-  member: { id, email: `${id}@example.com`, name: id, role: 'owner' as const },
+const member = (id: string) => ({
+  member: { id, name: id, role: 'owner' as const },
   organization: { organization_id: 'o', name: 'Org' },
 })
+
+const identity = (id: string) => ({ account: { id, email: `${id}@example.com` }, organizations: [{ organization_id: 'o', name: 'Org' }] })
 
 /** Real controllers on fake transports; each opened session gets its own network, like a real page would. */
 function stack(over: Partial<AuthDeps> = {}) {
   const nets: FakeNetwork[] = []
   const ended: (() => void)[] = []
   const closes: ReturnType<typeof vi.fn>[] = []
+  let signedIn = 'owner'
   const deps: AuthDeps = {
     restore: vi.fn(async () => ({ screen: 'signin' as const })),
-    signIn: vi.fn(async (email: string) => ok({ identity: identity(email.split('@')[0]) }) as never),
+    signIn: vi.fn(async (email: string) => { signedIn = email.split('@')[0]; return ok({ identity: identity(signedIn) }) as never }),
     setupAndSignIn: vi.fn(),
     signOut: vi.fn(async () => true),
+    getOrganization: vi.fn(async () => ok(member(signedIn))),
     openSession(selfId, onEnded): SessionModel {
       const net = fakeNetwork()
       nets.push(net)
@@ -259,4 +263,119 @@ describe('auth adapter: a new session never shows the old one', () => {
     expect(first.history).toEqual([])
     expect(second.history.map((h) => h.channel)).toEqual(['mine'])
   })
+})
+
+describe('Organization selection fences data within one Account Session', () => {
+  it('late Messages, send ACKs and Channel REST responses cannot change the selected Organization', async () => {
+    const s = stack()
+    await signInAs(s, 'm1')
+    const first = await openChannelA(s)
+    void s.auth.session!.sync.channel('A').send('old Organization')
+    const oldList = s.auth.session!.channels.load()
+    await settle()
+    await s.auth.selectOrganization('other')
+    const second = s.nets[1]
+    second.lists[0].resolve(ok({ channels: [channel('B')] }))
+    await settle()
+    first.sends[0].resolve(ok(sentBy('m1', 101, 'm1-c1', 'old Organization')))
+    first.socket.onEvent({ type: 'message', message: record(102) })
+    first.lists[1].resolve(ok({ channels: [channel('old-only')] }))
+    await oldList
+    await settle()
+    expect(first.socket.closed).toBe(true)
+    expect(s.auth.selectedOrganizationId).toBe('other')
+    expect(s.auth.session!.channels.state.channels.map(c => c.id)).toEqual(['B'])
+    expect(s.auth.session!.sync.channel('A').timeline).toMatchObject({ messages: [], pending: [] })
+    expect(s.auth.view.screen).toBe('app')
+  })
+
+  it('a late send 401 after a switch still signs out the same Account Session', async () => {
+    const s = stack()
+    await signInAs(s, 'm1')
+    const first = await openChannelA(s)
+    void s.auth.session!.sync.channel('A').send('old request')
+    await settle()
+    await s.auth.selectOrganization('other')
+    first.sends[0].resolve({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(s.auth.view).toMatchObject({ screen: 'signin', notice: expect.any(String) })
+    expect(s.auth.session).toBeNull()
+    expect(s.nets[1].socket.closed).toBe(true)
+  })
+
+  it('a late Channel REST 401 after a switch still signs out the same Account Session', async () => {
+    const s = stack()
+    await signInAs(s, 'm1')
+    const first = s.nets[0]
+    await s.auth.selectOrganization('other')
+    first.lists[0].resolve({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(s.auth.view.screen).toBe('signin')
+  })
+
+  it('a late 401 from a replaced Account Session is ignored', async () => {
+    const s = stack()
+    await signInAs(s, 'm1')
+    const first = await openChannelA(s)
+    void s.auth.session!.sync.channel('A').send('old account')
+    await settle()
+    await signInAs(s, 'm2')
+    first.sends[0].resolve({ ok: false, kind: 'http', status: 401 })
+    first.lists[0].resolve({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(s.auth.view.screen).toBe('app')
+    expect(s.nets[1].socket.closed).toBe(false)
+  })
+
+  it('Membership loss is terminal only for its Organization and switching to another remains possible', async () => {
+    const s = stack()
+    await signInAs(s, 'm1')
+    const first = await openChannelA(s)
+    first.socket.onClose(4003)
+    await settle()
+    expect(s.auth.organizationStatus).toBe('unavailable')
+    expect(s.auth.view.screen).toBe('app')
+    await s.auth.selectOrganization('other')
+    expect(s.auth.organizationStatus).toBe('ready')
+    expect(s.nets).toHaveLength(2)
+    await s.auth.selectOrganization('o')
+    expect(s.auth.organizationStatus).toBe('unavailable')
+    expect(s.nets).toHaveLength(2)
+  })
+})
+
+it('a late Organization identity response is fenced after switching, but its same-Account 401 remains authoritative', async () => {
+  let resolve!: (result: Awaited<ReturnType<AuthDeps['getOrganization']>>) => void
+  const s = stack({ getOrganization: vi.fn(async (id: string): ReturnType<AuthDeps['getOrganization']> => id === 'held'
+    ? new Promise(r => { resolve = r }) : ok(member('m1'))) })
+  await signInAs(s, 'm1')
+  const old = s.auth.selectOrganization('held')
+  await s.auth.selectOrganization('other')
+  resolve(ok({ ...member('old'), organization: { organization_id: 'held', name: 'Old' } }))
+  await old
+  expect(s.auth.selectedOrganizationId).toBe('other')
+  expect(s.auth.organization!.member.id).toBe('m1')
+  expect(s.nets).toHaveLength(2)
+
+  const unauthorized = s.auth.selectOrganization('held')
+  await s.auth.selectOrganization('other')
+  resolve({ ok: false, kind: 'http', status: 401 })
+  await unauthorized
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.session).toBeNull()
+})
+
+it('a new Account with no Organizations clears the previous unavailable Organization status', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  s.nets[0].socket.onClose(4003)
+  await settle()
+  expect(s.auth.organizationStatus).toBe('unavailable')
+  vi.mocked(s.deps.signIn).mockResolvedValueOnce(ok({ identity: { account: { id: 'empty', email: 'empty@example.com' }, organizations: [] } }) as never)
+  await signInAs(s, 'empty')
+  expect(s.auth.view.screen).toBe('app')
+  expect(s.auth.organizationStatus).toBe('loading')
+  expect(s.auth.organization).toBeNull()
+  expect(s.auth.selectedOrganizationId).toBe('')
+  expect(s.auth.session).toBeNull()
 })

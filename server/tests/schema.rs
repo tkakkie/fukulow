@@ -21,7 +21,9 @@ async fn check_organization_ids(pool: &PgPool) -> Result<(), String> {
            AND t.table_schema !~ '^pg_'
            AND NOT (t.table_schema = 'public' AND t.table_name IN (
                'organizations', -- Tenant root, not owned by another organization.
-               '_sqlx_migrations' -- SQLx bookkeeping shared by all organizations.
+               '_sqlx_migrations', -- SQLx bookkeeping shared by all organizations.
+               'accounts', -- Global authentication identities.
+               'account_sessions' -- Global credentials for one Account.
            ))
            AND NOT EXISTS (
                SELECT 1 FROM information_schema.columns c
@@ -83,27 +85,23 @@ async fn session_indexes(pool: &PgPool) -> Result<Vec<Index>, sqlx::Error> {
          FROM pg_index i \
          JOIN pg_class c ON c.oid = i.indexrelid \
          JOIN pg_am am ON am.oid = c.relam \
-         WHERE i.indrelid = 'public.sessions'::regclass ORDER BY c.relname",
+         WHERE i.indrelid = 'public.account_sessions'::regclass ORDER BY c.relname",
     )
     .fetch_all(pool)
     .await
 }
 
 #[sqlx::test(migrations = false)]
-async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expiry(pool: PgPool) {
+async fn session_indexes_keep_primary_key_and_global_expiry(pool: PgPool) {
     migrate(&pool).await.unwrap();
     assert_eq!(
         session_indexes(&pool).await.unwrap(),
         vec![
             Index {
-                name: "sessions_organization_expiry".into(),
-                key_columns: vec![
-                    "organization_id".into(),
-                    "expires_at".into(),
-                    "token_hash".into()
-                ],
-                total_attributes: 3,
-                options: vec![0, 0, 0],
+                name: "account_sessions_account_id".into(),
+                key_columns: vec!["account_id".into()],
+                total_attributes: 1,
+                options: vec![0],
                 nulls_not_distinct: false,
                 is_unique: false,
                 is_primary: false,
@@ -113,10 +111,23 @@ async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expir
                 method: "btree".into(),
             },
             Index {
-                name: "sessions_pkey".into(),
-                key_columns: vec!["organization_id".into(), "token_hash".into()],
+                name: "account_sessions_expiry".into(),
+                key_columns: vec!["expires_at".into(), "token_hash".into()],
                 total_attributes: 2,
                 options: vec![0, 0],
+                nulls_not_distinct: false,
+                is_unique: false,
+                is_primary: false,
+                has_predicate: false,
+                has_expressions: false,
+                is_valid: true,
+                method: "btree".into(),
+            },
+            Index {
+                name: "account_sessions_pkey".into(),
+                key_columns: vec!["token_hash".into()],
+                total_attributes: 1,
+                options: vec![0],
                 nulls_not_distinct: false,
                 is_unique: true,
                 is_primary: true,
@@ -127,17 +138,26 @@ async fn session_indexes_keep_primary_key_and_scoped_expiry_without_global_expir
             },
         ]
     );
+    let member_index: String = sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND tablename='users' AND indexname='users_account_id'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        member_index,
+        "CREATE INDEX users_account_id ON public.users USING btree (account_id)"
+    );
     let primary_key: (String, String) = sqlx::query_as(
         "SELECT c.conname::text, i.relname::text FROM pg_constraint c \
          JOIN pg_class i ON i.oid = c.conindid \
-         WHERE c.conrelid = 'public.sessions'::regclass AND c.contype = 'p'",
+         WHERE c.conrelid = 'public.account_sessions'::regclass AND c.contype = 'p'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(
         primary_key,
-        ("sessions_pkey".into(), "sessions_pkey".into())
+        (
+            "account_sessions_pkey".into(),
+            "account_sessions_pkey".into()
+        )
     );
 }
 
@@ -146,14 +166,14 @@ async fn session_index_check_distinguishes_include_sort_and_null_changes(pool: P
     migrate(&pool).await.unwrap();
     let original = session_indexes(&pool).await.unwrap();
     for definition in [
-        "(organization_id, expires_at, token_hash) INCLUDE (user_id)",
-        "(organization_id DESC, expires_at, token_hash)",
-        "(organization_id NULLS FIRST, expires_at, token_hash)",
-        "(organization_id, expires_at, token_hash) NULLS NOT DISTINCT",
+        "(expires_at, token_hash) INCLUDE (account_id)",
+        "(expires_at DESC, token_hash)",
+        "(expires_at NULLS FIRST, token_hash)",
+        "(expires_at, token_hash) NULLS NOT DISTINCT",
     ] {
         sqlx::raw_sql(&format!(
-            "DROP INDEX sessions_organization_expiry; \
-             CREATE INDEX sessions_organization_expiry ON sessions {definition}"
+            "DROP INDEX account_sessions_expiry; \
+             CREATE INDEX account_sessions_expiry ON account_sessions {definition}"
         ))
         .execute(&pool)
         .await
@@ -165,9 +185,9 @@ async fn session_index_check_distinguishes_include_sort_and_null_changes(pool: P
         );
     }
     sqlx::raw_sql(
-        "DROP INDEX sessions_organization_expiry; \
-         CREATE INDEX sessions_organization_expiry \
-         ON sessions (organization_id, expires_at, token_hash)",
+        "DROP INDEX account_sessions_expiry; \
+         CREATE INDEX account_sessions_expiry \
+         ON account_sessions (expires_at, token_hash)",
     )
     .execute(&pool)
     .await
@@ -185,6 +205,8 @@ async fn schema_guard_rejects_missing_and_nullable_organization_id(pool: PgPool)
          CREATE SCHEMA other;
          CREATE TABLE other.organizations (id uuid PRIMARY KEY);
          CREATE TABLE other._sqlx_migrations (id bigint PRIMARY KEY);
+         CREATE TABLE other.accounts (id uuid PRIMARY KEY);
+         CREATE TABLE other.account_sessions (id uuid PRIMARY KEY);
          CREATE TABLE other.valid (organization_id uuid NOT NULL);",
     )
     .execute(&pool)
@@ -193,12 +215,14 @@ async fn schema_guard_rejects_missing_and_nullable_organization_id(pool: PgPool)
 
     assert_eq!(
         check_organization_ids(&pool).await.unwrap_err(),
-        "tables missing NOT NULL organization_id: [(\"other\", \"_sqlx_migrations\"), (\"other\", \"organizations\"), (\"public\", \"missing_organization\"), (\"public\", \"nullable_organization\")]"
+        "tables missing NOT NULL organization_id: [(\"other\", \"_sqlx_migrations\"), (\"other\", \"account_sessions\"), (\"other\", \"accounts\"), (\"other\", \"organizations\"), (\"public\", \"missing_organization\"), (\"public\", \"nullable_organization\")]"
     );
 
     sqlx::raw_sql(
         "ALTER TABLE missing_organization ADD COLUMN organization_id uuid NOT NULL;
          ALTER TABLE nullable_organization ALTER COLUMN organization_id SET NOT NULL;
+         ALTER TABLE other.accounts ADD COLUMN organization_id uuid NOT NULL;
+         ALTER TABLE other.account_sessions ADD COLUMN organization_id uuid NOT NULL;
          ALTER TABLE other.organizations ADD COLUMN organization_id uuid NOT NULL;
          ALTER TABLE other._sqlx_migrations ADD COLUMN organization_id uuid NOT NULL;",
     )

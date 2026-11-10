@@ -2,7 +2,7 @@ use super::Auth;
 use crate::AppState;
 use sqlx::PgPool;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
@@ -17,11 +17,16 @@ type SessionKey = (Uuid, Vec<u8>);
 struct SessionStatus {
     revoked: bool,
     failed: bool,
+    membership_revoked: bool,
+    account_id: Uuid,
+    membership_revision: i64,
 }
 
 #[derive(Default)]
 struct Sessions {
     entries: HashMap<SessionKey, watch::Sender<SessionStatus>>,
+    by_token: HashMap<Vec<u8>, HashSet<SessionKey>>,
+    by_member: HashMap<(Uuid, Uuid), HashSet<SessionKey>>,
     unavailable: bool,
 }
 
@@ -65,35 +70,130 @@ impl Default for SessionChanges {
 }
 
 impl SessionChanges {
+    #[cfg(test)]
     fn register(&self, key: SessionKey) -> Registration {
+        self.register_member(key, Uuid::nil(), 0)
+    }
+
+    fn register_member(
+        &self,
+        key: SessionKey,
+        account_id: Uuid,
+        membership_revision: i64,
+    ) -> Registration {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let unavailable = sessions.unavailable;
-        let signal = sessions
-            .entries
-            .entry(key.clone())
-            .or_insert_with(|| watch::channel(SessionStatus::default()).0);
+        let signal = sessions.entries.entry(key.clone()).or_insert_with(|| {
+            watch::channel(SessionStatus {
+                account_id,
+                membership_revision,
+                ..SessionStatus::default()
+            })
+            .0
+        });
         let status = *signal.borrow();
-        if status.failed && !status.revoked {
+        if !status.revoked
+            && status.account_id == account_id
+            && membership_revision < status.membership_revision
+        {
+            // An upgrade authorized before reactivation must not replace or
+            // revoke an epoch authorized against the newer Membership.
+            let epoch = watch::channel(SessionStatus {
+                account_id,
+                membership_revision,
+                membership_revoked: true,
+                failed: unavailable,
+                ..SessionStatus::default()
+            })
+            .0;
+            return Registration {
+                changed: epoch.subscribe(),
+                guard: RegistrationGuard {
+                    registry: self.clone(),
+                    key,
+                    epoch,
+                },
+            };
+        }
+        if !status.revoked
+            && ((status.failed && !status.membership_revoked)
+                || status.account_id != account_id
+                || status.membership_revision != membership_revision)
+        {
             // Old sockets and in-flight passes keep their original sender.
-            *signal = watch::channel(SessionStatus::default()).0;
+            if status.account_id != account_id || status.membership_revision != membership_revision
+            {
+                signal.send_modify(|status| status.membership_revoked = true);
+            }
+            *signal = watch::channel(SessionStatus {
+                account_id,
+                membership_revision,
+                ..SessionStatus::default()
+            })
+            .0;
         }
         if unavailable {
             signal.send_modify(|status| status.failed = true);
         }
+        let epoch = signal.clone();
+        let changed = signal.subscribe();
+        let account_id = signal.borrow().account_id;
+        if status.account_id != account_id {
+            remove_index(&mut sessions.by_member, &(key.0, status.account_id), &key);
+        }
+        sessions
+            .by_token
+            .entry(key.1.clone())
+            .or_default()
+            .insert(key.clone());
+        sessions
+            .by_member
+            .entry((key.0, account_id))
+            .or_default()
+            .insert(key.clone());
         Registration {
-            changed: signal.subscribe(),
+            changed,
             guard: RegistrationGuard {
                 registry: self.clone(),
                 key,
-                epoch: signal.clone(),
+                epoch,
             },
         }
     }
 
-    pub(super) fn revoked(&self, organization: Uuid, hash: Vec<u8>) {
+    pub(super) fn revoked(&self, hash: Vec<u8>) {
         let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(signal) = sessions.entries.get(&(organization, hash)) {
-            signal.send_modify(|status| status.revoked = true);
+        if let Some(keys) = sessions.by_token.get(&hash) {
+            for key in keys {
+                if let Some(signal) = sessions.entries.get(key) {
+                    signal.send_modify(|status| status.revoked = true);
+                }
+            }
+        }
+    }
+    pub(super) fn membership_revoked(&self, organization: Uuid, account_id: Uuid, revision: i64) {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(keys) = sessions.by_member.get(&(organization, account_id)) {
+            for key in keys {
+                if let Some(signal) = sessions.entries.get(key)
+                    && signal.borrow().membership_revision < revision
+                {
+                    signal.send_modify(|status| status.membership_revoked = true);
+                }
+            }
+        }
+    }
+}
+
+fn remove_index<K: Eq + std::hash::Hash>(
+    index: &mut HashMap<K, HashSet<SessionKey>>,
+    key: &K,
+    session: &SessionKey,
+) {
+    if let Some(entries) = index.get_mut(key) {
+        entries.remove(session);
+        if entries.is_empty() {
+            index.remove(key);
         }
     }
 }
@@ -121,30 +221,45 @@ impl Drop for RegistrationGuard {
             .get(&self.key)
             .is_some_and(|signal| signal.same_channel(&self.epoch) && signal.receiver_count() == 0)
         {
+            let account_id = self.epoch.borrow().account_id;
             sessions.entries.remove(&self.key);
+            remove_index(&mut sessions.by_token, &self.key.1, &self.key);
+            remove_index(
+                &mut sessions.by_member,
+                &(self.key.0, account_id),
+                &self.key,
+            );
         }
     }
 }
 pub(crate) struct SessionWatch {
     registration: Registration,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
-async fn deadline(pool: &PgPool, key: &SessionKey) -> Result<Option<Instant>, sqlx::Error> {
+async fn deadline(
+    pool: &PgPool,
+    key: &SessionKey,
+    account: Uuid,
+    revision: i64,
+) -> Result<(Option<Instant>, bool), sqlx::Error> {
     let checked_at = Instant::now();
-    let remaining = tokio::time::timeout(
-        CHECK_TIMEOUT,
-        sqlx::query_scalar::<_, f64>(
-            "SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 \
-             FROM sessions WHERE organization_id = $1 AND token_hash = $2 AND expires_at > clock_timestamp()",
-        ).bind(key.0).bind(&key.1).fetch_optional(pool),
-    ).await.map_err(|_| sqlx::Error::PoolTimedOut)??;
-    Ok(remaining
-        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-        .map(|seconds| {
-            // Count SQL latency conservatively: never extend a session past its DB expiry.
-            checked_at + Duration::from_secs_f64(seconds.min(f64::from(super::SESSION_SECONDS)))
-        }))
+    let row = tokio::time::timeout(CHECK_TIMEOUT, sqlx::query_as::<_, (f64, bool)>(
+        "SELECT EXTRACT(EPOCH FROM (s.expires_at - clock_timestamp()))::float8, \
+         COALESCE(u.deactivated_at IS NULL AND u.membership_revision = $4 AND u.account_id = $3, false) \
+         FROM account_sessions s LEFT JOIN users u ON u.account_id = s.account_id AND u.organization_id = $1 \
+         WHERE s.token_hash = $2 AND s.expires_at > clock_timestamp()"
+    ).bind(key.0).bind(&key.1).bind(account).bind(revision).fetch_optional(pool)).await.map_err(|_| sqlx::Error::PoolTimedOut)??;
+    Ok(match row {
+        Some((seconds, active)) if seconds.is_finite() && seconds > 0.0 => (
+            Some(
+                checked_at
+                    + Duration::from_secs_f64(seconds.min(f64::from(super::SESSION_SECONDS))),
+            ),
+            active,
+        ),
+        _ => (None, false),
+    })
 }
 
 impl Auth {
@@ -154,13 +269,23 @@ impl Auth {
         state: &AppState,
     ) -> Result<Option<SessionWatch>, sqlx::Error> {
         state.session_changes.start_rechecks(&state.pool);
-        let registration = state.session_changes.register((
-            self.identity.organization.organization_id,
-            self.token_hash.clone(),
-        ));
+        let registration = state.session_changes.register_member(
+            (
+                self.identity.organization.organization_id,
+                self.token_hash.clone(),
+            ),
+            self.account_id,
+            self.membership_revision,
+        );
         let status = *registration.changed.borrow();
         if status.revoked {
             return Ok(None);
+        }
+        if status.membership_revoked {
+            return Ok(Some(SessionWatch {
+                registration,
+                deadline: None,
+            }));
         }
         if status.failed {
             return Err(sqlx::Error::PoolClosed);
@@ -170,7 +295,19 @@ impl Auth {
             .session_changes
             .pause_check(tests::Phase::Registered)
             .await;
-        let deadline = deadline(&state.pool, &registration.guard.key).await?;
+        let checked = deadline(
+            &state.pool,
+            &registration.guard.key,
+            self.account_id,
+            self.membership_revision,
+        )
+        .await;
+        if matches!(checked, Ok((Some(_), false))) {
+            registration
+                .guard
+                .epoch
+                .send_modify(|status| status.membership_revoked = true);
+        }
         #[cfg(test)]
         state
             .session_changes
@@ -180,24 +317,36 @@ impl Auth {
         if status.revoked {
             return Ok(None);
         }
+        if status.membership_revoked {
+            return Ok(Some(SessionWatch {
+                registration,
+                deadline: checked.as_ref().ok().and_then(|(deadline, _)| *deadline),
+            }));
+        }
         if status.failed {
             return Err(sqlx::Error::PoolClosed);
         }
-        Ok(deadline.map(|deadline| SessionWatch {
+        Ok(checked?.0.map(|deadline| SessionWatch {
             registration,
-            deadline,
+            deadline: Some(deadline),
         }))
     }
 }
 
 impl SessionWatch {
-    pub(crate) async fn ended(&mut self) -> Result<(), sqlx::Error> {
+    pub(crate) async fn ended(&mut self) -> Result<u16, sqlx::Error> {
         tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(self.deadline) => Ok(()),
-            status = self.registration.changed.wait_for(|status| status.revoked || status.failed) => {
+            _ = async {
+                match self.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => Ok(4001),
+            status = self.registration.changed.wait_for(|status| status.revoked || status.membership_revoked || status.failed) => {
                 match status {
-                    Ok(status) if status.revoked => Ok(()),
+                    Ok(status) if status.revoked => Ok(4001),
+                    Ok(status) if status.membership_revoked => Ok(4003),
                     _ => Err(sqlx::Error::PoolTimedOut),
                 }
             }

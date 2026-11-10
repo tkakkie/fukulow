@@ -10,6 +10,8 @@ export type TimelineApi = {
 type Wait = Extract<Effect, { type: 'wait' }>
 export type SyncOptions = {
   selfId: string
+  organizationId?: string
+  checkMembership?: () => Promise<Result<unknown>>
   api?: TimelineApi
   connect?: (handlers: RealtimeHandlers) => Connection
   newId?: () => string
@@ -30,8 +32,11 @@ export type TimelineState = {
 
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
-  const transport = options.api ?? api
-  const connect = options.connect ?? connectRealtime
+  const transport = options.api ?? {
+    listMessages: (channel: string, query?: ListMessagesQuery) => api.listMessages(options.organizationId ?? '', channel, query),
+    sendMessage: (channel: string, body: SendMessageRequest) => api.sendMessage(options.organizationId ?? '', channel, body),
+  }
+  const connect = options.connect ?? (handlers => connectRealtime(handlers, undefined, options.organizationId))
   const newId = options.newId ?? (() => crypto.randomUUID())
   const delay = options.delay ?? (n => Math.min(10_000, 500 * 2 ** Math.min(n, 5)))
   const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms))
@@ -79,10 +84,11 @@ export function createSync(options: SyncOptions) {
       case 'connect': {
         socket?.transport.close()
         try {
+          let opened = false
           const subscriptions = new Map<string, number[]>()
           const confirmed = new Map<string, number>()
           const transport = connect({
-            onReady: () => { void dispatch({ type: 'connection_ready', connection: effect.id }) },
+            onReady: () => { opened = true; void dispatch({ type: 'connection_ready', connection: effect.id }) },
             onEvent: event => {
               const isReply = event.type === 'subscribed' || (event.type === 'error' &&
                 (event.code === 'channel_not_found' || event.code === 'subscription_limit'))
@@ -114,7 +120,18 @@ export function createSync(options: SyncOptions) {
               }
               void dispatch({ type: 'event', connection: effect.id, event, subscription })
             },
-            onClose: code => { void dispatch({ type: 'socket_closed', connection: effect.id, code }) },
+            onClose: code => {
+              if (opened || !options.checkMembership) {
+                void dispatch({ type: 'socket_closed', connection: effect.id, code }); return
+              }
+              // Browsers hide rejected upgrade responses. Only REST can establish Membership loss.
+              void request(effect.id, options.checkMembership).then(result => {
+                if (state.connection !== effect.id || !state.running) return
+                if (api.isOrganizationUnavailable(result)) void dispatch({ type: 'organization_unavailable' })
+                else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
+                else void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
+              }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
+            },
           })
           socket = { transport, subscriptions }
         } catch { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) }
@@ -194,7 +211,7 @@ export function createSync(options: SyncOptions) {
       loadOlder: () => dispatch({ type: 'load_older', channel }),
       async send(body: string) {
         const text = body.trim()
-        if (!text) return false
+        if (!text || !state.running || state.organization === 'unavailable') return false
         const clientMessageId = newId()
         const completion = dispatch({ type: 'user_send', channel, clientMessageId, body: text })
         const accepted = state.channels[channel]?.pending.some(p => p.clientMessageId === clientMessageId) ?? false
@@ -214,6 +231,7 @@ export function createSync(options: SyncOptions) {
     watch: (channel: string) => dispatch({ type: 'watch', channel }),
     unwatch: (channel: string) => dispatch({ type: 'unwatch', channel }),
     close: () => dispatch({ type: 'stop' }),
+    unavailable: () => dispatch({ type: 'organization_unavailable' }),
     getTimeline(channel: string) {
       let t = timelines.get(channel)
       if (!t) { t = timeline(channel); timelines.set(channel, t) }

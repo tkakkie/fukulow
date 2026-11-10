@@ -2,7 +2,7 @@ use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn connect(address: std::net::SocketAddr, token: &str) -> Client {
-    let mut request = format!("ws://{address}/api/v1/ws")
+    let mut request = format!("ws://{address}{}", scoped_path("/api/v1/ws", token))
         .into_client_request()
         .unwrap();
     request.headers_mut().insert(
@@ -52,9 +52,10 @@ async fn http_status(
     stream
         .write_all(
             format!(
-                "{method} /api/v1/channels/{channel}/messages HTTP/1.1\r\nHost: {address}\r\n\
+                "{method} {} HTTP/1.1\r\nHost: {address}\r\n\
                  Authorization: Bearer {token}\r\nContent-Type: application/json\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                scoped_path(&format!("/api/v1/channels/{channel}/messages"), token),
                 body.len()
             )
             .as_bytes(),

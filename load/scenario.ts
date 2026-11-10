@@ -69,7 +69,7 @@ export const options: Options = {
   },
 };
 
-type Setup = { token: string; tokens: string[]; channelIds: string[] };
+type Setup = { token: string; tokens: string[]; channelIds: string[]; organizationId: string };
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function params(operation: string, token?: string): Params {
@@ -94,10 +94,12 @@ export function setup(): Setup {
       organization_name: 'Load test', setup_token: __ENV.LOAD_SETUP_TOKEN };
     requireStatus(http.post(`${baseUrl}/api/v1/setup`, JSON.stringify(body), params('setup')), 201, 'setup');
   }
-  const body: SignInRequest = { email, password, organization_id: __ENV.LOAD_ORGANIZATION_ID };
+  const body: SignInRequest = { email, password };
   const response = http.post(`${baseUrl}/api/v1/session`, JSON.stringify(body), params('sign_in'));
   requireStatus(response, 200, 'sign_in');
-  const { token } = response.json() as SessionResponse;
+  const { token, identity } = response.json() as SessionResponse;
+  const organizationId = __ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id;
+  if (!organizationId || !identity.organizations.some((organization) => organization.organization_id === organizationId)) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
   const tokens = [token];
   try {
     for (let i = 1; i < Math.ceil(channels * subscribers / socketsPerSession); i++) {
@@ -107,15 +109,15 @@ export function setup(): Setup {
     }
     const channelIds = Array.from({ length: channels }, (_, index) => {
       const body: CreateChannelRequest = { name: `load-${Date.now()}-${index}`, visibility };
-      const response = http.post(`${baseUrl}/api/v1/channels`, JSON.stringify(body), params('create_channel', token));
+      const response = http.post(`${baseUrl}/api/v1/orgs/${organizationId}/channels`, JSON.stringify(body), params('create_channel', token));
       requireStatus(response, 201, 'create_channel');
       return (response.json() as Channel).id;
     });
-    return { token, tokens, channelIds };
+    return { token, tokens, channelIds, organizationId };
   } catch (error) {
     // k6 skips teardown when setup fails; retain the provisioning error if sign-out also fails.
     try {
-      teardown({ token, tokens, channelIds: [] });
+      teardown({ token, tokens, channelIds: [], organizationId });
     } catch {
       console.error('Failed to revoke session after setup failure');
     }
@@ -156,7 +158,7 @@ export default async function (data: Setup): Promise<void> {
   function connect(channelId: string, channel: number): void {
     const tags = { channel: String(channel) };
     subscriptions.add(0, tags);
-    const socket = new WebSocket(`${baseUrl.replace(/^http/, 'ws')}/api/v1/ws`, null,
+    const socket = new WebSocket(`${baseUrl.replace(/^http/, 'ws')}/api/v1/orgs/${data.organizationId}/ws`, null,
       { headers: { Authorization: `Bearer ${data.tokens[sessionIndex(sockets.length, socketsPerSession)]}` }, tags: { name: 'subscribe' } });
     sockets.push(socket);
     let opened = false;
@@ -214,7 +216,7 @@ export default async function (data: Setup): Promise<void> {
     peakPublishes = Math.max(peakPublishes, activePublishes);
     const started = Date.now();
     try {
-      const response = await http.asyncRequest('POST', `${baseUrl}/api/v1/channels/${channelId}/messages`,
+      const response = await http.asyncRequest('POST', `${baseUrl}/api/v1/orgs/${data.organizationId}/channels/${channelId}/messages`,
         JSON.stringify(body), params('publish', data.token));
       publishResponseTime.add(Date.now() - started, { channel: String(channel) });
       requireStatus(response, 201, 'send_message');

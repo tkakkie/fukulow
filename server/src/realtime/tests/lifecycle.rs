@@ -11,7 +11,7 @@ async fn lifecycle_socket(f: &Fixture) -> (Server, Client, oneshot::Receiver<()>
     let done = Arc::new(Mutex::new(Some(done)));
     let router = Router::new()
         .route(
-            "/api/v1/ws",
+            "/api/v1/orgs/{org}/ws",
             axum::routing::get(
                 move |State(state): State<AppState>, auth: Auth, ws: WebSocketUpgrade| {
                     let done = done.clone();

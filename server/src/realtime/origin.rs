@@ -1,4 +1,36 @@
-use axum::http::{HeaderMap, Uri, header};
+use crate::{AppState, auth::ErrorBody};
+use axum::{
+    Json,
+    response::{IntoResponse, Response},
+};
+use axum::{
+    extract::FromRequestParts,
+    http::{HeaderMap, StatusCode, Uri, header, request::Parts},
+};
+
+pub struct CheckedOrigin;
+impl FromRequestParts<AppState> for CheckedOrigin {
+    type Rejection = Response;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        if !state
+            .ws_allowed_origins
+            .permits(&parts.headers, state.cookie_secure)
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(ErrorBody {
+                    error: "origin_not_allowed".into(),
+                }),
+            )
+                .into_response());
+        }
+        Ok(Self)
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct AllowedOrigins(Vec<Origin>);

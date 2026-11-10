@@ -187,7 +187,10 @@ async fn definite_commit_failure_does_not_signal_or_consume_sequence(pool: PgPoo
     let mut socket = f.server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
     ready(&mut socket, f.channel, 0).await;
-    let mut queue = f.state.message_delivery.queue(f.organization, f.member, 1);
+    let mut queue = f
+        .state
+        .message_delivery
+        .queue(f.organization, (f.member, 0), 1);
     queue.subscribe(f.channel);
     sqlx::raw_sql(
         "CREATE FUNCTION reject_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \

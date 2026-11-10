@@ -10,14 +10,13 @@ use axum::{
     http::{HeaderMap, HeaderName},
 };
 use tokio::time::Instant;
-use uuid::Uuid;
 
 const WINDOW: Duration = Duration::from_secs(60);
 const IP_LIMIT: u32 = 20;
 const ACCOUNT_LIMIT: u32 = 5;
 const MAX_KEYS: usize = 10_000;
 
-type Account = (Uuid, String);
+type Account = String;
 
 #[derive(Clone, Default)]
 pub struct SignInThrottle {
@@ -185,8 +184,8 @@ pub(super) struct Attempt {
 }
 
 impl Attempt {
-    pub(super) fn account(&mut self, organization: Uuid, email: String) -> Result<(), Duration> {
-        let account = (organization, email);
+    pub(super) fn account(&mut self, email: String) -> Result<(), Duration> {
+        let account = email;
         reserve(
             &mut self.throttle.lock().accounts,
             account.clone(),
@@ -240,96 +239,62 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn failures_expire_and_success_does_not_clear_other_failures() {
         let throttle = SignInThrottle::default();
-        let organization = Uuid::new_v4();
         for _ in 0..ACCOUNT_LIMIT - 1 {
             let mut attempt = throttle.begin(ip(1)).unwrap();
-            attempt
-                .account(organization, "owner@example.com".into())
-                .unwrap();
+            attempt.account("owner@example.com".into()).unwrap();
             attempt.failed();
         }
         // A success releases only its own reservation.
         let mut success = throttle.begin(ip(1)).unwrap();
-        success
-            .account(organization, "owner@example.com".into())
-            .unwrap();
+        success.account("owner@example.com".into()).unwrap();
         drop(success);
         let mut attempt = throttle.begin(ip(1)).unwrap();
-        attempt
-            .account(organization, "owner@example.com".into())
-            .unwrap();
+        attempt.account("owner@example.com".into()).unwrap();
         attempt.failed();
         let mut rejected = throttle.begin(ip(2)).unwrap();
-        assert_eq!(
-            rejected.account(organization, "owner@example.com".into()),
-            Err(WINDOW)
-        );
+        assert_eq!(rejected.account("owner@example.com".into()), Err(WINDOW));
         drop(rejected);
         tokio::time::advance(WINDOW - Duration::from_millis(1)).await;
         let mut rejected = throttle.begin(ip(2)).unwrap();
-        assert!(
-            rejected
-                .account(organization, "owner@example.com".into())
-                .is_err()
-        );
+        assert!(rejected.account("owner@example.com".into()).is_err());
         drop(rejected);
         tokio::time::advance(Duration::from_millis(1)).await;
         let mut allowed = throttle.begin(ip(1)).unwrap();
-        allowed
-            .account(organization, "owner@example.com".into())
-            .unwrap();
+        allowed.account("owner@example.com".into()).unwrap();
     }
 
     #[tokio::test(start_paused = true)]
     async fn concurrent_reservations_are_bounded_and_cancellation_releases_them() {
         let throttle = SignInThrottle::default();
-        let organization = Uuid::new_v4();
         let mut attempts = Vec::new();
         for n in 0..ACCOUNT_LIMIT {
             let mut attempt = throttle.begin(ip(n as u8)).unwrap();
-            attempt
-                .account(organization, "owner@example.com".into())
-                .unwrap();
+            attempt.account("owner@example.com".into()).unwrap();
             attempts.push(attempt);
         }
         // Unfinished password work still counts across window boundaries.
         tokio::time::advance(WINDOW).await;
         let mut rejected = throttle.begin(ip(10)).unwrap();
-        assert!(
-            rejected
-                .account(organization, "owner@example.com".into())
-                .is_err()
-        );
+        assert!(rejected.account("owner@example.com".into()).is_err());
         drop(attempts.pop());
-        rejected
-            .account(organization, "owner@example.com".into())
-            .unwrap();
+        rejected.account("owner@example.com".into()).unwrap();
         drop(rejected);
         for attempt in attempts {
             attempt.failed();
         }
         let mut attempt = throttle.begin(ip(10)).unwrap();
-        attempt
-            .account(organization, "owner@example.com".into())
-            .unwrap();
+        attempt.account("owner@example.com".into()).unwrap();
         attempt.failed();
         let mut rejected = throttle.begin(ip(10)).unwrap();
-        assert!(
-            rejected
-                .account(organization, "owner@example.com".into())
-                .is_err()
-        );
+        assert!(rejected.account("owner@example.com".into()).is_err());
     }
 
     #[tokio::test(start_paused = true)]
     async fn ip_budget_is_shared_across_accounts_but_not_ips() {
         let throttle = SignInThrottle::default();
-        let organization = Uuid::new_v4();
         for n in 0..IP_LIMIT {
             let mut attempt = throttle.begin(ip(1)).unwrap();
-            attempt
-                .account(organization, format!("{n}@example.com"))
-                .unwrap();
+            attempt.account(format!("{n}@example.com")).unwrap();
             attempt.failed();
         }
         assert!(throttle.begin(ip(1)).is_err());
@@ -393,9 +358,7 @@ mod tests {
         }
         assert_eq!(throttle.lock().ips.len(), MAX_KEYS);
         let mut attempt = throttle.begin(ip(1)).unwrap();
-        attempt
-            .account(Uuid::new_v4(), "owner@example.com".into())
-            .unwrap();
+        attempt.account("owner@example.com".into()).unwrap();
         assert_eq!(throttle.lock().ips.len(), MAX_KEYS);
         assert!(
             crate::auth::check_password(
@@ -463,27 +426,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn bucket_storage_is_bounded_and_expired_entries_are_purged() {
         let throttle = SignInThrottle::default();
-        let organization = Uuid::new_v4();
         for n in 0..MAX_KEYS {
             let mut attempt = throttle.begin(ip(1)).unwrap();
-            attempt
-                .account(organization, format!("{n}@example.com"))
-                .unwrap();
+            attempt.account(format!("{n}@example.com")).unwrap();
         }
         let mut rejected = throttle.begin(ip(1)).unwrap();
-        assert!(
-            rejected
-                .account(organization, "overflow@example.com".into())
-                .is_err()
-        );
+        assert!(rejected.account("overflow@example.com".into()).is_err());
         assert_eq!(throttle.lock().accounts.len(), MAX_KEYS);
         drop(rejected);
         assert!(throttle.lock().ips.is_empty());
         tokio::time::advance(WINDOW).await;
         let mut allowed = throttle.begin(ip(1)).unwrap();
-        allowed
-            .account(organization, "overflow@example.com".into())
-            .unwrap();
+        allowed.account("overflow@example.com".into()).unwrap();
         assert_eq!(throttle.lock().accounts.len(), 1);
     }
 

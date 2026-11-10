@@ -4,7 +4,7 @@ use axum::{
         State, WebSocketUpgrade,
         ws::{CloseFrame, Message as Frame, WebSocket, rejection::WebSocketUpgradeRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,8 @@ const LIVE_QUEUE_CAPACITY: usize = 256;
 pub const CLOSE_QUEUE_OVERFLOW: u16 = 4008;
 /// Session expired or signed out: stop protected delivery and go to Sign in.
 pub const CLOSE_SESSION_ENDED: u16 = 4001;
+/// Membership ended for this Organization only: terminal unavailable, no reconnect.
+pub const CLOSE_ORGANIZATION_UNAVAILABLE: u16 = 4003;
 
 /// Client -> server control messages. Cursors are per channel and exclusive.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -76,33 +78,24 @@ pub enum ServerEvent {
 /// duplicates are harmless, gaps are forbidden. Publish only committed new messages.
 /// Queue overflow closes with 4008 (never silently drops an event); reconnect and
 /// re-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;
-/// stop protected delivery and go to Sign in.
-#[utoipa::path(get, path = "/api/v1/ws",
+/// stop protected delivery and go to Sign in. Membership loss closes only this
+/// Organization with 4003: terminal unavailable, never reconnect/resubscribe/retry sends.
+/// A rejected handshake has no close code: check GET /api/v1/orgs/{org}/me.
+#[utoipa::path(get, path = "/api/v1/orgs/{org}/ws",
+    params(("org" = Uuid, Path, description = "Organization id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 101, description = "WebSocket upgrade; frames use ClientMessage / ServerEvent"),
-        (status = 400, description = "Invalid WebSocket upgrade request after successful authentication and Origin validation", body = ErrorBody),
-        (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade", body = ErrorBody),
-        (status = 403, description = "Cookie Origin missing or not allowed", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, or invalid WebSocket upgrade after Origin validation and successful authentication", body = ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential before WebSocket upgrade", body = ErrorBody),
+        (status = 403, description = "Cookie Origin missing or not allowed, checked before authentication and Organization resolution: origin_not_allowed", body = ErrorBody),
+        (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
         (status = 500, description = "Database failure while resolving the session before WebSocket upgrade", body = ErrorBody)))]
 pub async fn upgrade(
     State(state): State<AppState>,
+    _origin: origin::CheckedOrigin,
     auth: Auth,
-    headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    if !state
-        .ws_allowed_origins
-        .permits(&headers, state.cookie_secure)
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(ErrorBody {
-                error: "origin not allowed".into(),
-            }),
-        )
-            .into_response();
-    }
     let ws = match ws {
         Ok(ws) => ws,
         Err(_) => {
@@ -146,7 +139,7 @@ async fn connected_with_lifecycle(
     // A stopped fallback worker must never admit an unmonitored subscription.
     let queue = state.message_delivery.queue(
         auth.identity.organization.organization_id,
-        auth.identity.member.id,
+        (auth.identity.member.id, auth.membership_revision),
         LIVE_QUEUE_CAPACITY,
     );
     let mut overflow = queue.overflow.clone();
@@ -159,7 +152,7 @@ async fn connected_with_lifecycle(
     };
     let code = tokio::select! {
         biased;
-        result = session.ended() => Some(if result.is_ok() { CLOSE_SESSION_ENDED } else { 1011 }),
+        result = session.ended() => Some(result.unwrap_or(1011)),
         _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
         _ = notification_failed.failed() => Some(1011),
         result = connection.run(&mut socket, lifecycle) => result.err(),

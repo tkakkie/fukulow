@@ -1,0 +1,346 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "membership-close-terminal",
+      "title": "Organization Membership loss is terminal and never means Sign in",
+      "covers": [
+        "C4",
+        "C10"
+      ],
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "as": "latest"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "latest",
+            "messages": [
+              {
+                "seq": 1
+              }
+            ],
+            "has_more": false
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 1
+          }
+        },
+        {
+          "input": {
+            "type": "user_send",
+            "channel": "A",
+            "client_message_id": "pending"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "send",
+                "as": "send"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "socket_closed",
+            "code": 4003
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              },
+              {
+                "type": "send"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          },
+          "observe": {
+            "session": "signed_in",
+            "organization": "unavailable",
+            "channels": {
+              "A": {
+                "state": "unavailable",
+                "pending": [
+                  {
+                    "client_message_id": "pending",
+                    "state": "failed"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "user_retry",
+            "client_message_id": "pending"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "send"
+              },
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "B"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "fetch_history"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "ack",
+            "respond_to": "send",
+            "message": {
+              "seq": 2,
+              "sender": "me",
+              "client_message_id": "pending"
+            }
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "visible": [
+                  1
+                ],
+                "pending": [
+                  {
+                    "client_message_id": "pending",
+                    "state": "failed"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "rest-membership-refusal-terminal",
+      "title": "Organization Membership loss is terminal and never means Sign in",
+      "covers": [
+        "C4",
+        "C10"
+      ],
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "as": "latest"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "latest",
+            "messages": [
+              {
+                "seq": 1
+              }
+            ],
+            "has_more": false
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 1
+          }
+        },
+        {
+          "input": {
+            "type": "user_send",
+            "channel": "A",
+            "client_message_id": "pending"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "send",
+                "as": "send"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "organization_refused",
+            "status": 404,
+            "error": "organization_unavailable"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              },
+              {
+                "type": "send"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          },
+          "observe": {
+            "session": "signed_in",
+            "organization": "unavailable",
+            "channels": {
+              "A": {
+                "state": "unavailable",
+                "pending": [
+                  {
+                    "client_message_id": "pending",
+                    "state": "failed"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "user_retry",
+            "client_message_id": "pending"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "send"
+              },
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "B"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "fetch_history"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "ack",
+            "respond_to": "send",
+            "message": {
+              "seq": 2,
+              "sender": "me",
+              "client_message_id": "pending"
+            }
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "visible": [
+                  1
+                ],
+                "pending": [
+                  {
+                    "client_message_id": "pending",
+                    "state": "failed"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

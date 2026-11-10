@@ -76,11 +76,28 @@
   {:else if auth.view.screen === 'app'}
     {@const identity = auth.view.identity}
     {@const session = auth.session}
-    {#if session}
-      {#key session}<Workspace {session} />{/key}
-      <p>{identity.organization.name} / {identity.member.name} さん</p>
-      {#if auth.error}<p role="alert">{auth.error}</p>{/if}
-      <button onclick={doSignOut} disabled={auth.busy}>ログアウト</button>
+    {@const organization = auth.organization}
+    {#if identity.organizations.length > 1}
+      <label>組織
+        <select value={auth.selectedOrganizationId} onchange={e => auth.selectOrganization(e.currentTarget.value)}>
+          {#each identity.organizations as org}<option value={org.organization_id}>{org.name}</option>{/each}
+        </select>
+      </label>
     {/if}
+    {#if auth.organizationStatus === 'unavailable'}
+      <p role="alert">この組織は利用できません。</p>
+    {:else if auth.organizationStatus === 'error'}
+      <p role="alert">サーバーに接続できません。</p>
+      <button onclick={() => auth.selectOrganization(auth.selectedOrganizationId)}>再試行</button>
+    {:else if session && organization}
+      {#key session}<Workspace {session} />{/key}
+      <p>{organization.organization.name} / {organization.member.name} さん</p>
+    {:else if identity.organizations.length === 0}
+      <p>利用できる組織がありません。</p>
+    {:else}
+      <p>読み込み中…</p>
+    {/if}
+    {#if auth.error}<p role="alert">{auth.error}</p>{/if}
+    <button onclick={doSignOut} disabled={auth.busy}>ログアウト</button>
   {/if}
 </main>

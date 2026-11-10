@@ -64,8 +64,15 @@ async fn setup(app: &Router) -> Value {
     body(response).await
 }
 
-async fn sign_in(app: &Router, organization_id: &str, password: &str) -> Response {
-    request(app, "POST", "/api/v1/session", json!({"organization_id": organization_id, "email": "owner@example.com", "password": password}), &[]).await
+async fn sign_in(app: &Router, _organization_id: &str, password: &str) -> Response {
+    request(
+        app,
+        "POST",
+        "/api/v1/session",
+        json!({"email": "owner@example.com", "password": password}),
+        &[],
+    )
+    .await
 }
 
 async fn assert_internal_error(response: Response) {
@@ -107,18 +114,25 @@ async fn auth_extractor_database_failures_return_generic_500_on_all_protected_en
         StatusCode::OK
     );
     // Break identity resolution after establishing a valid session, without changing handlers.
-    sqlx::query("ALTER TABLE users RENAME COLUMN role TO injected_unavailable_role")
-        .execute(&pool)
-        .await
+    sqlx::query(
+        "ALTER TABLE account_sessions RENAME COLUMN account_id TO injected_unavailable_account",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let org = identity["organization"]["organization_id"]
+        .as_str()
         .unwrap();
-    let messages = format!("/api/v1/channels/{}/messages", Uuid::new_v4());
+    let channels = format!("/api/v1/orgs/{org}/channels");
+    let ws = format!("/api/v1/orgs/{org}/ws");
+    let messages = format!("/api/v1/orgs/{org}/channels/{}/messages", Uuid::new_v4());
     for (method, path, input) in [
         ("GET", "/api/v1/me", Value::Null),
         ("DELETE", "/api/v1/session", Value::Null),
-        ("GET", "/api/v1/channels", Value::Null),
+        ("GET", channels.as_str(), Value::Null),
         (
             "POST",
-            "/api/v1/channels",
+            channels.as_str(),
             json!({"name": "Channel", "visibility": "public"}),
         ),
         ("GET", messages.as_str(), Value::Null),
@@ -127,7 +141,7 @@ async fn auth_extractor_database_failures_return_generic_500_on_all_protected_en
             messages.as_str(),
             json!({"client_message_id": Uuid::new_v4(), "body": "Message"}),
         ),
-        ("GET", "/api/v1/ws", Value::Null),
+        ("GET", ws.as_str(), Value::Null),
     ] {
         assert_internal_error(request(&app, method, path, input, &headers).await).await;
     }
@@ -142,7 +156,7 @@ async fn auth_extractor_database_failures_return_generic_500_on_all_protected_en
 #[sqlx::test]
 async fn public_endpoint_database_failures_return_generic_500(pool: PgPool) {
     let app = router(&pool);
-    sqlx::query("ALTER TABLE organizations RENAME TO injected_unavailable_organizations")
+    sqlx::raw_sql("ALTER TABLE accounts RENAME TO injected_unavailable_accounts; ALTER TABLE organizations RENAME TO injected_unavailable_organizations;")
         .execute(&pool)
         .await
         .unwrap();
@@ -176,7 +190,7 @@ async fn sign_out_database_failure_returns_generic_500_and_preserves_session(poo
     .await;
     let authorization = format!("Bearer {}", session["token"].as_str().unwrap());
     let headers = [("authorization", authorization.as_str())];
-    sqlx::raw_sql("CREATE FUNCTION fail_session_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected session deletion failure'; END $$; CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION fail_session_delete();")
+    sqlx::raw_sql("CREATE FUNCTION fail_session_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected session deletion failure'; END $$; CREATE TRIGGER fail_session_delete BEFORE DELETE ON account_sessions FOR EACH ROW EXECUTE FUNCTION fail_session_delete();")
         .execute(&pool).await.unwrap();
     assert_internal_error(request(&app, "DELETE", "/api/v1/session", Value::Null, &headers).await)
         .await;
@@ -205,7 +219,7 @@ async fn two_organizations(pool: &PgPool, app: &Router) -> (Value, Uuid) {
         .unwrap();
     // Use the same member id and email in both organizations to catch joins
     // which accidentally omit the organization_id part of a composite key.
-    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) SELECT $1, id, email, 'Owner B', password_hash, 'guest' FROM users WHERE organization_id = $2")
+    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) SELECT $1, id, account_id, 'Owner B', 'guest' FROM users WHERE organization_id = $2")
         .bind(second_id).bind(first_id).execute(pool).await.unwrap();
     (first, second_id)
 }
@@ -242,7 +256,7 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
 async fn setup_status_empty_database_is_public_and_reveals_only_boolean(pool: PgPool) {
     assert_setup_status(&pool, true).await;
     let counts: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM sessions)",
+        "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM account_sessions)",
     )
     .fetch_one(&pool)
     .await
@@ -255,7 +269,7 @@ async fn setup_status_after_setup_is_public_and_reveals_only_boolean(pool: PgPoo
     setup(&router(&pool)).await;
     assert_setup_status(&pool, false).await;
     let counts: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM sessions)",
+        "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM account_sessions)",
     )
     .fetch_one(&pool)
     .await
@@ -290,7 +304,7 @@ async fn setup_works_once_and_is_atomic(pool: PgPool) {
         .parse::<Uuid>()
         .unwrap();
     let (count, hash, role): (i64, String, String) = sqlx::query_as(
-        "SELECT count(*) OVER (), password_hash, role FROM users WHERE organization_id = $1",
+        "SELECT count(*) OVER (), a.password_hash, u.role FROM users u JOIN accounts a ON a.id = u.account_id WHERE u.organization_id = $1",
     )
     .bind(organization_id)
     .fetch_one(&pool)
@@ -505,11 +519,14 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
 async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
-    let organization_id = identity["organization"]["organization_id"]
-        .as_str()
-        .unwrap();
-    let input = json!({"email": "Owner@Example.com", "password": PASSWORD});
-    let response = request(&app, "POST", "/api/v1/session", input.clone(), &[]).await;
+    let response = request(
+        &app,
+        "POST",
+        "/api/v1/session",
+        json!({"email":"Owner@Example.com","password":PASSWORD}),
+        &[],
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     let cookie = response.headers()[header::SET_COOKIE]
         .to_str()
@@ -519,64 +536,80 @@ async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
         .unwrap()
         .to_owned();
     let session = body(response).await;
-    assert_eq!(session["identity"], identity);
-    let token = session["token"].as_str().unwrap();
-    assert!(token.starts_with(&format!("{organization_id}.")));
-    let bearer = format!("Bearer {token}");
-    for headers in [[("cookie", cookie.as_str())], [("authorization", &bearer)]] {
+    assert_eq!(session["identity"]["account"]["email"], "owner@example.com");
+    assert_eq!(
+        session["identity"]["organizations"],
+        json!([identity["organization"]])
+    );
+    let bearer = format!("Bearer {}", session["token"].as_str().unwrap());
+    for headers in [
+        [("cookie", cookie.as_str())],
+        [("authorization", bearer.as_str())],
+    ] {
         let response = request(&app, "GET", "/api/v1/me", Value::Null, &headers).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body(response).await, identity);
+        assert_eq!(body(response).await, session["identity"]);
     }
-    let mut null_organization = input.clone();
-    null_organization["organization_id"] = Value::Null;
-    assert_eq!(
-        request(&app, "POST", "/api/v1/session", null_organization, &[])
-            .await
-            .status(),
-        StatusCode::OK
-    );
-    for (field, value) in [
-        ("email", "unknown@example.com".to_owned()),
-        ("password", "incorrect password".to_owned()),
-        ("organization_id", Uuid::new_v4().to_string()),
+    for invalid in [
+        json!({"email":"unknown@example.com","password":PASSWORD}),
+        json!({"email":"owner@example.com","password":"incorrect password"}),
     ] {
-        let mut invalid = input.clone();
-        invalid[field] = json!(value);
         let response = request(&app, "POST", "/api/v1/session", invalid, &[]).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(
-            body(response).await,
-            json!({"error": "invalid credentials"})
-        );
+        assert_eq!(body(response).await, json!({"error":"invalid credentials"}));
     }
+    let response = request(
+        &app,
+        "POST",
+        "/api/v1/session",
+        json!({"organization_id":null,"email":"owner@example.com","password":PASSWORD}),
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test]
-async fn sign_in_without_organization_rejects_multiple_organizations(pool: PgPool) {
+async fn one_account_has_independent_members_and_roles_in_multiple_organizations(pool: PgPool) {
     let app = router(&pool);
-    let (_, second_id) = two_organizations(&pool, &app).await;
-    let mut input = json!({"email": "owner@example.com", "password": PASSWORD});
-    for explicit_null in [false, true] {
-        if explicit_null {
-            input["organization_id"] = Value::Null;
-        }
-        let response = request(&app, "POST", "/api/v1/session", input.clone(), &[]).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(body(response).await, json!({"error": "invalid input"}));
-    }
-    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(sessions, 0);
+    let (first, second) = two_organizations(&pool, &app).await;
+    let response = sign_in(&app, "", PASSWORD).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = body(response).await;
     assert_eq!(
-        sign_in(&app, &second_id.to_string(), PASSWORD)
-            .await
-            .status(),
-        StatusCode::OK
+        session["identity"]["organizations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
+    let auth = format!("Bearer {}", session["token"].as_str().unwrap());
+    for (organization, name, role) in [
+        (
+            first["organization"]["organization_id"]
+                .as_str()
+                .unwrap()
+                .parse::<Uuid>()
+                .unwrap(),
+            "Owner A",
+            "owner",
+        ),
+        (second, "Owner B", "guest"),
+    ] {
+        let response = request(
+            &app,
+            "GET",
+            &format!("/api/v1/orgs/{organization}/me"),
+            Value::Null,
+            &[("authorization", &auth)],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let identity = body(response).await;
+        assert_eq!(identity["member"]["name"], name);
+        assert_eq!(identity["member"]["role"], role);
+        assert!(identity["member"].get("email").is_none());
+    }
 }
 
 #[sqlx::test]
@@ -589,7 +622,7 @@ async fn sign_in_without_organization_rejects_an_unconfigured_instance(pool: PgP
         &[],
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[sqlx::test]
@@ -605,7 +638,14 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let unknown = request(&app, "POST", "/api/v1/session", json!({"organization_id": organization_id, "email": "unknown@example.com", "password": PASSWORD}), &[]).await;
+    let unknown = request(
+        &app,
+        "POST",
+        "/api/v1/session",
+        json!({"email": "unknown@example.com", "password": PASSWORD}),
+        &[],
+    )
+    .await;
     assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
     let response = sign_in(&app, organization_id, PASSWORD).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -631,11 +671,11 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
         let response = request(&app, "GET", "/api/v1/me", Value::Null, &headers).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(body(response).await, identity);
+        assert_eq!(body(response).await, session["identity"]);
     }
     // Raw credentials must never be persisted.
     let hashes: Vec<Vec<u8>> =
-        sqlx::query_scalar("SELECT token_hash FROM sessions WHERE organization_id = $1")
+        sqlx::query_scalar("SELECT token_hash FROM account_sessions WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)")
             .bind(organization_id.parse::<Uuid>().unwrap())
             .fetch_all(&pool)
             .await
@@ -741,7 +781,7 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
         );
     }
     sqlx::query(
-        "UPDATE sessions SET expires_at = now() - interval '1 second' WHERE organization_id = $1",
+        "UPDATE account_sessions SET expires_at = now() - interval '1 second' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)",
     )
     .bind(id.parse::<Uuid>().unwrap())
     .execute(&pool)
@@ -776,76 +816,73 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
 #[sqlx::test]
 async fn session_cannot_access_another_organization(pool: PgPool) {
     let app = router(&pool);
-    let (first, second_id) = two_organizations(&pool, &app).await;
-    let first_id = first["organization"]["organization_id"].as_str().unwrap();
-    let session = body(sign_in(&app, first_id, PASSWORD).await).await;
-    let token = session["token"].as_str().unwrap();
-    let bearer = format!("Bearer {token}");
-    let response = request(
-        &app,
-        "GET",
-        &format!("/api/v1/me?organization_id={second_id}"),
-        Value::Null,
-        &[
-            ("authorization", &bearer),
-            ("x-organization-id", &second_id.to_string()),
-        ],
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body(response).await, first);
-    let swapped = format!("{}.{}", second_id, token.split_once('.').unwrap().1);
-    assert_eq!(
-        request(
-            &app,
-            "GET",
-            "/api/v1/me",
-            Value::Null,
-            &[("authorization", &format!("Bearer {swapped}"))]
-        )
-        .await
-        .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        request(
-            &app,
-            "GET",
-            "/api/v1/me",
-            Value::Null,
-            &[("cookie", &format!("fukulow_session={swapped}"))]
-        )
-        .await
-        .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        sign_in(&app, &Uuid::new_v4().to_string(), PASSWORD)
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let second = body(sign_in(&app, &second_id.to_string(), PASSWORD).await).await;
-    assert_eq!(
-        second["identity"]["organization"]["organization_id"],
-        second_id.to_string()
-    );
-    assert_eq!(second["identity"]["member"]["name"], "Owner B");
-    assert_eq!(second["identity"]["member"]["role"], "guest");
-    // A composite FK must reject a member id belonging only to another tenant.
-    let first_only = Uuid::new_v4();
-    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) SELECT organization_id, $2, 'only-a@example.com', name, password_hash, role FROM users WHERE organization_id = $1")
-        .bind(first_id.parse::<Uuid>().unwrap()).bind(first_only).execute(&pool).await.unwrap();
-    assert!(
-        sqlx::query(
-            "INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)"
-        )
-        .bind(second_id)
-        .bind(vec![0u8; 32])
-        .bind(first_only)
+    let first = setup(&app).await;
+    let first_id = first["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let foreign = Uuid::new_v4();
+    let account = Uuid::new_v4();
+    let shared_id = first["member"]["id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Foreign')")
+        .bind(foreign)
         .execute(&pool)
         .await
-        .is_err()
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO accounts (id,email,password_hash) VALUES ($1,'foreign@example.com','unused')",
+    )
+    .bind(account)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Foreign member','owner')").bind(foreign).bind(shared_id).bind(account).execute(&pool).await.unwrap();
+    let session = body(sign_in(&app, "", PASSWORD).await).await;
+    let auth = format!("Bearer {}", session["token"].as_str().unwrap());
+    let mut refusal = None;
+    for organization in [foreign, Uuid::new_v4(), first_id] {
+        if organization == first_id {
+            sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1")
+                .bind(first_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for suffix in ["me", "channels", "ws"] {
+            let response = request(
+                &app,
+                "GET",
+                &format!("/api/v1/orgs/{organization}/{suffix}"),
+                Value::Null,
+                &[("authorization", &auth)],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let error = body(response).await;
+            assert_eq!(error["error"], "organization_unavailable");
+            if let Some(expected) = &refusal {
+                assert_eq!(&error, expected);
+            } else {
+                refusal = Some(error);
+            }
+        }
+    }
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/me",
+            Value::Null,
+            &[("authorization", &auth)]
+        )
+        .await
+        .status(),
+        StatusCode::OK
     );
 }
 
@@ -873,7 +910,7 @@ async fn invalid_setup_does_not_consume_bootstrap(pool: PgPool) {
 async fn sign_in_from(
     app: &Router,
     peer: &str,
-    organization_id: Option<Uuid>,
+    _organization_id: Option<Uuid>,
     email: &str,
     password: &str,
     forwarded: Option<&str>,
@@ -891,7 +928,7 @@ async fn sign_in_from(
             request
                 .body(Body::from(
                     json!({
-                        "organization_id": organization_id, "email": email, "password": password
+                        "email": email, "password": password
                     })
                     .to_string(),
                 ))
@@ -922,36 +959,30 @@ async fn assert_throttled(response: Response) {
 }
 
 #[sqlx::test]
-async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts_or_organizations(
-    pool: PgPool,
-) {
+async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts(pool: PgPool) {
     let app = router(&pool);
-    let (first, second) = two_organizations(&pool, &app).await;
-    let first: Uuid = first["organization"]["organization_id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) SELECT organization_id, $2, 'other@example.com', name, password_hash, role FROM users WHERE organization_id = $1")
-        .bind(first).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+    setup(&app).await;
+    sqlx::query("INSERT INTO accounts (id,email,password_hash) SELECT $1,'other@example.com',password_hash FROM accounts").bind(Uuid::new_v4()).execute(&pool).await.unwrap();
     for n in 1..=5 {
-        let response = sign_in_from(
-            &app,
-            &format!("192.0.2.{n}:1234"),
-            Some(first),
-            " Owner@Example.com ",
-            "incorrect password",
-            None,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            sign_in_from(
+                &app,
+                &format!("192.0.2.{n}:1234"),
+                None,
+                " Owner@Example.com ",
+                "incorrect password",
+                None
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
-    // Another IP cannot bypass the account budget, even with the correct password.
     assert_throttled(
         sign_in_from(
             &app,
             "192.0.2.6:1234",
-            Some(first),
+            None,
             "owner@example.com",
             PASSWORD,
             None,
@@ -959,31 +990,25 @@ async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts_or_o
         .await,
     )
     .await;
-    // A different account on the same IP and the same email in another tenant work.
-    for (organization, email) in [(first, "other@example.com"), (second, "owner@example.com")] {
-        assert_eq!(
-            sign_in_from(
-                &app,
-                "192.0.2.1:1234",
-                Some(organization),
-                email,
-                PASSWORD,
-                None
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
-    }
-    // Advance only between DB operations; SQLx needs a running clock for network I/O.
-    tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(61)).await;
-    tokio::time::resume();
     assert_eq!(
         sign_in_from(
             &app,
             "192.0.2.1:1234",
-            Some(first),
+            None,
+            "other@example.com",
+            PASSWORD,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    advance_cleanup_interval_and_expire_throttle_window().await;
+    assert_eq!(
+        sign_in_from(
+            &app,
+            "192.0.2.1:1234",
+            None,
             "owner@example.com",
             PASSWORD,
             None
@@ -1163,67 +1188,15 @@ async fn advance_cleanup_interval_and_expire_throttle_window() {
 }
 
 #[sqlx::test]
-async fn ambiguous_organization_charges_only_ip_budget_and_leaves_other_sign_ins_usable(
-    pool: PgPool,
-) {
+async fn multiple_organizations_do_not_make_account_sign_in_ambiguous(pool: PgPool) {
     let app = router(&pool);
-    let (first, second) = two_organizations(&pool, &app).await;
-    let first: Uuid = first["organization"]["organization_id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    for n in 1..=20 {
-        let response = sign_in_from(
-            &app,
-            "192.0.2.1:1234",
-            None,
-            "owner@example.com",
-            PASSWORD,
-            None,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(body(response).await, json!({"error": "invalid input"}));
-        if n == 10 {
-            // More than the account limit of ambiguous failures did not charge either account.
-            for organization in [first, second] {
-                assert_eq!(
-                    sign_in_from(
-                        &app,
-                        "192.0.2.1:1234",
-                        Some(organization),
-                        "owner@example.com",
-                        PASSWORD,
-                        None
-                    )
-                    .await
-                    .status(),
-                    StatusCode::OK
-                );
-            }
-        }
-    }
-    for organization in [None, Some(first), Some(second)] {
-        assert_throttled(
-            sign_in_from(
-                &app,
-                "192.0.2.1:1234",
-                organization,
-                "owner@example.com",
-                PASSWORD,
-                None,
-            )
-            .await,
-        )
-        .await;
-    }
-    for organization in [first, second] {
+    two_organizations(&pool, &app).await;
+    for _ in 0..6 {
         assert_eq!(
             sign_in_from(
                 &app,
-                "192.0.2.2:1234",
-                Some(organization),
+                "192.0.2.1:1234",
+                None,
                 "owner@example.com",
                 PASSWORD,
                 None
@@ -1233,48 +1206,6 @@ async fn ambiguous_organization_charges_only_ip_budget_and_leaves_other_sign_ins
             StatusCode::OK
         );
     }
-    advance_cleanup_interval_and_expire_throttle_window().await;
-    // Existing credential failures and ambiguous lookups consume the same IP budget.
-    for _ in 0..19 {
-        assert_eq!(
-            sign_in_from(
-                &app,
-                "192.0.2.1:1234",
-                None,
-                "owner@example.com",
-                PASSWORD,
-                None
-            )
-            .await
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
-    }
-    assert_eq!(
-        sign_in_from(
-            &app,
-            "192.0.2.1:1234",
-            Some(first),
-            "owner@example.com",
-            "incorrect password",
-            None
-        )
-        .await
-        .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_throttled(
-        sign_in_from(
-            &app,
-            "192.0.2.1:1234",
-            Some(first),
-            "owner@example.com",
-            PASSWORD,
-            None,
-        )
-        .await,
-    )
-    .await;
 }
 
 // Generated once with argon2 0.5.3 defaults and the 16-byte salt
@@ -1288,7 +1219,7 @@ async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
     let organization = identity["organization"]["organization_id"]
         .as_str()
         .unwrap();
-    sqlx::query("UPDATE users SET password_hash = $1 WHERE organization_id = $2")
+    sqlx::query("UPDATE accounts SET password_hash = $1 WHERE id IN (SELECT account_id FROM users WHERE organization_id = $2)")
         .bind(ARGON2_053_PHC)
         .bind(organization.parse::<Uuid>().unwrap())
         .execute(&pool)
@@ -1310,7 +1241,7 @@ async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
 async fn new_password_hash_preserves_explicit_parameters_and_salt_length(pool: PgPool) {
     let identity = setup(&router(&pool)).await;
     let hash: String =
-        sqlx::query_scalar("SELECT password_hash FROM users WHERE organization_id = $1")
+        sqlx::query_scalar("SELECT password_hash FROM accounts WHERE id IN (SELECT account_id FROM users WHERE organization_id = $1)")
             .bind(
                 identity["organization"]["organization_id"]
                     .as_str()
@@ -1341,16 +1272,30 @@ const FIXED_DIGEST: &str = "da36cd522069db7890f63fe6e69904762a6868b9b26b8533b817
 #[sqlx::test]
 async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) {
     let organization: Uuid = "11111111-2222-4333-8444-555555555555".parse().unwrap();
+    let account = Uuid::new_v4();
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Fixture')")
+    sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Fixture')")
         .bind(organization)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) VALUES ($1, $2, 'fixture@example.com', 'Fixture', $3, 'owner')")
-        .bind(organization).bind(user_id).bind(ARGON2_053_PHC).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO sessions (organization_id, user_id, token_hash) VALUES ($1, $2, decode($3, 'hex'))")
-        .bind(organization).bind(user_id).bind(FIXED_DIGEST).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO accounts (id,email,password_hash) VALUES ($1,'fixture@example.com',$2)",
+    )
+    .bind(account)
+    .bind(ARGON2_053_PHC)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Fixture','owner')").bind(organization).bind(user_id).bind(account).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO account_sessions (account_id,token_hash) VALUES ($1,decode($2,'hex'))",
+    )
+    .bind(account)
+    .bind(FIXED_DIGEST)
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = router(&pool);
     for (name, value) in [
         ("cookie", format!("fukulow_session={FIXED_CREDENTIAL}")),
@@ -1359,11 +1304,11 @@ async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) 
         let response = request(&app, "GET", "/api/v1/me", Value::Null, &[(name, &value)]).await;
         assert_eq!(response.status(), StatusCode::OK);
         let identity = body(response).await;
+        assert_eq!(identity["account"]["id"], account.to_string());
         assert_eq!(
-            identity["organization"]["organization_id"],
+            identity["organizations"][0]["organization_id"],
             organization.to_string()
         );
-        assert_eq!(identity["member"]["id"], user_id.to_string());
     }
 }
 
@@ -1380,8 +1325,7 @@ async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: Pg
         assert_eq!(response.status(), StatusCode::OK);
         let session = body(response).await;
         let token = session["token"].as_str().unwrap();
-        let (prefix, secret) = token.split_once('.').unwrap();
-        assert_eq!(prefix, organization);
+        let secret = token;
         assert_eq!(secret.len(), 64);
         assert!(
             secret
@@ -1389,10 +1333,78 @@ async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: Pg
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         );
         // PostgreSQL's SHA-256 is independent from the Rust implementation.
-        let stored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE organization_id = $1 AND token_hash = sha256(convert_to($2, 'UTF8')))")
+        let stored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM account_sessions WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1) AND token_hash = sha256(convert_to($2, 'UTF8')))")
             .bind(organization.parse::<Uuid>().unwrap()).bind(token).fetch_one(&pool).await.unwrap();
         assert!(stored);
         tokens.push(token.to_owned());
     }
     assert_ne!(tokens[0], tokens[1]);
+}
+
+#[sqlx::test]
+async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let organization: Uuid = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let account: Uuid = sqlx::query_scalar("SELECT account_id FROM users WHERE organization_id=$1")
+        .bind(organization)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let error=sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Duplicate','guest')").bind(organization).bind(Uuid::new_v4()).bind(account).execute(&pool).await.unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23505")
+    );
+    assert!(
+        sqlx::query("DELETE FROM users WHERE organization_id=$1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (member, revision): (Uuid, i64) =
+        sqlx::query_as("SELECT id,membership_revision FROM users WHERE organization_id=$1")
+            .bind(organization)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(member.to_string(), identity["member"]["id"]);
+    assert_eq!(revision, 1);
+}
+
+#[sqlx::test]
+async fn member_truncate_is_refused_and_preserves_history(pool: PgPool) {
+    let app = router(&pool);
+    let identity = setup(&app).await;
+    let error = sqlx::query("TRUNCATE users CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .as_database_error()
+            .unwrap()
+            .message()
+            .contains("Member rows must never be truncated")
+    );
+    let member: Uuid = sqlx::query_scalar("SELECT id FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(member.to_string(), identity["member"]["id"]);
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "fukulow/contract/realtime/schema.json",
   "title": "Real-time sync contract fixtures",
-  "description": "Language-neutral fixtures for the real-time sync contract in docs/spec.md (S1-S5 server, C1-C9 client; design: #91, scope: #95). A fixture file is {kind, scenarios[]} and lives in delivery/ (kind=delivery, satisfied by the Rust server) or client/ (kind=client, satisfied by the TypeScript client and a future Kotlin client). Fixtures name behaviour only: no implementation state, function names, timer values or algorithms. Names such as Channel ids, Members and message ids are fixture-local labels; a runner maps them to real ids. Validation uses only the JSON Schema keywords type, enum, const, required, properties, additionalProperties, items, minItems, minimum, maxItems, pattern, oneOf and $ref (to #/$defs); web/scripts/realtime-fixtures.ts adds the cross-reference checks listed in each $comment marked 'semantic'.",
+  "description": "Language-neutral fixtures for the real-time sync contract in docs/spec.md (S1-S5 server, C1-C10 client; design: #91, scope: #95). A fixture file is {kind, scenarios[]} and lives in delivery/ (kind=delivery, satisfied by the Rust server) or client/ (kind=client, satisfied by the TypeScript client and a future Kotlin client). Fixtures name behaviour only: no implementation state, function names, timer values or algorithms. Names such as Channel ids, Members and message ids are fixture-local labels; a runner maps them to real ids. Validation uses only the JSON Schema keywords type, enum, const, required, properties, additionalProperties, items, minItems, minimum, maxItems, pattern, oneOf and $ref (to #/$defs); web/scripts/realtime-fixtures.ts adds the cross-reference checks listed in each $comment marked 'semantic'.",
   "type": "object",
   "required": ["kind", "scenarios"],
   "properties": {
@@ -21,7 +21,7 @@
     "Cursor": { "type": "integer", "minimum": 0 },
     "Rule": {
       "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet.",
-      "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]
+      "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"]
     },
     "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
     "SeqList": {
@@ -298,7 +298,7 @@
           "additionalProperties": false
         },
         {
-          "$comment": "The server closes the socket with this WebSocket close code (4001 session ended, 4008 queue overflow, 1011 internal).",
+          "$comment": "The server closes the socket with this WebSocket close code (4001 Account Session ended, 4003 Organization Membership lost, 4008 queue overflow, 1011 internal).",
           "type": "object",
           "required": ["type", "code"],
           "properties": { "type": { "const": "closed" }, "code": { "type": "integer", "minimum": 1000 } },
@@ -414,6 +414,7 @@
     "Input": {
       "$comment": "What happened outside the client. 'me' is the signed-in Member; other labels are other Members. Request/response pairing is by respond_to (see ClientScenario); a response delivered after the client has moved on (timer already obsolete, session replaced, Channel reset) is a stale completion and must change nothing.",
       "oneOf": [
+        { "$comment": "An independent REST check confirmed the selected Organization is unavailable (C10); a failed WebSocket handshake alone never produces this input.", "type": "object", "required": ["type", "status", "error"], "properties": { "type": { "const": "organization_refused" }, "status": { "const": 404 }, "error": { "const": "organization_unavailable" } }, "additionalProperties": false },
         { "$comment": "A session starts (Sign in): the client begins its connection.", "type": "object", "required": ["type"], "properties": { "type": { "const": "session_start" } }, "additionalProperties": false },
         { "$comment": "The session is replaced by another one (sign out and in, or another Member): all state of the previous session is discarded and its in-flight work fenced. A new connection is needed.", "type": "object", "required": ["type"], "properties": { "type": { "const": "session_replaced" } }, "additionalProperties": false },
         { "$comment": "A socket opened and authenticated.", "type": "object", "required": ["type"], "properties": { "type": { "const": "connection_ready" } }, "additionalProperties": false },
@@ -503,6 +504,7 @@
       "type": "object",
       "properties": {
         "session": { "enum": ["signed_in", "sign_in_required"] },
+        "organization": { "enum": ["available", "unavailable"] },
         "channels": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/ChannelObservation" }

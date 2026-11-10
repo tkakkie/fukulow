@@ -1,5 +1,4 @@
 use super::*;
-use axum::extract::FromRequestParts;
 
 #[sqlx::test]
 async fn surrounding_channel_name_whitespace_is_rejected_without_writes(pool: PgPool) {
@@ -71,12 +70,7 @@ async fn surrounding_channel_name_whitespace_is_rejected_before_opening_transact
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     let state = AppState::for_test(pool.clone());
-    let (mut parts, _) = Request::post("/api/v1/channels")
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .body(Body::empty())
-        .unwrap()
-        .into_parts();
-    let auth = Auth::from_request_parts(&mut parts, &state).await.unwrap();
+    let auth = extract_auth(state.clone(), &token).await;
     // Auth may read the session; semantic validation must precede even BEGIN.
     pool.close().await;
     let response = create_channel(

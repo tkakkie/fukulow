@@ -4,7 +4,39 @@
  */
 
 export interface paths {
-    "/api/v1/channels": {
+    "/api/v1/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["health"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels": {
         parameters: {
             query?: never;
             header?: never;
@@ -26,7 +58,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/channels/{id}/messages": {
+    "/api/v1/orgs/{org}/channels/{id}/messages": {
         parameters: {
             query?: never;
             header?: never;
@@ -56,14 +88,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/health": {
+    "/api/v1/orgs/{org}/me": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["health"];
+        get: operations["organization_me"];
         put?: never;
         post?: never;
         delete?: never;
@@ -72,14 +104,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/me": {
+    "/api/v1/orgs/{org}/ws": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["me"];
+        /**
+         * Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.
+         *     Authenticate with the session cookie or Authorization: Bearer, never a query token.
+         *     Cookie auth requires a matching allowed Origin (configured, same-origin by default);
+         *     reject a missing/foreign Origin with 403. Bearer clients need no Origin header.
+         * @description On subscribe: first register the live subscription, queueing events per connection;
+         *     replay committed messages with seq > after_seq ascending in pages of up to 50
+         *     messages; flush queued live events with seq > last replayed;
+         *     then send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):
+         *     duplicates are harmless, gaps are forbidden. Publish only committed new messages.
+         *     Queue overflow closes with 4008 (never silently drops an event); reconnect and
+         *     re-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;
+         *     stop protected delivery and go to Sign in. Membership loss closes only this
+         *     Organization with 4003: terminal unavailable, never reconnect/resubscribe/retry sends.
+         *     A rejected handshake has no close code: check GET /api/v1/orgs/{org}/me.
+         */
+        get: operations["upgrade"];
         put?: never;
         post?: never;
         delete?: never;
@@ -131,40 +179,19 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/ws": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.
-         *     Authenticate with the session cookie or Authorization: Bearer, never a query token.
-         *     Cookie auth requires a matching allowed Origin (configured, same-origin by default);
-         *     reject a missing/foreign Origin with 403. Bearer clients need no Origin header.
-         * @description On subscribe: first register the live subscription, queueing events per connection;
-         *     replay committed messages with seq > after_seq ascending in pages of up to 50
-         *     messages; flush queued live events with seq > last replayed;
-         *     then send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):
-         *     duplicates are harmless, gaps are forbidden. Publish only committed new messages.
-         *     Queue overflow closes with 4008 (never silently drops an event); reconnect and
-         *     re-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;
-         *     stop protected delivery and go to Sign in.
-         */
-        get: operations["upgrade"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Account: {
+            email: string;
+            /** Format: uuid */
+            id: string;
+        };
+        AccountIdentity: {
+            account: components["schemas"]["Account"];
+            organizations: components["schemas"]["Organization"][];
+        };
         Channel: {
             /** Format: uuid */
             id: string;
@@ -225,7 +252,6 @@ export interface components {
             limit?: number | null;
         };
         Member: {
-            email: string;
             /** Format: uuid */
             id: string;
             name: string;
@@ -295,7 +321,7 @@ export interface components {
         SessionResponse: {
             /** Format: int32 */
             expires_in: number;
-            identity: components["schemas"]["Identity"];
+            identity: components["schemas"]["AccountIdentity"];
             /** @description Opaque bearer credential. Store securely; returned only on sign-in. */
             token: string;
         };
@@ -319,11 +345,6 @@ export interface components {
         };
         SignInRequest: {
             email: string;
-            /**
-             * Format: uuid
-             * @description Returned by setup; may be omitted only when exactly one organization exists.
-             */
-            organization_id?: string | null;
             /** Format: password */
             password: string;
         };
@@ -372,6 +393,8 @@ export interface components {
     headers: never;
     pathItems: never;
 }
+export type Account = components['schemas']['Account'];
+export type AccountIdentity = components['schemas']['AccountIdentity'];
 export type Channel = components['schemas']['Channel'];
 export type ChannelList = components['schemas']['ChannelList'];
 export type ChannelVisibility = components['schemas']['ChannelVisibility'];
@@ -398,11 +421,72 @@ export type Subscribed = components['schemas']['Subscribed'];
 export type Unsubscribe = components['schemas']['Unsubscribe'];
 export type $defs = Record<string, never>;
 export interface operations {
-    list_channels: {
+    health: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server is responding; returns the plain-text body ok */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+        };
+    };
+    me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current Account and active Organizations */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountIdentity"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure while resolving the session identity */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_channels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -416,8 +500,26 @@ export interface operations {
                     "application/json": components["schemas"]["ChannelList"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Malformed Organization id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Non-Member, unknown Organization or deactivated Member: organization_unavailable */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -440,7 +542,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+            };
             cookie?: never;
         };
         requestBody: {
@@ -458,7 +563,7 @@ export interface operations {
                     "application/json": components["schemas"]["Channel"];
                 };
             };
-            /** @description Invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace */
+            /** @description Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -467,8 +572,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Non-Member, unknown Organization or deactivated Member: organization_unavailable */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -526,6 +640,8 @@ export interface operations {
             };
             header?: never;
             path: {
+                /** @description Organization id */
+                org: string;
                 /** @description Channel id */
                 id: string;
             };
@@ -542,7 +658,7 @@ export interface operations {
                     "application/json": components["schemas"]["MessagePage"];
                 };
             };
-            /** @description Invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined */
+            /** @description Malformed Organization id, invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -551,7 +667,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -560,7 +676,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
+            /** @description organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -585,6 +701,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Organization id */
+                org: string;
                 /** @description Channel id */
                 id: string;
             };
@@ -605,7 +723,7 @@ export interface operations {
                     "application/json": components["schemas"]["Message"];
                 };
             };
-            /** @description Invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
+            /** @description Malformed Organization id, invalid Channel id, Message JSON or fields, or body that is empty or whitespace-only, contains NUL, or exceeds 4000 Unicode scalar values */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -614,7 +732,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -623,7 +741,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
+            /** @description organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -681,36 +799,19 @@ export interface operations {
             };
         };
     };
-    health: {
+    organization_me: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Server is responding; returns the plain-text body ok */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/plain": string;
-                };
+            path: {
+                /** @description Organization id */
+                org: string;
             };
-        };
-    };
-    me: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Current session's Member and Organization identity */
+            /** @description Active Member in this Organization */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -719,7 +820,16 @@ export interface operations {
                     "application/json": components["schemas"]["Identity"];
                 };
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Malformed Organization id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -728,7 +838,82 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Database failure while resolving the session identity */
+            /** @description Non-Member, unknown Organization or deactivated Member: organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    upgrade: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebSocket upgrade; frames use ClientMessage / ServerEvent */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed Organization id, or invalid WebSocket upgrade after Origin validation and successful authentication */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential before WebSocket upgrade */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Cookie Origin missing or not allowed, checked before authentication and Organization resolution: origin_not_allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Non-Member, unknown Organization or deactivated Member: organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure while resolving the session before WebSocket upgrade */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -763,7 +948,7 @@ export interface operations {
                     "application/json": components["schemas"]["SessionResponse"];
                 };
             };
-            /** @description Invalid sign-in JSON, fields, email or password length, or omitted Organization when no sole Organization exists */
+            /** @description Invalid sign-in JSON, fields, email or password length */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -772,7 +957,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Email or password does not match an account in the selected Organization */
+            /** @description Email or password does not match an Account */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -838,7 +1023,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -957,60 +1142,6 @@ export interface operations {
                 };
             };
             /** @description Database or password hashing failure while creating the first Organization and Owner */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    upgrade: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description WebSocket upgrade; frames use ClientMessage / ServerEvent */
-            101: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Invalid WebSocket upgrade request after successful authentication and Origin validation */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Cookie Origin missing or not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Database failure while resolving the session before WebSocket upgrade */
             500: {
                 headers: {
                     [name: string]: unknown;

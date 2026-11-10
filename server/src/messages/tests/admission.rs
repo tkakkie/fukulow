@@ -64,6 +64,14 @@ async fn saturated_send_queue_preserves_organization_and_private_channel_denials
     let nonmember = member(&pool, organization_a, Uuid::new_v4()).await;
     let organization_b = organization(&pool).await;
     let outsider = member(&pool, organization_b, Uuid::new_v4()).await;
+    let inactive_id = Uuid::new_v4();
+    let inactive = member(&pool, organization_a, inactive_id).await;
+    sqlx::query("UPDATE users SET deactivated_at = now() WHERE organization_id = $1 AND id = $2")
+        .bind(organization_a)
+        .bind(inactive_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let channel_id = Uuid::new_v4();
     channel(&pool, organization_a, channel_id, creator, true).await;
     let state = AppState::for_test(pool.clone());
@@ -89,6 +97,27 @@ async fn saturated_send_queue_preserves_organization_and_private_channel_denials
             StatusCode::NOT_FOUND,
         )
         .await;
+        assert_eq!(admission.queued_sends(), queued.len());
+    }
+    // URL scope resolves the Account's active Member before queue admission.
+    for (organization, token) in [
+        (organization_a, &outsider),
+        (organization_a, &inactive),
+        (Uuid::new_v4(), &creator_token),
+    ] {
+        let response = request(
+            &app,
+            "POST",
+            &format!("/api/v1/orgs/{organization}/channels/{channel_id}/messages"),
+            token,
+            input(Uuid::new_v4(), "denied"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body(response).await,
+            json!({"error": "organization_unavailable"})
+        );
         assert_eq!(admission.queued_sends(), queued.len());
     }
     drop(queued);
@@ -124,7 +153,7 @@ async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(
         &pool,
         &delivery,
         organization,
-        sender,
+        (sender, 0),
         channel,
         SendMessageRequest {
             client_message_id: key,
@@ -160,7 +189,7 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
         &pool,
         &delivery,
         organization,
-        sender,
+        (sender, 0),
         channel,
         SendMessageRequest {
             client_message_id: Uuid::new_v4(),
@@ -207,7 +236,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
                 &pool,
                 &delivery,
                 organization,
-                sender,
+                (sender, 0),
                 channel,
                 SendMessageRequest {
                     client_message_id: Uuid::new_v4(),
@@ -241,7 +270,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
         &app_pool,
         &delivery,
         organization,
-        sender,
+        (sender, 0),
         channel,
         SendMessageRequest {
             client_message_id: Uuid::new_v4(),

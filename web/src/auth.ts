@@ -4,7 +4,7 @@ import {
   getSetupStatus,
   postSession,
   postSetup,
-  type Identity,
+  type AccountIdentity,
   type Result,
   type SetupRequest,
 } from './api'
@@ -14,7 +14,7 @@ export type AuthState =
   | { screen: 'error' } // retryable: network failure or 5xx
   | { screen: 'setup' }
   | { screen: 'signin'; notice?: string }
-  | { screen: 'app'; identity: Identity }
+  | { screen: 'app'; identity: AccountIdentity }
 
 type Fetch = typeof fetch
 

@@ -15,7 +15,7 @@ pub(super) async fn request(
         let body = if input.is_null() { String::new() } else { input.to_string() };
         let request = format!(
             "{method} {} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            path.as_ref(), token.as_ref(), body.len(),
+            scoped_path(path.as_ref(), token.as_ref()), token.as_ref(), body.len(),
         );
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut bytes = Vec::new();

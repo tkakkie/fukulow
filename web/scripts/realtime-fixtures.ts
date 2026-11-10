@@ -383,7 +383,7 @@ export type ObservedChannel = {
   messages: Message[]
   pending: { client_message_id: string; state: string }[]
 }
-export type Observed = { session?: string; channels: Record<string, ObservedChannel> }
+export type Observed = { session?: string; organization?: string; channels: Record<string, ObservedChannel> }
 /** What a client must provide to run fixtures. */
 export type ClientUnderTest = { feed(input: ResolvedInput): Effect[]; observe(): Observed }
 
@@ -392,7 +392,7 @@ type ClientStep = {
   input: Record<string, Json>
   only_if?: 'connect_pending' | 'socket_open'
   effects?: { required?: Pattern[]; forbidden?: Pattern[]; ordered?: boolean }
-  observe?: { session?: string; channels?: Record<string, Record<string, Json>> }
+  observe?: { session?: string; organization?: string; channels?: Record<string, Record<string, Json>> }
 }
 export type ClientScenario = { id: string; never?: Pattern[]; steps: ClientStep[] }
 
@@ -511,6 +511,9 @@ function checkEffects(step: ClientStep, emitted: Effect[], bound: Map<string, Ef
 function checkObservation(expected: NonNullable<ClientStep['observe']>, actual: Observed, at: string, failures: string[]) {
   if (expected.session !== undefined && actual.session !== expected.session) {
     failures.push(`${at}: session is ${String(actual.session)}, expected ${expected.session}`)
+  }
+  if (expected.organization !== undefined && actual.organization !== expected.organization) {
+    failures.push(`${at}: organization is ${String(actual.organization)}, expected ${expected.organization}`)
   }
   for (const [name, want] of Object.entries(expected.channels ?? {})) {
     const got = actual.channels[name] ?? { cursor: null, messages: [], pending: [] }

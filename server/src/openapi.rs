@@ -9,10 +9,10 @@ use utoipa::{
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::sign_out, crate::auth::me,
+    paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::sign_out, crate::auth::me, crate::auth::organization_me,
         crate::channels::list_channels, crate::channels::create_channel,
         crate::messages::list_messages, crate::messages::send_message, crate::realtime::upgrade),
-    components(schemas(crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::ErrorBody,
+    components(schemas(crate::auth::Account, crate::auth::AccountIdentity, crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::ErrorBody,
         crate::channels::Channel, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::channels::ChannelList,
         crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage,
         crate::realtime::ClientMessage, crate::realtime::ServerEvent)),

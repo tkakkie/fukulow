@@ -42,8 +42,8 @@ it('controller keeps admission 503 retryable and retries manually with the same 
     }))
     .mockResolvedValueOnce(new Response(JSON.stringify(message), { status: 201 }))
   const client = controllerClient({ api: {
-    listMessages: (channel, query) => api.listMessages(channel, query, fetchMock),
-    sendMessage: (channel, body) => api.sendMessage(channel, body, fetchMock),
+    listMessages: (channel, query) => api.listMessages('o', channel, query, fetchMock),
+    sendMessage: (channel, body) => api.sendMessage('o', channel, body, fetchMock),
   } })
   await client.sync.start()
   await client.feed({ type: 'connection_ready' })
@@ -58,7 +58,7 @@ it('controller keeps admission 503 retryable and retries manually with the same 
   await client.sync.getTimeline('A').retry('c1')
   expect(fetchMock).toHaveBeenCalledTimes(3)
   for (const [path, init] of fetchMock.mock.calls.slice(1)) {
-    expect(path).toBe('/api/v1/channels/A/messages')
+    expect(path).toBe('/api/v1/orgs/o/channels/A/messages')
     expect(init?.method).toBe('POST')
     expect(JSON.parse(init?.body as string)).toEqual({ client_message_id: 'c1', body: 'hello' })
   }

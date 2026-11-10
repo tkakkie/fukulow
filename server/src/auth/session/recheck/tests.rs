@@ -8,7 +8,7 @@ async fn active_checks(pool: &PgPool) -> i64 {
         "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
          AND state = 'active' AND query LIKE $1",
     )
-    .bind("SELECT sessions.organization_id, sessions.token_hash FROM sessions%")
+    .bind("SELECT registered.organization_id, registered.token_hash%")
     .fetch_one(pool)
     .await
     .unwrap()
@@ -36,13 +36,13 @@ async fn many_socket_monitors_share_one_non_overlapping_fallback_query(pool: PgP
         foreign.token_hash,
     );
     // Same hash, different Organization: the valid foreign row must not mask this deletion.
-    sqlx::query("DELETE FROM sessions WHERE organization_id = $1")
-        .bind(key.0)
+    sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
+        .bind(&key.1)
         .execute(&pool)
         .await
         .unwrap();
     let mut held = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE account_sessions IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *held)
         .await
         .unwrap();
@@ -53,7 +53,7 @@ async fn many_socket_monitors_share_one_non_overlapping_fallback_query(pool: PgP
             } else {
                 (key.0, i.to_be_bytes().to_vec())
             }),
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
         })
         .collect();
     let valid = state.session_changes.register(foreign_key);
@@ -100,8 +100,8 @@ async fn chunked_pass_checks_exact_keys_and_excludes_expired_sessions(pool: PgPo
         foreign.identity.organization.organization_id,
         foreign.token_hash,
     );
-    sqlx::query("UPDATE sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE organization_id = $1")
-        .bind(key.0).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE token_hash = $1")
+        .bind(&key.1).execute(&pool).await.unwrap();
     let mut keys: Vec<_> = (0..BATCH_SIZE + 1)
         .map(|_| (Uuid::new_v4(), vec![2; 32]))
         .collect();
@@ -112,12 +112,13 @@ async fn chunked_pass_checks_exact_keys_and_excludes_expired_sessions(pool: PgPo
         vec![2; 32],
     );
     keys.push(foreign_key.clone());
-    assert_eq!(
-        check(&pool, &keys, Instant::now() + CHECK_TIMEOUT)
-            .await
-            .unwrap(),
-        HashSet::from([foreign_key])
-    );
+    let checks: Vec<_> = keys.iter().map(|key| (key.0, key.1.clone(), 0)).collect();
+    let ended = check(&pool, &checks, Instant::now() + CHECK_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(ended.len(), keys.len() - 1);
+    assert!(!ended.contains_key(&foreign_key));
+    assert!(ended.values().all(|code| *code == 4001));
 }
 
 #[sqlx::test]
@@ -134,11 +135,11 @@ async fn timed_out_pass_latches_errors_and_releases_its_pool_connection(pool: Pg
     let mut watches: Vec<_> = (0..32)
         .map(|_| SessionWatch {
             registration: state.session_changes.register(key.clone()),
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
         })
         .collect();
     let mut held = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE account_sessions IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *held)
         .await
         .unwrap();
@@ -184,8 +185,8 @@ async fn reregistration_mid_check_cannot_receive_old_results(pool: PgPool) {
         auth.identity.organization.organization_id,
         auth.token_hash.clone(),
     );
-    sqlx::query("DELETE FROM sessions WHERE organization_id = $1")
-        .bind(key.0)
+    sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
+        .bind(&key.1)
         .execute(&pool)
         .await
         .unwrap();
@@ -195,10 +196,9 @@ async fn reregistration_mid_check_cannot_receive_old_results(pool: PgPool) {
     queried.entered().await;
     // The old epoch's SQL result says missing. Reconnect with a now-valid DB row.
     drop(old);
-    sqlx::query("INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)")
-        .bind(key.0)
+    sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
         .bind(&key.1)
-        .bind(auth.identity.member.id)
+        .bind(auth.account_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -269,35 +269,26 @@ async fn large_session_pass_fails_closed_by_production_deadline(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "manual many-distinct-sessions measurement; run alone with --ignored --nocapture"]
 async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
-    let (_, auth) = fixture(&pool).await;
-    let organization = auth.identity.organization.organization_id;
-    // 32-byte unique hashes; provision outside the timed pass.
-    sqlx::query(
-        "INSERT INTO sessions (organization_id, token_hash, user_id) \
-        SELECT $1, decode(lpad(to_hex(n), 64, '0'), 'hex'), $2 \
-        FROM generate_series(1, 100000) AS n",
-    )
-    .bind(organization)
-    .bind(auth.identity.member.id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query("ANALYZE sessions")
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Distinct Accounts/Members spread over ten Organizations; provisioning is untimed.
+    sqlx::raw_sql("INSERT INTO organizations (organization_id, name) SELECT lpad(to_hex(1000000+n),32,'0')::uuid, 'Measured Organization' FROM generate_series(0,9) n;
+        INSERT INTO accounts (id,email,password_hash) SELECT lpad(to_hex(n),32,'0')::uuid, n::text || '@measurement.example', 'unused' FROM generate_series(1,100000) n;
+        INSERT INTO users (organization_id,id,account_id,name,role) SELECT lpad(to_hex(1000000+n%10),32,'0')::uuid, lpad(to_hex(n),32,'0')::uuid, lpad(to_hex(n),32,'0')::uuid, 'Measured Member', 'member' FROM generate_series(1,100000) n;
+        INSERT INTO account_sessions (token_hash,account_id) SELECT decode(lpad(to_hex(n),64,'0'),'hex'), lpad(to_hex(n),32,'0')::uuid FROM generate_series(1,100000) n;
+        ANALYZE organizations; ANALYZE accounts; ANALYZE users; ANALYZE account_sessions;")
+        .execute(&pool).await.unwrap();
     for count in [1_000_u32, 10_000, 100_000] {
         let keys: Vec<_> = (1..=count)
             .map(|i| {
                 let mut hash = vec![0; 32];
                 hash[28..].copy_from_slice(&i.to_be_bytes());
-                (organization, hash)
+                (Uuid::from_u128(1_000_000 + u128::from(i % 10)), hash)
             })
             .collect();
         let changes = SessionChanges::default();
         let registrations: Vec<_> = keys
             .iter()
-            .map(|key| changes.register(key.clone()))
+            .enumerate()
+            .map(|(i, key)| changes.register_member(key.clone(), Uuid::from_u128(i as u128 + 1), 0))
             .collect();
         let started = Instant::now();
         pass(
@@ -311,10 +302,11 @@ async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
             let status = *registration.changed.borrow();
             assert!(!status.failed);
             assert!(!status.revoked);
+            assert!(!status.membership_revoked);
         }
         assert!(started.elapsed() < CHECK_TIMEOUT);
         eprintln!(
-            "DISTINCT_SESSION_PASS sessions={count} chunks={} elapsed_ms={:.3} deadline_ms=5000",
+            "DISTINCT_SESSION_PASS organizations=10 accounts={count} members={count} sessions={count} chunks={} elapsed_ms={:.3} deadline_ms=5000",
             keys.len().div_ceil(BATCH_SIZE),
             started.elapsed().as_secs_f64() * 1000.0
         );
@@ -333,7 +325,7 @@ async fn failed_check_result_cannot_fail_reconnected_epoch(pool: PgPool) {
     );
     let old = changes.register(key.clone());
     let mut held = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE account_sessions IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *held)
         .await
         .unwrap();
@@ -350,4 +342,124 @@ async fn failed_check_result_cannot_fail_reconnected_epoch(pool: PgPool) {
     assert!(!new.registration.changed.borrow().failed);
     assert!(!new.registration.changed.borrow().revoked);
     next_snapshot.release();
+}
+
+#[sqlx::test]
+async fn batch_recheck_distinguishes_session_end_membership_loss_and_valid_sessions(pool: PgPool) {
+    let (state, auth) = fixture(&pool).await;
+    let (_, expired) = fixture(&pool).await;
+    let (_, inactive) = fixture(&pool).await;
+    let (_, valid) = fixture(&pool).await;
+    let mut ended_session = auth.watch_session(&state).await.unwrap().unwrap();
+    let mut expired_session = expired.watch_session(&state).await.unwrap().unwrap();
+    let mut inactive_membership = inactive.watch_session(&state).await.unwrap().unwrap();
+    let valid_membership = valid.watch_session(&state).await.unwrap().unwrap();
+    sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
+        .bind(&auth.token_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE token_hash = $1").bind(&expired.token_hash).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2")
+        .bind(inactive.identity.organization.organization_id).bind(inactive.account_id).execute(&pool).await.unwrap();
+    pass(
+        &state.session_changes.sessions,
+        &pool,
+        Instant::now() + CHECK_TIMEOUT,
+        &state.session_changes.gate,
+    )
+    .await;
+    assert_eq!(ended_session.ended().await.unwrap(), 4001);
+    assert_eq!(expired_session.ended().await.unwrap(), 4001);
+    assert_eq!(inactive_membership.ended().await.unwrap(), 4003);
+    assert!(!valid_membership.registration.changed.has_changed().unwrap());
+    // Even when both causes apply, an ended Account Session always means Sign in.
+    sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
+        .bind(&inactive.token_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let key = (
+        inactive.identity.organization.organization_id,
+        inactive.token_hash.clone(),
+        0,
+    );
+    assert_eq!(
+        check(
+            &pool,
+            std::slice::from_ref(&key),
+            Instant::now() + CHECK_TIMEOUT
+        )
+        .await
+        .unwrap()[&(key.0, key.1)],
+        4001
+    );
+}
+
+#[sqlx::test]
+async fn lost_signal_deactivate_reactivate_still_revokes_stale_membership_revision(pool: PgPool) {
+    let (mut state, mut auth) = fixture(&pool).await;
+    state.session_changes =
+        SessionChanges::with_recheck_timing(Duration::from_millis(50), CHECK_TIMEOUT);
+    let mut stale = auth.watch_session(&state).await.unwrap().unwrap();
+    sqlx::query("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2")
+        .bind(auth.identity.organization.organization_id).bind(auth.account_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE users SET deactivated_at = NULL WHERE organization_id = $1 AND account_id = $2",
+    )
+    .bind(auth.identity.organization.organization_id)
+    .bind(auth.account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // No signal: the single fallback pass compares the revision captured at connect.
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), stale.ended())
+            .await
+            .unwrap()
+            .unwrap(),
+        4003
+    );
+    assert!(!stale.registration.changed.borrow().revoked);
+    auth.membership_revision = 1;
+    let fresh = auth.watch_session(&state).await.unwrap().unwrap();
+    assert!(!fresh.registration.changed.borrow().membership_revoked);
+    assert!(!fresh.registration.changed.borrow().revoked);
+    assert!(
+        !fresh
+            .registration
+            .guard
+            .epoch
+            .same_channel(&stale.registration.guard.epoch)
+    );
+}
+
+#[sqlx::test]
+async fn deadline_includes_query_result_application(pool: PgPool) {
+    let (state, auth) = fixture(&pool).await;
+    let mut socket = auth.watch_session(&state).await.unwrap().unwrap();
+    let queried = state.session_changes.pause(Phase::Queried);
+    let started = Instant::now();
+    let pass = pass(
+        &state.session_changes.sessions,
+        &pool,
+        started + CHECK_TIMEOUT,
+        &state.session_changes.gate,
+    );
+    tokio::pin!(pass);
+    tokio::select! {
+        _ = &mut pass => panic!("pass did not pause after SQL"),
+        _ = queried.entered() => {},
+    }
+    tokio::time::pause();
+    tokio::time::advance(CHECK_TIMEOUT).await;
+    queried.release();
+    pass.await;
+    assert!(matches!(
+        socket.ended().await,
+        Err(sqlx::Error::PoolTimedOut)
+    ));
+    assert!(!socket.registration.changed.borrow().revoked);
+    assert!(!socket.registration.changed.borrow().membership_revoked);
+    tokio::time::resume();
 }

@@ -104,7 +104,7 @@ async fn session_entropy_failure_returns_500_without_session_or_fallback(pool: s
             serde_json::from_slice::<Value>(&body).unwrap(),
             json!({"error": "internal error"})
         );
-        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM account_sessions")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -121,14 +121,10 @@ async fn session_entropy_success_encodes_every_byte_once(pool: sqlx::PgPool) {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     let session: Value = serde_json::from_slice(&body).unwrap();
-    let organization = session["identity"]["organization"]["organization_id"]
-        .as_str()
-        .unwrap();
-    let expected =
-        format!("{organization}.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    let expected = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     assert_eq!(session["token"], expected);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let stored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE organization_id = $1 AND token_hash = sha256(convert_to($2, 'UTF8')))")
-        .bind(organization.parse::<Uuid>().unwrap()).bind(expected).fetch_one(&pool).await.unwrap();
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM account_sessions WHERE token_hash = sha256(convert_to($1, 'UTF8')))")
+        .bind(expected).fetch_one(&pool).await.unwrap();
     assert!(stored);
 }
