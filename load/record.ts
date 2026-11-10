@@ -23,7 +23,8 @@ const env = { ...inherited, LOAD_PROJECT: project, LOAD_PORT: port, LOAD_DB_PASS
   BASE_URL: process.env.LOAD_DIRECT_NETWORK === '1' ? 'http://app:8080' : `http://host.docker.internal:${port}`, LOAD_BOOTSTRAP: '1',
   LOAD_APP_IMAGE: process.env.LOAD_APP_IMAGE || `${project}-app`,
   LOAD_SERVER_SOURCE: resolve(process.env.LOAD_SERVER_SOURCE || '.'),
-  LOAD_EMAIL: 'baseline@example.invalid', LOAD_PASSWORD: randomUUID(), LOAD_MEASURE: '1' };
+  LOAD_EMAIL: 'baseline@example.invalid', LOAD_PASSWORD: randomUUID(), LOAD_MEASURE: '1',
+  LOAD_RECONNECT_STORM: process.env.LOAD_RECONNECT_STORM || '0' };
 const compose = ['compose', '-p', project, '-f', 'load/compose.yml'];
 const command = (file: string, args: string[]) => execFileSync(file, args, { env, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).trim();
 const docker = (...args: string[]) => command('docker', args);
@@ -44,6 +45,9 @@ let timer: ReturnType<typeof setInterval> | undefined;
 let sampling: Promise<void> | undefined;
 let log = '';
 let summary: unknown;
+let storm: unknown;
+let restart: Promise<void> | undefined;
+let restartMs: number | undefined;
 let progress: unknown;
 let rate: { startedAt: number; offered: number; [key: string]: unknown } | undefined;
 let measurementError: unknown;
@@ -71,14 +75,14 @@ try {
   const metadata = {
     hostNode: process.version,
     harness: Object.fromEntries(['Makefile', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
-      'load/sessions.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
+      'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
       [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
     serverDirty: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'status', '--porcelain']),
     configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
       'SOCKETS_PER_SESSION', 'CONNECT_BATCH', 'CONNECT_INTERVAL_MS', 'READY_TIMEOUT_SECONDS', 'DRAIN_TIMEOUT_SECONDS',
-      'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'REQUEST_TIMEOUT_SECONDS'].map(key => [key, env[key as keyof typeof env] ?? null])),
+      'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'LOAD_RECONNECT_STORM', 'REQUEST_TIMEOUT_SECONDS'].map(key => [key, env[key as keyof typeof env] ?? null])),
     project, port, started: new Date().toISOString(), platform: platform(), arch: arch(),
     hostCpuModel: cpus()[0]?.model, hostCpus: cpus().length, hostMemory: totalmem(),
     docker: JSON.parse(docker('info', '--format', '{"ServerVersion":{{json .ServerVersion}},"NCPU":{{json .NCPU}},"MemTotal":{{json .MemTotal}},"OperatingSystem":{{json .OperatingSystem}}}')),
@@ -122,9 +126,15 @@ try {
       buffered = buffered.slice(end + 1);
       try {
         if (line.includes('LOAD_MEASUREMENT_START')) capture('before');
+        if (line.includes('LOAD_RECONNECT_STORM_READY') && env.LOAD_RECONNECT_STORM === '1' && !restart) {
+          const started = Date.now();
+          restart = execAsync('docker', [...compose, 'restart', 'app'], { env, timeout: 80_000 })
+            .then(() => { restartMs = Date.now() - started; }, error => { measurementError = String(error); });
+        }
         if (line.includes('LOAD_MEASUREMENT_END')) capture('after');
         // console.log messages are JSON-quoted in k6's text log output.
         const message = line.includes('msg=') ? JSON.parse(line.match(/msg=("(?:[^"\\]|\\.)*")/)?.[1] || 'null') : line;
+        if (typeof message === 'string' && message.startsWith('LOAD_RECONNECT_STORM ')) storm = JSON.parse(message.slice(21));
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
         if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) progress = JSON.parse(message.slice(14));
         if (line.startsWith('LOAD_SUMMARY ')) summary = JSON.parse(line.slice(13));
@@ -138,6 +148,8 @@ try {
     generator.on('error', reject);
     generator.on('close', (code) => done(code ?? 1));
   });
+  await restart;
+  if (env.LOAD_RECONNECT_STORM === '1' && (!storm || restartMs === undefined)) throw new Error('Missing storm measurement/restart');
   if (primaryError) throw primaryError;
   if (timer) clearInterval(timer);
   await sampling;
@@ -156,7 +168,7 @@ try {
   primaryError ??= error;
 } finally {
   if (timer) clearInterval(timer);
-  try { await sampling; } catch (error) { cleanupErrors.push(error); }
+  try { await restart; await sampling; } catch (error) { cleanupErrors.push(error); }
   const attempt = (action: () => void) => {
     try { action(); } catch (error) { cleanupErrors.push(error); }
   };
@@ -176,7 +188,7 @@ try {
       topLevelStatementsPerSend: (topLevelCalls ?? 0) / rate.offered,
       topLevelQueriesPerSend: (queries ?? 0) / rate.offered,
       topLevelQueriesPerAcceptedSend: (queries ?? 0) / Number(rate.accepted ?? rate.offered) };
-    writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, summary, snapshots, statementDeltas, sqlPerSend,
+    writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, storm, restartMs, summary, snapshots, statementDeltas, sqlPerSend,
       resources, progress, measurementError }, null, 2));
   });
   attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));

@@ -3,6 +3,7 @@ pub mod channels;
 pub mod messages;
 pub mod openapi;
 pub mod realtime;
+pub mod shutdown;
 
 use axum::{
     Router,
@@ -13,10 +14,15 @@ use axum::{
     routing::get,
 };
 use rust_embed::RustEmbed;
+use shutdown::Shutdown;
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     sync::LazyLock,
+    time::Duration,
 };
+
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(serde::Deserialize)]
 struct ManifestChunk {
@@ -49,6 +55,7 @@ struct Assets;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::PgPool,
+    pub shutdown: shutdown::Shutdown,
     pub cookie_secure: bool,
     pub setup_token: Option<String>,
     pub sign_in_throttle: auth::SignInThrottle,
@@ -69,6 +76,7 @@ impl AppState {
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
+            shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
         }
     }
@@ -119,11 +127,94 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/orgs/{org}/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .fallback(static_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.shutdown.clone(),
+            reject_new_requests,
+        ))
         .layer(middleware::from_fn_with_state(
             cookie_secure,
             security_headers,
         ))
         .with_state(state)
+}
+
+pub(crate) async fn reject_new_requests(
+    State(shutdown): State<Shutdown>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    if shutdown.is_stopped() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (
+                    header::RETRY_AFTER,
+                    rand::random_range(1..=5_u64).to_string(),
+                ),
+                (header::CACHE_CONTROL, "no-store".to_owned()),
+            ],
+            axum::Json(crate::auth::ErrorBody {
+                error: "shutting_down".into(),
+            }),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// The caller must terminate the process on expiry, without waiting for pool/runtime teardown.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    signal: impl Future<Output = ()>,
+    deadline: Duration,
+) -> std::io::Result<bool> {
+    let shutdown = state.shutdown.clone();
+    let pool = state.pool.clone();
+    let delivery = state.message_delivery.clone();
+    let stop_accepting = shutdown.clone();
+    let server = axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { stop_accepting.cancelled().await })
+    .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => { result?; return Ok(true); }
+        _ = signal => {}
+    }
+    let bound = tokio::time::Instant::now() + deadline;
+    shutdown.begin();
+    let drain = async {
+        server.await?;
+        // HTTP completion alone misses persistence whose caller disconnected,
+        // and the notification spawned immediately before persistence completes.
+        delivery.drained().await;
+        shutdown.sockets.drained().await;
+        pool.close().await;
+        Ok::<_, std::io::Error>(())
+    };
+    match tokio::time::timeout_at(bound, drain).await {
+        Ok(result) => {
+            result?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// Register both handlers before accepting any connections.
+pub fn signal() -> std::io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    })
 }
 
 // Host is validated as an authority and restricted to CSP source characters before reflection.
@@ -186,7 +277,7 @@ async fn static_handler(uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     if let Some(file) = Assets::get(path) {
-        return serve(path, file);
+        return serve_asset(path, file);
     }
     // A path whose last segment has an extension is an asset request: missing means 404,
     // not index.html. Anything else is a client-side route of the SPA.
@@ -195,12 +286,12 @@ async fn static_handler(uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     match Assets::get("index.html") {
-        Some(file) => serve("index.html", file),
+        Some(file) => serve_asset("index.html", file),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn serve(name: &str, file: rust_embed::EmbeddedFile) -> Response {
+fn serve_asset(name: &str, file: rust_embed::EmbeddedFile) -> Response {
     let mime = mime_guess::from_path(name).first_or_octet_stream();
     let cache = if is_hashed_asset(name) {
         "public, max-age=31536000, immutable"
@@ -239,6 +330,7 @@ mod tests {
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
+            shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
         })
         .oneshot(Request::get(path).body(Body::empty()).unwrap())

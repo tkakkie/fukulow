@@ -16,6 +16,7 @@ async fn lifecycle_socket(f: &Fixture) -> (Server, Client, oneshot::Receiver<()>
                 move |State(state): State<AppState>, auth: Auth, ws: WebSocketUpgrade| {
                     let done = done.clone();
                     async move {
+                        let work = state.shutdown.sockets.enter();
                         ws.on_upgrade(move |socket| async move {
                             connected_with_lifecycle(
                                 socket,
@@ -25,6 +26,7 @@ async fn lifecycle_socket(f: &Fixture) -> (Server, Client, oneshot::Receiver<()>
                                     ping_interval: PING_INTERVAL,
                                     idle_timeout: IDLE_TIMEOUT,
                                 },
+                                work,
                             )
                             .await;
                             let _ = done.lock().unwrap().take().unwrap().send(());

@@ -103,6 +103,7 @@ async fn account_migration_preserves_single_organization_and_requires_new_sign_i
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let response = app
