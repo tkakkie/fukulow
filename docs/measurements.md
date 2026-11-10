@@ -356,3 +356,22 @@ Dataset: one Organization/Member/public Channel, 10,000 Topics and 100,000 pre-W
 | Deep, exclusive 95001 | 400 | 24.703 | 37.373 | 67.434 | p95 <=100 ms: pass |
 
 Nearest-rank p95 is sorted sample 380/400. This single warm-cache shared-host run supports feasibility at this dataset/concurrency only, not arbitrary history size, cold-cache performance, page-size-bounded work, mixed-Channel capacity or a production latency guarantee. No expiry or candidate limit was added.
+
+### #137 round-1 mixed timeline and concurrent-send remeasurement (2026-11-11)
+
+This supersedes the preceding feasibility evidence for the current decision; the earlier Topic-only/VACUUM run remains historical. Same preselected <=100 ms timeline p95 target, four response-paced readers, 50 items, recent and deep W-relative pages. Production now fixes/validates W under the #135 barrier, releases the watermark slot and shared lock, then runs the immutable-prefix aggregate in a fresh authorization/data snapshot. No new read admission or history/candidate limits.
+
+Reproduce sequentially with DATABASE_URL pointing at the test PostgreSQL, and no concurrent builds/tests/load probes: `MEASURE_TOPICS=5000 cargo test --release -p fukulow-server --lib measure_topic_projection_pages -- --ignored --nocapture`, then the same command with `MEASURE_TOPICS=10000` (the default). Committed runner: `server/src/messages/tests/topics/measurement.rs`; round-1 changes on base 74c1e02. Native optimized Rust 1.99.0, current-thread Tokio, 20-connection application pool, fresh SQLx database per size, Apple M5/10 CPUs/32 GiB, macOS 27.0.1 arm64, Docker 29.9.3/PostgreSQL 18.6 over loopback port 55432. Desktop/agent/background work was not isolated.
+
+At T=5,000/10,000 Topics, seed 10 pre-W Messages per Topic plus 50,000/100,000 plain Messages, interleaved at odd/even seq, W=100,000/200,000. Every Topic moves once after W, so initial Channel size is 105,000/210,000 Messages. Run ANALYZE only; no forced VACUUM. Ten sequential warm-ups per boundary, then four readers ×100 requests (400 samples). Deep boundary is exclusive 95,000/190,000: 5,001/10,001 timeline positions consumed (about 100/200 pages). Responses verify W, all 50 exact mixed positions, and each Topic count=10 despite later activity.
+
+During each timed window a fifth worker sends real HTTP Topic Messages to the same Channel/Topic every 50 ms (20/s nominal, first tick immediate); each send awaits its response, missed ticks are skipped. Actual rates below show no material offered-rate loss in these windows. Timings cover in-process HTTP authentication, authorization, barrier, query, serialization/decoding; send timings include persistence/COMMIT/ACK, not WebSocket receipt. They exclude fixture setup, TCP/proxy/TLS. Nearest-rank percentiles: reads sample 380/400; sends ceil(0.95×N).
+
+| Initial Channel Messages | Boundary | Read N | Read p50 / p95 / max ms | Send N | Send p50 / p95 / max ms | Window s / sends per s |
+|---:|---|---:|---|---:|---|---|
+| 105,000 | Recent | 400 | 16.598 / 20.819 / 37.401 | 36 | 5.168 / 21.147 / 22.801 | 1.761 / 20.437 |
+| 105,000 | Deep, exclusive 95,000 | 400 | 17.961 / 23.995 / 28.950 | 38 | 5.293 / 8.173 / 9.011 | 1.878 / 20.229 |
+| 210,000 | Recent | 400 | 28.696 / 32.342 / 52.591 | 59 | 5.043 / 11.249 / 19.983 | 2.927 / 20.154 |
+| 210,000 | Deep, exclusive 190,000 | 400 | 28.619 / 32.235 / 38.311 | 59 | 4.776 / 6.345 / 8.638 | 2.924 / 20.177 |
+
+Both sizes/boundaries pass. The smaller Channel gained 74 Messages and the larger 118 over their two timed windows. A deliberately simple proportional projection from the larger point's worst read p95 crosses 100 ms at 210,000 ×100/32.342 ≈649,310 total Channel Messages (about 30,920 Topics, 618,390 pre-W mixed Messages at the same ratio). Treat ~649k as the planning stop-and-remeasure point; it is not a measured failure or safe capacity bound. Plan changes, heap visibility, cache pressure and contention can invalidate linear scaling; these single, short, warm-cache shared-host runs do not establish arbitrary-history, cold-cache or production performance. The smaller point is a scaling check, not a fitted capacity guarantee. No limits were added. Raw logs outside Git: `/private/tmp/topics-137-release-{5000,10000}.log`.
