@@ -27,6 +27,7 @@ fn router_with_cookie_security(pool: &PgPool, cookie_secure: bool) -> Router {
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     })
 }
@@ -243,6 +244,7 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
+            shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
         });
         let response = app
@@ -345,6 +347,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
+            shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
         });
         let valid_input = if path == "/api/v1/setup" {
@@ -439,6 +442,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let expected = json!({"error": "invalid credentials"});
@@ -506,6 +510,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     for token in [None, Some(""), Some("wrong-token-test-only")] {
@@ -1216,6 +1221,7 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
+        shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
     });
     let first = setup(&app).await;

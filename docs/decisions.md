@@ -10,6 +10,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Public repo. Reason: free CI minutes.
 - Migrations run at startup before listening. PostgreSQL 18 persists under `/var/lib/postgresql` (its new data path).
 - Deployment is single-process: live delivery, revocation, throttles and admission are process-local. Multiple server processes need shared publication/revocation and a shared limiter first (#18, #57).
+- #195: shutdown also returns 503 for non-API paths, including static assets and SPA routes; these middleware rejections are outside OpenAPI.
 - A second instance blocked on the migration advisory lock past the 5 s timeout fails startup and relies on Compose `restart: unless-stopped` to retry (#88, #93).
 - PostgreSQL 17+ is required (`transaction_timeout`); on older servers every send/subscription fails loudly. Compose and CI use 18; no startup check (#158).
 - Dependabot security updates were enabled on 2026-11-08 but no security PR has been seen, so do not claim they work. VPS automatic OS security updates are planned with the deploy work.
@@ -87,6 +88,11 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - History reads authorization and its page in one read-only REPEATABLE READ transaction without row locks: loss committed before the snapshot denies; an authorized page sees no later Messages (#146).
 
 ## Real-time delivery
+- #195: SIGTERM/SIGINT stop acceptance and reject new requests, broadcast 1001, then drain HTTP, detached sends/notifications and sockets before closing the pool. Count before spawn/upgrade so caller disconnects and task handoffs cannot hide work.
+- #195: retain provisional 60 s drain / 75 s Compose stop_grace_period from measured drains: 2,048-send SIGTERM <=814 ms; idle 10k restart <1 s (measurements.md). These are not guaranteed worst-case times; pre-admission SQL can exceed them. Expiry skips runtime teardown.
+- #195 known limit: on normal exit, Tokio runtime teardown is outside the drain and can run past its 60 s deadline. Retain the current teardown behavior; no larger change now.
+- #195: sockets independently observe one shutdown watch and send Close concurrently, each capped at 1 s; a slow peer cannot serialize 10,000 closes. Upgrade callbacks retain a drain guard before handoff so late scheduling cannot race pool close.
+- #195: SIGKILL, crashes and drain expiry cannot promise COMMIT outcome or Close delivery. Retry the same client_message_id and resubscribe from the gap-free cursor; #135 resolves uncertain COMMITs without duplicate Messages.
 - Subscribe handoff: register live first, replay committed seq > cursor in 50-Message pages, flush newer queued events, then send `subscribed`. Clients dedupe by (channel_id, seq): duplicates allowed, no gaps (#18).
 - Full queues close with 4008, never silent loss; clients reconnect from each Channel's last seq. Per connection: 256 queued events, at most 256 subscriptions (#18).
 - Messages owns post-commit fan-out; Channels owns visibility. Fan-out checks all candidate Members in one visibility query (no per-recipient SQL) and shares canonical payloads; authorization-query failure closes with 4008 for replay (#18).
@@ -137,7 +143,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - The initial WebSocket session check is capped at 5 s (was the 30 s pool default); a DB error there closes with 1011, reserving 4001 for ended sessions (#57 PR C).
 - #157 supervises the worker: any unexpected exit latches unavailability, signals 1011 and refuses new WebSocket admission. A failed non-revoked registration gets a fresh watch sender; revoked epochs are never replaced.
 - #163: after an unexpected worker exit the process exits(1) after a fixed 2 s grace so Compose `restart: unless-stopped` restores service. Rejected: a healthcheck alone, because Compose does not restart unhealthy containers.
-- #163: only a return with the registry gone or the pool explicitly closed is a normal exit; `main.rs` never closes the pool today. Revisit when graceful shutdown closes it while HTTP keeps serving.
+- #163/#195: successful return after registry drop or explicit pool close is normal. Graceful shutdown closes the pool only after HTTP, sends, notifications and sockets drain, so fallback supervision does not exit(1); panic/cancel remains fatal even during teardown.
 - #163 exit cuts in-flight HTTP; outcomes may be unknown. Recovery is an idempotent retry with the same `client_message_id` plus #135 replay; no automatic HTTP retry and no Close-frame delivery promise.
 - #163 manual check: `node scripts/check-compose-restart.ts` verifies `restart: unless-stopped` after killing the real main process (host-PID helper when in-container SIGKILL is ignored); Rust tests cover the panic path.
 
@@ -168,6 +174,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Capabilities (`{allowed, reason?}` per operation) are added only when the UI must show in advance whether an operation is possible (#91).
 - #120: an async `channel_not_found` carries no subscription generation; if it could belong to a retired or a pending subscription, the controller reconnects with backoff. Cost: one resubscribe of all Channels; other clients must do the same.
 - #97 Svelte 5 adapters only read the controller and forward intents; `createSubscriber` carries change notifications, so state is never copied into `$state`. Session controllers live from Sign in to sign-out/4001/401/replacement, closed by the auth adapter.
+- #195: reconnect uses full jitter [0, min(10 s, 500 ms * 2^attempt)), including the first 4008; only subscribed resets attempts, avoiding handshake retry loops. 4001/4003 remain terminal. History fill keeps deterministic backoff; injected randomness permits exact tests.
 - #146/#148 client classification: 4001 Sign in; 4003 terminal Organization unavailable; 1001/1011 back off and reconnect; 4008 reconnects with bounded retries. A rejected browser handshake never implies 4003 (`GET .../me` confirms).
 - The auth adapter keeps Account/controller lifetime and Organization selection together (Tier 2 deviation) to avoid an unrelated abstraction in the #146 migration; sync policy stays in the controller/protocol.
 - #200 layout A2 (rail, チャンネル column with トピック accordion, main card, closable right panel), picked by the maintainer from three mockups; surfaces split by tone and radius, not rules. Details in `docs/ui.md`.

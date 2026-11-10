@@ -200,7 +200,8 @@
         {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
-        {"input":{"type":"socket_closed","code":4008},"effects":{"required":[{"type":"connect"}],"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"socket_closed","code":4008},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"overflow_wait"}],"forbidden":[{"type":"subscribe"},{"type":"connect"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"overflow_wait"},"effects":{"required":[{"type":"connect"}]}},
         {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r_s"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"r_s"},"observe":{"channels":{"A":{"state":"ready","cursor":100}}}}
       ]
@@ -216,7 +217,8 @@
         {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
-        {"input":{"type":"socket_closed","code":4008},"effects":{"required":[{"type":"connect"}],"forbidden":[{"type":"subscribe"}]}},
+        {"input":{"type":"socket_closed","code":4008},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"overflow_wait"}],"forbidden":[{"type":"subscribe"},{"type":"connect"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"overflow_wait"},"effects":{"required":[{"type":"connect"}]}},
         {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"r1_s"}]}},
         {"input":{"type":"socket_closed","code":4008},"only_if":"socket_open","effects":{"forbidden":[{"type":"subscribe"}]}},
         {"input":{"type":"connection_ready"},"only_if":"connect_pending"},
