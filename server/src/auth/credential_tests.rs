@@ -33,34 +33,38 @@ fn app_with_entropy(
 ) -> axum::Router {
     axum::Router::new()
         .route(
-            "/api/v1/session",
+            "/api/v1/native/session",
             axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
                 let calls = calls.clone();
-                sign_in_with_entropy(
-                    state,
-                    peer,
-                    headers,
-                    input,
-                    &PASSWORD_WORKERS,
-                    move |bytes| {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        assert_eq!(bytes.len(), 32);
-                        if !fail || partial {
-                            for (byte, value) in bytes.iter_mut().zip(0u8..) {
-                                *byte = value;
+                async move {
+                    sign_in_with_entropy(
+                        state,
+                        peer,
+                        headers,
+                        input,
+                        &PASSWORD_WORKERS,
+                        move |bytes| {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            assert_eq!(bytes.len(), 32);
+                            if !fail || partial {
+                                for (byte, value) in bytes.iter_mut().zip(0u8..) {
+                                    *byte = value;
+                                }
                             }
-                        }
-                        if fail {
-                            Err(ApiError(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "internal error",
-                                None,
-                            ))
-                        } else {
-                            Ok(())
-                        }
-                    },
-                )
+                            if fail {
+                                Err(ApiError(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "internal error",
+                                    None,
+                                ))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+                    .map(IntoResponse::into_response)
+                }
             }),
         )
         .with_state(state)
@@ -68,7 +72,7 @@ fn app_with_entropy(
 
 async fn sign_in_request(app: axum::Router) -> Response {
     app.oneshot(
-        Request::post("/api/v1/session")
+        Request::post("/api/v1/native/session")
             .extension(ConnectInfo(
                 "192.0.2.1:1234".parse::<std::net::SocketAddr>().unwrap(),
             ))

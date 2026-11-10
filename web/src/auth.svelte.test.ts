@@ -192,7 +192,7 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     const history = net.history.length
     await vi.advanceTimersByTimeAsync(5 * 60_000)
     expect(s.auth.view.screen).toBe('app')
-    expect(s.auth.session!.sync.channel('A').timeline.status).toBe('error')
+    expect(s.auth.session!.sync.channel('A').timeline.status).toBe('unavailable')
     expect(net.history).toHaveLength(history)
     expect(s.closes[0]).not.toHaveBeenCalled()
   })
@@ -363,6 +363,38 @@ it('a late Organization identity response is fenced after switching, but its sam
   await unauthorized
   expect(s.auth.view.screen).toBe('signin')
   expect(s.auth.session).toBeNull()
+})
+
+it('shows context-specific 400 and wait-before-retrying 429 messages on sign-in, and clears sign-out errors on Organization switch', async () => {
+  const s400 = stack({ signIn: vi.fn(async () => ({ ok: false, kind: 'http', status: 400 }) as never) })
+  expect(await s400.auth.submitSignIn('bad', 'x')).toBe(false)
+  expect(s400.auth.error).not.toContain('12文字')
+  expect(s400.auth.error).toContain('入力内容を確認してください')
+
+  const s429 = stack({ signIn: vi.fn(async () => ({ ok: false, kind: 'http', status: 429 }) as never) })
+  expect(await s429.auth.submitSignIn('a@example.com', 'pw')).toBe(false)
+  expect(s429.auth.error).toContain('しばらく待ってから')
+
+  let finishSignOut!: (ok: boolean) => void
+  const orgSwitch = stack({
+    signOut: vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockImplementationOnce(() => new Promise(r => { finishSignOut = r })),
+  })
+  await signInAs(orgSwitch, 'm1')
+  expect(await orgSwitch.auth.signOut()).toBe(false)
+  expect(orgSwitch.auth.error).not.toBe('')
+
+  await orgSwitch.auth.selectOrganization('other')
+  expect(orgSwitch.auth.error).toBe('')
+  expect(orgSwitch.auth.selectedOrganizationId).toBe('other')
+
+  // An in-flight failed signOut started before switching Organizations does not re-populate error.
+  const pendingSignOut = orgSwitch.auth.signOut()
+  await orgSwitch.auth.selectOrganization('o')
+  finishSignOut(false)
+  expect(await pendingSignOut).toBe(false)
+  expect(orgSwitch.auth.error).toBe('')
 })
 
 it('a new Account with no Organizations clears the previous unavailable Organization status', async () => {

@@ -1,5 +1,7 @@
-import { expect, test, type Page } from '@playwright/test'
-import type { Message, ServerEvent } from '../src/api'
+import { expect, test, type Page, type WebSocket as ObservedWebSocket } from '@playwright/test'
+import type { components, ServerEvent } from '../src/api-schema.d.ts'
+
+type Message = components['schemas']['Message']
 
 // Empty DB -> setup -> sign in -> create channel -> post -> appears live in a second browser context.
 const owner = { email: 'owner@example.com', password: 'correct horse battery' }
@@ -12,10 +14,36 @@ async function signIn(page: Page) {
   await expect(page.getByText('Acme / Alice さん')).toBeVisible()
 }
 
-test('a message posted in one browser appears live in another, without reload', async ({ browser }) => {
+test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and sign-out', async ({ browser, baseURL }) => {
+  expect(new URL(baseURL!).protocol).toBe('https:')
   // Browser A and B are independent contexts (own cookies, own sessions).
-  const a = await (await browser.newContext()).newPage()
-  const b = await (await browser.newContext()).newPage()
+  const a = await (await browser.newContext({ baseURL, ignoreHTTPSErrors: true })).newPage()
+  const b = await (await browser.newContext({ baseURL, ignoreHTTPSErrors: true })).newPage()
+  const cspErrors: string[] = []
+  const sockets: ObservedWebSocket[] = []
+  const signIns: Promise<unknown>[] = []
+  for (const page of [a, b]) {
+    page.on('console', message => { if (/content.security.policy|violates.*directive/i.test(message.text())) cspErrors.push(message.text()) })
+    page.on('pageerror', error => cspErrors.push(error.message))
+    page.on('response', response => {
+      if (new URL(response.url()).pathname === '/api/v1/session' && response.request().method() === 'POST') {
+        signIns.push(response.json().then(body => {
+          expect(Object.keys(body).sort()).toEqual(['expires_in', 'identity'])
+          expect(response.headers()['cache-control']).toBe('no-store')
+        }))
+      }
+    })
+    await page.addInitScript(() => {
+      const sockets: WebSocket[] = []
+      const Original = window.WebSocket
+      // Preserve the native browser constructor and network/CSP enforcement; retain only a test close hook.
+      window.WebSocket = class extends Original {
+        constructor(url: string | URL, protocols?: string | string[]) { super(url, protocols); sockets.push(this) }
+      }
+      Object.assign(window, { closeTestSockets: () => sockets.forEach(socket => socket.close(4008, 'E2E reconnect')) })
+    })
+  }
+  a.on('websocket', socket => { expect(new URL(socket.url()).protocol).toBe('wss:'); sockets.push(socket) })
   const echoes: Message[] = []
   a.on('websocket', socket => socket.on('framereceived', ({ payload }) => {
     const event = JSON.parse(String(payload)) as ServerEvent
@@ -23,7 +51,26 @@ test('a message posted in one browser appears live in another, without reload', 
   }))
 
   // A: fresh instance -> setup (signs in automatically) -> channel through the product UI.
-  await a.goto('/')
+  const first = await a.goto('/')
+  const headers = first!.headers()
+  expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")
+  expect(headers['content-security-policy']).toContain('wss://' + new URL(baseURL!).host)
+  expect(headers['content-security-policy']).not.toMatch(/unsafe-inline|unsafe-eval/)
+  expect(headers['x-content-type-options']).toBe('nosniff')
+  expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin')
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(baseURL!).hostname)
+  expect(headers['strict-transport-security']).toBe(loopback ? undefined : 'max-age=31536000')
+  expect(headers['cache-control']).toBe('no-cache')
+  for (const path of ['/index.html', '/channels/general', '/favicon.svg']) {
+    expect((await a.request.get(path)).headers()['cache-control']).toBe('no-cache')
+  }
+  const files = await a.locator('script[src], link[rel="stylesheet"]').evaluateAll(elements => elements.map(element => element.getAttribute('src') ?? element.getAttribute('href')!))
+  expect(files.length).toBeGreaterThan(0)
+  for (const path of files) {
+    const response = await a.request.get(path, { headers: { 'Accept-Encoding': 'gzip' } })
+    expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
+    expect(response.headers()['content-encoding']).toBe('gzip')
+  }
   await a.getByLabel('組織名').fill('Acme')
   await a.getByLabel('オーナーの名前').fill('Alice')
   await a.getByLabel('メールアドレス').fill(owner.email)
@@ -40,12 +87,25 @@ test('a message posted in one browser appears live in another, without reload', 
   await expect(b.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
   await expect(a.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
 
+  const oldSocket = sockets.at(-1)!
+  const count = sockets.length
+  const closed = new Promise<void>(resolve => oldSocket.once('close', () => resolve()))
+  await a.evaluate(() => (window as typeof window & { closeTestSockets: () => void }).closeTestSockets())
+  await closed
+  await expect.poll(() => sockets.length).toBeGreaterThan(count)
+  await expect(a.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+  const cookies = await a.context().cookies()
+  const session = cookies.find(cookie => cookie.name === '__Host-fukulow_session')!
+  expect(session).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict', path: '/' })
+  expect(cookies.some(cookie => cookie.name === 'fukulow_session')).toBe(false)
+
   const historyAfterPost: string[] = []
   b.on('request', (r) => {
     if (new URL(r.url()).pathname.endsWith('/messages') && r.method() === 'GET') historyAfterPost.push(r.url())
   })
 
-  const text = `live ${Date.now()}`
+  // Exceed Caddy's compression threshold to verify that API responses stay uncompressed.
+  const text = `live ${Date.now()} ${'message '.repeat(128)}`
   await a.getByLabel('メッセージ').fill(text)
   const acknowledgement = a.waitForResponse(response =>
     new URL(response.url()).pathname.endsWith('/messages') && response.request().method() === 'POST')
@@ -55,9 +115,20 @@ test('a message posted in one browser appears live in another, without reload', 
   await expect(b.locator('.body', { hasText: text })).toHaveCount(1)
   const response = await acknowledgement
   expect(response.status()).toBe(201)
+  expect(response.headers()['content-encoding']).toBeUndefined()
   const canonical = await response.json() as Message
   await expect.poll(() => echoes.filter(m => m.client_message_id === canonical.client_message_id)).toEqual([canonical])
   await expect(a.locator('li[data-status]')).toHaveCount(0)
   await expect(a.locator('.body', { hasText: text })).toHaveCount(1) // Both echo and ack have completed.
   expect(historyAfterPost).toEqual([])
+  await Promise.all(signIns)
+  expect(signIns).toHaveLength(2)
+  await a.getByRole('button', { name: 'ログアウト' }).click()
+  await expect(a.getByRole('heading', { name: 'ログイン' })).toBeVisible()
+  expect((await a.context().cookies()).some(cookie => cookie.name.endsWith('fukulow_session'))).toBe(false)
+  await a.reload()
+  await expect(a.getByRole('heading', { name: 'ログイン' })).toBeVisible()
+  expect(cspErrors).toEqual([])
+  await a.context().close()
+  await b.context().close()
 })

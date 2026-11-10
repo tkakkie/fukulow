@@ -178,7 +178,7 @@ async fn reply_migration_preserves_existing_rows_and_scopes_both_foreign_keys(po
     let mut paths = std::fs::read_dir(directory)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.file_name().unwrap().to_str().unwrap() < "202611110002_replies.sql")
+        .filter(|p| p.file_name().unwrap().to_str().unwrap() < "202611110198_replies.sql")
         .collect::<Vec<_>>();
     paths.sort();
     for path in paths {
@@ -198,7 +198,7 @@ async fn reply_migration_preserves_existing_rows_and_scopes_both_foreign_keys(po
         .await
         .unwrap();
     sqlx::raw_sql(include_str!(
-        "../../../../migrations/202611110002_replies.sql"
+        "../../../../migrations/202611110198_replies.sql"
     ))
     .execute(&pool)
     .await

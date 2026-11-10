@@ -36,6 +36,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/native/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["native_sign_in"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/channels": {
         parameters: {
             query?: never;
@@ -413,6 +429,13 @@ export interface components {
             /** @description Always ascending seq (newest last), including latest and before_seq pages. */
             messages: components["schemas"]["Message"][];
         };
+        NativeSessionResponse: {
+            /** Format: int32 */
+            expires_in: number;
+            identity: components["schemas"]["AccountIdentity"];
+            /** @description Opaque bearer credential. Store securely; returned only on native sign-in. */
+            token: string;
+        };
         Organization: {
             name: string;
             /** Format: uuid */
@@ -465,8 +488,6 @@ export interface components {
             /** Format: int32 */
             expires_in: number;
             identity: components["schemas"]["AccountIdentity"];
-            /** @description Opaque bearer credential. Store securely; returned only on sign-in. */
-            token: string;
         };
         SetupRequest: {
             email: string;
@@ -605,6 +626,7 @@ export type Member = components['schemas']['Member'];
 export type Message = components['schemas']['Message'];
 export type MessageEvent = components['schemas']['MessageEvent'];
 export type MessagePage = components['schemas']['MessagePage'];
+export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
 export type Organization = components['schemas']['Organization'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
 export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
@@ -675,6 +697,86 @@ export interface operations {
                 };
             };
             /** @description Database failure while resolving the session identity */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    native_sign_in: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SignInRequest"];
+            };
+        };
+        responses: {
+            /** @description Signed in for a native client; returns identity, bearer token and expiry without setting cookies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeSessionResponse"];
+                };
+            };
+            /** @description Invalid sign-in JSON, fields, email or password length */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Email or password does not match an Account */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too many failed or in-flight sign-in attempts; budget shared with web sign-in */
+            429: {
+                headers: {
+                    /** @description Seconds until retry; at least 1 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database, password verification, or credential generation failure while signing in */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -1519,10 +1621,10 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Signed in; returns identity, session token and expiry, and sets the session cookie */
+            /** @description Signed in for the web; returns only identity and expiry and sets the session cookie */
             200: {
                 headers: {
-                    /** @description HttpOnly; SameSite=Strict; Path=/; Secure by default */
+                    /** @description __Host-fukulow_session; Secure; HttpOnly; SameSite=Strict; Path=/; no Domain. Local HTTP uses fukulow_session. Legacy cookie expired on HTTPS */
                     "Set-Cookie"?: string;
                     [name: string]: unknown;
                 };

@@ -9,10 +9,10 @@ use utoipa::{
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::sign_out, crate::auth::me, crate::auth::organization_me,
+    paths(crate::health, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::native_sign_in, crate::auth::sign_out, crate::auth::me, crate::auth::organization_me,
         crate::channels::list_channels, crate::channels::create_channel,
         crate::messages::list_messages, crate::messages::send_message, crate::messages::replies::reply_chain, crate::messages::topics::projection::list_timeline, crate::messages::topics::projection::list_topics, crate::messages::topics::projection::topic_summary, crate::messages::topics::topic_history, crate::realtime::upgrade),
-    components(schemas(crate::auth::Account, crate::auth::AccountIdentity, crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::ErrorBody,
+    components(schemas(crate::auth::Account, crate::auth::AccountIdentity, crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::NativeSessionResponse, crate::auth::ErrorBody,
         crate::channels::Channel, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::channels::ChannelList,
         crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage, crate::messages::ReplyChainPage, crate::messages::ReplyChainQuery, crate::messages::ListProjectionQuery, crate::messages::TimelineItem, crate::messages::TimelinePage, crate::messages::TopicPage, crate::messages::TopicSummary, crate::messages::TopicSummaryResponse,
         crate::realtime::ClientMessage, crate::realtime::ServerEvent)),
@@ -30,7 +30,7 @@ impl Modify for Security {
         );
         components.add_security_scheme(
             "cookie",
-            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new("fukulow_session"))),
+            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description("__Host-fukulow_session", "HTTPS production cookie; local HTTP with FUKULOW_COOKIE_SECURE=false uses fukulow_session"))),
         );
     }
 }

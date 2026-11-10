@@ -374,7 +374,7 @@ async fn topic_migration_preserves_existing_messages_as_null(pool: PgPool) {
     .await
     .unwrap();
     sqlx::raw_sql(include_str!(
-        "../../../../migrations/202611110002_replies.sql"
+        "../../../../migrations/202611110198_replies.sql"
     ))
     .execute(&pool)
     .await
