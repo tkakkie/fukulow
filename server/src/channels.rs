@@ -64,12 +64,7 @@ pub async fn list_channels(
     let sql = format!(
         "SELECT c.id, c.name, c.visibility FROM ({}) u \
          LEFT JOIN channels c ON c.organization_id = $1 \
-         AND (c.visibility = 'public' OR EXISTS (\
-             SELECT 1 FROM channel_members cm \
-             WHERE cm.organization_id = c.organization_id \
-               AND cm.channel_id = c.id AND cm.member_id = u.id \
-               AND cm.membership_revision = u.membership_revision\
-         )) WHERE u.id = $2 AND u.membership_revision = $3 \
+         AND ({VISIBLE_CHANNEL_SQL}) WHERE u.id = $2 AND u.membership_revision = $3 \
          ORDER BY lower(c.name COLLATE \"C\"), c.id",
         auth::ACTIVE_MEMBERS_SQL
     );
@@ -130,7 +125,7 @@ pub async fn create_channel(
     }
     let organization_id = auth.identity.organization.organization_id;
     let mut tx = state.pool.begin().await?;
-    let sql = format!("SELECT id FROM ({}) u", auth::CURRENT_MEMBER_SQL);
+    let sql = format!("SELECT id FROM ({}) u", auth::current_member_sql(true));
     if sqlx::query_scalar::<_, Uuid>(&sql)
         .bind(organization_id)
         .bind(auth.identity.member.id)
@@ -192,6 +187,19 @@ pub async fn create_channel(
         .into_response())
 }
 
+// All Channel authorization paths share the same grant predicate (aliases c and u).
+const VISIBLE_CHANNEL_SQL: &str = "c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
+    WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
+    AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision)";
+
+fn visibility_sql(member_sql: &str, channel_parameter: &str) -> String {
+    format!(
+        "SELECT u.id, u.membership_revision, EXISTS (SELECT 1 FROM channels c \
+         WHERE c.organization_id = $1 AND c.id = {channel_parameter} \
+         AND ({VISIBLE_CHANNEL_SQL})) AS visible FROM ({member_sql}) u"
+    )
+}
+
 // None distinguishes Membership loss from an unavailable Channel in one snapshot.
 pub(crate) async fn is_visible<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
@@ -199,30 +207,17 @@ pub(crate) async fn is_visible<'e, E: sqlx::PgExecutor<'e>>(
     member: (Uuid, i64),
     channel_id: Uuid,
 ) -> Result<Option<bool>, sqlx::Error> {
-    member_visibility(
-        executor,
-        organization_id,
-        member,
-        channel_id,
-        auth::CURRENT_MEMBER_SQL,
-    )
-    .await
+    member_visibility(executor, organization_id, member, channel_id, false).await
 }
 
-pub(crate) async fn is_visible_in_snapshot<'e, E: sqlx::PgExecutor<'e>>(
-    executor: E,
+// Only writes retain the Member lock through COMMIT, fencing concurrent deactivation.
+pub(crate) async fn is_visible_for_write(
+    connection: &mut sqlx::PgConnection,
     organization_id: Uuid,
     member: (Uuid, i64),
     channel_id: Uuid,
 ) -> Result<Option<bool>, sqlx::Error> {
-    member_visibility(
-        executor,
-        organization_id,
-        member,
-        channel_id,
-        auth::ACTIVE_MEMBERS_SQL,
-    )
-    .await
+    member_visibility(connection, organization_id, member, channel_id, true).await
 }
 
 async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
@@ -230,14 +225,11 @@ async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
     organization_id: Uuid,
     member: (Uuid, i64),
     channel_id: Uuid,
-    member_sql: &str,
+    lock: bool,
 ) -> Result<Option<bool>, sqlx::Error> {
     let sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM channels c WHERE c.organization_id = $1 AND c.id = $4 \
-         AND (c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
-         WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
-         AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision))) \
-         FROM ({member_sql}) u WHERE u.id = $2 AND u.membership_revision = $3"
+        "SELECT visible FROM ({}) visibility",
+        visibility_sql(&auth::current_member_sql(lock), "$4")
     );
     sqlx::query_scalar(&sql)
         .bind(organization_id)
@@ -248,6 +240,15 @@ async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
         .await
 }
 
+fn visible_members_sql() -> String {
+    format!(
+        "SELECT v.id, v.membership_revision FROM ({}) v \
+         JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id, revision) \
+         ON v.id = candidate.id AND v.membership_revision = candidate.revision WHERE v.visible",
+        visibility_sql(&auth::candidate_members_sql(), "$2")
+    )
+}
+
 // Match each socket's captured revision, including multiple epochs for the same Member.
 pub(crate) async fn visible_members(
     pool: &sqlx::PgPool,
@@ -256,16 +257,7 @@ pub(crate) async fn visible_members(
     members: &[(Uuid, i64)],
 ) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
     let (ids, revisions): (Vec<_>, Vec<_>) = members.iter().copied().unzip();
-    let sql = format!(
-        "SELECT u.id, u.membership_revision FROM UNNEST($3::uuid[], $4::bigint[]) candidate(id, revision) \
-         JOIN ({}) u ON u.id = candidate.id AND u.membership_revision = candidate.revision \
-         JOIN channels c ON c.organization_id = $1 AND c.id = $2 \
-         WHERE c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
-         WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
-         AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision)",
-        auth::ACTIVE_MEMBERS_SQL
-    );
-    sqlx::query_as(&sql)
+    sqlx::query_as(&visible_members_sql())
         .bind(organization_id)
         .bind(channel_id)
         .bind(ids)

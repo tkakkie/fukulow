@@ -573,12 +573,17 @@ impl FromRequestParts<AppState> for Auth {
 }
 
 // Owned here so Channel authorization can compose one query without owning Member SQL.
-// $1 is always the Organization; callers filter the captured Member/revision pairs.
-// A write retains this shared row lock through COMMIT; deactivation cannot commit
-// between its authorization and persistence. Ordinary reads release it with the query.
-pub(crate) const CURRENT_MEMBER_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND id = $2 AND membership_revision = $3 AND deactivated_at IS NULL FOR SHARE";
-
+// $1 is always the Organization. Reads never take Member row locks.
 pub(crate) const ACTIVE_MEMBERS_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND deactivated_at IS NULL";
+
+pub(crate) fn current_member_sql(lock: bool) -> String {
+    let locking = if lock { " FOR SHARE" } else { "" };
+    format!("{ACTIVE_MEMBERS_SQL} AND id = $2 AND membership_revision = $3{locking}")
+}
+
+pub(crate) fn candidate_members_sql() -> String {
+    format!("{ACTIVE_MEMBERS_SQL} AND id = ANY($3)")
+}
 
 /// Foundation for Member administration (#144/#149); no removal endpoint is exposed.
 pub async fn deactivate_member(

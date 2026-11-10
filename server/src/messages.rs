@@ -124,7 +124,7 @@ pub async fn list_messages(
         .pool
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await?;
-    match channels::is_visible_in_snapshot(
+    match channels::is_visible(
         &mut *tx,
         organization_id,
         (auth.identity.member.id, auth.membership_revision),
@@ -385,7 +385,13 @@ async fn persist_admitted(
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN").await?;
-    require_visible(tx.connection()?, organization_id, sender, channel_id).await?;
+    match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
+        .await?
+    {
+        Some(true) => {}
+        Some(false) => return Err(MessageError::NotFound),
+        None => return Err(MessageError::OrganizationUnavailable),
+    }
     let sender = sender.0;
     if let Some(message) = existing(
         tx.connection()?,
