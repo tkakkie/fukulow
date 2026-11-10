@@ -304,7 +304,7 @@ it('an explicit retry after a terminal refusal fetches and subscribes again thro
   await ready(client)
   await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' })
   const t = client.sync.getTimeline('A')
-  expect(t.get().status).toBe('error')
+  expect(t.get().status).toBe('unavailable')
   const history = (await client.feed({ type: 'refresh', channel: 'A' })).find(e => e.type === 'fetch_history')!
   await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
   expect(t.get().status).toBe('ready')
@@ -347,7 +347,7 @@ it('controller async channel_not_found marks a confirmed Channel unavailable wit
   expect(await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' }))
     .toContainEqual(expect.objectContaining({ type: 'unsubscribe', channel: 'A' }))
   expect(client.sync.get().channels.A.state).toBe('unavailable')
-  expect(client.sync.getTimeline('A').get().status).toBe('error')
+  expect(client.sync.getTimeline('A').get().status).toBe('unavailable')
   const count = client.allEffects.length
   await vi.advanceTimersByTimeAsync(60_000)
   expect(client.allEffects).toHaveLength(count)

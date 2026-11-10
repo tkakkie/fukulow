@@ -5,6 +5,7 @@ const port = 18080
 
 export default defineConfig({
   testDir: './e2e',
+  workers: 1,
   timeout: 30_000,
   use: { baseURL: `http://127.0.0.1:${port}` },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],

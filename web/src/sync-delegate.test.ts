@@ -80,11 +80,16 @@ it.each(['channel_not_found', 'subscription_limit', 403, 404, 500] as const)(
     const client = controllerClient()
     const t = await bootstrap(client)
     expect(t.get()).toMatchObject({ status: 'ready', messages: [record(100)] })
+    t.setDraft('unsent draft')
     if (typeof refusal === 'number') {
       const history = (await client.feed({ type: 'refresh', channel: 'A' })).find(e => e.type === 'fetch_history')!
       await client.feed({ type: 'history_failed', respond_to: history, status: refusal })
     } else await client.feed({ type: 'error_event', channel: 'A', code: refusal })
-    expect(t.get()).toMatchObject({ status: 'error', messages: [record(100)] })
+    expect(t.get()).toMatchObject({
+      status: refusal === 500 ? 'error' : 'unavailable',
+      messages: [record(100)],
+      draft: 'unsent draft',
+    })
     await client.sync.close()
   },
 )
