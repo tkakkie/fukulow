@@ -147,6 +147,13 @@ it('before and nonadjacent latest records extend the window without becoming cur
   expect(d.get().channels.A.cursor).toBe(102)
 })
 
+it('reconnects with backoff after a 1001 idle-timeout close', () => {
+  const d = boot()
+  const timer = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1001 }), 'wait')
+  const next = id(d.feed({ type: 'timer_elapsed', id: timer }), 'connect')
+  expect(next).toBeDefined()
+})
+
 it('rejects stale connection readiness, events, closes and subscription completions', () => {
   const d = boot()
   const timer = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1011 }), 'wait')
