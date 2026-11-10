@@ -9,6 +9,7 @@ Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spe
 - Auth, permissions, tenant scoping, real-time delivery, API contract, migrations: check the related decisions and invariants first (required).
 - Nothing found: try other keywords (spec terms, modules, error values) and related Issues/PRs before assuming no constraint.
 - `docs/measurements.md`: never in normal work or unrelated changes; for performance work, load tests, regression checks or comparing results, search and read only the related section.
+- A doc split into an index plus `docs/<kind>/<area>.md` parts: open the index only for related work, then the matching parts; a cross-area change reads every related part.
 - Reorganising or verifying docs: read them in full. "Not whole" is a default, never a ban on a needed check.
 - `docs/workflow.md` by task: implementing needs only "Workflow essentials"; PRs, reviews, labels, sweeps, conflicts, merges: the matching section.
 
@@ -16,6 +17,7 @@ Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spe
 - `decisions.md`: only current decisions, what + why in at most 300 characters each; split or link `#n` rather than blur a reason.
 - `measurements.md`: only results behind a decision, performance comparisons or key regression checks, with reproduction conditions and limits; no routine/debug logs, raw artifacts or duplicates; never silently rewrite or drop an old record.
 - `invariants.md`: a Rule cell states what must hold, scope and exceptions included, in at most 160 characters.
+- Splitting a doc (over ~40 KB, repeated conflicts, or a major `spec.md` feature) is evaluated, not automatic: only via its own approved Issue, never in an unrelated PR, no new doc kinds. Procedure: `docs/workflow.md` §13.
 
 ## Stack
 Rust (axum, tokio, sqlx), PostgreSQL, WebSocket in `server/`; Svelte + Vite SPA (no SvelteKit/SSR) in `web/`, embedded (rust-embed). One Docker image; compose profile Caddy (default) or nginx; Xserver VPS.
