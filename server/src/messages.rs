@@ -424,7 +424,7 @@ async fn persist_admitted(
     if let Some(message) = message {
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
         // connected subscribers silently missing a possibly committed message.
-        let mut notification = delivery.notification(organization_id, channel_id);
+        let mut notification = delivery.notification(organization_id, channel_id, message.seq);
         if let Err(error) = commit::finish(tx, input.client_message_id).await {
             if commit::definitely_rolled_back(&error) {
                 notification.complete();

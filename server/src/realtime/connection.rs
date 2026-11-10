@@ -46,6 +46,11 @@ impl Connection<'_> {
             return Ok(());
         }
         if after.checked_add(1) != Some(message.seq) {
+            #[cfg(test)]
+            self.state
+                .message_delivery
+                .live_refills
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return self.catch_up(socket, message.channel_id).await;
         }
         Self::event(
@@ -96,8 +101,8 @@ impl Connection<'_> {
         .await
     }
 
-    // Notifications can race after commit. Reading the committed prefix delivers seq order
-    // even when the task publishing seq N is scheduled after the task publishing N+1.
+    // Subscription replay also handles a cursor gap after access was lost and restored.
+    // Concurrent publication reordering is recovered once by the Channel publisher.
     async fn catch_up(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<(), u16> {
         let Some(mut after) = self.cursors.get(&channel).copied() else {
             return Ok(());

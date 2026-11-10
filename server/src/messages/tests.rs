@@ -886,3 +886,5 @@ fn scoped_path(path: &str, token: &str) -> String {
 }
 
 pub(super) mod membership;
+
+mod fanout;
