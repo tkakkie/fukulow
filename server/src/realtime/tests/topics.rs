@@ -1,6 +1,6 @@
 use super::*;
 
-async fn topic_send(f: &Fixture, token: &str, channel: Uuid, key: Uuid) -> Value {
+pub(super) async fn topic_send(f: &Fixture, token: &str, channel: Uuid, key: Uuid) -> Value {
     let response = request(
         &f.app,
         "POST",

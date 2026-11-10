@@ -73,7 +73,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #63 accepted lock: the plain CHECK validates rows under ACCESS EXCLUSIVE during ALTER, also blocking reads; acceptable at current scale.
 - Channel names with leading/trailing `str::trim()` whitespace are rejected (400), never trimmed: trimming changes what was typed, invisible differences allow look-alikes (#72). Checked in the API, not a DB CHECK: PostgreSQL whitespace differs from Rust (#77).
 - Per-Channel seq comes from a messages-owned counter row updated in the insert transaction, not a PostgreSQL sequence, so a rollback consumes no number. Cost: it serializes writes to a hot Channel (#17).
-- Idempotency key (organization_id, sender, client_message_id): a match returns the canonical Message, a different body/Channel/Topic name_key 409; a concurrent duplicate rolls back its allocation before reading the winner (#17).
+- Idempotency key (organization_id, sender, client_message_id): a match returns the canonical Message, a different body/Channel/Topic name_key/reply target 409; a concurrent duplicate rolls back its allocation before reading the winner (#17).
 - Message body: 1..=4000 Unicode scalars (the spec sets no limit), no NUL, not whitespace-only, never trimmed (whitespace counts for idempotency); 400 before seq allocation (#17, maintainer-approved).
 - Sends re-check Member/revision/private grant after BEGIN and hold a shared Member row lock through COMMIT, so deactivation cannot commit between authorization and persistence. Channel creation keeps the same lock (#146 review).
 - History reads authorization and its page in one read-only REPEATABLE READ transaction without row locks: loss committed before the snapshot denies; an authorized page sees no later Messages (#146).
@@ -178,3 +178,9 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Topic reads use #135 watermark admission/barrier only to fix or validate W, then release both before a fresh authorization/data snapshot bounded by W. Aggregates use the shared pool without separate admission; admission rejection is 503 with Retry-After. W never expires.
 - #137 paging gate met with mixed Messages and concurrent sends: release recent/deep p95 32.342/32.235 ms at 210k Channel Messages, four readers; send p95 11.249/6.345 ms. Keep prefix aggregation/index; proportional 100 ms crossing ~649k Messages needs remeasurement. Conditions: measurements.md.
 - topics.last_seq/message_count are a write-only cache retained for #142/#143; immutable Message aggregates supply W-relative summaries, because current cached values cannot reconstruct an older W (#137).
+
+## Replies (#139)
+- Replies store a committed parent id and stable root, inherit its Topic, and share send admission/barrier/transaction/publication. Scoped parent/root FKs and a self-parent CHECK protect references; committed immutable parents prevent cycles.
+- Retry identity compares reply_to before parent lookup; inherited Topic is not client intent. Same-key retries stay canonical and changed parents conflict without an existence leak.
+- Chain reads union an indexed root lookup and limited reply_root_id/seq range, including the null-root Message without recursion. Resolve ambiguous COMMIT, then authorize/read a fresh snapshot; no cross-page W or depth cap.
+- DeferredOrganizationAuth rejects Session/database errors before reading a send body but carries Organization loss to input validation. This implements #139's 400-before-404 precedence without weakening 401 or admission authorization.

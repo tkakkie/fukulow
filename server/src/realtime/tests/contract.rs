@@ -6,6 +6,7 @@ mod capacity;
 mod http;
 mod model;
 mod negative;
+mod replies;
 mod timeline;
 use assertions::{Assertion, Failure};
 use model::*;
@@ -233,6 +234,7 @@ impl Runner {
                 assert_eq!(status, 204);
             }
             Step::History(spec) => self.history(spec).await,
+            Step::ReplyChain(spec) => self.chain(index, spec).await?,
             Step::MainTimeline(spec) => self.timeline(index, spec).await?,
             Step::Expect { socket, events } => {
                 for (event, expected) in events.into_iter().enumerate() {
@@ -258,6 +260,7 @@ impl Runner {
             key,
             label,
             topic_name,
+            reply_to,
             expect_status,
         } = spec;
         let mut first = None;
@@ -268,6 +271,9 @@ impl Runner {
                 let requests = (0..count)
                     .map(|_| {
                         let mut input = self.post_input(key.as_deref());
+                        if let Some(label) = &reply_to {
+                            input["reply_to"] = self.posts[label]["id"].clone();
+                        }
                         if let Some(name) = &topic_name {
                             input["topic_name"] = json!(name);
                         }
@@ -289,6 +295,9 @@ impl Runner {
             } else {
                 for _ in 0..count {
                     let mut input = self.post_input(key.as_deref());
+                    if let Some(label) = &reply_to {
+                        input["reply_to"] = self.posts[label]["id"].clone();
+                    }
                     if let Some(name) = &topic_name {
                         input["topic_name"] = json!(name);
                     }

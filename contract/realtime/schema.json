@@ -20,7 +20,7 @@
     "Seq": { "type": "integer", "minimum": 1 },
     "Cursor": { "type": "integer", "minimum": 0 },
     "Rule": {
-      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P2/P5 run; client projections and other P rules remain proposed (semantic).",
+      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P1/P2/P5/P6/P7 run; client projections and other P rules remain proposed (semantic).",
       "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
     },
     "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
@@ -182,6 +182,68 @@
       "$comment": "Steps run strictly in order; the runner waits for each step to complete (an HTTP response, a control message written to the socket) before the next, except where a step says it is concurrent. Control messages on one socket are processed by the server in order, so an event produced by a later control message (a 'subscribed' or an 'error') is a barrier showing every earlier control message on that socket has been handled.",
       "oneOf": [
         {
+          "type": "object",
+          "required": [
+            "do",
+            "as",
+            "channel",
+            "anchor",
+            "query",
+            "expect"
+          ],
+          "properties": {
+            "do": {
+              "const": "reply_chain"
+            },
+            "as": {
+              "$ref": "#/$defs/Label"
+            },
+            "channel": {
+              "$ref": "#/$defs/ChannelRef"
+            },
+            "anchor": {
+              "$ref": "#/$defs/Label"
+            },
+            "query": {
+              "type": "object",
+              "properties": {
+                "after_seq": {
+                  "type": "integer"
+                },
+                "limit": {
+                  "type": "integer"
+                }
+              },
+              "additionalProperties": false
+            },
+            "expect": {
+              "type": "object",
+              "required": [
+                "status",
+                "root",
+                "seqs",
+                "has_more"
+              ],
+              "properties": {
+                "status": {
+                  "$ref": "#/$defs/HttpStatus"
+                },
+                "root": {
+                  "$ref": "#/$defs/Label"
+                },
+                "seqs": {
+                  "$ref": "#/$defs/SeqList"
+                },
+                "has_more": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "$comment": "Open a WebSocket authenticated as Member 'as'. expect_handshake: the upgrade must be refused with this HTTP status (no socket exists afterwards).",
           "type": "object",
           "required": ["do", "socket", "as"],
@@ -236,6 +298,7 @@
             "key": { "$ref": "#/$defs/Label" },
             "label": { "$ref": "#/$defs/Label" },
             "topic_name": { "$ref": "#/$defs/Label" },
+            "reply_to": { "$ref": "#/$defs/Label" },
             "expect_status": { "$ref": "#/$defs/HttpStatus" }
           },
           "additionalProperties": false

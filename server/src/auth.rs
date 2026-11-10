@@ -572,6 +572,24 @@ impl FromRequestParts<AppState> for Auth {
     }
 }
 
+/// Authenticate before reading the body, deferring only Organization loss so
+/// handlers can give input validation precedence over that authorization denial.
+pub struct DeferredOrganizationAuth(pub(crate) Option<Auth>);
+
+impl FromRequestParts<AppState> for DeferredOrganizationAuth {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match Auth::from_request_parts(parts, state).await {
+            Ok(auth) => Ok(Self(Some(auth))),
+            Err(error) if error.0 == StatusCode::NOT_FOUND => Ok(Self(None)),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 // Owned here so Channel authorization can compose one query without owning Member SQL.
 // $1 is always the Organization. Reads never take Member row locks.
 pub(crate) const ACTIVE_MEMBERS_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND deactivated_at IS NULL";

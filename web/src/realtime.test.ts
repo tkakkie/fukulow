@@ -77,3 +77,19 @@ it('forwards Topic Messages without losing their generated topic_id', () => {
   socket.onmessage?.({ data: JSON.stringify(event) })
   expect(handlers.onEvent).toHaveBeenCalledWith(event)
 })
+
+it('forwards Reply chain membership when the parent is not loaded and rejects malformed Reply fields', () => {
+  const socket: SocketLike = { send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null, onclose: null }
+  const handlers = { onReady: vi.fn(), onEvent: vi.fn(), onClose: vi.fn() }
+  connectRealtime(handlers, () => socket)
+  const event = { type: 'message', message: { ...record(20), reply_to: 'unloaded-parent', reply_root_id: 'root' } }
+  socket.onmessage?.({ data: JSON.stringify(event) })
+  expect(handlers.onEvent).toHaveBeenCalledWith(event)
+  handlers.onEvent.mockClear()
+  for (const field of ['reply_to', 'reply_root_id']) {
+    const missing: Record<string, unknown> = { ...event.message }
+    delete missing[field]
+    for (const message of [missing, { ...event.message, [field]: 123 }]) socket.onmessage?.({ data: JSON.stringify({ type: 'message', message }) })
+  }
+  expect(handlers.onEvent).not.toHaveBeenCalled()
+})

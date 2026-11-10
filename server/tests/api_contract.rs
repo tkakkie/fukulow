@@ -22,7 +22,7 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // Topic projections add four routes with six described responses each.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 85;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 91;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {
@@ -367,6 +367,10 @@ fn send_and_topic_admission_retry_after_is_at_least_one_second() {
     for (path, method) in [
         ("/api/v1/orgs/{org}/channels/{id}/messages", "post"),
         ("/api/v1/orgs/{org}/channels/{id}/timeline", "get"),
+        (
+            "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain",
+            "get",
+        ),
         ("/api/v1/orgs/{org}/channels/{id}/topics", "get"),
         ("/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}", "get"),
         (
@@ -451,6 +455,8 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         body: "hello".into(),
         created_at: "2026-11-09T00:00:00Z".into(),
         topic_id: None,
+        reply_to: None,
+        reply_root_id: None,
     };
     assert_eq!(
         serde_json::to_value(&message).unwrap()["topic_id"],
@@ -546,6 +552,7 @@ fn account_and_member_openapi_contracts_are_separate() {
         "me",
         "channels",
         "channels/{id}/messages",
+        "channels/{id}/messages/{message_id}/chain",
         "channels/{id}/timeline",
         "channels/{id}/topics",
         "channels/{id}/topics/{topic_id}",
@@ -633,6 +640,69 @@ fn topic_openapi_contract_includes_all_shapes_and_discriminators() {
             document["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
                 ["$ref"],
             format!("#/components/schemas/{shape}")
+        );
+    }
+}
+
+#[test]
+fn reply_openapi_contract_has_nullable_membership_send_target_and_bounded_chain_projection() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    for field in ["reply_to", "reply_root_id"] {
+        assert_eq!(
+            schemas["Message"]["properties"][field]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(schemas["Message"]["properties"][field]["format"], "uuid");
+        assert!(
+            schemas["Message"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field))
+        );
+    }
+    assert_eq!(
+        schemas["SendMessageRequest"]["properties"]["reply_to"]["format"],
+        "uuid"
+    );
+    assert!(
+        schemas["SendMessageRequest"]["properties"]
+            .get("reply_root_id")
+            .is_none()
+    );
+    let operation =
+        &document["paths"]["/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain"]["get"];
+    assert_eq!(
+        operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ReplyChainPage"
+    );
+    for (name, minimum, maximum, default) in
+        [("after_seq", 0, None, 0), ("limit", 1, Some(200), 50)]
+    {
+        let parameter = operation["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name)
+            .unwrap();
+        assert_eq!(parameter["schema"]["minimum"], minimum);
+        assert_eq!(parameter["schema"]["default"], default);
+        if let Some(max) = maximum {
+            assert_eq!(parameter["schema"]["maximum"], max);
+        }
+    }
+    for status in ["400", "401", "404", "500", "503"] {
+        assert_eq!(
+            operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorBody"
+        );
+    }
+    for field in ["root_id", "messages", "has_more"] {
+        assert!(
+            schemas["ReplyChainPage"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field))
         );
     }
 }

@@ -582,6 +582,8 @@ mod tests {
             body: "committed".into(),
             created_at: "now".into(),
             topic_id: None,
+            reply_to: None,
+            reply_root_id: None,
         }
     }
 
@@ -975,6 +977,8 @@ mod tests {
                 body: "committed".into(),
                 created_at: "now".into(),
                 topic_id: None,
+                reply_to: None,
+                reply_root_id: None,
             },
         );
         gate.entered.acquire().await.unwrap().forget();
@@ -1037,6 +1041,8 @@ mod tests {
                 body: "committed".into(),
                 created_at: "now".into(),
                 topic_id: None,
+                reply_to: None,
+                reply_root_id: None,
             },
         );
         // The current-thread runtime cannot poll the spawned future until we yield.
@@ -1073,6 +1079,8 @@ mod tests {
             body: "hello".into(),
             created_at: "now".into(),
             topic_id: None,
+            reply_to: None,
+            reply_root_id: None,
         });
         queue.sender.send(message.clone());
         queue.sender.send(message);
