@@ -43,7 +43,7 @@ impl Default for SessionChanges {
             worker: Arc::new(Once::new()),
             interval: RECHECK_INTERVAL,
             timeout: CHECK_TIMEOUT,
-            on_fatal: Arc::new(|| (recheck::FATAL_EXIT.0)(recheck::FATAL_EXIT.1)),
+            on_fatal: Arc::new(|| std::process::exit(1)),
             #[cfg(test)]
             gate: Default::default(),
         }

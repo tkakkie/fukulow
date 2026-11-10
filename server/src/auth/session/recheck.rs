@@ -4,7 +4,6 @@ use std::{collections::HashSet, sync::Weak};
 
 const BATCH_SIZE: usize = 1000;
 const EXIT_GRACE: Duration = Duration::from_secs(2);
-pub(super) const FATAL_EXIT: (fn(i32) -> !, i32) = (std::process::exit, 1);
 
 impl SessionChanges {
     pub(super) fn start_rechecks(&self, pool: &PgPool) {
@@ -48,10 +47,10 @@ async fn supervise(
     on_fatal: Arc<dyn Fn() + Send + Sync>,
 ) {
     let result = worker.await;
-    let Some(sessions) = sessions.upgrade() else {
-        return;
-    };
-    {
+    let sessions = sessions.upgrade();
+    // A panic/cancellation is never a clean shutdown, even if teardown races it.
+    let abnormal = result.is_err() || (sessions.is_some() && !pool.is_closed());
+    if let Some(sessions) = sessions {
         // Admission and failure signalling share the registration lock.
         let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.unavailable = true;
@@ -60,9 +59,7 @@ async fn supervise(
         }
         eprintln!("session fallback worker stopped; WebSockets fail closed: {result:?}");
     }
-    // Registry teardown and pool closure are normal shutdown. Every other exit,
-    // including a successful return, leaves sockets without their fallback check.
-    if !pool.is_closed() {
+    if abnormal {
         // Do not wait on sockets: a stuck Close frame must not prevent recovery.
         tokio::time::sleep(EXIT_GRACE).await;
         on_fatal();

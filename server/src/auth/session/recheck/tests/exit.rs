@@ -13,18 +13,9 @@ fn fixture() -> (SessionChanges, Arc<AtomicUsize>, PgPool) {
     (changes, calls, pool)
 }
 
-#[test]
-fn production_fatal_hook_exits_with_code_one() {
-    assert!(std::ptr::fn_addr_eq(
-        FATAL_EXIT.0,
-        std::process::exit as fn(i32) -> !,
-    ));
-    assert_eq!(FATAL_EXIT.1, 1);
-    assert_eq!(EXIT_GRACE, Duration::from_secs(2));
-}
-
 #[tokio::test(start_paused = true)]
 async fn worker_panic_requests_fatal_exit_once_after_grace() {
+    assert_eq!(EXIT_GRACE, Duration::from_secs(2));
     let (changes, calls, pool) = fixture();
     changes.start_rechecks(&pool);
     changes.panic_worker().await;
@@ -43,6 +34,38 @@ async fn worker_panic_requests_fatal_exit_once_after_grace() {
     changes.start_rechecks(&pool);
     tokio::time::advance(RECHECK_INTERVAL + EXIT_GRACE).await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn join_errors_never_become_normal_during_shutdown() {
+    for panic in [false, true] {
+        for registry_dropped in [false, true] {
+            for pool_closed in [false, true] {
+                let (changes, calls, pool) = fixture();
+                let sessions = Arc::downgrade(&changes.sessions);
+                let on_fatal = changes.on_fatal.clone();
+                let worker = tokio::spawn(async move {
+                    if panic {
+                        panic!("injected worker panic");
+                    }
+                    std::future::pending::<()>().await;
+                });
+                if !panic {
+                    worker.abort();
+                }
+                if pool_closed {
+                    pool.close().await;
+                }
+                if registry_dropped {
+                    drop(changes);
+                    assert!(sessions.upgrade().is_none());
+                }
+                let supervisor = tokio::spawn(supervise(worker, sessions, pool, on_fatal));
+                supervisor.await.unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

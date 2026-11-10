@@ -117,35 +117,64 @@
 - #157 measurements (2026-11-10 01:09/01:17 UTC): clean main c282fc8 versus the final server implementation, using the exact #57 `load-record` command/configuration above, 1 public Channel, 20 distinct sessions/sockets, 2 sends/100 ms for 30 seconds, fresh isolated DBs, release images and no warm-up. Apple M5/10 CPU/32 GiB; Docker 29.9.3 VM 10 CPU/7.748 GiB; identical PostgreSQL 18.6 and k6 1.8.2 image IDs, direct HTTP/bridge, one shared test-DB container. Before -> after: 600 sends in 30.001 -> 30.002 s (19.9993 -> 19.9987/s), peak 20 sockets/2 publishes, all 12,000 deliveries, zero missing/errors and all 1,244 checks passed in both runs. Delivery mean/p95/p99 6.036/9/14 -> 6.814/9/10 ms; publish HTTP 5.032/8/12.01 -> 5.763/8/9 ms. Both issue exactly one fallback query for 20 sessions (0.053 -> 0.068 ms SQL execution); SQL/send is unchanged at 7.0017 top-level queries, 9.0017 statements with transactions and 11.0033 including nested FK checks. Fifteen resource samples each: app CPU mean/peak 3.84/4.65 -> 4.01/4.62%, peak memory 65.13 -> 65.45 MiB; DB 5.92/9.77 -> 6.42/7.30%, 89.71 -> 90.16 MiB; generator 5.75/6.96 -> 6.57/7.19%, 25.82 -> 25.65 MiB. External artifact bundles are named `fukulow-157-before` and `fukulow-157-after` (metadata, SQL snapshots, resources and k6 output); isolated load containers, networks, volumes and app images were removed. These single modest shared-host runs, including other development work, establish neither a latency improvement nor WebSocket capacity.
 - #157 distinct-session measurement: `cargo test --release -p fukulow-server measure_distinct_session_pass_within_five_seconds -- --ignored --nocapture` against a fresh disposable database on PostgreSQL at loopback, using the same shared host/test-DB container. With 100,000 valid rows provisioned and ANALYZE completed first, the actual production pass verified 1,000/10,000/100,000 distinct sessions (1/10/100 chunks) in 16.086/89.648/253.199 ms respectively, each within one 5,000 ms deadline, including snapshot and result application. This tests one Organization, an available pool and local PostgreSQL, without 100,000 WebSockets or concurrent publishing; it is evidence for keeping the deadline without a count cap, not a production capacity guarantee. The controlled-clock 20,000-registration denial test separately verifies fail-closed behaviour with pool acquisition blocked through the deadline.
 
-- #163 adopts maintainer option (b): the existing fallback-worker supervisor terminates the process after an unexpected exit, allowing Compose `restart: unless-stopped` to restore real-time service. A healthcheck alone would expose failure but Compose does not restart unhealthy containers. Registry teardown or a closed pool means normal shutdown; while the registry exists and the pool is open, panic/cancellation (`JoinError`) and a successful worker return are abnormal. A not-started worker needs no action. The existing unavailable latch, failed signals and stderr log remain; no worker restart loop or second supervisor is added.
-- #163 gives sockets a fixed `EXIT_GRACE = 2s` Tokio sleep after failure signalling, then calls the production hook `std::process::exit(1)` exactly once. The non-zero code makes failure visible (unless-stopped also restarts zero exits). The grace never waits for sockets or HTTP requests; it is bounded by the timer plus runtime scheduling, even if a Close frame is stuck. Existing sockets attempt 1011 before process termination drops all remaining TCP connections; receipt of that Close frame is not guaranteed. New connections remain refused, verified session end still means 4001, and delivery overflow/authorization-query failure still means 4008. Test-only hook injection and paused time verify the grace without exiting the test process; the production exit function pointer and code are asserted separately.
-- #163 process exit abruptly cuts any HTTP request still in flight after the grace, without draining handlers or Rust destructors. Committed sends stay committed; an interrupted/lost response leaves the client uncertain, so it retries with the same `client_message_id`. Database transactions either commit or roll back, and #135's replay barrier recovers committed Messages after reconnect. Clients back off and reconnect/resubscribe from their confirmed per-Channel cursor; service resumes after Compose's restart delay and application startup, with no fixed outage-duration guarantee.
-- #163 manual Compose restart-policy check (run from the repository root, Docker available, loopback port 8080 free; isolated project, image and disposable DB). This temporary command override executes the real release binary as PID 1 with an invalid cookie setting once, causing its startup `Result` to exit 1; its marker survives container restart, so subsequent execution uses the normal Compose environment. It checks the actual restart policy independently of the unit-tested worker fatal hook, without a production panic switch, Cargo feature or signal-based approximation. Exact reproduction sequence:
-  ```sh
-  check_dir=$(mktemp -d /private/tmp/fukulow-163-checks.XXXXXX)
+- #163 adopts maintainer option (b): the existing fallback-worker supervisor terminates the process after an unexpected exit, allowing Compose `restart: unless-stopped` to restore real-time service. A healthcheck alone would expose failure but Compose does not restart unhealthy containers. A successful worker return is normal only when the registry has disappeared or the pool was explicitly closed. Panic/cancellation (`JoinError`) is always abnormal, including when teardown races it; returning with the registry alive and pool open is also abnormal. A not-started worker needs no action. The existing unavailable latch, failed signals and stderr log remain; no dependency, resident task, worker restart loop or second supervisor is added.
+- #163 gives sockets a fixed `EXIT_GRACE = 2s` Tokio sleep after failure signalling, then calls the production hook `std::process::exit(1)` exactly once. The non-zero code makes failure visible (unless-stopped also restarts zero exits). The grace never waits for sockets or HTTP requests; it is bounded by the timer plus runtime scheduling, even if a Close frame is stuck. Existing sockets attempt 1011 on a best-effort basis before process termination drops all remaining TCP connections; Close frame delivery is never guaranteed. New connections remain refused, verified session end still means 4001, and delivery overflow/authorization-query failure still means 4008. Test-only hook injection and paused time exercise the actual abnormal-exit-to-hook path, the grace and all shutdown classifications without exiting the test process; the production closure visibly calls `exit(1)`.
+- #163 process exit abruptly cuts any HTTP request still in flight after the grace, without draining handlers or Rust destructors. In-flight request outcomes can be unknown: committed sends stay committed, but an interrupted/lost response cannot tell the client whether a send committed. Recovery requires an idempotent retry with the same `client_message_id`; #135's replay barrier recovers committed Messages after reconnect. Client policy must back off and reconnect/resubscribe from the confirmed per-Channel cursor. This change adds no automatic HTTP retries, and promises neither automatic retry behaviour nor delivery of a Close frame. Service resumes after Compose's restart delay and application startup, with no fixed outage-duration guarantee.
+- #163 reproducible manual Compose restart-policy check: run this Bash 3.2-compatible sequence from the repository root with Docker available. It builds the unmodified release image, uses a unique project/image, a project-owned disposable database volume and a dynamically allocated loopback port, and removes the stack/volume/network/image on exit. The first attempt sends SIGKILL to PID 1 inside the app container. Linux namespace init can ignore that signal; if the restart count stays unchanged, a short-lived helper using the already-required PostgreSQL image sends SIGKILL to that same app main process from the Docker host PID namespace (requires host-PID access). This really kills the release binary without invoking Docker's manual stop/kill API or overriding the app command; the helper is not a supervisor. The health probe resolves the port again because Docker can reassign a dynamically allocated port during restart. Unit tests separately cover the worker-to-fatal-hook path; this check verifies restart policy after killing PID 1, not an externally triggered worker panic. Exact sequence (artifacts/build log remain in the printed temporary directory):
+  ```bash
+  #!/usr/bin/env bash
+  set -euo pipefail
+  check_dir=$(mktemp -d /private/tmp/fukulow-163-pid1.XXXXXX)
+  project="fukulow-163-$(date +%s)-$$"
+  export CHECK_IMAGE="$project-app" POSTGRES_PASSWORD=restart-check-only
   cat > "$check_dir/restart.yml" <<'YAML'
   services:
     app:
-      image: fukulow-163-restart-check
-      command:
-        - sh
-        - -c
-        - |
-          if [ ! -e /tmp/exit-once ]; then
-            touch /tmp/exit-once
-            export FUKULOW_COOKIE_SECURE=invalid
-          fi
-          exec fukulow-server
+      image: ${CHECK_IMAGE}
+      ports: !override
+        - "127.0.0.1::8080"
   YAML
-  export POSTGRES_PASSWORD=restart-check-only
-  docker compose -p fukulow-163-restart -f compose.yml -f "$check_dir/restart.yml" build app
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$check_dir/events-since"
-  docker compose -p fukulow-163-restart -f compose.yml -f "$check_dir/restart.yml" up -d --no-build
-  curl --retry 20 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:8080/api/v1/health
-  docker inspect fukulow-163-restart-app-1 --format 'policy={{.HostConfig.RestartPolicy.Name}} restarts={{.RestartCount}} status={{.State.Status}}'
-  docker events --since "$(cat "$check_dir/events-since")" --until "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --filter container=fukulow-163-restart-app-1 --filter event=die --format '{{.Action}} exitCode={{index .Actor.Attributes "exitCode"}}'
-  docker compose -p fukulow-163-restart -f compose.yml -f "$check_dir/restart.yml" logs --no-log-prefix app
-  docker compose -p fukulow-163-restart -f compose.yml -f "$check_dir/restart.yml" down -v --remove-orphans
-  docker image rm fukulow-163-restart-check
+  dc() { docker compose -p "$project" -f compose.yml -f "$check_dir/restart.yml" "$@"; }
+  cleanup() { dc down -v --remove-orphans; docker image rm "$CHECK_IMAGE"; }
+  trap cleanup EXIT
+  printf 'project=%s artifacts=%s\n' "$project" "$check_dir"
+  dc build app > "$check_dir/build.log" 2>&1
+  dc up -d --no-build
+  container=$(dc ps -q app)
+  wait_health() {
+    for attempt in $(seq 1 60); do
+      if address=$(dc port app 8080) && curl --max-time 1 -fsS "http://$address/api/v1/health"; then return 0; fi
+      sleep 1
+    done
+    return 1
+  }
+  wait_health
+  # Stay up for at least 10 seconds before testing the restart policy.
+  sleep 10
+  before=$(docker inspect -f '{{.RestartCount}}' "$container")
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  docker exec "$container" sh -c 'cat /proc/1/comm; kill -KILL 1'
+  sleep 2
+  after_exec=$(docker inspect -f '{{.RestartCount}}' "$container")
+  printf 'before=%s after_inside_namespace_kill=%s\n' "$before" "$after_exec"
+  if [ "$after_exec" -eq "$before" ]; then
+    # Namespace init ignores same-namespace signals without a handler. Kill the
+    # app's actual main process from the Docker host PID namespace instead.
+    host_pid=$(docker inspect -f '{{.State.Pid}}' "$container")
+    printf 'ancestor_namespace_SIGKILL host_pid=%s\n' "$host_pid"
+    docker run --rm --pid=host --entrypoint sh postgres:18 -c 'kill -KILL "$1"' sh "$host_pid"
+  fi
+  for attempt in $(seq 1 60); do
+    after=$(docker inspect -f '{{.RestartCount}}' "$container")
+    if [ "$after" -gt "$before" ]; then break; fi
+    sleep 1
+  done
+  [ "$after" -gt "$before" ]
+  wait_health
+  docker inspect -f 'policy={{.HostConfig.RestartPolicy.Name}} restarts={{.RestartCount}} status={{.State.Status}}' "$container"
+  # Include the kill event even when recovery finishes within the same second.
+  sleep 1
+  docker events --since "$since" --until "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --filter container="$container" --filter event=die --format '{{.Action}} exitCode={{index .Actor.Attributes "exitCode"}}'
+  dc logs --no-log-prefix app
   ```
-- #163 observed check (2026-11-10, Docker 29.9.3, working tree based on `35c2ae6`): ran the sequence above with `/private/tmp/fukulow-163-checks.3aDWa6/restart.yml` and the image built from this implementation. Docker events reported `die exitCode=1`; inspect reported `policy=unless-stopped restarts=1 status=running`; logs showed `Error: "FUKULOW_COOKIE_SECURE must be true or false"` followed by `listening on 0.0.0.0:8080`; health returned `ok`. The isolated stack/volume/image were removed afterward. This checks recovery from a real exit 1, not an externally triggered worker panic; grace/classification and 1011/refusal are covered by Rust tests.
+- #163 observed PID 1 check (2026-11-10, Docker 29.9.3 / Compose v5.7.0, release image built from this branch's follow-up): project `fukulow-163-1794277900-5169`, artifacts `/private/tmp/fukulow-163-pid1.uoMoM6`, transcript `/private/tmp/fukulow-163-pid1-verified.log`. `/proc/1/comm` was `fukulow-server`; `docker exec ... kill -KILL 1` returned but was ignored (`RestartCount` 0 -> 0). The ancestor-namespace helper killed the actual main process (host PID 72056); Docker recorded `die exitCode=137`, then `policy=unless-stopped restarts=1 status=running`, and `/api/v1/health` returned `ok` again. Logs showed startup twice. All isolated containers, volume, network and app image were removed by the exit trap. An earlier probe kept the pre-restart ephemeral port and failed its HTTP check after Docker reassigned it; the corrected sequence above re-resolves the port and passed. This establishes policy recovery after a real PID 1 kill; the worker exit, 2-second grace and replaceable hook are exercised separately by Rust tests, without claiming that a worker panic was triggered in Compose.
