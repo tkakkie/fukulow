@@ -19,10 +19,16 @@ struct SessionStatus {
     failed: bool,
 }
 
+#[derive(Default)]
+struct Sessions {
+    entries: HashMap<SessionKey, watch::Sender<SessionStatus>>,
+    unavailable: bool,
+}
+
 /// Only connected sessions retain a signal; sign-out never wakes unrelated sessions.
 #[derive(Clone)]
 pub struct SessionChanges {
-    sessions: Arc<Mutex<HashMap<SessionKey, watch::Sender<SessionStatus>>>>,
+    sessions: Arc<Mutex<Sessions>>,
     worker: Arc<Once>,
     interval: Duration,
     timeout: Duration,
@@ -45,22 +51,32 @@ impl Default for SessionChanges {
 impl SessionChanges {
     fn register(&self, key: SessionKey) -> Registration {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = sessions
+        let unavailable = sessions.unavailable;
+        let signal = sessions
+            .entries
             .entry(key.clone())
-            .or_insert_with(|| watch::channel(SessionStatus::default()).0)
-            .subscribe();
+            .or_insert_with(|| watch::channel(SessionStatus::default()).0);
+        let status = *signal.borrow();
+        if status.failed && !status.revoked {
+            // Old sockets and in-flight passes keep their original sender.
+            *signal = watch::channel(SessionStatus::default()).0;
+        }
+        if unavailable {
+            signal.send_modify(|status| status.failed = true);
+        }
         Registration {
-            changed,
+            changed: signal.subscribe(),
             guard: RegistrationGuard {
                 registry: self.clone(),
                 key,
+                epoch: signal.clone(),
             },
         }
     }
 
     pub(super) fn revoked(&self, organization: Uuid, hash: Vec<u8>) {
         let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(signal) = sessions.get(&(organization, hash)) {
+        if let Some(signal) = sessions.entries.get(&(organization, hash)) {
             signal.send_modify(|status| status.revoked = true);
         }
     }
@@ -74,6 +90,7 @@ struct Registration {
 struct RegistrationGuard {
     registry: SessionChanges,
     key: SessionKey,
+    epoch: watch::Sender<SessionStatus>,
 }
 impl Drop for RegistrationGuard {
     fn drop(&mut self) {
@@ -84,10 +101,11 @@ impl Drop for RegistrationGuard {
             .unwrap_or_else(|e| e.into_inner());
         // Registration and last-receiver removal use the same lock as sign-out.
         if sessions
+            .entries
             .get(&self.key)
-            .is_some_and(|signal| signal.receiver_count() == 0)
+            .is_some_and(|signal| signal.same_channel(&self.epoch) && signal.receiver_count() == 0)
         {
-            sessions.remove(&self.key);
+            sessions.entries.remove(&self.key);
         }
     }
 }
@@ -119,22 +137,36 @@ impl Auth {
         &self,
         state: &AppState,
     ) -> Result<Option<SessionWatch>, sqlx::Error> {
+        state.session_changes.start_rechecks(&state.pool);
         let registration = state.session_changes.register((
             self.identity.organization.organization_id,
             self.token_hash.clone(),
         ));
+        let status = *registration.changed.borrow();
+        if status.revoked {
+            return Ok(None);
+        }
+        if status.failed {
+            return Err(sqlx::Error::PoolClosed);
+        }
         #[cfg(test)]
         state
             .session_changes
             .pause_check(tests::Phase::Registered)
             .await;
-        state.session_changes.start_rechecks(&state.pool);
         let deadline = deadline(&state.pool, &registration.guard.key).await?;
         #[cfg(test)]
         state
             .session_changes
             .pause_check(tests::Phase::Checked)
             .await;
+        let status = *registration.changed.borrow();
+        if status.revoked {
+            return Ok(None);
+        }
+        if status.failed {
+            return Err(sqlx::Error::PoolClosed);
+        }
         Ok(deadline.map(|deadline| SessionWatch {
             registration,
             deadline,

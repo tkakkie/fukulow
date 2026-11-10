@@ -133,6 +133,8 @@ async fn connected(mut socket: WebSocket, state: AppState, auth: Auth) {
             return;
         }
     };
+    // Session admission checks worker health after SQL as well as at registration.
+    // A stopped fallback worker must never admit an unmonitored subscription.
     let queue = state.message_delivery.queue(
         auth.identity.organization.organization_id,
         auth.identity.member.id,
