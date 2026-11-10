@@ -164,7 +164,9 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Known limits for the 10k target: FIFO budgets can delay unrelated Organizations; four watermarks per Channel cap popular-Channel reconnects (~1,000/s at ~4 ms each); 10,000 simultaneous reconnects need client backoff (#156).
 - #178 keeps send queue caps 256/2,048: smaller caps raised refusals; larger ones roughly doubled accepted HTTP/delivery delay with no shown capacity benefit; RSS did not discriminate. A conservative choice, not an optimality or fairness claim.
 - #179 isolates held cursor waiters from execution capacity. #190 prevents only one Organization monopolizing reservations; simultaneous multi-Organization exhaustion and contention for the 40 shared execution permits remain. No cross-Organization fairness guarantee.
-- Pending maintainer decision (#158 N1): two stuck Channels with 4+ reconnecting subscribers each can fill all 8 watermark slots; lowering the per-Channel cap to 2 would trade popular-Channel reconnect throughput.
+- [#199](https://github.com/tkakkie/fukulow/issues/199): measured, the cap stays 4; cap 2 cut steady-state throughput ~31% and raised recovery 1011 admission rejections ~45%, with no significant 10,000-client recovery-time improvement. The cap-2 change is not merged.
+- #199 known limit: two stuck Channels can hold all 8 watermark slots; another Organization's subscribe then fails with 1011. #213 defers per-Organization watermark fairness unless cross-tenant failure spread becomes a real problem.
+- #212 follows up handshake admission, listen backlog and accept pacing; client jitter is in #195. #199's local recovery was bounded by handshake capacity, not the watermark cap; it does not establish production 10,000-connection capacity.
 
 ## Web client
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
@@ -189,7 +191,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #178 harness: `make load-record` with `LOAD_DIRECT_NETWORK=1` (port-forwarding failed at 9,990 sockets), `LOAD_SERVER_SOURCE` for the worktree, `LOAD_LEGACY=1` only for pre-#146 builds; short windows are rejected. Never attach the raw artifact directory publicly (server logs, source patch).
 - Measurements so far are modest single-host runs: none establishes the 10k-connection target, a capacity or a latency guarantee. Heavy run: `CHANNELS=1 SUBSCRIBERS=10000 ... make load` with `nofile` 65536; one generator loop can saturate (#20).
 
-## Topics (#137)
+## Topics (#137, #138)
 - Messages owns Topics, nullable messages.topic_id and their atomic send updates; composite FKs bind a Message's Topic to its Organization and Channel. #139 appends its own migration, preserving #137's migration.
 - Topic names: 1..=60 Unicode scalars; reject empty, NUL, whitespace-only or surrounding str::trim() whitespace (400), never trim. Per-Channel lower(name COLLATE "C") uniqueness folds ASCII only; keep the first display name. This differs from Channel rules.
 - Topic creation/join, Message, seq and summary commit together inside existing bounded send admission. Retry identity adds the Topic name_key (null without Topic); changed intent is 409. Lost-response retries need no server Topic UUID.
@@ -204,3 +206,4 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - DeferredOrganizationAuth rejects Session/database errors before reading a send body but carries Organization loss to input validation. This implements #139's 400-before-404 precedence without weakening 401 or admission authorization.
 - #139 accepts deploy-time locks/scans for plain indexes and validated FKs/CHECKs on messages at current scale, like #63; migration lock timeout bounds waiting, not scan time. The chain index excludes non-Replies to reduce write/storage cost.
 - reply_root_id consistency is application-enforced: each Reply stores its parent's root (or the parent if it is a root), whose reply_root_id is null. Future chain-moving writers (#141) and repairs must preserve this; scoped FKs alone do not.
+- #138: opt-in Topic composition bootstraps sync with the real Message at W from the initial timeline; later projection pages stay outside sync. Reason: preserve the existing unfiltered cursor/gap protocol and avoid component conflicts during the UI follow-up.
