@@ -202,84 +202,103 @@ async fn topic_projection_ambiguous_commit_waits_before_snapshot_and_recovers_wi
 
 #[sqlx::test]
 async fn topic_projection_reauthorizes_after_waiting_for_barrier(pool: PgPool) {
-    for denial in ["member", "revision", "grant"] {
-        let (_, org, owner, channel, owner_token) = fixture(&pool).await;
-        let viewer = Uuid::new_v4();
-        let token = member(&pool, org, viewer).await;
-        sqlx::query("UPDATE channels SET visibility='private' WHERE organization_id=$1 AND id=$2")
+    for route in ["timeline", "topics", "summary", "history"] {
+        for denial in ["member", "revision", "grant"] {
+            let (_, org, owner, channel, owner_token) = fixture(&pool).await;
+            let viewer = Uuid::new_v4();
+            let token = member(&pool, org, viewer).await;
+            sqlx::query(
+                "UPDATE channels SET visibility='private' WHERE organization_id=$1 AND id=$2",
+            )
             .bind(org)
             .bind(channel)
             .execute(&pool)
             .await
             .unwrap();
-        for id in [owner, viewer] {
-            sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)").bind(org).bind(channel).bind(id).execute(&pool).await.unwrap();
-        }
-        let state = AppState::for_test(pool.clone());
-        let app = crate::app(state);
-        sent(
-            &app,
-            &owner_token,
-            channel,
-            topic_input(Uuid::new_v4(), "Existing"),
-        )
-        .await;
-        let mut held = pool.begin().await.unwrap();
-        commit::lock(&mut held, org, channel, false).await.unwrap();
-        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *held)
-            .await
-            .unwrap();
-        let read = {
-            let app = app.clone();
-            let token = token.clone();
-            tokio::spawn(async move {
-                request(
-                    &app,
-                    "GET",
-                    &format!("/api/v1/channels/{channel}/timeline"),
-                    &token,
-                    Value::Null,
-                )
-                .await
-            })
-        };
-        // This read has passed its first authorization and is blocked at the barrier.
-        waiting(&pool, pid).await;
-        if denial == "grant" {
-            sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(org).bind(channel).bind(viewer).execute(&pool).await.unwrap();
-        } else {
-            sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
-                .bind(org)
-                .bind(viewer)
-                .execute(&pool)
-                .await
-                .unwrap();
-            if denial == "revision" {
-                sqlx::query(
-                    "UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2",
-                )
-                .bind(org)
-                .bind(viewer)
-                .execute(&pool)
-                .await
-                .unwrap();
+            for id in [owner, viewer] {
+                sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)").bind(org).bind(channel).bind(id).execute(&pool).await.unwrap();
             }
+            let state = AppState::for_test(pool.clone());
+            let app = crate::app(state);
+            let message = sent(
+                &app,
+                &owner_token,
+                channel,
+                topic_input(Uuid::new_v4(), "Existing"),
+            )
+            .await;
+            let topic = message["topic_id"].as_str().unwrap();
+            let suffix = match route {
+                "summary" => format!("topics/{topic}"),
+                "history" => format!("topics/{topic}/messages"),
+                _ => route.into(),
+            };
+            let mut held = pool.begin().await.unwrap();
+            commit::lock(&mut held, org, channel, false).await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *held)
+                .await
+                .unwrap();
+            let read = {
+                let app = app.clone();
+                let token = token.clone();
+                let suffix = suffix.clone();
+                tokio::spawn(async move {
+                    request(
+                        &app,
+                        "GET",
+                        &format!("/api/v1/channels/{channel}/{suffix}"),
+                        &token,
+                        Value::Null,
+                    )
+                    .await
+                })
+            };
+            // This read has passed its first authorization and is blocked at the barrier.
+            waiting(&pool, pid).await;
+            if denial == "grant" {
+                sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(org).bind(channel).bind(viewer).execute(&pool).await.unwrap();
+            } else {
+                sqlx::query(
+                    "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2",
+                )
+                .bind(org)
+                .bind(viewer)
+                .execute(&pool)
+                .await
+                .unwrap();
+                if denial == "revision" {
+                    sqlx::query(
+                        "UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2",
+                    )
+                    .bind(org)
+                    .bind(viewer)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+            }
+            held.commit().await.unwrap();
+            let response = read.await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{route}: {denial}"
+            );
+            assert_eq!(
+                body(response).await,
+                json!({"error":if denial=="grant" {"channel not found"} else {"organization_unavailable"}}),
+                "{route}: {denial}"
+            );
+            let page = get(&app, &owner_token, channel, &suffix).await;
+            let latest_message = match route {
+                "timeline" => &page["items"][0]["topic"]["latest_message"],
+                "topics" => &page["topics"][0]["latest_message"],
+                "summary" => &page["topic"]["latest_message"],
+                _ => &page["messages"][0],
+            };
+            assert_eq!(latest_message, &message, "{route}: {denial}");
         }
-        held.commit().await.unwrap();
-        let response = read.await.unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            body(response).await,
-            json!({"error":if denial=="grant" {"channel not found"} else {"organization_unavailable"}})
-        );
-        assert_eq!(
-            get(&app, &owner_token, channel, "timeline").await["items"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
     }
 }
 

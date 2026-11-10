@@ -666,6 +666,16 @@
           },
           "503": {
             "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -799,6 +809,16 @@
           },
           "503": {
             "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -907,6 +927,16 @@
           },
           "503": {
             "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1050,6 +1080,16 @@
           },
           "503": {
             "description": "Projection watermark admission unavailable; Retry-After gives retry seconds",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

@@ -4,6 +4,8 @@ use sqlx::{FromRow, Row};
 // Reconstruct every Topic's position BEFORE the exclusive boundary. Current
 // topics.last_seq cannot enumerate Topics that moved after W. Counts use the same
 // immutable prefix. Only selected candidates fetch payloads (no per-Topic SQL).
+// A scalar visibility subquery preserves one NULL access row after Member loss,
+// so an empty page still distinguishes Organization loss from Channel denial.
 fn page_sql() -> String {
     format!(
         r#"
@@ -128,7 +130,8 @@ async fn read(
         (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found; private and unknown Channels are identical", body = ErrorBody),
-        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
         (status = 500, description = "Database failure or commit barrier timeout reading the projection", body = ErrorBody)))]
 pub async fn list_timeline(
     State(state): State<AppState>,
@@ -158,7 +161,8 @@ pub async fn list_timeline(
         (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found", body = ErrorBody),
-        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
         (status = 500, description = "Database failure or barrier timeout listing Topics", body = ErrorBody)))]
 pub async fn list_topics(
     State(state): State<AppState>,
@@ -196,7 +200,8 @@ pub async fn list_topics(
         (status = 400, description = "Invalid Organization id, Channel id or Topic id", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical", body = ErrorBody),
-        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
         (status = 500, description = "Database failure or barrier timeout reading the Topic summary", body = ErrorBody)))]
 pub async fn topic_summary(
     State(state): State<AppState>,

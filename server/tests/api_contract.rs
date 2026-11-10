@@ -362,12 +362,23 @@ fn sign_in_retry_after_is_at_least_one_second() {
 }
 
 #[test]
-fn send_admission_retry_after_is_at_least_one_second() {
+fn send_and_topic_admission_retry_after_is_at_least_one_second() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
-    let schema = &document["paths"]["/api/v1/orgs/{org}/channels/{id}/messages"]["post"]["responses"]
-        ["503"]["headers"]["Retry-After"]["schema"];
-    assert_eq!(schema["type"], "integer");
-    assert_eq!(schema["minimum"], 1);
+    for (path, method) in [
+        ("/api/v1/orgs/{org}/channels/{id}/messages", "post"),
+        ("/api/v1/orgs/{org}/channels/{id}/timeline", "get"),
+        ("/api/v1/orgs/{org}/channels/{id}/topics", "get"),
+        ("/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}", "get"),
+        (
+            "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/messages",
+            "get",
+        ),
+    ] {
+        let schema = &document["paths"][path][method]["responses"]["503"]["headers"]["Retry-After"]
+            ["schema"];
+        assert_eq!(schema["type"], "integer", "{method} {path}");
+        assert_eq!(schema["minimum"], 1, "{method} {path}");
+    }
 }
 
 fn assert_variant_contract<T: Serialize>(root: &str, variants: &[(T, &str)]) {

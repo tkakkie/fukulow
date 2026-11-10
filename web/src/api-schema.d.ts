@@ -1015,6 +1015,8 @@ export interface operations {
             /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
             503: {
                 headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -1089,6 +1091,8 @@ export interface operations {
             /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
             503: {
                 headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -1158,6 +1162,8 @@ export interface operations {
             /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
             503: {
                 headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -1234,6 +1240,8 @@ export interface operations {
             /** @description Projection watermark admission unavailable; Retry-After gives retry seconds */
             503: {
                 headers: {
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {

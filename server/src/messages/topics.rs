@@ -139,7 +139,8 @@ pub(super) async fn record(
         (status = 400, description = "Invalid Organization id, Channel id, Topic id, conflicting cursors or limit", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical", body = ErrorBody),
-        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody),
+        (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
         (status = 500, description = "Database failure or barrier timeout reading Topic history", body = ErrorBody)))]
 pub async fn topic_history(
     State(state): State<AppState>,
