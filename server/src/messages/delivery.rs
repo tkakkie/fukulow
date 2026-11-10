@@ -59,6 +59,10 @@ pub(super) struct Notification {
 }
 
 impl Notification {
+    pub(super) fn complete(&mut self) {
+        self.completed = true;
+    }
+
     pub(super) fn spawn(mut self, pool: sqlx::PgPool, message: Message) {
         let Ok(permit) = self.delivery.notifications.clone().try_acquire_owned() else {
             // The message is committed: signal reconnect/replay instead of queuing work.

@@ -17,8 +17,11 @@ use crate::{
     channels,
 };
 
+mod commit;
 mod delivery;
 mod failure;
+#[cfg(test)]
+pub(crate) use commit::ambiguous_commit;
 pub use delivery::Delivery;
 #[cfg(test)]
 pub(crate) use delivery::{
@@ -342,10 +345,16 @@ async fn persist(
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
         .bind(input.client_message_id).bind(&input.body).fetch_optional(&mut *tx).await?;
     if let Some(message) = message {
+        commit::lock(&mut tx, organization_id, channel_id, false).await?;
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
         // connected subscribers silently missing a possibly committed message.
-        let notification = delivery.notification(organization_id, channel_id);
-        tx.commit().await?;
+        let mut notification = delivery.notification(organization_id, channel_id);
+        if let Err(error) = commit::finish(tx, input.client_message_id).await {
+            if commit::definitely_rolled_back(&error) {
+                notification.complete();
+            }
+            return Err(error.into());
+        }
         notification.spawn(pool.clone(), message.clone());
         return Ok(message);
     }
@@ -364,14 +373,29 @@ pub(crate) async fn latest_seq(
     organization: Uuid,
     channel: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2",
-    )
-    .bind(organization)
-    .bind(channel)
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or(0))
+    // A post-failure subscription must not snapshot behind an unresolved COMMIT.
+    // Take a fresh READ COMMITTED snapshot *after* acquiring the shared barrier.
+    tokio::time::timeout(delivery::NOTIFICATION_TIMEOUT, async {
+        let mut tx = pool
+            .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '10s'")
+            .execute(&mut *tx)
+            .await?;
+        commit::lock(&mut tx, organization, channel, true).await?;
+        let sql = "SELECT seq FROM channel_message_sequences \
+                   WHERE organization_id = $1 AND channel_id = $2";
+        let seq = sqlx::query_scalar::<_, i64>(sql)
+            .bind(organization)
+            .bind(channel)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(0);
+        tx.commit().await?;
+        Ok(seq)
+    })
+    .await
+    .map_err(|_| sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))?
 }
 
 pub(crate) async fn replay_page(
