@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { checkDecisions, MAX_DECISION_LENGTH, checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -212,6 +212,37 @@ describe('reference checking against a fixture repository', () => {
 describe('the real docs/invariants.md', () => {
   it('names only existing, executable tests (static scan; the CLI also reconciles with cargo)', () => {
     expect(checkInvariants(resolve(import.meta.dirname, '../..'))).toEqual([])
+  })
+})
+
+describe('checkDecisions', () => {
+  const doc = (entry: string) => `# Decisions\n\nIntro line that is not an entry.\n\n## Section\n- ${entry}\n`
+
+  it('accepts an entry of exactly MAX_DECISION_LENGTH code points', () => {
+    expect(MAX_DECISION_LENGTH).toBe(300)
+    expect(checkDecisions(doc('a'.repeat(300)))).toEqual([])
+  })
+
+  it('rejects one code point more and names the line', () => {
+    const errors = checkDecisions(doc('a'.repeat(301)))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatch(/^line 6: decision entry is 301 characters \(max 300\)/)
+  })
+
+  it('counts code points, not bytes or UTF-16 units', () => {
+    expect(checkDecisions(doc('`x` ' + '決'.repeat(295) + '😀'))).toEqual([])
+    expect(checkDecisions(doc('`x` ' + '決'.repeat(296) + '😀'))).toHaveLength(1)
+  })
+
+  it('ignores headings, blank lines, prose and indented lines', () => {
+    const long = 'a'.repeat(400)
+    expect(checkDecisions(`# ${long}\n\n${long}\n  - ${long}\n| ${long} |\n`)).toEqual([])
+  })
+})
+
+describe('the real docs/decisions.md', () => {
+  it('keeps every entry within the length limit', () => {
+    expect(checkDecisions(readFileSync(resolve(import.meta.dirname, '../../docs/decisions.md'), 'utf8'))).toEqual([])
   })
 })
 

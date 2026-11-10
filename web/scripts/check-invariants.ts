@@ -1,4 +1,5 @@
 // Verifies that every test named in docs/invariants.md is a real test that CI actually runs.
+// Also checks that every docs/decisions.md entry stays within MAX_DECISION_LENGTH (AGENTS.md "Writing docs").
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
 //
 // A reference is `path::test_name` (path relative to the repository root).
@@ -432,6 +433,21 @@ export function cargoList(root: string): ListedTest[] {
   return listed
 }
 
+/** Maximum docs/decisions.md entry length in Unicode code points, after the leading `- ` (AGENTS.md "Writing docs"). */
+export const MAX_DECISION_LENGTH = 300
+
+/** Checks that every `- ` entry of docs/decisions.md is at most MAX_DECISION_LENGTH code points. */
+export function checkDecisions(md: string): string[] {
+  const errors: string[] = []
+  md.split('\n').forEach((text, idx) => {
+    if (!text.startsWith('- ')) return
+    const entry = [...text.slice(2)]
+    if (entry.length > MAX_DECISION_LENGTH)
+      errors.push(`line ${idx + 1}: decision entry is ${entry.length} characters (max ${MAX_DECISION_LENGTH}): ${entry.slice(0, 40).join('')}`)
+  })
+  return errors
+}
+
 /** Static scan only, or reconciled with the real cargo list when `listed` is given. */
 export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
   const { rows, errors } = parseInvariants(readFileSync(join(root, 'docs/invariants.md'), 'utf8'))
@@ -451,6 +467,8 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
   }
   const errors = checkInvariants(root, listed)
   for (const e of errors) console.error(`${relative(process.cwd(), join(root, 'docs/invariants.md'))}: ${e}`)
-  if (errors.length > 0) process.exit(1)
-  console.log('invariants: every named test exists and runs in CI')
+  const decisionErrors = checkDecisions(readFileSync(join(root, 'docs/decisions.md'), 'utf8'))
+  for (const e of decisionErrors) console.error(`${relative(process.cwd(), join(root, 'docs/decisions.md'))}: ${e}`)
+  if (errors.length > 0 || decisionErrors.length > 0) process.exit(1)
+  console.log('invariants: every named test exists and runs in CI; decisions entries are within the length limit')
 }
