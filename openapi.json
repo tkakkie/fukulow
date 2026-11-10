@@ -386,7 +386,7 @@
                 "schema": {
                   "type": "integer",
                   "format": "int64",
-                  "minimum": 0
+                  "minimum": 1
                 },
                 "description": "Jittered retry delay in seconds (1 through 5)"
               }

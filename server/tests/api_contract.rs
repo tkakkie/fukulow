@@ -333,6 +333,15 @@ fn sign_in_retry_after_is_at_least_one_second() {
     assert_eq!(schema["minimum"], 1);
 }
 
+#[test]
+fn send_admission_retry_after_is_at_least_one_second() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schema = &document["paths"]["/api/v1/channels/{id}/messages"]["post"]["responses"]["503"]["headers"]
+        ["Retry-After"]["schema"];
+    assert_eq!(schema["type"], "integer");
+    assert_eq!(schema["minimum"], 1);
+}
+
 fn assert_variant_contract<T: Serialize>(root: &str, variants: &[(T, &str)]) {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let schemas = &document["components"]["schemas"];

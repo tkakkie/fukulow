@@ -180,7 +180,7 @@ pub async fn list_messages(
         (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody),
         (status = 500, description = "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id", body = ErrorBody),
         (status = 503, description = "Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id", body = ErrorBody,
-            headers(("Retry-After" = u64, description = "Jittered retry delay in seconds (1 through 5)")))))]
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)")))))]
 pub async fn send_message(
     State(state): State<AppState>,
     auth: Auth,
