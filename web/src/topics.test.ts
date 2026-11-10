@@ -384,6 +384,117 @@ it('bounds hanging projection requests, allows manual retry, and closes their de
   expect(vi.getTimerCount()).toBe(0)
 })
 
+const readKinds = ['main', 'list', 'summary', 'topic'] as const
+type ReadKind = typeof readKinds[number]
+function retryRead(c: ReturnType<typeof topicClient>, kind: ReadKind) {
+  switch (kind) {
+    case 'main': return c.topics.loadMain('A')
+    case 'list': return c.topics.loadList('A')
+    case 'summary': return c.topics.loadSummary('A', 'T')
+    case 'topic': return c.topics.loadTopic('A', 'T')
+  }
+}
+function deferRead(c: ReturnType<typeof topicClient>, kind: ReadKind) {
+  switch (kind) {
+    case 'main': {
+      const first = deferred<Result<TimelinePage>>()
+      c.topicsApi.listTimeline.mockReturnValueOnce(first.promise)
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ as_of_seq: 20,
+        items: [{ kind: 'message', message: msg(2) }], has_more: false })) }
+    }
+    case 'list': {
+      const first = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopics>>>()
+      c.topicsApi.listTopics.mockReturnValueOnce(first.promise)
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ as_of_seq: 20,
+        topics: [summary('stale', 2, 1)], has_more: true })) }
+    }
+    case 'summary': {
+      const first = deferred<Result<TopicSummaryResponse>>()
+      c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise)
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ as_of_seq: 20, topic: summary('T', 20, 99) })) }
+    }
+    case 'topic': {
+      const first = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopicMessages>>>()
+      c.topicsApi.listTopicMessages.mockReturnValueOnce(first.promise)
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ messages: [msg(2, 'T')], has_more: false })) }
+    }
+  }
+}
+
+it.each(readKinds)('timed-out %s read cannot overwrite its completed retry', async kind => {
+  const c = topicClient()
+  await c.boot()
+  const first = deferRead(c, kind)
+  const loading = retryRead(c, kind)
+  await vi.advanceTimersByTimeAsync(30_000); await loading
+  await retryRead(c, kind)
+  const retried = c.topics.get('A')
+  const settled = vi.spyOn(c.sync, 'settleHistory')
+  first.succeed(); await flush()
+  expect(c.topics.get('A')).toEqual(retried)
+  expect(c.topics.get('A').topic('T')).toEqual(retried.topic('T'))
+  expect(c.sync.get().channels.A.cursor).toBe(10)
+  expect(settled).not.toHaveBeenCalled()
+  if (kind === 'main' || kind === 'list' || kind === 'topic') {
+    await retryRead(c, kind)
+    if (kind === 'main') expect(c.topicsApi.listTimeline.mock.calls.at(-1)).toEqual(['A', { as_of_seq: 10, before_position: 8 }])
+    if (kind === 'list') expect(c.topicsApi.listTopics).toHaveBeenCalledTimes(2)
+    if (kind === 'topic') expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', { before_seq: 5 }])
+  }
+  await c.sync.close()
+})
+
+it('independent read kinds and Topic targets do not supersede each other', async () => {
+  const c = topicClient()
+  await c.boot()
+  const first = readKinds.map(kind => deferRead(c, kind))
+  const loading = readKinds.map(kind => retryRead(c, kind))
+  await c.topics.loadSummary('A', 'U')
+  await c.topics.loadTopic('A', 'U')
+  first.forEach(read => read.succeed())
+  await Promise.all(loading)
+  expect(c.topics.get('A').main).toMatchObject({ asOfSeq: 20, before: 2, hasMore: false, loading: false })
+  expect(c.topics.get('A').list).toMatchObject({ asOfSeq: 20, before: 2, hasMore: true, loading: false })
+  expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 99 })
+  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2, 10])
+  await c.sync.close()
+})
+
+it.each(readKinds)('superseded timed-out %s read preserves C6/C10 but cannot cause C9', async kind => {
+  for (const status of [403, 404, 401, 'organization_unavailable'] as const) {
+    const c = topicClient()
+    await c.boot()
+    const first = deferRead(c, kind)
+    const loading = retryRead(c, kind)
+    await vi.advanceTimersByTimeAsync(30_000); await loading
+    await retryRead(c, kind)
+    const denial = vi.spyOn(c.sync, 'channelUnavailable')
+    first.fail({ ok: false, kind: 'http', status: typeof status === 'number' ? status : 404,
+      ...(status === 'organization_unavailable' ? { error: status } : {}) })
+    await flush()
+    expect(denial).not.toHaveBeenCalled()
+    expect(c.onSessionEnded).toHaveBeenCalledTimes(status === 401 ? 1 : 0)
+    expect(c.sync.get().organization).toBe(status === 'organization_unavailable' ? 'unavailable' : 'available')
+    if (status === 403 || status === 404) expect(c.topics.get('A').unavailable).toBe(false)
+    await c.sync.close()
+  }
+})
+
+it('a main read superseded by bootstrap cannot cause a late C9 denial', async () => {
+  for (const status of [403, 404]) {
+    const c = topicClient()
+    await c.boot()
+    const first = deferred<Result<TimelinePage>>()
+    c.topicsApi.listTimeline.mockReturnValueOnce(first.promise)
+    const loading = c.topics.loadMain('A'); await flush()
+    await c.topics.bootstrap('A')
+    first.resolve({ ok: false, kind: 'http', status }); await loading
+    expect(c.topics.get('A').unavailable).toBe(false)
+    expect(c.sync.get().channels.A.state).toBe('ready')
+    await c.sync.close()
+  }
+})
+
 it.each([403, 404])('a stale projection %s cannot deny a newly selected Channel', async status => {
   const c = topicClient()
   await c.boot()

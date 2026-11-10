@@ -22,8 +22,9 @@ type TopicWindow = { messages: Map<number, Message>; before?: number; hasMore: b
 const paging = (): Paging => ({ hasMore: true, loading: false, error: false })
 const window = () => ({ main: paging(), list: paging(), messages: new Map<number, Message>(),
   mainTopics: new Set<string>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
-  summaries: new Set<string>(), unavailable: false })
+  summaries: new Set<string>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
 type Window = ReturnType<typeof window>
+type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
 
 /** Session-owned projection windows around the existing unfiltered sync controller. No protocol state is copied. */
 export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
@@ -61,7 +62,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     sync.get().organization === 'available' && windows.get(channel) === w && !w.unavailable &&
     sync.get().channels[channel]?.watched === true
 
-  async function read<T>(channel: string, w: Window, run: () => Promise<Result<T>>, bootstrap = false): Promise<Result<T>> {
+  async function read<T>(channel: string, w: Window, slot: ReadSlot, run: () => Promise<Result<T>>, bootstrap = false) {
+    const token = Symbol(slot)
+    w.reads.set(slot, token)
+    const isCurrent = () => current(channel, w) && w.reads.get(slot) === token
     let timer: ReturnType<typeof setTimeout> | undefined
     // Session replacement fences late authentication failures; same-session late 401 remains authoritative.
     const session = sessionToken
@@ -77,7 +81,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         deadlines.set(timer, () => resolve({ ok: false, kind: 'network' }))
       })])
       // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
-      if (!bootstrap && !api.isOrganizationUnavailable(result) && current(channel, w) && !result.ok && result.kind === 'http' &&
+      if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() && !result.ok && result.kind === 'http' &&
         [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
         // C9: refuse sends and resubscription until explicit user selection.
         void sync.channelUnavailable(channel)
@@ -86,7 +90,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         w.main.loading = w.list.loading = false
         notify()
       }
-      return result
+      return { result, isCurrent }
     } finally {
       if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) }
     }
@@ -119,8 +123,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     if (!current(channel, w) || p.loading || !p.hasMore) return { ok: false, kind: 'network' }
     p.loading = true; p.error = false; notify()
     const query: ListTimelineQuery = p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }
-    const result = await read(channel, w, () => options.api.listTimeline(channel, query), bootstrap)
-    if (current(channel, w) && w.main === p) {
+    const { result, isCurrent } = await read(channel, w, 'main', () => options.api.listTimeline(channel, query), bootstrap)
+    if (isCurrent() && w.main === p) {
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         applyMain(w, result.data)
@@ -128,7 +132,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       }
       notify()
     }
-    return result
+    return isCurrent() ? result : { ok: false, kind: 'network' }
   }
   function snapshot(channel: string) {
     const w = closed ? window() : getWindow(channel)
@@ -180,9 +184,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       const w = getWindow(channel), p = w.list
       if (!current(channel, w) || p.loading || !p.hasMore) return
       p.loading = true; p.error = false; notify()
-      const result = await read(channel, w, () => options.api.listTopics(channel,
+      const { result, isCurrent } = await read(channel, w, 'list', () => options.api.listTopics(channel,
         p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }))
-      if (!current(channel, w)) return
+      if (!isCurrent()) return
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         mergeBaselines(w, result.data)
@@ -195,8 +199,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       const w = getWindow(channel)
       if (!current(channel, w) || w.summaries.has(topicId)) return
       w.summaries.add(topicId)
-      const result = await read(channel, w, () => options.api.getTopicSummary(channel, topicId))
-      if (!current(channel, w)) return
+      const { result, isCurrent } = await read(channel, w, `summary:${topicId}`, () => options.api.getTopicSummary(channel, topicId))
+      if (!isCurrent()) return
       w.summaries.delete(topicId)
       if (result.ok) {
         mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
@@ -211,9 +215,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (!t) w.topics.set(topicId, t = { messages: new Map(), hasMore: true, loading: false, error: false })
       if (!current(channel, w) || t.loading || !t.hasMore) return
       t.loading = true; t.error = false; notify()
-      const result = await read(channel, w, () => options.api.listTopicMessages(channel, topicId,
+      const { result, isCurrent } = await read(channel, w, `topic:${topicId}`, () => options.api.listTopicMessages(channel, topicId,
         t.before === undefined ? {} : { before_seq: t.before }))
-      if (!current(channel, w)) return
+      if (!isCurrent()) return
       t.loading = false; t.error = !result.ok
       if (result.ok) {
         for (const m of result.data.messages) t.messages.set(m.seq, m)
