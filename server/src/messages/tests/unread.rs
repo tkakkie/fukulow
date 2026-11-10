@@ -230,7 +230,7 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
         std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.file_name().unwrap().to_str().unwrap() < "202611110003_unread.sql")
+            .filter(|p| p.file_name().unwrap().to_str().unwrap() < "202611110199_unread.sql")
             .collect::<Vec<_>>();
     paths.sort();
     for path in paths {
@@ -248,7 +248,7 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
     let private = Uuid::new_v4();
     super::channel(&pool, org, private, owner_id, true).await;
     post(&app, &owner, private, Some("Private")).await;
-    sqlx::raw_sql(include_str!("../../../migrations/202611110003_unread.sql"))
+    sqlx::raw_sql(include_str!("../../../migrations/202611110199_unread.sql"))
         .execute(&pool)
         .await
         .unwrap();
