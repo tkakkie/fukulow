@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test'
 
-// Sprint 1 acceptance: runs against the real Docker Compose stack started from an empty database:
-//   docker compose --profile caddy down -v && docker compose --profile caddy up -d --build
+// Runs against an isolated real Docker Compose stack with an empty database.
+// Set E2E_BASE_URL to its private HTTPS port; never reuse another task's stack or database.
 // Caddy serves https://localhost with its internal CA, hence ignoreHTTPSErrors.
 export default defineConfig({
   testDir: './e2e-compose',

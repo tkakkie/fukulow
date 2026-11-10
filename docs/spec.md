@@ -20,7 +20,8 @@ Later: attachments, reactions, push notifications, bots/webhooks, multiple organ
 
 ## Accounts and Memberships
 - An Account owns globally unique lower-case email, password and Account Sessions. A Member owns the display name and Role in one Organization. One Account may have different Members and Roles in several Organizations; there is at most one Member per Account per Organization.
-- Sign in uses email and password only. GET /api/v1/me returns the Account and its active Organizations; GET /api/v1/orgs/{org}/me returns its active Member. Every Channel, Message and WebSocket route is under /api/v1/orgs/{org}; only the authenticated Account and that Organization URL establish authority.
+- Sign in uses email and password only. Web POST /api/v1/session returns only identity and expires_in, setting an HttpOnly Account Session cookie; native POST /api/v1/native/session returns identity, token and expires_in without cookies. Both share verification, issuance, throttling and DELETE /api/v1/session revocation.
+- GET /api/v1/me returns the Account and its active Organizations; GET /api/v1/orgs/{org}/me returns its active Member. Every Channel, Message and WebSocket route is under /api/v1/orgs/{org}; only the authenticated Account and that Organization URL establish authority.
 - A non-Member, unknown Organization and deactivated Member all return identical 404 ErrorBody with error `organization_unavailable`. Other denials have distinct error values (for example `origin_not_allowed`). Cookie WebSocket Origin validation precedes authentication and Organization resolution: a missing or disallowed Origin returns 403 `origin_not_allowed` even with invalid credentials or an unavailable Organization. Member rows and historical attribution are retained. Reactivation never automatically restores private Channel permissions.
 
 ## Setup

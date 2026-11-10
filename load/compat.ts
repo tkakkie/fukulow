@@ -1,4 +1,7 @@
 // Only the pre-#146 measurement baseline uses the old routes/identity shape.
+export function signInPath(legacy: boolean): string {
+  return legacy ? '/api/v1/session' : '/api/v1/native/session';
+}
 export function organizationPath(organization: string, legacy: boolean): string {
   return legacy ? '/api/v1' : `/api/v1/orgs/${organization}`;
 }
