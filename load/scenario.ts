@@ -47,6 +47,8 @@ const subscriptions = new Gauge('subscribers_per_channel');
 const publishes = new Gauge('concurrent_publishes');
 const deliveryLatency = new Trend('delivery_latency', true);
 const publishResponseTime = new Trend('publish_http_response_time', true);
+const acceptedResponseTime = new Trend('accepted_http_response_time', true);
+const rejectedResponseTime = new Trend('rejected_http_response_time', true);
 const errors = new Counter('load_errors');
 const missing = new Counter('missing_deliveries');
 const published = new Counter('published_messages');
@@ -165,6 +167,8 @@ export default async function (data: Setup): Promise<void> {
   let offered = 0;
   let accepted = 0;
   let refusals = 0;
+  let firstOfferedAt = 0;
+  let lastOfferedAt = 0;
   let sendStartedAt = 0;
   let sendCompletedAt = 0;
   let failed = false;
@@ -187,7 +191,6 @@ export default async function (data: Setup): Promise<void> {
 
   function connect(channelId: string, channel: number, socketIndex: number, afterSeq = 0): void {
     const tags = { channel: String(channel) };
-    subscriptions.add(0, tags);
     const socket = new WebSocket(`${baseUrl.replace(/^http/, 'ws')}${organizationPath(data.organizationId, legacy)}/ws`, null,
       { headers: { Authorization: `Bearer ${data.tokens[sessionIndex(socketIndex, socketsPerSession)]}` }, tags: { name: 'subscribe' } });
     sockets[socketIndex] = socket;
@@ -246,6 +249,8 @@ export default async function (data: Setup): Promise<void> {
   }
 
   async function publish(index: number): Promise<void> {
+    lastOfferedAt = Date.now();
+    firstOfferedAt ||= lastOfferedAt;
     offered++;
     attempted.add(1);
     const channel = index % publishChannels;
@@ -260,6 +265,7 @@ export default async function (data: Setup): Promise<void> {
         JSON.stringify(body), params('publish', data.token));
       publishResponseTime.add(Date.now() - started, { channel: String(channel) });
       if (response.status === 503 && allowRejections) {
+        rejectedResponseTime.add(Date.now() - started);
         refusals++;
         rejected.add(1);
         const retry = response.headers['Retry-After'];
@@ -274,6 +280,7 @@ export default async function (data: Setup): Promise<void> {
         m.client_message_id === body.client_message_id && m.body === body.body && m.seq > 0 })) {
         throw new Error('Unexpected send response');
       }
+      acceptedResponseTime.add(Date.now() - started);
       accepted++;
       published.add(1, { channel: String(channel) });
     } catch (error) {
@@ -285,6 +292,7 @@ export default async function (data: Setup): Promise<void> {
   }
 
   try {
+    data.channelIds.forEach((_, channel) => subscriptions.add(0, { channel: String(channel) }));
     for (let index = 0; index < channels * subscribers; index++) {
       const channel = Math.floor(index / subscribers);
       connect(data.channelIds[channel], channel, index);
@@ -302,6 +310,7 @@ export default async function (data: Setup): Promise<void> {
     sendStartedAt = Date.now();
     const result = await schedule(duration * 1000, interval, publishers, Date.now, pause, publish);
     console.log('LOAD_RATE ' + JSON.stringify({ ...result, offeredSendRate: result.offered / (result.elapsedMs / 1000),
+      firstOfferedAt, lastOfferedAt, launchSpanMs: lastOfferedAt - firstOfferedAt,
       accepted, refusals, acceptedSendRate: accepted / (Math.max(result.elapsedMs, sendCompletedAt - result.startedAt) / 1000),
       legacy, allowRejections, reconnect, connectBatch, connectInterval, requestTimeout,
       configuredSendRate: publishers * 1000 / interval, peakConnections, peakPublishes,
@@ -318,7 +327,7 @@ export default async function (data: Setup): Promise<void> {
     throw error;
   } finally {
     console.log('LOAD_PROGRESS ' + JSON.stringify({ offered, accepted, refusals, activeConnections, peakConnections,
-      peakPublishes, perChannel, sendStartedAt, sendCompletedAt, missing: deliveries.missing,
+      peakPublishes, perChannel, firstOfferedAt, lastOfferedAt, sendStartedAt, sendCompletedAt, missing: deliveries.missing,
       channels, subscribers, publishers, duration, interval, socketsPerSession, connectBatch, connectInterval,
       readyTimeout, drainTimeout, legacy, allowRejections, reconnect, requestTimeout }));
     closing = true;
