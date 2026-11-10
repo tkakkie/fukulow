@@ -21,7 +21,7 @@ pub(crate) async fn pause_history(channel: Uuid) {
     }
 }
 
-async fn captured_auth(pool: &PgPool, token: &str) -> Auth {
+pub(super) async fn captured_auth(pool: &PgPool, token: &str) -> Auth {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(sender)));
     let app = Router::new()
@@ -96,6 +96,7 @@ async fn deactivation_after_auth_is_organization_unavailable_for_history_and_sen
             send_auth,
             Ok(Path((organization, channel))),
             ApiJson(SendMessageRequest {
+                topic_name: None,
                 client_message_id: Uuid::new_v4(),
                 body: "denied".into(),
             }),
@@ -147,6 +148,7 @@ async fn queued_send_rechecks_member_revision_and_private_grant_after_begin(pool
             (sender, 0),
             channel,
             SendMessageRequest {
+                topic_name: None,
                 client_message_id: key,
                 body: "must not commit".into(),
             },

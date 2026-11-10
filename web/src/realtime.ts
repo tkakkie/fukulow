@@ -29,14 +29,11 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isSequence = (value: unknown, minimum: number): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= minimum
 
-// `topic_id === null` holds only while Topics are unimplemented. When Topics ship this check must change together with
-// the OpenAPI schema and generated types, topic Messages must be received and routed to their Topic (the Channel timeline shows only a
-// summary, see docs/spec.md), and a test must show valid Messages are not silently dropped (#125).
 function isMessage(value: unknown): value is Message {
   return isObject(value) && typeof value.channel_id === 'string' && isSequence(value.seq, 1) &&
     typeof value.id === 'string' && typeof value.sender === 'string' &&
     typeof value.client_message_id === 'string' && typeof value.body === 'string' &&
-    typeof value.created_at === 'string' && value.topic_id === null
+    typeof value.created_at === 'string' && (value.topic_id === null || typeof value.topic_id === 'string')
 }
 
 function isServerEvent(value: unknown): value is ServerEvent {
