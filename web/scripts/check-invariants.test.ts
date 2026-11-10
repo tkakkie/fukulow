@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
+import { checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -122,6 +122,37 @@ describe('docs/invariants.md parsing', () => {
     expect(errors).toHaveLength(1)
     expect(errors[0]).toContain('line 3')
     expect(errors[0]).toContain('(todo)')
+  })
+
+  const ruleRow = (rule: string) => `| Rule | Test |\n|---|---|\n| ${rule} | \`a.rs::x\` |`
+
+  it('accepts a Rule cell of exactly the maximum length', () => {
+    expect(MAX_RULE_LENGTH).toBe(160)
+    const { rows, errors } = parseInvariants(ruleRow('a'.repeat(160)))
+    expect(errors).toEqual([])
+    expect(rows).toHaveLength(1)
+  })
+
+  it('fails a Rule cell one character over the maximum, naming the line (negative)', () => {
+    const { errors } = parseInvariants(ruleRow('a'.repeat(161)))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('line 3')
+    expect(errors[0]).toContain('161 characters (max 160)')
+  })
+
+  it('counts Unicode code points, backticks and markup included, not bytes or UTF-16 units', () => {
+    const fits = '`x` ' + '組'.repeat(155) + '𠮷'
+    expect([...fits].length).toBe(160)
+    expect(fits.length).toBeGreaterThan(160)
+    expect(parseInvariants(ruleRow(fits)).errors).toEqual([])
+    expect(parseInvariants(ruleRow(fits + '`')).errors[0]).toContain('161 characters')
+  })
+
+  it('fails closed on an escaped pipe in a Rule cell as a column-count error (negative)', () => {
+    const { rows, errors } = parseInvariants(ruleRow('a \\| b'))
+    expect(rows).toEqual([])
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('expected 2 columns')
   })
 })
 
