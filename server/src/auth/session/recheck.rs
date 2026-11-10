@@ -35,7 +35,9 @@ impl SessionChanges {
 
     #[cfg(test)]
     pub(crate) fn with_on_fatal(mut self, on_fatal: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.assert_no_default_fatal();
         self.on_fatal = on_fatal;
+        self.default_fatal_calls = None;
         self
     }
 }

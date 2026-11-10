@@ -14,6 +14,38 @@ fn fixture() -> (SessionChanges, Arc<AtomicUsize>, PgPool) {
 }
 
 #[tokio::test(start_paused = true)]
+#[should_panic(expected = "default fatal hook called; use with_on_fatal")]
+async fn forgotten_fatal_override_is_detected_in_test_task() {
+    let changes = SessionChanges::default();
+    let (_, _, pool) = fixture();
+    let worker = tokio::spawn(async {});
+    let supervisor = tokio::spawn(supervise(
+        worker,
+        Arc::downgrade(&changes.sessions),
+        pool,
+        changes.on_fatal.clone(),
+    ));
+    supervisor.await.unwrap();
+    // The default returned safely in the background; detection fails this test task.
+    assert_eq!(
+        changes
+            .default_fatal_calls
+            .as_ref()
+            .unwrap()
+            .load(Ordering::SeqCst),
+        1
+    );
+    SessionChanges::default().assert_no_default_fatal();
+    changes.assert_no_default_fatal();
+}
+
+#[tokio::test]
+#[should_panic(expected = "worker panic tests must call with_on_fatal")]
+async fn worker_panic_helper_rejects_forgotten_fatal_override() {
+    SessionChanges::default().panic_worker().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn worker_panic_requests_fatal_exit_once_after_grace() {
     assert_eq!(EXIT_GRACE, Duration::from_secs(2));
     let (changes, calls, pool) = fixture();
