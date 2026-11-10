@@ -18,18 +18,24 @@ export type AuthState =
 
 type Fetch = typeof fetch
 
-/** Japanese message for a failed call; `context` selects the wording for 401. */
+/** Japanese message for a failed call; `context` selects the wording per screen. */
 export function errorMessage(r: Extract<Result<unknown>, { ok: false }>, context: 'setup' | 'signin'): string {
   if (r.kind === 'network') return 'サーバーに接続できません。しばらくしてからもう一度お試しください。'
   switch (r.status) {
     case 400:
-      return '入力内容を確認してください。パスワードは12文字以上で入力してください。'
+      return context === 'setup'
+        ? '入力内容を確認してください。パスワードは12文字以上で入力してください。'
+        : 'メールアドレスとパスワードの入力内容を確認してください。'
     case 401:
       return context === 'setup'
         ? 'セットアップトークンが正しくありません。管理者から受け取ったトークンを入力してください。'
         : 'メールアドレスまたはパスワードが正しくありません。'
     case 409:
       return 'セットアップはすでに完了しています。ログインしてください。'
+    case 429:
+      return context === 'setup'
+        ? '試行回数が多すぎます。しばらく待ってからもう一度お試しください。'
+        : 'ログインの試行が多すぎます。しばらく待ってからもう一度お試しください。'
     default:
       return 'エラーが発生しました。もう一度お試しください。'
   }

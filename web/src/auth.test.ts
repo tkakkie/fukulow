@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { restore, setupAndSignIn, signOut } from './auth'
+import { errorMessage, restore, setupAndSignIn, signOut } from './auth'
 
 const identity = {
   account: { id: 'a', email: 'a@example.com' },
@@ -95,6 +95,22 @@ describe('signOut', () => {
     expect(await signOut(route({ 'DELETE /api/v1/session': () => new Response(null, { status: 204 }) }))).toBe(true)
     expect(await signOut(route({ 'DELETE /api/v1/session': () => j({}, 401) }))).toBe(true)
     expect(await signOut(vi.fn().mockRejectedValue(new Error('n')))).toBe(false)
+  })
+})
+
+describe('errorMessage', () => {
+  it('distinguishes 400 wording between setup and signin', () => {
+    const bad = { ok: false as const, kind: 'http' as const, status: 400 }
+    expect(errorMessage(bad, 'setup')).toContain('12文字以上')
+    const signin = errorMessage(bad, 'signin')
+    expect(signin).not.toContain('12文字')
+    expect(signin).toContain('入力内容を確認してください')
+  })
+
+  it('tells the user to wait before retrying on 429', () => {
+    const throttled = { ok: false as const, kind: 'http' as const, status: 429 }
+    expect(errorMessage(throttled, 'signin')).toContain('しばらく待ってから')
+    expect(errorMessage(throttled, 'setup')).toContain('しばらく待ってから')
   })
 })
 

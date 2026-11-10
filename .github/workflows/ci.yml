@@ -90,6 +90,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - name: Backup publication and disposable restore guards
+        run: node --test scripts/backup.test.ts
       - run: rustup component add rustc-dev
       - run: rustfmt --check --edition 2024 scripts/module-direction.rs
       - run: node --test scripts/check-module-direction.test.ts
