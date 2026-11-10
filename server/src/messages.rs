@@ -379,9 +379,6 @@ pub(crate) async fn latest_seq(
         let mut tx = pool
             .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
             .await?;
-        sqlx::query("SET LOCAL lock_timeout = '10s'")
-            .execute(&mut *tx)
-            .await?;
         commit::lock(&mut tx, organization, channel, true).await?;
         let sql = "SELECT seq FROM channel_message_sequences \
                    WHERE organization_id = $1 AND channel_id = $2";

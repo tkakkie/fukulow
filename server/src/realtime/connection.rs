@@ -86,7 +86,10 @@ impl Connection<'_> {
             return Ok(());
         };
         let organization = self.auth.identity.organization.organization_id;
-        let through = messages::latest_seq(&self.state.pool, organization, channel)
+        let through = self
+            .state
+            .message_delivery
+            .latest_seq(&self.state.pool, organization, channel)
             .await
             .map_err(|_| 1011u16)?;
         after = after.min(through);
@@ -156,13 +159,16 @@ impl Connection<'_> {
                     }
                 }
                 if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
-                    let latest = messages::latest_seq(
-                        &self.state.pool,
-                        self.auth.identity.organization.organization_id,
-                        channel_id,
-                    )
-                    .await
-                    .map_err(|_| 1011u16)?;
+                    let latest = self
+                        .state
+                        .message_delivery
+                        .latest_seq(
+                            &self.state.pool,
+                            self.auth.identity.organization.organization_id,
+                            channel_id,
+                        )
+                        .await
+                        .map_err(|_| 1011u16)?;
                     Self::event(
                         socket,
                         ServerEvent::Subscribed {
