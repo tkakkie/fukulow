@@ -32,7 +32,7 @@ impl Signal {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            // Outside a runtime only retain the latch; sockets are being dropped too.
+            // Outside a runtime only retain the latch (no wake is scheduled); observers see it on their next check.
             return;
         };
         let signal = self.clone();
@@ -61,6 +61,7 @@ pub(crate) struct FailureWait {
 }
 
 impl FailureWait {
+    /// Single-shot: call it once; awaiting it again after completion panics (tokio oneshot).
     pub(crate) async fn failed(&mut self) {
         // A panicked monitor also fails closed when its sender drops.
         let _ = (&mut self.ready).await;
