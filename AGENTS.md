@@ -1,10 +1,11 @@
 # fukulow
 
 Business chat app (Zulip-like: channels, topics, reply chains), built mostly by AI. Goals: high concurrency, fast display; product quality.
-Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (past measurement records). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13).
+Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (past measurement records), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13).
 
 ## What to read
 - Always this file; for a behaviour change, the relevant `docs/spec.md` sections first.
+- Web UI work (components, layout, styles, copy, keyboard): `docs/ui.md` first, in full.
 - `docs/decisions.md`, `docs/invariants.md`: by default search headings/keywords and read only the matches.
 - Auth, permissions, tenant scoping, real-time delivery, API contract, migrations: check the related decisions and invariants first (required).
 - Nothing found: try other keywords (spec terms, modules, error values) and related Issues/PRs before assuming no constraint.
@@ -16,6 +17,7 @@ Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spe
 ## Writing docs
 - `decisions.md`: only current decisions, what + why in at most 300 characters each; split or link `#n` rather than blur a reason.
 - `measurements.md`: only results behind a decision, performance comparisons or key regression checks, with reproduction conditions and limits; no routine/debug logs, raw artifacts or duplicates; never silently rewrite or drop an old record.
+- `ui.md`: short shared UI rules (layout, navigation, tokens, components, states, accessibility, keyboard, copy); it wins over mockups.
 - `invariants.md`: a Rule cell states what must hold, scope and exceptions included, in at most 160 characters.
 - Splitting a doc (over ~40 KB, repeated conflicts, or a major `spec.md` feature) is evaluated, not automatic: only via its own approved Issue, never in an unrelated PR, no new doc kinds. Procedure: `docs/workflow.md` §13.
 
