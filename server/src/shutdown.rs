@@ -1,30 +1,55 @@
-use crate::{AppState, app};
-use axum::{extract::State, middleware::Next, response::IntoResponse};
+#[cfg(test)]
 use std::{future::Future, time::Duration};
 use tokio::sync::watch;
 
-pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Count before spawning, and release on every exit, including cancellation.
 #[derive(Clone, Default)]
-pub(crate) struct Work(watch::Sender<usize>);
+pub(crate) struct Work {
+    count: watch::Sender<usize>,
+    #[cfg(test)]
+    pub(crate) drain_polls: watch::Sender<usize>,
+}
 
 pub(crate) struct Guard(Work);
 
 impl Work {
     pub(crate) fn enter(&self) -> Guard {
-        self.0.send_modify(|count| *count += 1);
+        self.count.send_modify(|count| *count += 1);
         Guard(self.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) async fn wait_for_count(&self, expected: usize) {
+        let _ = self
+            .count
+            .subscribe()
+            .wait_for(|count| *count == expected)
+            .await;
+    }
+
     pub(crate) async fn drained(&self) {
-        let _ = self.0.subscribe().wait_for(|count| *count == 0).await;
+        let mut counts = self.count.subscribe();
+        let waiting = counts.wait_for(|count| *count == 0);
+        #[cfg(test)]
+        {
+            tokio::pin!(waiting);
+            // Acknowledge after the actual drain poll, including a Ready result.
+            // Tests can then inspect pool ordering without racing the serve task.
+            let _ = std::future::poll_fn(|cx| {
+                let result = waiting.as_mut().poll(cx);
+                self.drain_polls.send_modify(|polls| *polls += 1);
+                result
+            })
+            .await;
+        }
+        #[cfg(not(test))]
+        let _ = waiting.await;
     }
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        self.0.0.send_modify(|count| *count -= 1);
+        self.0.count.send_modify(|count| *count -= 1);
     }
 }
 
@@ -35,6 +60,10 @@ pub struct Shutdown {
 }
 
 impl Shutdown {
+    pub(crate) fn is_stopped(&self) -> bool {
+        *self.stopped.borrow()
+    }
+
     pub fn begin(&self) {
         self.stopped.send_replace(true);
     }
@@ -44,84 +73,12 @@ impl Shutdown {
     }
 }
 
-pub(crate) async fn reject_new_requests(
-    State(shutdown): State<Shutdown>,
-    request: axum::extract::Request,
-    next: Next,
-) -> axum::response::Response {
-    if *shutdown.stopped.borrow() {
-        return (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(crate::auth::ErrorBody {
-                error: "server shutting down".into(),
-            }),
-        )
-            .into_response();
-    }
-    next.run(request).await
-}
-
-/// The caller must terminate the process on expiry, without waiting for pool/runtime teardown.
-pub async fn serve(
-    listener: tokio::net::TcpListener,
-    state: AppState,
-    signal: impl Future<Output = ()>,
-    deadline: Duration,
-) -> std::io::Result<bool> {
-    let shutdown = state.shutdown.clone();
-    let pool = state.pool.clone();
-    let delivery = state.message_delivery.clone();
-    let stop_accepting = shutdown.clone();
-    let server = axum::serve(
-        listener,
-        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move { stop_accepting.cancelled().await })
-    .into_future();
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => { result?; return Ok(true); }
-        _ = signal => {}
-    }
-    let bound = tokio::time::Instant::now() + deadline;
-    shutdown.begin();
-    let drain = async {
-        server.await?;
-        // HTTP completion alone misses persistence whose caller disconnected,
-        // and the notification spawned immediately before persistence completes.
-        delivery.drained().await;
-        shutdown.sockets.drained().await;
-        pool.close().await;
-        Ok::<_, std::io::Error>(())
-    };
-    match tokio::time::timeout_at(bound, drain).await {
-        Ok(result) => {
-            result?;
-            Ok(true)
-        }
-        Err(_) => Ok(false),
-    }
-}
-
-/// Register both handlers before accepting any connections.
-pub fn signal() -> std::io::Result<impl Future<Output = ()>> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    Ok(async move {
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = interrupt.recv() => {}
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn shutdown_wakes_ten_thousand_close_tasks_concurrently() {
+    async fn shutdown_watch_wakes_ten_thousand_waiters_concurrently() {
         let shutdown = Shutdown::default();
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..10_000 {

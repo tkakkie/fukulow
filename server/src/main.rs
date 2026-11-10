@@ -32,8 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on {addr}");
-    let signal = fukulow_server::shutdown::signal()?;
-    let completed = fukulow_server::shutdown::serve(
+    let signal = fukulow_server::signal()?;
+    let completed = fukulow_server::serve(
         listener,
         AppState {
             pool,
@@ -47,12 +47,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ws_allowed_origins,
         },
         signal,
-        fukulow_server::shutdown::DRAIN_TIMEOUT,
+        fukulow_server::DRAIN_TIMEOUT,
     )
     .await?;
     if !completed {
         eprintln!("shutdown drain deadline expired; send outcomes may be unknown; exiting");
-        // Runtime destruction can wait indefinitely for blocking tasks.
+        // Runtime destruction can outlast the drain deadline while blocking tasks finish.
         std::process::exit(0);
     }
     Ok(())

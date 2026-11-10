@@ -80,7 +80,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 
 ## Real-time delivery
 - #195: SIGTERM/SIGINT stop acceptance and reject new requests, broadcast 1001, then drain HTTP, detached sends/notifications and sockets before closing the pool. Count before spawn/upgrade so caller disconnects and task handoffs cannot hide work.
-- #195: retain 60 s overall drain including pool close: 40 s admitted send + 10 s notification + 10 s margin; pre-admission SQL can exceed that budget. The 10k idle restart took <1 s (measurements.md). Compose grants 75 s; expiry exits without runtime teardown.
+- #195: retain provisional 60 s overall drain / 75 s Compose grace: 2,048-send SIGTERM drain <=814 ms; idle 10k restart <1 s (measurements.md). This is headroom, not a worst-case bound; pre-admission SQL can exceed it. Expiry skips runtime teardown.
 - #195: sockets independently observe one shutdown watch and send Close concurrently, each capped at 1 s; a slow peer cannot serialize 10,000 closes. Upgrade callbacks retain a drain guard before handoff so late scheduling cannot race pool close.
 - #195: SIGKILL, crashes and drain expiry cannot promise COMMIT outcome or Close delivery. Retry the same client_message_id and resubscribe from the gap-free cursor; #135 resolves uncertain COMMITs without duplicate Messages.
 - Subscribe handoff: register live first, replay committed seq > cursor in 50-Message pages, flush newer queued events, then send `subscribed`. Clients dedupe by (channel_id, seq): duplicates allowed, no gaps (#18).

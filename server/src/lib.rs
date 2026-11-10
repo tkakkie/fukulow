@@ -7,11 +7,17 @@ pub mod shutdown;
 
 use axum::{
     Router,
+    extract::State,
     http::{StatusCode, Uri, header},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::get,
 };
 use rust_embed::RustEmbed;
+use shutdown::Shutdown;
+use std::{future::Future, time::Duration};
+
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(RustEmbed)]
 #[folder = "../web/dist"]
@@ -73,9 +79,81 @@ pub fn app(state: AppState) -> Router {
         .fallback(static_handler)
         .layer(axum::middleware::from_fn_with_state(
             state.shutdown.clone(),
-            shutdown::reject_new_requests,
+            reject_new_requests,
         ))
         .with_state(state)
+}
+
+pub(crate) async fn reject_new_requests(
+    State(shutdown): State<Shutdown>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    if shutdown.is_stopped() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(crate::auth::ErrorBody {
+                error: "server shutting down".into(),
+            }),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// The caller must terminate the process on expiry, without waiting for pool/runtime teardown.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    signal: impl Future<Output = ()>,
+    deadline: Duration,
+) -> std::io::Result<bool> {
+    let shutdown = state.shutdown.clone();
+    let pool = state.pool.clone();
+    let delivery = state.message_delivery.clone();
+    let stop_accepting = shutdown.clone();
+    let server = axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { stop_accepting.cancelled().await })
+    .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => { result?; return Ok(true); }
+        _ = signal => {}
+    }
+    let bound = tokio::time::Instant::now() + deadline;
+    shutdown.begin();
+    let drain = async {
+        server.await?;
+        // HTTP completion alone misses persistence whose caller disconnected,
+        // and the notification spawned immediately before persistence completes.
+        delivery.drained().await;
+        shutdown.sockets.drained().await;
+        pool.close().await;
+        Ok::<_, std::io::Error>(())
+    };
+    match tokio::time::timeout_at(bound, drain).await {
+        Ok(result) => {
+            result?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// Register both handlers before accepting any connections.
+pub fn signal() -> std::io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    })
 }
 
 #[utoipa::path(get, path = "/api/v1/health", responses((status = 200, description = "Server is responding; returns the plain-text body ok", body = String, content_type = "text/plain")))]
@@ -90,7 +168,7 @@ async fn static_handler(uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     if let Some(file) = Assets::get(path) {
-        return serve(path, file);
+        return serve_asset(path, file);
     }
     // A path whose last segment has an extension is an asset request: missing means 404,
     // not index.html. Anything else is a client-side route of the SPA.
@@ -99,12 +177,12 @@ async fn static_handler(uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     match Assets::get("index.html") {
-        Some(file) => serve("index.html", file),
+        Some(file) => serve_asset("index.html", file),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn serve(name: &str, file: rust_embed::EmbeddedFile) -> Response {
+fn serve_asset(name: &str, file: rust_embed::EmbeddedFile) -> Response {
     let mime = mime_guess::from_path(name).first_or_octet_stream();
     ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response()
 }

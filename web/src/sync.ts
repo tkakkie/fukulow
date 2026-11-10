@@ -1,5 +1,5 @@
 import * as api from './api'
-import { reconnectDelay } from './reconnect'
+import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { initialState, step, type ChannelState, type Effect, type Input } from './protocol'
@@ -31,8 +31,6 @@ export type TimelineState = {
   hasOlder: boolean
   loadingOlder: boolean
 }
-
-const backoffCap = (attempt: number) => Math.min(10_000, 500 * 2 ** Math.min(attempt, 5))
 
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
