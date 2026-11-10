@@ -44,6 +44,7 @@ struct ChannelFanout {
 // Twice the production pool's 20 connections; bound backlog without waiting on sends.
 pub(crate) const MAX_IN_FLIGHT_NOTIFICATIONS: usize = 40;
 pub(crate) const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const LIVE_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 struct Sender {
@@ -275,6 +276,14 @@ impl Delivery {
         let after = cursor
             .get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(message.seq) - 1);
         if message.seq <= *after {
+            return Ok(());
+        }
+        let gap = message.seq - *after - 1;
+        if gap > super::REPLAY_PAGE_SIZE || gap > LIVE_QUEUE_CAPACITY as i64 {
+            // Latch before skipping: current subscribers reconnect; later subscribers
+            // register before taking their committed replay watermark.
+            self.failures.signal((organization, message.channel_id));
+            *after = message.seq;
             return Ok(());
         }
         // Recover a committed gap once per Channel, never once per subscriber.

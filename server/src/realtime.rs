@@ -15,14 +15,12 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::{Auth, ErrorBody},
-    messages::Message,
+    messages::{LIVE_QUEUE_CAPACITY, Message},
 };
 
 mod connection;
 mod origin;
 pub use origin::AllowedOrigins;
-
-const LIVE_QUEUE_CAPACITY: usize = 256;
 
 /// Queue overflow: reconnect and subscribe from the last seq per channel; never drop silently.
 pub const CLOSE_QUEUE_OVERFLOW: u16 = 4008;

@@ -24,6 +24,7 @@ mod failure;
 #[cfg(test)]
 pub(crate) use commit::ambiguous_commit;
 pub use delivery::Delivery;
+pub(crate) use delivery::LIVE_QUEUE_CAPACITY;
 #[cfg(test)]
 pub(crate) use delivery::{
     MAX_IN_FLIGHT_NOTIFICATIONS, NOTIFICATION_TIMEOUT, PublicationGate, pause_publication,
@@ -467,6 +468,8 @@ async fn latest_seq(
     Ok(seq)
 }
 
+const REPLAY_PAGE_SIZE: i64 = 50;
+
 pub(crate) async fn replay_page(
     pool: &sqlx::PgPool,
     organization: Uuid,
@@ -478,12 +481,13 @@ pub(crate) async fn replay_page(
         "SELECT id, channel_id, seq, client_message_id, sender, body, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
-         ORDER BY seq ASC LIMIT 50",
+         ORDER BY seq ASC LIMIT $5",
     )
     .bind(organization)
     .bind(channel)
     .bind(after)
     .bind(through)
+    .bind(REPLAY_PAGE_SIZE)
     .fetch_all(pool)
     .await
 }
