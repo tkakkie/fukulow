@@ -3,6 +3,8 @@ use sqlx::PgConnection;
 use std::{collections::HashSet, sync::Weak};
 
 const BATCH_SIZE: usize = 1000;
+const EXIT_GRACE: Duration = Duration::from_secs(2);
+pub(super) const FATAL_EXIT: (fn(i32) -> !, i32) = (std::process::exit, 1);
 
 impl SessionChanges {
     pub(super) fn start_rechecks(&self, pool: &PgPool) {
@@ -13,26 +15,13 @@ impl SessionChanges {
             let timeout = self.timeout;
             let worker = tokio::spawn(run(
                 sessions.clone(),
-                pool,
+                pool.clone(),
                 interval,
                 timeout,
                 #[cfg(test)]
                 self.gate.clone(),
             ));
-            tokio::spawn(async move {
-                let result = worker.await;
-                if let Some(sessions) = sessions.upgrade() {
-                    // Admission and failure signalling share the registration lock.
-                    let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
-                    sessions.unavailable = true;
-                    for signal in sessions.entries.values() {
-                        signal.send_modify(|status| status.failed = true);
-                    }
-                    eprintln!(
-                        "session fallback worker stopped; WebSockets fail closed: {result:?}"
-                    );
-                }
-            });
+            tokio::spawn(supervise(worker, sessions, pool, self.on_fatal.clone()));
         });
     }
 
@@ -43,6 +32,40 @@ impl SessionChanges {
             timeout,
             ..Self::default()
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_on_fatal(mut self, on_fatal: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.on_fatal = on_fatal;
+        self
+    }
+}
+
+async fn supervise(
+    worker: tokio::task::JoinHandle<()>,
+    sessions: Weak<Mutex<Sessions>>,
+    pool: PgPool,
+    on_fatal: Arc<dyn Fn() + Send + Sync>,
+) {
+    let result = worker.await;
+    let Some(sessions) = sessions.upgrade() else {
+        return;
+    };
+    {
+        // Admission and failure signalling share the registration lock.
+        let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.unavailable = true;
+        for signal in sessions.entries.values() {
+            signal.send_modify(|status| status.failed = true);
+        }
+        eprintln!("session fallback worker stopped; WebSockets fail closed: {result:?}");
+    }
+    // Registry teardown and pool closure are normal shutdown. Every other exit,
+    // including a successful return, leaves sockets without their fallback check.
+    if !pool.is_closed() {
+        // Do not wait on sockets: a stuck Close frame must not prevent recovery.
+        tokio::time::sleep(EXIT_GRACE).await;
+        on_fatal();
     }
 }
 

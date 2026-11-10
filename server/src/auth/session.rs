@@ -32,6 +32,7 @@ pub struct SessionChanges {
     worker: Arc<Once>,
     interval: Duration,
     timeout: Duration,
+    on_fatal: Arc<dyn Fn() + Send + Sync>,
     #[cfg(test)]
     gate: Arc<Mutex<Option<Arc<tests::Gate>>>>,
 }
@@ -42,6 +43,7 @@ impl Default for SessionChanges {
             worker: Arc::new(Once::new()),
             interval: RECHECK_INTERVAL,
             timeout: CHECK_TIMEOUT,
+            on_fatal: Arc::new(|| (recheck::FATAL_EXIT.0)(recheck::FATAL_EXIT.1)),
             #[cfg(test)]
             gate: Default::default(),
         }

@@ -298,7 +298,8 @@ async fn failed_epoch_closes_but_new_epoch_checks_current_database(pool: PgPool)
 async fn worker_failure_during_initial_check_is_not_admitted(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     state.session_changes =
-        SessionChanges::with_recheck_timing(Duration::from_millis(50), CHECK_TIMEOUT);
+        SessionChanges::with_recheck_timing(Duration::from_millis(50), CHECK_TIMEOUT)
+            .with_on_fatal(Arc::new(|| {}));
     let checked = state.session_changes.pause(Phase::Checked);
     let watch = auth.watch_session(&state);
     tokio::pin!(watch);

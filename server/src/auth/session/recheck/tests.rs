@@ -1,6 +1,8 @@
 use super::*;
 use crate::auth::session::tests::{Phase, fixture};
 
+mod exit;
+
 async fn active_checks(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
