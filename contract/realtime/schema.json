@@ -20,7 +20,7 @@
     "Seq": { "type": "integer", "minimum": 1 },
     "Cursor": { "type": "integer", "minimum": 0 },
     "Rule": {
-      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = the planned projection and Unread rules (not implemented yet; only proposed scenarios cover them, semantic).",
+      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P2/P5 run; client projections and other P rules remain proposed (semantic).",
       "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
     },
     "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
@@ -49,6 +49,34 @@
         "note": { "type": "string" }
       },
       "additionalProperties": false
+    },
+    "TimelineItems": {
+      "$comment": "Server /timeline items in ascending W-relative position. Topic names are fixture labels; the runner binds ids from canonical sends and compares full latest Messages.",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object", "required": ["kind", "message"],
+            "properties": {
+              "kind": { "const": "message" },
+              "message": { "type": "object", "required": ["seq"], "properties": { "seq": { "$ref": "#/$defs/Seq" } }, "additionalProperties": false }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object", "required": ["kind", "topic"],
+            "properties": {
+              "kind": { "const": "topic" },
+              "topic": {
+                "type": "object", "required": ["name", "last_seq", "message_count"],
+                "properties": { "name": { "$ref": "#/$defs/Label" }, "last_seq": { "$ref": "#/$defs/Seq" }, "message_count": { "type": "integer", "minimum": 1 } },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     "TopicLine": {
       "$comment": "Planned (P2, P4). One line of the main timeline: a Message without Topic at its seq, or a Topic's summary line at its position with its message_count (null = no baseline yet, P4).",
@@ -196,7 +224,7 @@
           "additionalProperties": false
         },
         {
-          "$comment": "POST /api/v1/channels/{channel}/messages as Member 'as' with a fresh body. count: number of sends (default 1), each with a fresh client_message_id unless 'key' is given; with 'key' every send reuses that client_message_id and body. concurrent: issue the count sends at the same time instead of one after another. label: names the canonical Message the first response returned, for from_post. topic (Planned, P1): post into this fixture-local Topic; the first post naming a label creates the Topic (Topics are created by their first Message). The runner asserts the status (default 201).",
+          "$comment": "POST /api/v1/channels/{channel}/messages as Member 'as' with a fresh body. count: number of sends (default 1), each with a fresh client_message_id unless 'key' is given; with 'key' every send reuses that client_message_id and body. concurrent: issue the count sends at the same time instead of one after another. label: names the canonical Message the first response returned, for from_post. topic_name (P1/P7): send by Topic name; the first post naming it creates the Topic (Topics are created by their first Message). The runner asserts the status (default 201).",
           "type": "object",
           "required": ["do", "as", "channel"],
           "properties": {
@@ -207,7 +235,7 @@
             "concurrent": { "type": "boolean" },
             "key": { "$ref": "#/$defs/Label" },
             "label": { "$ref": "#/$defs/Label" },
-            "topic": { "$ref": "#/$defs/Label" },
+            "topic_name": { "$ref": "#/$defs/Label" },
             "expect_status": { "$ref": "#/$defs/HttpStatus" }
           },
           "additionalProperties": false
@@ -252,7 +280,7 @@
           "additionalProperties": false
         },
         {
-          "$comment": "Planned (P2, P5; #137 fixes the route and field names). Fetch a main-timeline page as Member 'as'. Without as_of_seq: the first page; the server returns as_of_seq W read under the commit barrier. With as_of_seq: a later page as of that W; before is the exclusive continuation boundary (a position as of W). expect compares status and, if present, as_of_seq, lines (ascending) and has_more (older lines exist as of W).",
+          "$comment": "GET /api/v1/channels/{channel}/timeline (P2, P5) as Member 'as'. Without as_of_seq: the first page; the server returns as_of_seq W read under the commit barrier. With as_of_seq: a later page as of that W; before_position is the exclusive continuation boundary (a position as of W). expect compares status, as_of_seq, items (ascending) and has_more (older lines exist as of W).",
           "type": "object",
           "required": ["do", "as", "channel", "query", "expect"],
           "properties": {
@@ -261,16 +289,16 @@
             "channel": { "$ref": "#/$defs/ChannelRef" },
             "query": {
               "type": "object",
-              "properties": { "as_of_seq": { "$ref": "#/$defs/Seq" }, "before": { "$ref": "#/$defs/Seq" }, "limit": { "type": "integer" } },
+              "properties": { "as_of_seq": { "$ref": "#/$defs/Cursor" }, "before_position": { "$ref": "#/$defs/Seq" }, "limit": { "type": "integer" } },
               "additionalProperties": false
             },
             "expect": {
               "type": "object",
-              "required": ["status"],
+              "required": ["status", "as_of_seq", "items", "has_more"],
               "properties": {
                 "status": { "$ref": "#/$defs/HttpStatus" },
                 "as_of_seq": { "$ref": "#/$defs/Cursor" },
-                "lines": { "$ref": "#/$defs/TopicLines" },
+                "items": { "$ref": "#/$defs/TimelineItems" },
                 "has_more": { "type": "boolean" }
               },
               "additionalProperties": false
@@ -438,7 +466,7 @@
       ]
     },
     "EffectPattern": {
-      "$comment": "Matches an emitted effect when every field given here equals the effect's field (extra fields of the effect are ignored). Effect types: connect (open a socket); subscribe(channel, after_seq); unsubscribe(channel); fetch_history(channel, page=latest|after|before, seq for after/before); send(channel, client_message_id) = the HTTP send, a resend is another send with the same id; wait(purpose, channel?) = the client asks to be woken later (exact durations are not part of the contract; the harness decides when to deliver timer_elapsed); membership_check = GET /api/v1/orgs/{org}/me after a WebSocket handshake failure (C10). Planned (P1, P2): fetch_history with topic = a Topic-filtered page; fetch_main_timeline(channel, as_of_seq?, before?) = a main-timeline page. as: binds a label to the matched effect so a later input can respond_to it. times: exactly this many emitted effects match in this step (default: at least one when required, none when forbidden).",
+      "$comment": "Matches an emitted effect when every field given here equals the effect's field (extra fields of the effect are ignored). Effect types: connect (open a socket); subscribe(channel, after_seq); unsubscribe(channel); fetch_history(channel, page=latest|after|before, seq for after/before); send(channel, client_message_id) = the HTTP send, a resend is another send with the same id; wait(purpose, channel?) = the client asks to be woken later (exact durations are not part of the contract; the harness decides when to deliver timer_elapsed); membership_check = GET /api/v1/orgs/{org}/me after a WebSocket handshake failure (C10). Planned (P1, P2): fetch_history with topic = a Topic-filtered page; fetch_main_timeline(channel, as_of_seq?, before_position?) = GET /timeline. as: binds a label to the matched effect so a later input can respond_to it. times: exactly this many emitted effects match in this step (default: at least one when required, none when forbidden).",
       "type": "object",
       "required": ["type"],
       "properties": {
@@ -451,7 +479,7 @@
         "purpose": { "enum": ["reorder_grace", "fill_backoff", "reconnect_backoff"] },
         "topic": { "$ref": "#/$defs/Label" },
         "as_of_seq": { "$ref": "#/$defs/Seq" },
-        "before": { "$ref": "#/$defs/Seq" },
+        "before_position": { "$ref": "#/$defs/Seq" },
         "as": { "$ref": "#/$defs/Label" },
         "times": { "type": "integer", "minimum": 0 }
       },
@@ -578,14 +606,14 @@
         { "$comment": "Planned (P1). The UI shows a Topic of the Channel.", "type": "object", "required": ["type", "channel", "topic"], "properties": { "type": { "const": "open_topic" }, "channel": { "$ref": "#/$defs/Label" }, "topic": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
         { "$comment": "Planned (P2). The UI shows the Channel's main timeline, or asks for older main-timeline lines.", "type": "object", "required": ["type", "channel"], "properties": { "type": { "const": "load_main_timeline" }, "channel": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
         {
-          "$comment": "Planned (P2, P4). A main-timeline page arrived: as_of_seq = W, lines ascending as of W, has_more = older lines exist as of W.",
+          "$comment": "Planned (P2, P4). A /timeline page arrived: as_of_seq = W, items ascending as of W, has_more = older lines exist as of W.",
           "type": "object",
-          "required": ["type", "respond_to", "as_of_seq", "lines", "has_more"],
+          "required": ["type", "respond_to", "as_of_seq", "items", "has_more"],
           "properties": {
             "type": { "const": "main_timeline_result" },
             "respond_to": { "$ref": "#/$defs/Label" },
             "as_of_seq": { "$ref": "#/$defs/Cursor" },
-            "lines": { "$ref": "#/$defs/TopicLines" },
+            "items": { "$ref": "#/$defs/TimelineItems" },
             "has_more": { "type": "boolean" }
           },
           "additionalProperties": false

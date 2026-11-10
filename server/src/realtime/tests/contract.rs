@@ -6,6 +6,7 @@ mod capacity;
 mod http;
 mod model;
 mod negative;
+mod timeline;
 use assertions::{Assertion, Failure};
 use model::*;
 
@@ -26,6 +27,7 @@ struct Runner {
     keys: HashMap<String, Uuid>,
     posts: HashMap<String, Value>,
     records: HashMap<(Uuid, i64), Value>,
+    topics: HashMap<(Uuid, String), Value>,
 }
 
 impl Drop for Runner {
@@ -58,6 +60,7 @@ impl Runner {
             keys: HashMap::new(),
             posts: HashMap::new(),
             records: HashMap::new(),
+            topics: HashMap::new(),
         };
         let mut organizations = HashMap::new();
         for label in setup.organizations {
@@ -230,6 +233,7 @@ impl Runner {
                 assert_eq!(status, 204);
             }
             Step::History(spec) => self.history(spec).await,
+            Step::MainTimeline(spec) => self.timeline(index, spec).await?,
             Step::Expect { socket, events } => {
                 for (event, expected) in events.into_iter().enumerate() {
                     self.expect(&socket, expected).await.map_err(|assertion| {
@@ -253,6 +257,7 @@ impl Runner {
             concurrent,
             key,
             label,
+            topic_name,
             expect_status,
         } = spec;
         let mut first = None;
@@ -262,7 +267,10 @@ impl Runner {
                 // Poll all real HTTP requests concurrently; keep response order for label binding.
                 let requests = (0..count)
                     .map(|_| {
-                        let input = self.post_input(key.as_deref());
+                        let mut input = self.post_input(key.as_deref());
+                        if let Some(name) = &topic_name {
+                            input["topic_name"] = json!(name);
+                        }
                         http::request(
                             self.server.address,
                             "POST",
@@ -275,13 +283,26 @@ impl Runner {
                 for (status, record) in futures_util::future::join_all(requests).await {
                     assert_eq!(status, expect_status, "POST response: {record}");
                     self.remember(channel, &member, &record, status);
+                    self.remember_topic(channel, topic_name.as_deref(), &record, status);
                     first.get_or_insert(record);
                 }
             } else {
                 for _ in 0..count {
-                    let record = self
-                        .post(&member, channel, key.as_deref(), expect_status)
-                        .await;
+                    let mut input = self.post_input(key.as_deref());
+                    if let Some(name) = &topic_name {
+                        input["topic_name"] = json!(name);
+                    }
+                    let (status, record) = http::request(
+                        self.server.address,
+                        "POST",
+                        format!("/api/v1/channels/{channel}/messages"),
+                        &self.members[&member].token,
+                        input,
+                    )
+                    .await;
+                    assert_eq!(status, expect_status, "POST response: {record}");
+                    self.remember(channel, &member, &record, status);
+                    self.remember_topic(channel, topic_name.as_deref(), &record, status);
                     first.get_or_insert(record);
                 }
             }
@@ -325,6 +346,20 @@ impl Runner {
             if let Some(has_more) = expect.has_more {
                 assert_eq!(page["has_more"], has_more);
             }
+        }
+    }
+
+    fn remember_topic(&mut self, channel: Uuid, name: Option<&str>, record: &Value, status: u16) {
+        if status == 201
+            && let Some(name) = name
+        {
+            let topic = &record["topic_id"];
+            assert!(topic.is_string(), "Topic send must return topic_id");
+            let bound = self
+                .topics
+                .entry((channel, name.into()))
+                .or_insert_with(|| topic.clone());
+            assert_eq!(bound, topic, "Topic sends must join the same Topic");
         }
     }
 
