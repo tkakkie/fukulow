@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { runClientScenarioAsync } from '../scripts/realtime-fixtures'
-import { scenarios, controllerClient } from './sync-test-helpers'
+import { partitionScenarios, runClientScenarioAsync } from '../scripts/realtime-fixtures'
+import { scenarios as all, controllerClient } from './sync-test-helpers'
+
+// Proposed fixtures (not implemented yet) are validated by realtime-fixtures and listed here as skipped.
+const { running: scenarios, proposed } = partitionScenarios(all)
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -11,11 +14,21 @@ describe('controller shared client fixtures with fake transport and timers', () 
     await client.sync.close()
     expect(vi.getTimerCount()).toBe(0)
   })
-  it('runs every client fixture through controller transports and timers', async () => {
+  it.skip.each(proposed.map(s => ({ ...s, owners: s.proposed!.owner.join(', ') })))('proposed: $id (owner $owners)', () => {})
+  it('runs every implemented client fixture through controller transports and timers', async () => {
     expect(scenarios.length).toBeGreaterThan(0)
     for (const scenario of scenarios) {
       const client = controllerClient()
       expect(await runClientScenarioAsync(scenario, client), scenario.id).toEqual([])
+      await client.sync.close()
+    }
+  })
+  it('fails the Membership-check fixtures for a controller that never checks after a handshake failure', async () => {
+    const checks = scenarios.filter(s => s.layer === 'controller')
+    expect(checks.length).toBeGreaterThan(0)
+    for (const scenario of checks) {
+      const client = controllerClient({ checkMembership: undefined })
+      expect((await runClientScenarioAsync(scenario, client)).join('\n'), scenario.id).toContain('membership_check')
       await client.sync.close()
     }
   })

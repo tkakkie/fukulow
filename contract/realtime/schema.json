@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "fukulow/contract/realtime/schema.json",
   "title": "Real-time sync contract fixtures",
-  "description": "Language-neutral fixtures for the real-time sync contract in docs/spec.md (S1-S5 server, C1-C10 client; design: #91, scope: #95). A fixture file is {kind, scenarios[]} and lives in delivery/ (kind=delivery, satisfied by the Rust server) or client/ (kind=client, satisfied by the TypeScript client and a future Kotlin client). Fixtures name behaviour only: no implementation state, function names, timer values or algorithms. Names such as Channel ids, Members and message ids are fixture-local labels; a runner maps them to real ids. Validation uses only the JSON Schema keywords type, enum, const, required, properties, additionalProperties, items, minItems, minimum, maxItems, pattern, oneOf and $ref (to #/$defs); web/scripts/realtime-fixtures.ts adds the cross-reference checks listed in each $comment marked 'semantic'.",
+  "description": "Language-neutral fixtures for the real-time sync contract in docs/spec.md (S1-S5 server, C1-C10 client; design: #91, scope: #95). A fixture file is {kind, scenarios[]} and lives in delivery/ (kind=delivery, satisfied by the Rust server) or client/ (kind=client, satisfied by the TypeScript client and a future Kotlin client). Fixtures name behaviour only: no implementation state, function names, timer values or algorithms. Names such as Channel ids, Members and message ids are fixture-local labels; a runner maps them to real ids. Validation uses only the JSON Schema keywords type, enum, const, required, properties, additionalProperties, items, minItems, minimum, maxItems, pattern, oneOf and $ref (to #/$defs); web/scripts/realtime-fixtures.ts adds the cross-reference checks listed in each $comment marked 'semantic'. A scenario with 'proposed' is a contract example for behaviour not implemented yet (P rules, docs/spec.md 'Planned'): it is validated, and runners skip it and report it as skipped until its owning Issue makes it pass and removes the marker. Vocabulary marked 'Planned' in a $comment is allowed only in proposed scenarios (semantic).",
   "type": "object",
   "required": ["kind", "scenarios"],
   "properties": {
@@ -20,8 +20,8 @@
     "Seq": { "type": "integer", "minimum": 1 },
     "Cursor": { "type": "integer", "minimum": 0 },
     "Rule": {
-      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet.",
-      "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"]
+      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = the planned projection and Unread rules (not implemented yet; only proposed scenarios cover them, semantic).",
+      "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
     },
     "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
     "SeqList": {
@@ -40,6 +40,37 @@
       }
     },
     "HttpStatus": { "type": "integer", "minimum": 100 },
+    "Proposed": {
+      "$comment": "Marks a scenario as a contract example for behaviour not implemented yet. owner: the Issues that implement it and make the scenario pass (they remove this marker in the same PR). Runners validate it but do not run it, and list it as skipped.",
+      "type": "object",
+      "required": ["owner"],
+      "properties": {
+        "owner": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^#[0-9]+$" } },
+        "note": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "TopicLine": {
+      "$comment": "Planned (P2, P4). One line of the main timeline: a Message without Topic at its seq, or a Topic's summary line at its position with its message_count (null = no baseline yet, P4).",
+      "oneOf": [
+        { "type": "object", "required": ["seq"], "properties": { "seq": { "$ref": "#/$defs/Seq" } }, "additionalProperties": false },
+        {
+          "type": "object",
+          "required": ["topic", "position", "message_count"],
+          "properties": {
+            "topic": { "$ref": "#/$defs/Label" },
+            "position": { "$ref": "#/$defs/Seq" },
+            "message_count": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TopicLines": {
+      "$comment": "Planned. Main-timeline lines in display order (ascending position). Semantic: positions strictly ascending; each Topic at most once.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/TopicLine" }
+    },
 
     "DeliveryScenario": {
       "$comment": "A scenario the Rust server satisfies. The runner builds the world in 'setup', then runs 'steps' in order. Members have one session each; a Member's sockets all use that session. Sockets are WebSockets opened by a 'connect' step; events on one socket are observed in arrival order. Semantic: labels are declared before use; sockets are connected before use; 'expect' events reference declared Channels.",
@@ -59,6 +90,7 @@
           },
           "additionalProperties": false
         },
+        "proposed": { "$ref": "#/$defs/Proposed" },
         "setup": { "$ref": "#/$defs/DeliverySetup" },
         "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/DeliveryStep" } }
       },
@@ -164,7 +196,7 @@
           "additionalProperties": false
         },
         {
-          "$comment": "POST /api/v1/channels/{channel}/messages as Member 'as' with a fresh body. count: number of sends (default 1), each with a fresh client_message_id unless 'key' is given; with 'key' every send reuses that client_message_id and body. concurrent: issue the count sends at the same time instead of one after another. label: names the canonical Message the first response returned, for from_post. The runner asserts the status (default 201).",
+          "$comment": "POST /api/v1/channels/{channel}/messages as Member 'as' with a fresh body. count: number of sends (default 1), each with a fresh client_message_id unless 'key' is given; with 'key' every send reuses that client_message_id and body. concurrent: issue the count sends at the same time instead of one after another. label: names the canonical Message the first response returned, for from_post. topic (Planned, P1): post into this fixture-local Topic; the first post naming a label creates the Topic (Topics are created by their first Message). The runner asserts the status (default 201).",
           "type": "object",
           "required": ["do", "as", "channel"],
           "properties": {
@@ -175,6 +207,7 @@
             "concurrent": { "type": "boolean" },
             "key": { "$ref": "#/$defs/Label" },
             "label": { "$ref": "#/$defs/Label" },
+            "topic": { "$ref": "#/$defs/Label" },
             "expect_status": { "$ref": "#/$defs/HttpStatus" }
           },
           "additionalProperties": false
@@ -216,6 +249,33 @@
           "type": "object",
           "required": ["do", "member"],
           "properties": { "do": { "const": "sign_out" }, "member": { "$ref": "#/$defs/Label" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "Planned (P2, P5; #137 fixes the route and field names). Fetch a main-timeline page as Member 'as'. Without as_of_seq: the first page; the server returns as_of_seq W read under the commit barrier. With as_of_seq: a later page as of that W; before is the exclusive continuation boundary (a position as of W). expect compares status and, if present, as_of_seq, lines (ascending) and has_more (older lines exist as of W).",
+          "type": "object",
+          "required": ["do", "as", "channel", "query", "expect"],
+          "properties": {
+            "do": { "const": "main_timeline" },
+            "as": { "$ref": "#/$defs/Label" },
+            "channel": { "$ref": "#/$defs/ChannelRef" },
+            "query": {
+              "type": "object",
+              "properties": { "as_of_seq": { "$ref": "#/$defs/Seq" }, "before": { "$ref": "#/$defs/Seq" }, "limit": { "type": "integer" } },
+              "additionalProperties": false
+            },
+            "expect": {
+              "type": "object",
+              "required": ["status"],
+              "properties": {
+                "status": { "$ref": "#/$defs/HttpStatus" },
+                "as_of_seq": { "$ref": "#/$defs/Cursor" },
+                "lines": { "$ref": "#/$defs/TopicLines" },
+                "has_more": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          },
           "additionalProperties": false
         },
         {
@@ -323,7 +383,7 @@
     },
 
     "ClientScenario": {
-      "$comment": "A scenario a client satisfies. The harness starts a client with no state and feeds 'steps' in order. Each step delivers one input (what happened outside the client: an event, a response, a user action) and then checks what the client did in response: 'effects' are the external requests the client emitted while handling this step's input (an effect emitted earlier is never re-checked), and 'observe' is what the client shows afterwards. Only what a step lists is checked. 'never' effects must not be emitted in any step. Semantic: every respond_to refers to a label bound by 'as' in an earlier step's required effects; labels are unique; an 'ack'/'send_failed' respond_to names a 'send' effect, 'history_result'/'history_failed' a 'fetch_history', 'subscribed' a 'subscribe', 'timer_elapsed' a 'wait'.",
+      "$comment": "A scenario a client satisfies. The harness starts a client with no state and feeds 'steps' in order. Each step delivers one input (what happened outside the client: an event, a response, a user action) and then checks what the client did in response: 'effects' are the external requests the client emitted while handling this step's input (an effect emitted earlier is never re-checked), and 'observe' is what the client shows afterwards. Only what a step lists is checked. 'never' effects must not be emitted in any step. Semantic: every respond_to refers to a label bound by 'as' in an earlier step's required effects; labels are unique; an 'ack'/'send_failed' respond_to names a 'send' effect, 'history_result'/'history_failed' a 'fetch_history', 'subscribed' a 'subscribe', 'timer_elapsed' a 'wait', 'membership_check_result' a 'membership_check', 'main_timeline_result' a 'fetch_main_timeline'. layer 'controller': the scenario observes a request the client makes on its own (the C10 Membership check); a runner of a pure, I/O-free protocol layer skips it, a runner of the whole client must run it.",
       "type": "object",
       "required": ["id", "title", "covers", "steps"],
       "properties": {
@@ -331,6 +391,8 @@
         "title": { "type": "string" },
         "covers": { "$ref": "#/$defs/Covers" },
         "note": { "type": "string" },
+        "proposed": { "$ref": "#/$defs/Proposed" },
+        "layer": { "enum": ["controller"] },
         "never": { "type": "array", "items": { "$ref": "#/$defs/EffectPattern" } },
         "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/ClientStep" } }
       },
@@ -376,24 +438,27 @@
       ]
     },
     "EffectPattern": {
-      "$comment": "Matches an emitted effect when every field given here equals the effect's field (extra fields of the effect are ignored). Effect types: connect (open a socket); subscribe(channel, after_seq); unsubscribe(channel); fetch_history(channel, page=latest|after|before, seq for after/before); send(channel, client_message_id) = the HTTP send, a resend is another send with the same id; wait(purpose, channel?) = the client asks to be woken later (exact durations are not part of the contract; the harness decides when to deliver timer_elapsed). as: binds a label to the matched effect so a later input can respond_to it. times: exactly this many emitted effects match in this step (default: at least one when required, none when forbidden).",
+      "$comment": "Matches an emitted effect when every field given here equals the effect's field (extra fields of the effect are ignored). Effect types: connect (open a socket); subscribe(channel, after_seq); unsubscribe(channel); fetch_history(channel, page=latest|after|before, seq for after/before); send(channel, client_message_id) = the HTTP send, a resend is another send with the same id; wait(purpose, channel?) = the client asks to be woken later (exact durations are not part of the contract; the harness decides when to deliver timer_elapsed); membership_check = GET /api/v1/orgs/{org}/me after a WebSocket handshake failure (C10). Planned (P1, P2): fetch_history with topic = a Topic-filtered page; fetch_main_timeline(channel, as_of_seq?, before?) = a main-timeline page. as: binds a label to the matched effect so a later input can respond_to it. times: exactly this many emitted effects match in this step (default: at least one when required, none when forbidden).",
       "type": "object",
       "required": ["type"],
       "properties": {
-        "type": { "enum": ["connect", "subscribe", "unsubscribe", "fetch_history", "send", "wait"] },
+        "type": { "enum": ["connect", "subscribe", "unsubscribe", "fetch_history", "send", "wait", "membership_check", "fetch_main_timeline"] },
         "channel": { "$ref": "#/$defs/Label" },
         "after_seq": { "$ref": "#/$defs/Cursor" },
         "page": { "enum": ["latest", "after", "before"] },
         "seq": { "$ref": "#/$defs/Cursor" },
         "client_message_id": { "$ref": "#/$defs/Label" },
         "purpose": { "enum": ["reorder_grace", "fill_backoff", "reconnect_backoff"] },
+        "topic": { "$ref": "#/$defs/Label" },
+        "as_of_seq": { "$ref": "#/$defs/Seq" },
+        "before": { "$ref": "#/$defs/Seq" },
         "as": { "$ref": "#/$defs/Label" },
         "times": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },
     "MessageSpec": {
-      "$comment": "A confirmed Message as the server record. Give seq, or from+to for consecutive Messages (each gets its own seq). Defaults: sender 'other', body 'm<seq>', id 'id<seq>', created_at fixed per seq, client_message_id absent (a distinct one per Message, never equal to any fixture label). Semantic: seq XOR (from and to).",
+      "$comment": "A confirmed Message as the server record. Give seq, or from+to for consecutive Messages (each gets its own seq). Defaults: sender 'other', body 'm<seq>', id 'id<seq>', created_at fixed per seq, client_message_id absent (a distinct one per Message, never equal to any fixture label), no Topic. topic (Planned, P1): the Message's fixture-local Topic. Semantic: seq XOR (from and to).",
       "type": "object",
       "properties": {
         "seq": { "$ref": "#/$defs/Seq" },
@@ -403,7 +468,8 @@
         "client_message_id": { "$ref": "#/$defs/Label" },
         "body": { "type": "string" },
         "id": { "$ref": "#/$defs/Label" },
-        "created_at": { "type": "string" }
+        "created_at": { "type": "string" },
+        "topic": { "$ref": "#/$defs/Label" }
       },
       "additionalProperties": false
     },
@@ -496,7 +562,34 @@
         },
         { "$comment": "The user retries a send.", "type": "object", "required": ["type", "client_message_id"], "properties": { "type": { "const": "user_retry" }, "client_message_id": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
         { "$comment": "The user discards a failed send.", "type": "object", "required": ["type", "client_message_id"], "properties": { "type": { "const": "user_discard" }, "client_message_id": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
-        { "$comment": "A wait the client asked for ended.", "type": "object", "required": ["type", "respond_to"], "properties": { "type": { "const": "timer_elapsed" }, "respond_to": { "$ref": "#/$defs/Label" } }, "additionalProperties": false }
+        { "$comment": "A wait the client asked for ended.", "type": "object", "required": ["type", "respond_to"], "properties": { "type": { "const": "timer_elapsed" }, "respond_to": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        {
+          "$comment": "The Membership check ended (C10): status 200 = Member; 404 with error organization_unavailable = Membership lost; another status, network or timeout = no conclusion.",
+          "type": "object",
+          "required": ["type", "respond_to", "status"],
+          "properties": {
+            "type": { "const": "membership_check_result" },
+            "respond_to": { "$ref": "#/$defs/Label" },
+            "status": { "$ref": "#/$defs/Status" },
+            "error": { "enum": ["organization_unavailable", "origin_not_allowed"] }
+          },
+          "additionalProperties": false
+        },
+        { "$comment": "Planned (P1). The UI shows a Topic of the Channel.", "type": "object", "required": ["type", "channel", "topic"], "properties": { "type": { "const": "open_topic" }, "channel": { "$ref": "#/$defs/Label" }, "topic": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        { "$comment": "Planned (P2). The UI shows the Channel's main timeline, or asks for older main-timeline lines.", "type": "object", "required": ["type", "channel"], "properties": { "type": { "const": "load_main_timeline" }, "channel": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        {
+          "$comment": "Planned (P2, P4). A main-timeline page arrived: as_of_seq = W, lines ascending as of W, has_more = older lines exist as of W.",
+          "type": "object",
+          "required": ["type", "respond_to", "as_of_seq", "lines", "has_more"],
+          "properties": {
+            "type": { "const": "main_timeline_result" },
+            "respond_to": { "$ref": "#/$defs/Label" },
+            "as_of_seq": { "$ref": "#/$defs/Cursor" },
+            "lines": { "$ref": "#/$defs/TopicLines" },
+            "has_more": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
       ]
     },
     "Observation": {
@@ -541,6 +634,19 @@
           "$comment": "Partial field checks on held Messages (canonical server fields win).",
           "type": "array",
           "items": { "$ref": "#/$defs/RecordCheck" }
+        },
+        "main_timeline": {
+          "$comment": "Planned (P2, P4, P5). Every main-timeline line the client holds, in order: one per held Message without Topic (from any page or the stream), one per Topic known from a summary or a Message, at its merged position with its merged count (P4).",
+          "$ref": "#/$defs/TopicLines"
+        },
+        "topics": {
+          "$comment": "Planned (P1). Per Topic label: visible = the Topic's Messages the Topic view holds, ascending.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": { "visible": { "$ref": "#/$defs/SeqList" } },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

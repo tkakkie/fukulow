@@ -106,6 +106,16 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #136: each socket owns one failure-monitor task (abort-on-drop) and awaits its oneshot in a `biased` select, keeping 4001/4003, then 4008, then 1011 priority. Outside a Tokio runtime `Signal::fail` keeps the latch and skips the wake.
 - Ping every 30 s; the first Ping after the last client frame starts one 60 s grace, so an idle unanswering socket closes with 1001 after ~90 s. Reason: keeps idle sockets exercised without frequent traffic at 10k sockets (#57 item 5).
 - Heartbeat uses the existing loop's single interval (no task, no env setting). All frame writes share the 5 s send deadline (4008 on timeout, 1001 on write error). Client Close is answered within 1 s (#57 item 5).
+- #148 separates two responsibilities: (1) gapless `seq` allocation (the counter row update, order within a Channel); (2) the #135 commit/watermark barrier (readers may trust every `seq` <= W is committed). Neither provides the other.
+- #148 fixtures for behaviour not implemented yet are marked `proposed` with an owner Issue: validated, skipped and listed by runners; planned vocabulary fails validation elsewhere. Membership-check fixtures are controller-layer: the pure protocol has no I/O.
+
+## Topics, Replies and Unread (planned, spec P1-P8)
+- A Topic is created by its first Message (or a Move to a new Topic); empty Topics do not exist. The main-timeline Topic line is a derived display that moves with the Topic's latest activity (maintainer, 2026-11-10, #148).
+- Main-timeline paging correctness (`position_W`, W as page anchor) is fixed in the spec; its cost is a measured feasibility gate in #137 that stops and asks on a miss, not a guarantee (maintainer, 2026-11-11, #148).
+- Topic counts are an as-of-W baseline plus deduplicated live Messages with `seq` > W; a Topic seen only live has no count until a summary fetch. Reason: replay below W or late older pages must neither double-count nor drop the baseline (#148).
+- Unread keeps a Channel position (Messages without Topic) and per-Topic positions; badge = sum. Initial position = latest committed `seq` when the Member gains access; older history is not unread (maintainer, 2026-11-11, #148, #142).
+- Move, Edit, Delete (principles only, #148): clients apply entries idempotently; a later change takes a Channel log position. Open: replay of a changed Message (current or as it was), of a deleted one, read positions after a Move. `channel_events` vs `channel_log`: Sprint 3 (#160).
+- DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
 
 ## Sessions and revocation
 - Two independent revocations: ending an Account Session signals its token hash in all Organizations (4001); Membership loss signals (organization_id, account_id) with its new revision (4003), leaving other Organizations alone (#146).

@@ -3,7 +3,7 @@
   "scenarios": [
     {
       "id": "membership-close-terminal",
-      "title": "Organization Membership loss is terminal and never means Sign in",
+      "title": "A 4003 close of an open socket makes the Organization unavailable and never means Sign in",
       "covers": [
         "C4",
         "C10"
@@ -173,7 +173,7 @@
     },
     {
       "id": "rest-membership-refusal-terminal",
-      "title": "Organization Membership loss is terminal and never means Sign in",
+      "title": "A REST-confirmed organization_unavailable makes the Organization unavailable and never means Sign in",
       "covers": [
         "C4",
         "C10"
@@ -338,6 +338,688 @@
                 ]
               }
             }
+          }
+        }
+      ]
+    },
+    {
+      "id": "handshake-failure-check-organization-unavailable-terminal",
+      "title": "A pre-connect close followed by a Membership check returning organization_unavailable is terminal for the Organization only",
+      "covers": [
+        "C4",
+        "C10"
+      ],
+      "layer": "controller",
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "latest",
+                "as": "latest"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "latest",
+            "messages": [
+              {
+                "from": 1,
+                "to": 3
+              }
+            ],
+            "has_more": false
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "loading",
+                "cursor": 3
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "socket_closed",
+            "code": 1006
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "membership_check",
+                "as": "check"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              }
+            ]
+          },
+          "note": "No connection_ready: the handshake failed and its HTTP status is hidden from a browser, so the client asks REST (C10)."
+        },
+        {
+          "input": {
+            "type": "membership_check_result",
+            "respond_to": "check",
+            "status": 404,
+            "error": "organization_unavailable"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              },
+              {
+                "type": "send"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          },
+          "observe": {
+            "session": "signed_in",
+            "organization": "unavailable",
+            "channels": {
+              "A": {
+                "state": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "B"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "fetch_history"
+              },
+              {
+                "type": "subscribe"
+              },
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "handshake-failure-check-transient-backs-off",
+      "title": "A Membership check that fails with a network error or 5xx is no conclusion: the client reconnects with backoff",
+      "covers": [
+        "C4",
+        "C10"
+      ],
+      "layer": "controller",
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "latest",
+                "as": "latest"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "latest",
+            "messages": [
+              {
+                "from": 1,
+                "to": 3
+              }
+            ],
+            "has_more": false
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "loading",
+                "cursor": 3
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "socket_closed",
+            "code": 1006
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "membership_check",
+                "as": "check"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              }
+            ]
+          },
+          "note": "No connection_ready: the handshake failed and its HTTP status is hidden from a browser, so the client asks REST (C10)."
+        },
+        {
+          "input": {
+            "type": "membership_check_result",
+            "respond_to": "check",
+            "status": "network"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "wait",
+                "purpose": "reconnect_backoff",
+                "as": "w1"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              }
+            ]
+          },
+          "observe": {
+            "session": "signed_in",
+            "organization": "available"
+          }
+        },
+        {
+          "input": {
+            "type": "timer_elapsed",
+            "respond_to": "w1"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "socket_closed",
+            "code": 1006
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "membership_check",
+                "as": "check2"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "membership_check_result",
+            "respond_to": "check2",
+            "status": 503
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "wait",
+                "purpose": "reconnect_backoff",
+                "as": "w2"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              }
+            ]
+          },
+          "observe": {
+            "session": "signed_in",
+            "organization": "available"
+          }
+        },
+        {
+          "input": {
+            "type": "timer_elapsed",
+            "respond_to": "w2"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "A",
+                "after_seq": 3,
+                "as": "sub"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 3,
+            "respond_to": "sub"
+          },
+          "observe": {
+            "organization": "available",
+            "channels": {
+              "A": {
+                "state": "ready",
+                "cursor": 3
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "handshake-failure-check-ok-reconnects",
+      "title": "A successful Membership check after a pre-connect close reconnects with backoff and resumes from the cursor",
+      "covers": [
+        "C2",
+        "C4",
+        "C10"
+      ],
+      "layer": "controller",
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "latest",
+                "as": "latest"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "latest",
+            "messages": [
+              {
+                "from": 1,
+                "to": 3
+              }
+            ],
+            "has_more": false
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "A",
+                "after_seq": 3,
+                "as": "s0"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 3,
+            "respond_to": "s0"
+          }
+        },
+        {
+          "input": {
+            "type": "message",
+            "channel": "A",
+            "message": {
+              "seq": 4
+            }
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "ready",
+                "cursor": 4
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "socket_closed",
+            "code": 1006
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "wait",
+                "purpose": "reconnect_backoff",
+                "as": "w1"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "membership_check"
+              }
+            ]
+          },
+          "note": "The socket had opened: an ordinary close, no Membership check."
+        },
+        {
+          "input": {
+            "type": "timer_elapsed",
+            "respond_to": "w1"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "socket_closed",
+            "code": 1006
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "membership_check",
+                "as": "check"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              }
+            ]
+          },
+          "note": "No connection_ready: the handshake failed and its HTTP status is hidden from a browser, so the client asks REST (C10)."
+        },
+        {
+          "input": {
+            "type": "membership_check_result",
+            "respond_to": "check",
+            "status": 200
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "wait",
+                "purpose": "reconnect_backoff",
+                "as": "w2"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              }
+            ]
+          },
+          "observe": {
+            "session": "signed_in",
+            "organization": "available"
+          }
+        },
+        {
+          "input": {
+            "type": "timer_elapsed",
+            "respond_to": "w2"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "A",
+                "after_seq": 4,
+                "as": "s1"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 4,
+            "respond_to": "s1"
+          },
+          "observe": {
+            "organization": "available",
+            "channels": {
+              "A": {
+                "state": "ready",
+                "cursor": 4,
+                "visible": [
+                  {
+                    "from": 1,
+                    "to": 4
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "handshake-failure-check-401-sign-in",
+      "title": "A Membership check answered with 401 means Sign in for the Account, not Organization unavailable",
+      "covers": [
+        "C4",
+        "C6",
+        "C10"
+      ],
+      "layer": "controller",
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "latest",
+                "as": "latest"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "latest",
+            "messages": [
+              {
+                "from": 1,
+                "to": 3
+              }
+            ],
+            "has_more": false
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "loading",
+                "cursor": 3
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "socket_closed",
+            "code": 1006
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "membership_check",
+                "as": "check"
+              }
+            ],
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              }
+            ]
+          },
+          "note": "No connection_ready: the handshake failed and its HTTP status is hidden from a browser, so the client asks REST (C10)."
+        },
+        {
+          "input": {
+            "type": "membership_check_result",
+            "respond_to": "check",
+            "status": 401
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "connect"
+              },
+              {
+                "type": "wait"
+              },
+              {
+                "type": "subscribe"
+              }
+            ]
+          },
+          "observe": {
+            "session": "sign_in_required",
+            "organization": "available"
           }
         }
       ]

@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { runClientScenario } from '../scripts/realtime-fixtures'
-import { scenarios, protocolClient } from './protocol-test-helpers'
+import { partitionScenarios, runClientScenario } from '../scripts/realtime-fixtures'
+import { scenarios as all, protocolClient } from './protocol-test-helpers'
 
+// Proposed fixtures (not implemented yet) and controller-only ones (the client's own Membership check) are listed as skipped.
+const { running, proposed } = partitionScenarios(all)
+const scenarios = running.filter(s => s.layer !== 'controller')
+const controllerOnly = running.filter(s => s.layer === 'controller')
 describe('pure protocol shared client fixtures', () => {
   it.each(scenarios)('$id', scenario => {
     expect(runClientScenario(scenario, protocolClient())).toEqual([])
   })
-  it('runs every client fixture against the protocol', () => {
+  it.skip.each(proposed.map(s => ({ ...s, owners: s.proposed!.owner.join(', ') })))('proposed: $id (owner $owners)', () => {})
+  it.skip.each(controllerOnly)('controller only: $id', () => {})
+  it('runs every implemented protocol-layer client fixture against the protocol', () => {
     expect(scenarios.length).toBeGreaterThan(0)
     for (const scenario of scenarios) expect(runClientScenario(scenario, protocolClient()), scenario.id).toEqual([])
   })
