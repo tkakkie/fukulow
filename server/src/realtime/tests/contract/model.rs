@@ -149,6 +149,7 @@ pub(super) enum Step {
         member: String,
     },
     History(HistorySpec),
+    MainTimeline(TimelineSpec),
     Expect {
         socket: String,
         events: Vec<Event>,
@@ -167,6 +168,7 @@ pub(super) struct PostSpec {
     pub concurrent: bool,
     pub key: Option<String>,
     pub label: Option<String>,
+    pub topic_name: Option<String>,
     #[serde(default = "created")]
     pub expect_status: u16,
 }
@@ -187,6 +189,46 @@ pub(super) struct HistoryExpectation {
     pub status: u16,
     pub seqs: Option<Vec<Seq>>,
     pub has_more: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TimelineSpec {
+    #[serde(rename = "as")]
+    pub member: String,
+    pub channel: ChannelRef,
+    pub query: std::collections::BTreeMap<String, i64>,
+    pub expect: TimelineExpectation,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TimelineExpectation {
+    pub status: u16,
+    pub as_of_seq: i64,
+    pub items: Vec<TimelineItem>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum TimelineItem {
+    Message { message: TimelineMessage },
+    Topic { topic: TimelineTopic },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TimelineMessage {
+    pub seq: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TimelineTopic {
+    pub name: String,
+    pub last_seq: i64,
+    pub message_count: i64,
 }
 
 #[derive(Debug, Deserialize)]

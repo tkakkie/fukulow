@@ -4,6 +4,9 @@ use futures_util::FutureExt;
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Failure {
     PublicMembers(String),
+    Timeline {
+        step: usize,
+    },
     Expectation {
         step: usize,
         event: usize,

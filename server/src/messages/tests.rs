@@ -256,6 +256,7 @@ async fn message_body_validation_matches_contract() {
         "🦉".repeat(4001),
     ] {
         let input = SendMessageRequest {
+            topic_name: None,
             client_message_id: Uuid::new_v4(),
             body: text,
         };
@@ -271,6 +272,7 @@ async fn message_body_validation_matches_contract() {
         "e\u{301}".repeat(2000),
     ] {
         let input = SendMessageRequest {
+            topic_name: None,
             client_message_id: Uuid::new_v4(),
             body: text.clone(),
         };
@@ -888,3 +890,5 @@ fn scoped_path(path: &str, token: &str) -> String {
 pub(super) mod membership;
 
 mod fanout;
+
+mod topics;

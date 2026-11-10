@@ -227,10 +227,7 @@ async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
     channel_id: Uuid,
     lock: bool,
 ) -> Result<Option<bool>, sqlx::Error> {
-    let sql = format!(
-        "SELECT visible FROM ({}) visibility",
-        visibility_sql(&auth::current_member_sql(lock), "$4")
-    );
+    let sql = member_visibility_sql(lock);
     sqlx::query_scalar(&sql)
         .bind(organization_id)
         .bind(member.0)
@@ -238,6 +235,15 @@ async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
         .bind(channel_id)
         .fetch_optional(executor)
         .await
+}
+
+// Projection reads compose this predicate with their data in one fresh snapshot
+// after the commit barrier. Bind Organization, Member, revision, Channel in order.
+pub(crate) fn member_visibility_sql(lock: bool) -> String {
+    format!(
+        "SELECT visible FROM ({}) visibility",
+        visibility_sql(&auth::current_member_sql(lock), "$4")
+    )
 }
 
 fn visible_members_sql() -> String {

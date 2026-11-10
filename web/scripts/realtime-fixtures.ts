@@ -119,23 +119,23 @@ const channelKey = (ref: Json): string =>
 
 // Planned vocabulary (docs/spec.md 'Planned', P rules): allowed only in scenarios marked proposed.
 const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
-const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before'])
+const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'])
 
 /** The path of the first planned term in a scenario, or null. */
-function plannedTerm(value: Json, path: string): string | null {
+function plannedTerm(value: Json, path: string, delivery = false): string | null {
   if (Array.isArray(value)) {
     for (const [i, item] of value.entries()) {
-      const found = plannedTerm(item, `${path}[${i}]`)
+      const found = plannedTerm(item, `${path}[${i}]`, delivery)
       if (found) return found
     }
     return null
   }
   if (!isObject(value)) return null
   for (const [key, item] of Object.entries(value)) {
-    if (plannedKeys.has(key)) return `${path}.${key}`
-    if ((key === 'type' || key === 'do') && plannedTypes.has(item as string)) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P'))) return `${path}.covers`
-    const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`)
+    if (plannedKeys.has(key) && !(delivery && ['topic', 'as_of_seq', 'before_position'].includes(key))) return `${path}.${key}`
+    if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(delivery && ['P2', 'P5'].includes(String(r))))) return `${path}.covers`
+    const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery)
     if (found) return found
   }
   return null
@@ -149,6 +149,14 @@ function checkLines(list: Json, where: string, errors: string[]) {
   if (!at.every((n, i) => i === 0 || n > at[i - 1])) errors.push(`${where}: line positions must be strictly ascending`)
   const topics = lines.flatMap((l) => (typeof l.topic === 'string' ? [l.topic] : []))
   if (new Set(topics).size !== topics.length) errors.push(`${where}: a Topic appears more than once`)
+}
+
+/** API timeline items use nested Message/Topic records, unlike client display lines. */
+function checkItems(list: Json, where: string, errors: string[]) {
+  if (!Array.isArray(list)) return
+  checkLines(list.map((item) => item.kind === 'message'
+    ? { seq: item.message.seq }
+    : { topic: item.topic.name, position: item.topic.last_seq }), where, errors)
 }
 
 function checkSeqList(list: Json, where: string, errors: string[]) {
@@ -268,7 +276,7 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
       case 'main_timeline':
         member(step.as)
         checkChannel(step.channel, at, false)
-        checkLines((step.expect as Record<string, Json>).lines, `${at}.expect.lines`, errors)
+        checkItems((step.expect as Record<string, Json>).items, `${at}.expect.items`, errors)
         break
       case 'expect': {
         socket(step.socket)
@@ -323,7 +331,7 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
       else if (bound !== respondsTo[type]) errors.push(`${at}.input: ${type} answers a ${respondsTo[type]} effect, but ${input.respond_to} is a ${bound} effect`)
     }
     if (isObject(input.message)) checkMessageSpec(input.message, `${at}.input.message`, errors, true)
-    checkLines(input.lines, `${at}.input.lines`, errors)
+    checkItems(input.items, `${at}.input.items`, errors)
     if (Array.isArray(input.messages)) {
       (input.messages as Record<string, Json>[]).forEach((m, j) => checkMessageSpec(m, `${at}.input.messages[${j}]`, errors))
       const flat = (input.messages as Record<string, Json>[]).flatMap((m) => ('seq' in m ? [m.seq as number] : 'to' in m ? [m.from as number, m.to as number] : []))
@@ -409,7 +417,11 @@ export function checkFixtures(dir: string = defaultDir): Problems {
         ids.set(scenario.id as string, file)
         if (isDelivery) checkDelivery(scenario, where, errors)
         else checkClient(scenario, where, errors)
-        const planned = scenario.proposed === undefined ? plannedTerm(scenario, '$') : null
+        // Only the implemented delivery rules leave the planned vocabulary gate.
+        // Client projection inputs, observations and even negative patterns stay gated.
+        const planned = scenario.proposed === undefined
+          ? plannedTerm(scenario, '$', isDelivery)
+          : null
         if (planned) errors.push(`${where}: ${planned} is planned vocabulary; mark the scenario proposed (owner Issue) until it is implemented`)
       })
     }
