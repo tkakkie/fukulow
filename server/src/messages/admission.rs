@@ -1,0 +1,327 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use uuid::Uuid;
+
+type ChannelKey = (Uuid, Uuid);
+const ADMISSION_WAIT: Duration = Duration::from_secs(1);
+const SEND_ADMISSION_WAIT: Duration = Duration::from_secs(30);
+pub(super) const WORK_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(super) struct Admission {
+    send: Arc<Semaphore>,
+    watermark: Arc<Semaphore>,
+    channels: Mutex<HashMap<ChannelKey, Arc<Slots>>>,
+}
+
+struct Slots {
+    watermark: Arc<Semaphore>,
+    send: Arc<Semaphore>,
+}
+
+pub(super) struct Permit {
+    admission: Arc<Admission>,
+    key: ChannelKey,
+    slots: Option<Arc<Slots>>,
+    channel: Option<OwnedSemaphorePermit>,
+    global: Option<OwnedSemaphorePermit>,
+}
+
+impl Admission {
+    #[cfg(test)]
+    pub(super) fn available_permits(&self) -> usize {
+        self.send.available_permits() + self.watermark.available_permits()
+    }
+
+    pub(super) fn new(connections: u32) -> Arc<Self> {
+        let budget = (connections - connections.div_ceil(5)).min(16) as usize;
+        // Separate FIFO budgets reserve half for watermarks while keeping >=20%
+        // of the pool outside both workloads. Serving both workloads with that
+        // headroom requires >=3 connections: then each budget is at least 1.
+        // Pools of 1/2 have 0 watermark slots (and 0/1 send slots); production uses 20.
+        Arc::new(Self {
+            send: Arc::new(Semaphore::new(budget.div_ceil(2))),
+            watermark: Arc::new(Semaphore::new(budget / 2)),
+            channels: Default::default(),
+        })
+    }
+
+    pub(super) async fn acquire(
+        self: &Arc<Self>,
+        organization: Uuid,
+        channel: Uuid,
+        send: bool,
+    ) -> Result<Permit, sqlx::Error> {
+        let key = (organization, channel);
+        let slots = self
+            .channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_insert_with(|| {
+                Arc::new(Slots {
+                    watermark: Arc::new(Semaphore::new(4)),
+                    send: Arc::new(Semaphore::new(1)),
+                })
+            })
+            .clone();
+        let semaphore = if send {
+            slots.send.clone()
+        } else {
+            slots.watermark.clone()
+        };
+        // Construct before awaiting so cancellation also removes idle Channel entries.
+        let mut permit = Permit {
+            admission: self.clone(),
+            key,
+            slots: Some(slots),
+            channel: None,
+            global: None,
+        };
+        // Send waiters hold no connection, so absorb ordinary hot-Channel bursts
+        // for as long as the pool's former acquire budget allowed.
+        let wait = if send {
+            SEND_ADMISSION_WAIT
+        } else {
+            ADMISSION_WAIT
+        };
+        let deadline = tokio::time::Instant::now() + wait;
+        let operation = if send { "send" } else { "watermark" };
+        permit.channel = Some(acquire(&semaphore, deadline, operation, "channel", key).await?);
+        let global = if send { &self.send } else { &self.watermark };
+        permit.global = Some(acquire(global, deadline, operation, "global", key).await?);
+        Ok(permit)
+    }
+}
+
+async fn acquire(
+    semaphore: &Arc<Semaphore>,
+    deadline: tokio::time::Instant,
+    operation: &str,
+    scope: &str,
+    key: ChannelKey,
+) -> Result<OwnedSemaphorePermit, sqlx::Error> {
+    match tokio::time::timeout_at(deadline, semaphore.clone().acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => {
+            eprintln!(
+                "admission_rejected operation={operation} scope={scope} organization={} channel={}",
+                key.0, key.1
+            );
+            Err(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "message work admission rejected",
+            )))
+        }
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        drop(self.global.take());
+        drop(self.channel.take());
+        let mut channels = self
+            .admission
+            .channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Release the registry reference while locked, including concurrent last exits.
+        drop(self.slots.take());
+        if channels
+            .get(&self.key)
+            .is_some_and(|slots| Arc::strong_count(slots) == 1)
+        {
+            channels.remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn send_admission_has_a_separate_longer_budget_without_holding_global_capacity() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let held = admission
+            .acquire(organization, channel, true)
+            .await
+            .unwrap();
+        let waiting = admission.acquire(organization, channel, true);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert_eq!(admission.available_permits(), 15);
+        drop(held);
+        drop(waiting.await.unwrap());
+
+        let held = admission
+            .acquire(organization, channel, true)
+            .await
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(
+            admission
+                .acquire(organization, channel, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(started.elapsed(), SEND_ADMISSION_WAIT);
+        drop(held);
+        assert_eq!(admission.available_permits(), 16);
+        assert!(admission.channels.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_caps_isolate_organizations_and_release_cancelled_and_rejected_waiters() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let send = admission
+            .acquire(organization, channel, true)
+            .await
+            .unwrap();
+        let mut watermarks = Vec::new();
+        for _ in 0..4 {
+            watermarks.push(
+                admission
+                    .acquire(organization, channel, false)
+                    .await
+                    .unwrap(),
+            );
+        }
+        for send in [true, false] {
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(1),
+                    admission.acquire(organization, channel, send)
+                )
+                .await
+                .is_err()
+            );
+            let error = admission
+                .acquire(organization, channel, send)
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(error, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        }
+        // Identical Channel UUID in another Organization has independent limits.
+        drop(
+            admission
+                .acquire(Uuid::new_v4(), channel, true)
+                .await
+                .unwrap(),
+        );
+        drop(
+            admission
+                .acquire(organization, Uuid::new_v4(), false)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(admission.available_permits(), 11);
+        assert_eq!(admission.channels.lock().unwrap().len(), 1);
+        drop((send, watermarks));
+        assert_eq!(admission.available_permits(), 16);
+        assert!(admission.channels.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn separate_budgets_preserve_pool_headroom_without_queueing_for_a_connection() {
+        for (connections, limit) in [(1, 0), (2, 1), (3, 2), (20, 16), (100, 16)] {
+            let admission = Admission::new(connections);
+            if connections >= 3 {
+                assert!(admission.watermark.available_permits() >= 1);
+            }
+            let organization = Uuid::new_v4();
+            let mut work = Vec::new();
+            for index in 0..limit {
+                work.push(
+                    admission
+                        .acquire(organization, Uuid::new_v4(), index % 2 == 0)
+                        .await
+                        .unwrap(),
+                );
+            }
+            for send in [true, false] {
+                assert!(
+                    admission
+                        .acquire(organization, Uuid::new_v4(), send)
+                        .await
+                        .is_err()
+                );
+            }
+            assert_eq!(admission.channels.lock().unwrap().len(), limit);
+            drop(work);
+            assert_eq!(admission.available_permits(), limit);
+            assert!(admission.channels.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_saturation_cannot_take_reserved_watermark_capacity() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let mut sends = Vec::new();
+        for _ in 0..8 {
+            sends.push(
+                admission
+                    .acquire(organization, Uuid::new_v4(), true)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert!(
+            admission
+                .acquire(organization, Uuid::new_v4(), true)
+                .await
+                .is_err()
+        );
+        let mut watermarks = Vec::new();
+        for _ in 0..8 {
+            watermarks.push(
+                admission
+                    .acquire(Uuid::new_v4(), Uuid::new_v4(), false)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(admission.available_permits(), 0);
+        drop((sends, watermarks));
+        assert_eq!(admission.available_permits(), 16);
+        assert!(admission.channels.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_last_exits_remove_idle_channel_entries() {
+        let admission = Admission::new(20);
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..128 {
+            let admission = admission.clone();
+            tasks.spawn(async move {
+                let _permit = admission
+                    .acquire(organization, channel, false)
+                    .await
+                    .unwrap();
+                tokio::task::yield_now().await;
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(admission.available_permits(), 16);
+        assert!(admission.channels.lock().unwrap().is_empty());
+    }
+}

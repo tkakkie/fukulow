@@ -1,4 +1,5 @@
 use super::Message;
+use super::admission::{Admission, WORK_TIMEOUT};
 use super::failure::{FailureWatch, Failures};
 use crate::channels;
 use std::{
@@ -31,11 +32,13 @@ impl Sender {
 }
 
 /// Process-local fan-out of canonical committed messages, with one shared payload per send.
+/// Use exactly one Delivery and its clones per application pool; admission is sized
+/// once from that pool on first use.
 #[derive(Clone)]
 pub struct Delivery {
     recipients: Arc<Mutex<HashMap<ChannelKey, Recipients>>>,
     notifications: Arc<Semaphore>,
-    watermarks: Arc<OnceLock<Semaphore>>,
+    admission: Arc<OnceLock<Arc<Admission>>>,
     failures: Failures,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -46,7 +49,7 @@ impl Default for Delivery {
         Self {
             recipients: Default::default(),
             notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
-            watermarks: Default::default(),
+            admission: Default::default(),
             failures: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
@@ -121,23 +124,31 @@ pub(crate) struct LiveQueue {
 }
 
 impl Delivery {
+    // Exactly one Delivery (and its clones) belongs to one application pool.
+    // Lazily size its shared budget from that pool, including in small test pools.
+    pub(super) fn admission(&self, pool: &sqlx::PgPool) -> &Arc<Admission> {
+        self.admission
+            .get_or_init(|| Admission::new(pool.options().get_max_connections()))
+    }
+
     pub(crate) async fn latest_seq(
         &self,
         pool: &sqlx::PgPool,
         organization: Uuid,
         channel: Uuid,
     ) -> Result<i64, sqlx::Error> {
-        // One Delivery belongs to one application pool. Reserve headroom before
-        // acquiring a connection, including on reconnect storms across Channels.
-        let waiters = self.watermarks.get_or_init(|| {
-            let connections = pool.options().get_max_connections();
-            let limit = (connections - connections.div_ceil(5)).min(16);
-            Semaphore::new(limit as usize)
-        });
-        let _permit = waiters
-            .try_acquire()
-            .map_err(|_| sqlx::Error::PoolTimedOut)?;
-        super::latest_seq(pool, organization, channel).await
+        tokio::time::timeout(WORK_TIMEOUT, async {
+            let _permit = self
+                .admission(pool)
+                .acquire(organization, channel, false)
+                .await?;
+            super::latest_seq(pool, organization, channel, _permit).await
+        })
+        .await
+        .map_err(|_| {
+            eprintln!("work_deadline_expired operation=watermark organization={organization} channel={channel}");
+            sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
+        })?
     }
 
     pub(crate) fn queue(&self, organization: Uuid, member: Uuid, capacity: usize) -> LiveQueue {
@@ -300,7 +311,7 @@ mod tests {
     #[sqlx::test]
     async fn watermark_capacity_covers_pool_wait_and_releases_on_every_exit(pool: sqlx::PgPool) {
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
+            .max_connections(3)
             .connect_with((*pool.connect_options()).clone())
             .await
             .unwrap();
@@ -310,17 +321,14 @@ mod tests {
         for cancel in [true, false] {
             let first = pool.acquire().await.unwrap();
             let second = pool.acquire().await.unwrap();
+            let third = pool.acquire().await.unwrap();
             let waiting = {
                 let pool = pool.clone();
                 let delivery = delivery.clone();
                 tokio::spawn(async move { delivery.latest_seq(&pool, organization, channel).await })
             };
             tokio::time::timeout(Duration::from_secs(2), async {
-                while delivery
-                    .watermarks
-                    .get()
-                    .is_none_or(|waiters| waiters.available_permits() != 0)
-                {
+                while delivery.admission(&pool).available_permits() != 1 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -332,7 +340,7 @@ mod tests {
                     .clone()
                     .latest_seq(&pool, organization, Uuid::new_v4())
                     .await,
-                Err(sqlx::Error::PoolTimedOut)
+                Err(sqlx::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
             ));
             if cancel {
                 waiting.abort();
@@ -343,8 +351,8 @@ mod tests {
                 tokio::time::resume();
                 assert!(matches!(waiting.await.unwrap(), Err(sqlx::Error::Io(_))));
             }
-            assert_eq!(delivery.watermarks.get().unwrap().available_permits(), 1);
-            drop((first, second));
+            assert_eq!(delivery.admission(&pool).available_permits(), 2);
+            drop((first, second, third));
             assert_eq!(
                 delivery
                     .latest_seq(&pool, organization, channel)
@@ -352,14 +360,14 @@ mod tests {
                     .unwrap(),
                 0
             );
-            assert_eq!(delivery.watermarks.get().unwrap().available_permits(), 1);
+            assert_eq!(delivery.admission(&pool).available_permits(), 2);
         }
         pool.close().await;
         assert!(matches!(
             delivery.latest_seq(&pool, organization, channel).await,
             Err(sqlx::Error::PoolClosed)
         ));
-        assert_eq!(delivery.watermarks.get().unwrap().available_permits(), 1);
+        assert_eq!(delivery.admission(&pool).available_permits(), 2);
     }
 
     #[tokio::test(start_paused = true)]
