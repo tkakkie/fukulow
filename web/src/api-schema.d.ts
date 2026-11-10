@@ -1710,7 +1710,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description invite_account_mismatch: signed-in Account does not own the invited address */
+            /** @description invite_account_mismatch: signed-in Account does not match the invited Account; invite_issuer_unauthorized: issuer is inactive or their current Role cannot issue this Invite */
             403: {
                 headers: {
                     [name: string]: unknown;

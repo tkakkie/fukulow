@@ -2,7 +2,7 @@
   import type { Identity, Role } from './api'
   import { roles, roleNames } from './members'
   import type { membersAdapter } from './members.svelte'
-  let { model, identity, onchanged }: { model: ReturnType<typeof membersAdapter>; identity: Identity; onchanged(): void } = $props()
+  let { model, identity, onchanged }: { model: ReturnType<typeof membersAdapter>; identity: Identity; onchanged(id: string): void } = $props()
   let email = $state('')
   let role = $state<Role>('member')
   const s = $derived(model.state)
@@ -20,7 +20,11 @@
         {#if capabilities.can_manage_roles.allowed}
           <label>ロール
             <select aria-label={`${member.name}のロール`} value={member.role} disabled={s.busy}
-              onchange={async e => { if (await model.role(member.id, e.currentTarget.value as Role)) onchanged() }}>
+              onchange={async e => {
+                const select = e.currentTarget
+                if (await model.role(member.id, select.value as Role)) onchanged(member.id)
+                else select.value = member.role
+              }}>
               {#each roles as role}<option value={role}>{roleNames[role]}</option>{/each}
             </select>
           </label>

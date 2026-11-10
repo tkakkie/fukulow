@@ -1,13 +1,15 @@
 CREATE TABLE invites (
     organization_id uuid NOT NULL REFERENCES organizations (organization_id),
     id uuid NOT NULL,
+    created_by uuid NOT NULL,
     email text NOT NULL CHECK (email = lower(email)),
     role text NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'guest')),
     token_hash bytea NOT NULL CHECK (octet_length(token_hash) = 32),
     expires_at timestamptz NOT NULL DEFAULT (now() + interval '7 days'),
     accepted_at timestamptz,
     PRIMARY KEY (organization_id, id),
-    UNIQUE (token_hash)
+    UNIQUE (token_hash),
+    FOREIGN KEY (organization_id, created_by) REFERENCES users (organization_id, id)
 );
 
 -- Serialize Owner transitions, including direct SQL and deactivation, per Organization.

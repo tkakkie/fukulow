@@ -77,8 +77,8 @@ pub async fn create_invite(
     fill_random(&mut random)?;
     let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
     let id = Uuid::new_v4();
-    let expires_at: String = sqlx::query_scalar("INSERT INTO invites (organization_id,id,email,role,token_hash) VALUES ($1,$2,$3,$4,$5) RETURNING to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")
-        .bind(org).bind(id).bind(email).bind(input.role).bind(Sha256::digest(token.as_bytes()).to_vec()).fetch_one(&mut *tx).await?;
+    let expires_at: String = sqlx::query_scalar("INSERT INTO invites (organization_id,id,email,role,token_hash,created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")
+        .bind(org).bind(id).bind(email).bind(input.role).bind(Sha256::digest(token.as_bytes()).to_vec()).bind(auth.identity.member.id).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok((
         StatusCode::CREATED,
@@ -97,14 +97,18 @@ fn invalid_invite() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "invite_unavailable", None)
 }
 
+fn unauthorized_issuer() -> ApiError {
+    ApiError(StatusCode::FORBIDDEN, "invite_issuer_unauthorized", None)
+}
+
 async fn valid_invite(
     connection: &mut sqlx::PgConnection,
     org: Uuid,
     hash: &[u8],
     lock: bool,
-) -> Result<(String, Role), ApiError> {
+) -> Result<(String, Role, Uuid), ApiError> {
     let sql = format!(
-        "SELECT email,role FROM invites WHERE organization_id=$1 AND token_hash=$2 AND accepted_at IS NULL AND expires_at > clock_timestamp(){}",
+        "SELECT email,role,created_by FROM invites WHERE organization_id=$1 AND token_hash=$2 AND accepted_at IS NULL AND expires_at > clock_timestamp(){}",
         if lock { " FOR UPDATE" } else { "" }
     );
     sqlx::query_as(&sql)
@@ -120,7 +124,7 @@ async fn valid_invite(
     responses((status=200, description="Invite consumed; Member added or reactivated. Existing Account must be signed in and match Invite email. New Account must sign in afterward", body=Identity),
     (status=400, description="Invalid input or password supplied while signed in", body=ErrorBody),
     (status=401, description="Invalid supplied Account Session", body=ErrorBody),
-    (status=403, description="invite_account_mismatch: signed-in Account does not own the invited address", body=ErrorBody),
+    (status=403, description="invite_account_mismatch: signed-in Account does not match the invited Account; invite_issuer_unauthorized: issuer is inactive or their current Role cannot issue this Invite", body=ErrorBody),
     (status=404, description="invite_unavailable: unknown, expired, used, foreign Organization or wrong email", body=ErrorBody),
     (status=409, description="invite_sign_in_required for an existing Account; member_already_active for an active Member", body=ErrorBody),
     (status=413, description="Request too large", body=ErrorBody),
@@ -152,7 +156,7 @@ pub async fn accept_invite(
         return Err(ApiError::bad_request());
     }
     // Validate before expensive hashing, then validate again under the consumption lock.
-    let (invited_email, _) =
+    let (invited_email, _, _) =
         valid_invite(&mut *state.pool.acquire().await?, org, &hash, false).await?;
     if supplied_email != invited_email {
         return Err(invalid_invite());
@@ -184,7 +188,26 @@ pub async fn accept_invite(
     let mut tx = state.pool.begin().await?;
     // Order matches Role changes; concurrent acceptances and Owner transitions serialize.
     members::lock_organization(&mut tx, org).await?;
-    let (invited_email, role) = valid_invite(&mut tx, org, &hash, true).await?;
+    let (invited_email, role, created_by) = valid_invite(&mut tx, org, &hash, true).await?;
+    // The Organization lock fences Role/deactivation writes, including their DB trigger.
+    let issuer_role = sqlx::query_scalar::<_, Role>(
+        "SELECT role FROM users WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL",
+    )
+    .bind(org)
+    .bind(created_by)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(unauthorized_issuer)?;
+    authorization::require(
+        Actor::Member {
+            organization: org,
+            role: issuer_role,
+            channel_member: false,
+        },
+        Action::Invite(role),
+        Resource::Organization(org),
+    )
+    .map_err(|_| unauthorized_issuer())?;
     let account_id = if let Some(account) = account {
         let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts a JOIN account_sessions s ON s.account_id=a.id WHERE a.id=$1 AND a.email=$2 AND s.token_hash=$3 AND s.expires_at>clock_timestamp())")
             .bind(account.account_id).bind(&invited_email).bind(account.token_hash).fetch_one(&mut *tx).await?;

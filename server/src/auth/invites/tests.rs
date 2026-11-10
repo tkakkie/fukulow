@@ -84,6 +84,218 @@ fn accept_input(invite: &Value, email: &str) -> Value {
     json!({"token":invite["token"],"email":email,"name":"Accepted"})
 }
 
+async fn assert_issuer_denied(
+    app: &Router,
+    pool: &sqlx::PgPool,
+    org: Uuid,
+    token: Option<&str>,
+    input: Value,
+) {
+    let r = req(
+        app,
+        "POST",
+        &format!("/api/v1/orgs/{org}/invites/accept"),
+        token,
+        input,
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body(r).await["error"], "invite_issuer_unauthorized");
+    let consumed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM invites WHERE organization_id=$1 AND accepted_at IS NOT NULL",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(consumed, 0);
+}
+
+#[sqlx::test]
+async fn invite_acceptance_denies_demoted_issuer_for_invited_role(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
+    let app = crate::app(AppState::for_test(pool.clone()));
+    for (initial, invited, current) in [
+        (Role::Admin, Role::Admin, Role::Member),
+        (Role::Owner, Role::Owner, Role::Admin),
+    ] {
+        let (_, issuer, _, token) = account(&pool, org, initial).await;
+        let email = format!("{issuer}@new.invalid");
+        let i = invite(&app, org, &token, &email, invited).await;
+        let created_by: Uuid =
+            sqlx::query_scalar("SELECT created_by FROM invites WHERE organization_id=$1 AND id=$2")
+                .bind(org)
+                .bind(i["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(created_by, issuer);
+        let r = req(
+            &app,
+            "PATCH",
+            &format!("/api/v1/orgs/{org}/members/{issuer}/role"),
+            Some(&owner),
+            json!({"role":current}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let mut input = accept_input(&i, &email);
+        input["password"] = json!("test password with enough characters");
+        assert_issuer_denied(&app, &pool, org, None, input).await;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE email=$1)")
+                .bind(email)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!exists);
+    }
+}
+
+#[sqlx::test]
+async fn invite_acceptance_denies_deactivated_issuer(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let other = org_fn(&pool).await;
+    let (issuer, _, _, admin) = account(&pool, org, Role::Admin).await;
+    let (target, _, email, token) = account(&pool, other, Role::Member).await;
+    let state = AppState::for_test(pool.clone());
+    let app = crate::app(state.clone());
+    let i = invite(&app, org, &admin, &email, Role::Admin).await;
+    deactivate_member(&state, org, issuer).await.unwrap();
+    assert_issuer_denied(&app, &pool, org, Some(&token), accept_input(&i, &email)).await;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE organization_id=$1 AND account_id=$2)",
+    )
+    .bind(org)
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!exists);
+}
+
+#[sqlx::test]
+async fn invite_acceptance_denies_deactivated_issuer_self_reactivation(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let (issuer, member, email, token) = account(&pool, org, Role::Admin).await;
+    let state = AppState::for_test(pool.clone());
+    let app = crate::app(state.clone());
+    let i = invite(&app, org, &token, &email, Role::Admin).await;
+    deactivate_member(&state, org, issuer).await.unwrap();
+    assert_issuer_denied(&app, &pool, org, Some(&token), accept_input(&i, &email)).await;
+    let inactive: bool = sqlx::query_scalar(
+        "SELECT deactivated_at IS NOT NULL FROM users WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(org)
+    .bind(member)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(inactive);
+}
+
+#[sqlx::test]
+async fn invite_acceptance_allows_currently_authorized_issuer(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
+    let app = crate::app(AppState::for_test(pool.clone()));
+    let email = "authorized@example.invalid";
+    let i = invite(&app, org, &admin, email, Role::Admin).await;
+    let mut input = accept_input(&i, email);
+    input["password"] = json!("test password with enough characters");
+    let r = req(
+        &app,
+        "POST",
+        &format!("/api/v1/orgs/{org}/invites/accept"),
+        None,
+        input,
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(body(r).await["member"]["role"], "admin");
+}
+
+#[sqlx::test]
+async fn invite_acceptance_rechecks_issuer_after_waiting_for_organization_lock(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let other = org_fn(&pool).await;
+    let (_, foreign_member, email, recipient) = account(&pool, other, Role::Member).await;
+    let app = crate::app(AppState::for_test(pool.clone()));
+    for deactivate in [false, true] {
+        let (_, issuer, _, token) = account(&pool, org, Role::Admin).await;
+        let i = invite(&app, org, &token, &email, Role::Admin).await;
+        let error =
+            sqlx::query("UPDATE invites SET created_by=$3 WHERE organization_id=$1 AND id=$2")
+                .bind(org)
+                .bind(i["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+                .bind(foreign_member)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("23503")
+        );
+        let mut tx = pool.begin().await.unwrap();
+        members::lock_organization(&mut tx, org).await.unwrap();
+        sqlx::query("UPDATE users SET role='member',deactivated_at=CASE WHEN $3 THEN clock_timestamp() ELSE NULL END WHERE organization_id=$1 AND id=$2")
+            .bind(org).bind(issuer).bind(deactivate).execute(&mut *tx).await.unwrap();
+        let task = tokio::spawn({
+            let app = app.clone();
+            let pool = pool.clone();
+            let recipient = recipient.clone();
+            let input = accept_input(&i, &email);
+            async move { assert_issuer_denied(&app, &pool, org, Some(&recipient), input).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT organization_id FROM organizations%')")
+                    .fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        tx.commit().await.unwrap();
+        task.await.unwrap();
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE organization_id=$1 AND account_id=(SELECT account_id FROM users WHERE organization_id=$2 AND id=$3)")
+        .bind(org).bind(other).bind(foreign_member).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn invite_acceptance_allows_demoted_issuer_with_authority_for_invited_role(
+    pool: sqlx::PgPool,
+) {
+    let org = org(&pool).await;
+    let other = org_fn(&pool).await;
+    let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
+    let (_, issuer, _, token) = account(&pool, org, Role::Owner).await;
+    let (_, _, email, recipient) = account(&pool, other, Role::Member).await;
+    let app = crate::app(AppState::for_test(pool.clone()));
+    let i = invite(&app, org, &token, &email, Role::Admin).await;
+    let r = req(
+        &app,
+        "PATCH",
+        &format!("/api/v1/orgs/{org}/members/{issuer}/role"),
+        Some(&owner),
+        json!({"role":"admin"}),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = req(
+        &app,
+        "POST",
+        &format!("/api/v1/orgs/{org}/invites/accept"),
+        Some(&recipient),
+        accept_input(&i, &email),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(body(r).await["member"]["role"], "admin");
+}
+
 #[sqlx::test]
 async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_controls(
     pool: sqlx::PgPool,

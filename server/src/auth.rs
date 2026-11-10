@@ -671,8 +671,12 @@ pub async fn deactivate_member(
 ) -> Result<(), sqlx::Error> {
     let state = state.clone();
     tokio::spawn(async move {
+        let mut tx = state.pool.begin().await?;
+        sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
+            .bind(organization).fetch_optional(&mut *tx).await?;
         let revision: Option<i64> = sqlx::query_scalar("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING membership_revision")
-            .bind(organization).bind(account).fetch_optional(&state.pool).await?;
+            .bind(organization).bind(account).fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
         if let Some(revision) = revision { state.session_changes.membership_revoked(organization,account,revision); }
         Ok(())
     }).await.map_err(|_|sqlx::Error::WorkerCrashed)?

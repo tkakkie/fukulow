@@ -73,7 +73,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Cookie WebSockets require one matching Origin: same Host over HTTPS (HTTP when cookie_secure=false) or `FUKULOW_WS_ALLOWED_ORIGINS`; forwarded headers never decide it. Origin is checked before Auth and Organization parsing; Bearer needs no Origin.
 
 - #144 uses one deny-by-default authorize function, including SQL role sets derived from it. Owner changes Roles/invites any Role; Admin invites non-Owners. Guests need explicit current grants even for public Channels; private grants remain required for every Role.
-- #144 Invites bind email/Role for 7 days; SHA-256 of 256 random bits is stored. Existing Accounts must authenticate; anonymous uniqueness conflicts require sign-in, never email attachment. Activation/consumption is atomic; issued Invites survive issuer demotion until use/expiry.
+- #144 Invites bind email/Role for 7 days; SHA-256 of 256 random bits is stored. Existing Accounts authenticate; anonymous uniqueness conflicts require sign-in, never email attachment. Activation/consumption is atomic.
+- #144 Invites retain their same-Organization issuer. Acceptance re-checks active Membership and current Role under the Organization lock using the creation policy, so demotion/deactivation cannot be bypassed with a stored Invite.
 - #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
 
 ## Channels and Messages

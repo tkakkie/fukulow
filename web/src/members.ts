@@ -7,6 +7,7 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   if (r.error === 'last_owner') return '最後のオーナーのロールは変更できません。'
   if (r.error === 'invite_sign_in_required') return 'このアドレスのアカウントでログインしてから招待を受けてください。'
   if (r.error === 'invite_account_mismatch') return '招待先のアカウントでログインしてください。'
+  if (r.error === 'invite_issuer_unauthorized') return '招待したメンバーの権限が変更されています。組織の管理者に新しい招待を依頼してください。'
   if (r.error === 'member_already_active') return 'すでにこの組織のメンバーです。'
   if (r.error === 'invite_unavailable') return 'この招待は利用できません。招待先アドレスと有効期限を確認してください。'
   if (r.status === 401) return 'セッションが終了しました。もう一度ログインしてください。'

@@ -45,7 +45,9 @@
 
 <main>
   <h1>fukulow</h1>
-  <InviteAccept model={invitation} signedIn={auth.view.screen === 'app'} accept={input => auth.acceptInvitation(invitation, input)} />
+  {#if auth.view.screen === 'app' || auth.view.screen === 'signin' || auth.view.screen === 'setup'}
+    <InviteAccept model={invitation} signedIn={auth.view.screen === 'app'} accept={input => auth.acceptInvitation(invitation, input)} />
+  {/if}
 
   {#if auth.view.screen === 'loading'}
     <p>読み込み中…</p>
@@ -98,7 +100,9 @@
       <button onclick={() => auth.selectOrganization(auth.selectedOrganizationId)}>再試行</button>
     {:else if session && organization}
       {#key session}<Workspace {session} canCreateChannels={organization.organization.capabilities.can_create_channels.allowed} />
-        {#if auth.members}<Members model={auth.members} identity={organization} onchanged={() => auth.selectOrganization(auth.selectedOrganizationId)} />{/if}
+        {#if auth.members}<Members model={auth.members} identity={organization} onchanged={id => {
+          if (id === organization.member.id) auth.selectOrganization(auth.selectedOrganizationId)
+        }} />{/if}
       {/key}
       <p>{organization.organization.name} / {organization.member.name} さん</p>
     {:else if identity.organizations.length === 0}
