@@ -15,8 +15,8 @@ export type RealtimeHandlers = {
 }
 export type Connection = { send(message: ClientMessage): void; close(): void }
 
-function defaultOpen(): SocketLike {
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/v1/ws`)
+function defaultOpen(organizationId: string): SocketLike {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/v1/orgs/${encodeURIComponent(organizationId)}/ws`)
   const socket: SocketLike = { send: d => ws.send(d), close: () => ws.close(), onopen: null, onmessage: null, onclose: null }
   ws.onopen = () => socket.onopen?.()
   ws.onmessage = e => socket.onmessage?.(e)
@@ -51,7 +51,7 @@ function isServerEvent(value: unknown): value is ServerEvent {
 }
 
 /** Delivery can repeat; the protocol establishes gap-free resume cursors across HTTP/socket races. */
-export function connectRealtime(handlers: RealtimeHandlers, open = defaultOpen): Connection {
+export function connectRealtime(handlers: RealtimeHandlers, open: () => SocketLike = () => defaultOpen(organizationId), organizationId = ''): Connection {
   const socket = open()
   socket.onopen = handlers.onReady
   socket.onclose = e => handlers.onClose(e.code)

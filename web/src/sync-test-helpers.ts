@@ -60,6 +60,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}) {
       const socket = sockets.at(-1)!
       const resolve = (r: Result<unknown>) => (e!.resolve as (r: Result<unknown>) => void)(r)
       switch (i.type) {
+        case 'organization_refused': void sync.unavailable(); break
         case 'session_start': void sync.start(); break
         case 'session_replaced': void sync.replaceSession('me'); break
         case 'connection_ready': socket.onReady(); break

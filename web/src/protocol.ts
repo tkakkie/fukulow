@@ -30,6 +30,7 @@ type Request =
 type Timer = { purpose: Purpose; channel?: string }
 export type State = {
   selfId: string
+  organization: 'available' | 'unavailable'
   session: 'signed_in' | 'sign_in_required'
   running: boolean
   next: number
@@ -54,7 +55,7 @@ export type Effect =
   | { type: 'sign_in' }
 export type Input =
   | { type: 'session_start' | 'session_replaced'; selfId: string }
-  | { type: 'stop' }
+  | { type: 'stop' | 'organization_unavailable' }
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
   | { type: 'event'; connection: number; event: ServerEvent; subscription?: number }
@@ -68,7 +69,7 @@ export type Input =
   | { type: 'timer_elapsed'; id: number }
 
 export function initialState(selfId = ''): State {
-  return { selfId, session: 'signed_in', running: false, next: 1, connection: null, connected: false,
+  return { selfId, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
     reconnectAttempt: 0, overflows: 0, channels: {}, requests: {}, timers: {} }
 }
 const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [],
@@ -231,6 +232,22 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     return { state, effects }
   }
   if (input.type === 'stop') { stop(false); return { state, effects } }
+  if (input.type === 'organization_unavailable' || (input.type === 'socket_closed' &&
+    input.connection === state.connection && input.code === 4003)) {
+    if (!state.running) return finish()
+    for (const id of Object.keys(state.timers)) cancel(Number(id))
+    state.organization = 'unavailable'
+    state.running = state.connected = false
+    state.connection = null
+    state.requests = {}
+    for (const id of Object.keys(state.channels)) {
+      const c = channel(id)
+      c.state = 'unavailable'; c.subscription = undefined
+      c.pending = c.pending.map(p => ({ ...p, state: 'failed' }))
+    }
+    effects.push({ type: 'close' })
+    return finish()
+  }
   if (!state.running) return finish()
 
   switch (input.type) {

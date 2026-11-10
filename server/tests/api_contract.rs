@@ -7,7 +7,10 @@ use fukulow_server::{
     AppState, app,
     messages::Message,
     openapi::ApiDoc,
-    realtime::{CLOSE_QUEUE_OVERFLOW, CLOSE_SESSION_ENDED, ClientMessage, ServerEvent},
+    realtime::{
+        CLOSE_ORGANIZATION_UNAVAILABLE, CLOSE_QUEUE_OVERFLOW, CLOSE_SESSION_ENDED, ClientMessage,
+        ServerEvent,
+    },
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -18,8 +21,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// 41 existing responses, nine previously undocumented 500s, and the WS 400.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 51;
+// Account / Member split adds the Organization identity and scoped denial responses.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 58;
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {
@@ -31,22 +34,42 @@ fn added_error_responses_have_error_body_and_meaningful_descriptions() {
             ("post", "/api/v1/session", "500", "signing in"),
             ("delete", "/api/v1/session", "500", "revoking"),
             ("get", "/api/v1/me", "500", "session identity"),
-            ("get", "/api/v1/channels", "500", "listing visible Channels"),
-            ("post", "/api/v1/channels", "500", "creating the Channel"),
             (
                 "get",
-                "/api/v1/channels/{id}/messages",
+                "/api/v1/orgs/{org}/channels",
+                "500",
+                "listing visible Channels",
+            ),
+            (
+                "post",
+                "/api/v1/orgs/{org}/channels",
+                "500",
+                "creating the Channel",
+            ),
+            (
+                "get",
+                "/api/v1/orgs/{org}/channels/{id}/messages",
                 "500",
                 "listing Messages",
             ),
             (
                 "post",
-                "/api/v1/channels/{id}/messages",
+                "/api/v1/orgs/{org}/channels/{id}/messages",
                 "500",
                 "persisting the Message",
             ),
-            ("get", "/api/v1/ws", "500", "before WebSocket upgrade"),
-            ("get", "/api/v1/ws", "400", "Invalid WebSocket upgrade"),
+            (
+                "get",
+                "/api/v1/orgs/{org}/ws",
+                "500",
+                "before WebSocket upgrade",
+            ),
+            (
+                "get",
+                "/api/v1/orgs/{org}/ws",
+                "400",
+                "Invalid WebSocket upgrade",
+            ),
         ] {
             let response = &document["paths"][path][method]["responses"][status];
             assert_eq!(
@@ -201,7 +224,7 @@ fn assert_removed_descriptions_are_rejected(committed: &Value) {
 #[should_panic(expected = "Response Object count changed")]
 fn response_description_count_rejects_changed_contract() {
     let mut committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
-    committed["paths"]["/api/v1/channels/{id}/messages"]["post"]["responses"]
+    committed["paths"]["/api/v1/orgs/{org}/channels/{id}/messages"]["post"]["responses"]
         .as_object_mut()
         .unwrap()
         .remove("400")
@@ -441,6 +464,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
     assert_eq!(with_channel["channel_id"], json!(channel_id));
     assert_eq!(CLOSE_QUEUE_OVERFLOW, 4008);
     assert_eq!(CLOSE_SESSION_ENDED, 4001);
+    assert_eq!(CLOSE_ORGANIZATION_UNAVAILABLE, 4003);
 }
 
 #[tokio::test]
@@ -458,7 +482,10 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
         session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
     });
-    for (method, path) in [("GET", "/api/v1/ws")] {
+    for (method, path) in [(
+        "GET",
+        "/api/v1/orgs/00000000-0000-0000-0000-000000000000/ws",
+    )] {
         let response = router
             .clone()
             .oneshot(
@@ -472,4 +499,37 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
             .unwrap();
         assert_eq!(response.status(), 401, "{method} {path}");
     }
+}
+
+#[test]
+fn account_and_member_openapi_contracts_are_separate() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    assert!(
+        document["components"]["schemas"]["SignInRequest"]["properties"]
+            .get("organization_id")
+            .is_none()
+    );
+    assert!(
+        document["components"]["schemas"]["Member"]["properties"]
+            .get("email")
+            .is_none()
+    );
+    for suffix in ["me", "channels", "channels/{id}/messages", "ws"] {
+        let path = format!("/api/v1/orgs/{{org}}/{suffix}");
+        let item = &document["paths"][&path];
+        for method in ["get", "post"] {
+            if let Some(operation) = item.get(method) {
+                let response = &operation["responses"]["404"];
+                assert!(
+                    response["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("organization_unavailable"),
+                    "{method} {path}"
+                );
+            }
+        }
+    }
+    assert!(document["paths"].get("/api/v1/ws").is_none());
+    assert!(document["paths"].get("/api/v1/channels").is_none());
 }

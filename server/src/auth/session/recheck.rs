@@ -1,6 +1,8 @@
 use super::*;
 use sqlx::PgConnection;
-use std::{collections::HashSet, sync::Weak};
+use std::sync::Weak;
+
+type CheckKey = (Uuid, Vec<u8>, i64);
 
 const BATCH_SIZE: usize = 1000;
 const EXIT_GRACE: Duration = Duration::from_secs(2);
@@ -115,7 +117,11 @@ async fn pass(
         .unwrap_or_else(|e| e.into_inner())
         .entries
         .iter()
-        .filter(|(_, signal)| !signal.borrow().revoked && !signal.borrow().failed)
+        .filter(|(_, signal)| {
+            !signal.borrow().revoked
+                && !signal.borrow().membership_revoked
+                && !signal.borrow().failed
+        })
         .map(|(key, signal)| (key.clone(), signal.clone()))
         .collect();
     #[cfg(test)]
@@ -123,28 +129,43 @@ async fn pass(
     if snapshot.is_empty() {
         return;
     }
-    let keys: Vec<_> = snapshot.iter().map(|(key, _)| key.clone()).collect();
+    let keys: Vec<_> = snapshot
+        .iter()
+        .map(|(key, signal)| (key.0, key.1.clone(), signal.borrow().membership_revision))
+        .collect();
     let result = check(pool, &keys, bound).await;
     #[cfg(test)]
     super::tests::pause_gate(gate, super::tests::Phase::Queried).await;
-    for (key, signal) in snapshot {
+    for (key, signal) in &snapshot {
+        if Instant::now() >= bound {
+            for (_, signal) in &snapshot {
+                signal.send_modify(|status| status.failed = true);
+            }
+            return;
+        }
         // Signal this registration epoch only: a disconnected/reconnected key may
         // have a new entry while SQL is in flight. Never clear either latch.
         match &result {
-            Ok(present) if !present.contains(&key) => {
-                signal.send_modify(|status| status.revoked = true);
-            }
+            Ok(ended) => match ended.get(key) {
+                Some(4001) => signal.send_modify(|status| status.revoked = true),
+                Some(4003) => signal.send_modify(|status| status.membership_revoked = true),
+                _ => {}
+            },
             Err(_) => signal.send_modify(|status| status.failed = true),
-            _ => {}
+        }
+    }
+    if Instant::now() >= bound {
+        for (_, signal) in &snapshot {
+            signal.send_modify(|status| status.failed = true);
         }
     }
 }
 
 async fn check(
     pool: &PgPool,
-    keys: &[SessionKey],
+    keys: &[CheckKey],
     bound: Instant,
-) -> Result<HashSet<SessionKey>, sqlx::Error> {
+) -> Result<HashMap<SessionKey, u16>, sqlx::Error> {
     let mut connection = tokio::time::timeout_at(bound, pool.acquire())
         .await
         .map_err(|_| sqlx::Error::PoolTimedOut)??;
@@ -161,25 +182,33 @@ async fn check(
 
 async fn query(
     connection: &mut PgConnection,
-    keys: &[SessionKey],
-) -> Result<HashSet<SessionKey>, sqlx::Error> {
-    let mut present = HashSet::new();
+    keys: &[CheckKey],
+) -> Result<HashMap<SessionKey, u16>, sqlx::Error> {
+    let mut ended = HashMap::new();
     for batch in keys.chunks(BATCH_SIZE) {
         let organizations: Vec<_> = batch.iter().map(|key| key.0).collect();
         let hashes: Vec<_> = batch.iter().map(|key| key.1.clone()).collect();
-        present.extend(
-            sqlx::query_as::<_, SessionKey>(
-                "SELECT sessions.organization_id, sessions.token_hash FROM sessions \
-             JOIN unnest($1::uuid[], $2::bytea[]) AS registered(organization_id, token_hash) \
-             USING (organization_id, token_hash) WHERE expires_at > clock_timestamp()",
-            )
-            .bind(organizations)
-            .bind(hashes)
-            .fetch_all(&mut *connection)
-            .await?,
-        );
+        let revisions: Vec<_> = batch.iter().map(|key| key.2).collect();
+        // Start from registered keys and preserve missing session versus membership
+        // causes. An INNER JOIN would collapse these independent revocations.
+        let rows = sqlx::query_as::<_, (Uuid, Vec<u8>, i32)>(
+            "SELECT registered.organization_id, registered.token_hash, \
+             CASE WHEN s.token_hash IS NULL OR s.expires_at <= clock_timestamp() THEN 4001 \
+                  WHEN u.id IS NULL OR u.deactivated_at IS NOT NULL OR u.membership_revision != registered.revision THEN 4003 \
+                  ELSE 0 END \
+             FROM unnest($1::uuid[], $2::bytea[], $3::bigint[]) AS registered(organization_id, token_hash, revision) \
+             LEFT JOIN account_sessions s ON s.token_hash = registered.token_hash \
+             LEFT JOIN users u ON u.organization_id = registered.organization_id AND u.account_id = s.account_id"
+        ).bind(organizations).bind(hashes).bind(revisions).fetch_all(&mut *connection).await?;
+        for (organization, hash, code) in rows {
+            if code == 4001 {
+                ended.insert((organization, hash), 4001);
+            } else if code == 4003 {
+                ended.insert((organization, hash), 4003);
+            }
+        }
     }
-    Ok(present)
+    Ok(ended)
 }
 
 #[cfg(test)]

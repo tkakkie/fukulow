@@ -1,13 +1,12 @@
 use axum::{
     Json,
-    extract::{ConnectInfo, FromRequest, FromRequestParts, Request, State},
+    extract::{ConnectInfo, FromRequest, FromRequestParts, Path, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use rand::{TryRngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
-use sqlx::FromRow;
 use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -130,7 +129,6 @@ pub struct Organization {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Member {
     pub id: Uuid,
-    pub email: String,
     pub name: String,
     pub role: Role,
 }
@@ -139,6 +137,18 @@ pub struct Member {
 pub struct Identity {
     pub organization: Organization,
     pub member: Member,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct Account {
+    pub id: Uuid,
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AccountIdentity {
+    pub account: Account,
+    pub organizations: Vec<Organization>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -166,8 +176,6 @@ pub struct SetupStatus {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SignInRequest {
-    /// Returned by setup; may be omitted only when exactly one organization exists.
-    pub organization_id: Option<Uuid>,
     pub email: String,
     #[schema(max_length = 1024, format = Password)]
     pub password: String,
@@ -175,7 +183,7 @@ pub struct SignInRequest {
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct SessionResponse {
-    pub identity: Identity,
+    pub identity: AccountIdentity,
     /// Opaque bearer credential. Store securely; returned only on sign-in.
     pub token: String,
     pub expires_in: u32,
@@ -307,8 +315,15 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
         .bind(organization_name)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) VALUES ($1, $2, $3, $4, $5, 'owner')")
-        .bind(organization_id).bind(id).bind(&email).bind(name).bind(password_hash).execute(&mut *tx).await?;
+    let account_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, $3)")
+        .bind(account_id)
+        .bind(&email)
+        .bind(password_hash)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, $4, 'owner')")
+        .bind(organization_id).bind(id).bind(account_id).bind(name).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok((
         StatusCode::CREATED,
@@ -320,39 +335,12 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
             },
             member: Member {
                 id,
-                email,
                 name: name.into(),
                 role: Role::Owner,
             },
         }),
     )
         .into_response())
-}
-
-#[derive(FromRow)]
-struct IdentityRow {
-    organization_id: Uuid,
-    organization_name: String,
-    id: Uuid,
-    email: String,
-    name: String,
-    role: Role,
-}
-impl From<IdentityRow> for Identity {
-    fn from(row: IdentityRow) -> Self {
-        Self {
-            organization: Organization {
-                organization_id: row.organization_id,
-                name: row.organization_name,
-            },
-            member: Member {
-                id: row.id,
-                email: row.email,
-                name: row.name,
-                role: row.role,
-            },
-        }
-    }
 }
 
 struct RetryAfterSeconds;
@@ -374,8 +362,8 @@ impl ToSchema for RetryAfterSeconds {}
 
 #[utoipa::path(post, path = "/api/v1/session", request_body = SignInRequest,
     responses((status = 200, description = "Signed in; returns identity, session token and expiry, and sets the session cookie", body = SessionResponse, headers(("Set-Cookie" = String, description = "HttpOnly; SameSite=Strict; Path=/; Secure by default"))),
-    (status = 400, description = "Invalid sign-in JSON, fields, email or password length, or omitted Organization when no sole Organization exists", body = ErrorBody),
-    (status = 401, description = "Email or password does not match an account in the selected Organization", body = ErrorBody),
+    (status = 400, description = "Invalid sign-in JSON, fields, email or password length", body = ErrorBody),
+    (status = 401, description = "Email or password does not match an Account", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts", body = ErrorBody,
@@ -417,28 +405,12 @@ async fn sign_in_with_entropy(
         .sign_in_throttle
         .begin(ip)
         .map_err(ApiError::throttled)?;
-    let organization_id = match input.organization_id {
-        Some(id) => id,
-        None => {
-            // Discover only whether there is a sole tenant; member lookup stays scoped.
-            let organizations =
-                sqlx::query_scalar::<_, Uuid>("SELECT organization_id FROM organizations LIMIT 2")
-                    .fetch_all(&state.pool)
-                    .await?;
-            let [id] = organizations.as_slice() else {
-                attempt.failed();
-                return Err(ApiError::bad_request());
-            };
-            *id
-        }
-    };
     attempt
-        .account(organization_id, email.clone())
+        .account(email.clone())
         .map_err(ApiError::throttled)?;
     let stored = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, password_hash FROM users WHERE organization_id = $1 AND email = $2",
+        "SELECT id, password_hash FROM accounts WHERE email = $1",
     )
-    .bind(organization_id)
     .bind(email)
     .fetch_optional(&state.pool)
     .await?;
@@ -450,15 +422,14 @@ async fn sign_in_with_entropy(
     let mut random = [0u8; 32];
     entropy(&mut random)?;
     let secret: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-    let token = format!("{organization_id}.{secret}");
+    let token = secret;
     let token_hash = Sha256::digest(token.as_bytes()).to_vec();
-    sqlx::query("INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)")
-        .bind(organization_id)
+    sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
         .bind(&token_hash)
         .bind(user_id)
         .execute(&state.pool)
         .await?;
-    let identity = identity(&state, organization_id, &token_hash).await?;
+    let identity = account_identity(&state.pool, user_id).await?;
     state.session_cleanup.trigger(&state.pool);
     Ok((
         [
@@ -487,29 +458,61 @@ fn cookie(state: &AppState, token: &str, seconds: u32) -> String {
     )
 }
 
-async fn identity(
-    state: &AppState,
-    organization_id: Uuid,
-    token_hash: &[u8],
-) -> Result<Identity, ApiError> {
-    let row = sqlx::query_as::<_, IdentityRow>(
-        "SELECT u.organization_id, o.name AS organization_name, u.id, u.email, u.name, u.role \
-         FROM sessions s \
-         JOIN users u ON u.organization_id = s.organization_id AND u.id = s.user_id \
-         JOIN organizations o ON o.organization_id = s.organization_id \
-         WHERE s.organization_id = $1 AND s.token_hash = $2 AND s.expires_at > now()",
-    )
-    .bind(organization_id)
-    .bind(token_hash)
-    .fetch_optional(&state.pool)
-    .await?;
-    row.map(Into::into).ok_or_else(ApiError::unauthorized)
+async fn account_identity(
+    pool: &sqlx::PgPool,
+    account_id: Uuid,
+) -> Result<AccountIdentity, ApiError> {
+    let email = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
+        .bind(account_id)
+        .fetch_one(pool)
+        .await?;
+    let organizations = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT o.organization_id, o.name FROM organizations o JOIN users u USING (organization_id) WHERE u.account_id = $1 AND u.deactivated_at IS NULL ORDER BY o.organization_id"
+    ).bind(account_id).fetch_all(pool).await?.into_iter().map(|(organization_id,name)|Organization{organization_id,name}).collect();
+    Ok(AccountIdentity {
+        account: Account {
+            id: account_id,
+            email,
+        },
+        organizations,
+    })
 }
 
-/// Trusted tenant and member for every authenticated endpoint. Never take tenant
-/// scope from a query/header supplied separately from the session credential.
+pub struct AccountAuth {
+    account_id: Uuid,
+    token_hash: Vec<u8>,
+}
+impl FromRequestParts<AppState> for AccountAuth {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = credential(&parts.headers)?;
+        if !(64..=128).contains(&token.len()) || !token.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(ApiError::unauthorized());
+        }
+        let token_hash = Sha256::digest(token.as_bytes()).to_vec();
+        let account_id = sqlx::query_scalar(
+            "SELECT account_id FROM account_sessions WHERE token_hash = $1 AND expires_at > now()",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
+        Ok(Self {
+            account_id,
+            token_hash,
+        })
+    }
+}
+
+/// Resolve authority only from the authenticated Account and Organization URL.
 pub struct Auth {
     pub identity: Identity,
+    pub(crate) account_id: Uuid,
+    pub(crate) membership_revision: i64,
     token_hash: Vec<u8>,
 }
 impl FromRequestParts<AppState> for Auth {
@@ -518,20 +521,67 @@ impl FromRequestParts<AppState> for Auth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = credential(&parts.headers)?;
-        let (organization, secret) = token.split_once('.').ok_or_else(ApiError::unauthorized)?;
-        let organization_id =
-            Uuid::parse_str(organization).map_err(|_| ApiError::unauthorized())?;
-        if secret.len() != 64 || !secret.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(ApiError::unauthorized());
-        }
-        let token_hash = Sha256::digest(token.as_bytes()).to_vec();
-        let identity = identity(state, organization_id, &token_hash).await?;
+        let account = AccountAuth::from_request_parts(parts, state).await?;
+        let Path(params) =
+            Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| ApiError::bad_request())?;
+        let organization: Uuid = params
+            .get("org")
+            .ok_or_else(ApiError::bad_request)?
+            .parse()
+            .map_err(|_| ApiError::bad_request())?;
+        let row = sqlx::query_as::<_, (Uuid,String,Role,String,i64)>(
+            "SELECT u.id, u.name, u.role, o.name, u.membership_revision FROM users u JOIN organizations o USING (organization_id) WHERE u.organization_id = $1 AND u.account_id = $2 AND u.deactivated_at IS NULL"
+        ).bind(organization).bind(account.account_id).fetch_optional(&state.pool).await?
+            .ok_or(ApiError(StatusCode::NOT_FOUND,"organization_unavailable",None))?;
         Ok(Self {
-            identity,
-            token_hash,
+            identity: Identity {
+                organization: Organization {
+                    organization_id: organization,
+                    name: row.3,
+                },
+                member: Member {
+                    id: row.0,
+                    name: row.1,
+                    role: row.2,
+                },
+            },
+            account_id: account.account_id,
+            membership_revision: row.4,
+            token_hash: account.token_hash,
         })
     }
+}
+
+pub(crate) async fn member_revision(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: Uuid,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar("SELECT membership_revision FROM users WHERE organization_id = $1 AND id = $2 AND deactivated_at IS NULL").bind(organization).bind(member).fetch_optional(pool).await
+}
+pub(crate) async fn active_members(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    members: &[Uuid],
+) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
+    sqlx::query_as("SELECT id, membership_revision FROM users WHERE organization_id = $1 AND id = ANY($2) AND deactivated_at IS NULL").bind(organization).bind(members).fetch_all(pool).await
+}
+
+/// Foundation for Member administration (#144/#149); no removal endpoint is exposed.
+pub async fn deactivate_member(
+    state: &AppState,
+    organization: Uuid,
+    account: Uuid,
+) -> Result<(), sqlx::Error> {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let revision: Option<i64> = sqlx::query_scalar("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING membership_revision")
+            .bind(organization).bind(account).fetch_optional(&state.pool).await?;
+        if let Some(revision) = revision { state.session_changes.membership_revoked(organization,account,revision); }
+        Ok(())
+    }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
 }
 
 fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -573,10 +623,23 @@ fn credential(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 #[utoipa::path(get, path = "/api/v1/me", security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, description = "Current session's Member and Organization identity", body = Identity),
+    responses((status = 200, description = "Current session's Member and Organization identity", body = AccountIdentity),
     (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
     (status = 500, description = "Database failure while resolving the session identity", body = ErrorBody)))]
-pub async fn me(auth: Auth) -> impl IntoResponse {
+pub async fn me(State(state): State<AppState>, auth: AccountAuth) -> Result<Response, ApiError> {
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(account_identity(&state.pool, auth.account_id).await?),
+    )
+        .into_response())
+}
+
+#[utoipa::path(get, path = "/api/v1/orgs/{org}/me", params(("org" = Uuid, Path, description = "Organization id")), security(("cookie" = []), ("bearer" = [])),
+ responses((status=200, description="Active Member in this Organization",body=Identity),
+ (status=401,description="Account Session ended",body=ErrorBody),
+ (status=404,description="Non-Member, unknown Organization or deactivated Member: organization_unavailable",body=ErrorBody),
+ (status=500,description="Database failure",body=ErrorBody)))]
+pub async fn organization_me(auth: Auth) -> impl IntoResponse {
     ([(header::CACHE_CONTROL, "no-store")], Json(auth.identity))
 }
 
@@ -584,18 +647,19 @@ pub async fn me(auth: Auth) -> impl IntoResponse {
     responses((status = 204, description = "Session revoked and cookie cleared", headers(("Set-Cookie" = String))),
     (status = 401, description = "Missing, invalid, ambiguous, expired, or revoked session credential", body = ErrorBody),
     (status = 500, description = "Database or worker failure while resolving or revoking the session", body = ErrorBody)))]
-pub async fn sign_out(State(state): State<AppState>, auth: Auth) -> Result<Response, ApiError> {
+pub async fn sign_out(
+    State(state): State<AppState>,
+    auth: AccountAuth,
+) -> Result<Response, ApiError> {
     let pool = state.pool.clone();
     let changes = state.session_changes.clone();
     // Finish revocation + notification even if the HTTP caller disconnects.
     tokio::spawn(async move {
-        let organization = auth.identity.organization.organization_id;
-        sqlx::query("DELETE FROM sessions WHERE organization_id = $1 AND token_hash = $2")
-            .bind(organization)
+        sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
             .bind(&auth.token_hash)
             .execute(&pool)
             .await?;
-        changes.revoked(organization, auth.token_hash);
+        changes.revoked(auth.token_hash);
         Ok::<_, sqlx::Error>(())
     })
     .await
@@ -697,7 +761,7 @@ mod tests {
                 json!({"error": "internal error"})
             );
             let counts: (i64, i64, i64) = sqlx::query_as(
-                "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM sessions)",
+                "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM account_sessions)",
             )
             .fetch_one(&pool)
             .await
@@ -730,15 +794,12 @@ mod tests {
             .unwrap();
         for stored in [Some(stored), None] {
             let throttle = SignInThrottle::default();
-            let organization = Uuid::new_v4();
             let ip = "192.0.2.1".parse().unwrap();
             if stored.is_some() {
                 // Successful verification must release reservations without charging failures.
                 for _ in 0..6 {
                     let mut attempt = throttle.begin(ip).unwrap();
-                    attempt
-                        .account(organization, "owner@example.com".into())
-                        .unwrap();
+                    attempt.account("owner@example.com".into()).unwrap();
                     assert!(
                         check_password(password.into(), stored.clone(), attempt, &PASSWORD_WORKERS)
                             .await
@@ -748,9 +809,7 @@ mod tests {
             }
             for _ in 0..5 {
                 let mut attempt = throttle.begin(ip).unwrap();
-                attempt
-                    .account(organization, "owner@example.com".into())
-                    .unwrap();
+                attempt.account("owner@example.com".into()).unwrap();
                 assert!(
                     !check_password(
                         "incorrect password".into(),
@@ -763,11 +822,7 @@ mod tests {
                 );
             }
             let mut rejected = throttle.begin(ip).unwrap();
-            assert!(
-                rejected
-                    .account(organization, "owner@example.com".into())
-                    .is_err()
-            );
+            assert!(rejected.account("owner@example.com".into()).is_err());
         }
     }
 
@@ -776,7 +831,6 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let organization = Uuid::new_v4();
         let peer: std::net::SocketAddr = "192.0.2.1:1234".parse().unwrap();
         static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
         let _workers = WORKERS.acquire_many(4).await.unwrap();
@@ -785,9 +839,7 @@ mod tests {
             for _ in 0..if by_ip { 20 } else { 5 } {
                 let mut attempt = throttle.begin(peer.ip()).unwrap();
                 if !by_ip {
-                    attempt
-                        .account(organization, "owner@example.com".into())
-                        .unwrap();
+                    attempt.account("owner@example.com".into()).unwrap();
                 }
                 attempt.failed();
             }
@@ -805,7 +857,7 @@ mod tests {
                     .header("x-forwarded-for", forwarded)
                     .body(axum::body::Body::from(
                         json!({
-                            "organization_id": if by_ip { None } else { Some(organization) },
+
                             "email": " Owner@Example.com ", "password": "incorrect password"
                         })
                         .to_string(),

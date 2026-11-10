@@ -80,9 +80,13 @@ impl Server {
         cookie: Option<&str>,
         origin: Option<&str>,
     ) -> Result<Client, tungstenite::Error> {
-        let mut request = format!("ws://{}/api/v1/ws", self.address)
-            .into_client_request()
-            .unwrap();
+        let mut request = format!(
+            "ws://{}{}",
+            self.address,
+            scoped_path("/api/v1/ws", bearer.or(cookie).unwrap_or(""))
+        )
+        .into_client_request()
+        .unwrap();
         if let Some(token) = bearer {
             request.headers_mut().insert(
                 header::AUTHORIZATION,
@@ -135,24 +139,32 @@ async fn organization(pool: &PgPool) -> Uuid {
         .unwrap();
     organization
 }
-async fn member(pool: &PgPool, organization: Uuid) -> (Uuid, String) {
-    let member = Uuid::new_v4();
-    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) VALUES ($1, $2, $3, 'Member', 'unused', 'member')")
-        .bind(organization).bind(member).bind(format!("{member}@example.com")).execute(pool).await.unwrap();
-    let token = format!(
-        "{organization}.{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    );
-    sqlx::query("INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)")
-        .bind(organization)
-        .bind(Sha256::digest(token.as_bytes()).to_vec())
-        .bind(member)
+async fn member(pool: &PgPool, organization_id: Uuid) -> (Uuid, String) {
+    let id = Uuid::new_v4();
+    let account_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'unused')")
+        .bind(account_id)
+        .bind(format!("{account_id}@example.com"))
         .execute(pool)
         .await
         .unwrap();
-    (member, token)
+    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, 'Member', $4)")
+        .bind(organization_id).bind(id).bind(account_id).bind("member").execute(pool).await.unwrap();
+    // The prefix is fixture metadata for explicit Organization route construction.
+    let token = format!(
+        "{organization_id}.{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
+        .bind(Sha256::digest(token.as_bytes()).to_vec())
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    (id, token)
 }
+
 async fn channel(pool: &PgPool, organization: Uuid, member: Uuid, private: bool) -> Uuid {
     let channel = Uuid::new_v4();
     sqlx::query(
@@ -189,11 +201,12 @@ async fn fixture(pool: &PgPool) -> Fixture {
     }
 }
 async fn request(app: &Router, method: &str, path: &str, token: &str, input: Value) -> Response {
+    let path = scoped_path(path, token);
     app.clone()
         .oneshot(
             Request::builder()
                 .method(method)
-                .uri(path)
+                .uri(&path)
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(input.to_string()))
@@ -291,7 +304,7 @@ async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_token
     let router = crate::app(state(&pool));
     for path in ["/api/v1/ws", "/api/v1/ws?token=ignored"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
-            let mut builder = Request::get(path);
+            let mut builder = Request::get(scoped_path(path, ""));
             if let Some(value) = authorization {
                 builder = builder.header(header::AUTHORIZATION, value);
             }
@@ -310,9 +323,12 @@ async fn invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_
     pool: PgPool,
 ) {
     let f = fixture(&pool).await;
-    let mut request = format!("ws://{}/api/v1/ws", f.server.address)
-        .into_client_request()
-        .unwrap();
+    let mut request = format!(
+        "ws://{}/api/v1/orgs/{}/ws",
+        f.server.address, f.organization
+    )
+    .into_client_request()
+    .unwrap();
     request.headers_mut().insert(
         header::COOKIE,
         format!("fukulow_session={}", f.token).parse().unwrap(),
@@ -349,7 +365,10 @@ async fn invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_
 async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(pool: PgPool) {
     let f = fixture(&pool).await;
     rejected(f.server.handshake(None, None, None).await, 401);
-    let query_url = format!("ws://{}/api/v1/ws?token={}", f.server.address, f.token);
+    let query_url = format!(
+        "ws://{}/api/v1/orgs/{}/ws?token={}",
+        f.server.address, f.organization, f.token
+    );
     rejected(
         tokio_tungstenite::connect_async(query_url)
             .await
@@ -387,7 +406,7 @@ async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(po
         401,
     );
     sqlx::query(
-        "UPDATE sessions SET expires_at = now() - interval '1 second' WHERE organization_id = $1",
+        "UPDATE account_sessions SET expires_at = now() - interval '1 second' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)",
     )
     .bind(f.organization)
     .execute(&pool)
@@ -661,7 +680,7 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
 #[sqlx::test]
 async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
     let f = fixture(&pool).await;
-    sqlx::query("UPDATE sessions SET expires_at = clock_timestamp() + interval '2 seconds' WHERE organization_id = $1").bind(f.organization).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() + interval '2 seconds' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)").bind(f.organization).execute(&pool).await.unwrap();
     let mut idle = f.server.connect(&f.token).await;
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
@@ -686,7 +705,7 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
     // Authenticate normally, then exhaust only the pool used by the post-upgrade session check.
     let router = Router::new()
         .route(
-            "/api/v1/ws",
+            "/api/v1/orgs/{org}/ws",
             axum::routing::get(
                 move |State(mut state): State<AppState>, auth: Auth, ws: WebSocketUpgrade| {
                     let exhausted = exhausted.clone();
@@ -891,3 +910,15 @@ mod contract;
 mod notification;
 mod session;
 mod watermark;
+
+fn scoped_path(path: &str, token: &str) -> String {
+    if path.starts_with("/api/v1/channels") || path.starts_with("/api/v1/ws") {
+        let organization = token
+            .split_once('.')
+            .map(|(id, _)| id)
+            .unwrap_or("00000000-0000-0000-0000-000000000000");
+        path.replacen("/api/v1/", &format!("/api/v1/orgs/{organization}/"), 1)
+    } else {
+        path.to_owned()
+    }
+}

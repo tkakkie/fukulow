@@ -27,8 +27,12 @@ async fn public_authorization_skips_membership_sql_but_checks_organization_and_c
     assert_eq!(
         visible_members(&pool, org, public, &[creator, nonmember])
             .await
-            .unwrap(),
-        vec![creator, nonmember]
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [creator, nonmember]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
     );
     for (scope, channel) in [(other, public), (org, Uuid::new_v4())] {
         assert!(!is_visible(&pool, scope, creator, channel).await.unwrap());

@@ -169,11 +169,8 @@ mod tests {
             let observed = calls.clone();
             let throttle = super::super::SignInThrottle::default();
             let ip = "192.0.2.1".parse().unwrap();
-            let organization = uuid::Uuid::new_v4();
             let mut attempt = throttle.begin(ip).unwrap();
-            attempt
-                .account(organization, "unknown@example.com".into())
-                .unwrap();
+            attempt.account("unknown@example.com".into()).unwrap();
             let error = check_password_with_hash(
                 "correct horse battery staple".into(),
                 None,
@@ -212,9 +209,7 @@ mod tests {
             // Reaching both full limits also proves both reservations were released.
             for _ in 0..5 {
                 let mut attempt = throttle.begin(ip).unwrap();
-                attempt
-                    .account(organization, "unknown@example.com".into())
-                    .unwrap();
+                attempt.account("unknown@example.com".into()).unwrap();
                 assert!(
                     !check_password(
                         "incorrect password".into(),
@@ -227,19 +222,13 @@ mod tests {
                 );
             }
             let mut rejected = throttle.begin("192.0.2.2".parse().unwrap()).unwrap();
-            assert!(
-                rejected
-                    .account(organization, "unknown@example.com".into())
-                    .is_err()
-            );
+            assert!(rejected.account("unknown@example.com".into()).is_err());
             drop(rejected);
 
             // Other accounts isolate the remaining IP budget from the account limit.
             for n in 5..20 {
                 let mut attempt = throttle.begin(ip).unwrap();
-                attempt
-                    .account(organization, format!("unknown-{n}@example.com"))
-                    .unwrap();
+                attempt.account(format!("unknown-{n}@example.com")).unwrap();
                 assert!(
                     !check_password(
                         "incorrect password".into(),

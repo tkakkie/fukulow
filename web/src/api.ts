@@ -10,12 +10,13 @@ export async function checkHealth(fetchFn: typeof fetch = fetch): Promise<boolea
 
 import type { components } from './api-schema'
 
+export type AccountIdentity = components['schemas']['AccountIdentity']
 export type Identity = components['schemas']['Identity']
 export type SetupRequest = components['schemas']['SetupRequest']
 export type SignInRequest = components['schemas']['SignInRequest']
 
 /** Result of an API call. `network` covers fetch failures and 5xx (retryable, never "signed out"). */
-export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number } | { ok: false; kind: 'network' }
+export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string } | { ok: false; kind: 'network' }
 
 async function call<T>(
   fetchFn: typeof fetch,
@@ -27,7 +28,11 @@ async function call<T>(
     // Cookie auth only: the HttpOnly session cookie is sent by the browser; no token is stored.
     const res = await fetchFn(path, { credentials: 'same-origin', ...init })
     if (res.status >= 500) return { ok: false, kind: 'network' }
-    if (!res.ok) return { ok: false, kind: 'http', status: res.status }
+    if (!res.ok) {
+      let error: string | undefined
+      try { error = ((await res.json()) as components['schemas']['ErrorBody']).error } catch { /* Status remains authoritative for malformed errors. */ }
+      return { ok: false, kind: 'http', status: res.status, ...(error === undefined ? {} : { error }) }
+    }
     return { ok: true, data: (parse ? await res.json() : undefined) as T }
   } catch {
     return { ok: false, kind: 'network' }
@@ -53,7 +58,15 @@ export const postSession = (body: SignInRequest, f: typeof fetch = fetch) =>
 export const deleteSession = (f: typeof fetch = fetch) =>
   call<undefined>(f, '/api/v1/session', { method: 'DELETE' }, false)
 
-export const getMe = (f: typeof fetch = fetch) => call<Identity>(f, '/api/v1/me', { cache: 'no-store' }, true)
+export const getMe = (f: typeof fetch = fetch) => call<AccountIdentity>(f, '/api/v1/me', { cache: 'no-store' }, true)
+
+const orgPath = (organizationId: string) => `/api/v1/orgs/${encodeURIComponent(organizationId)}`
+
+export const getOrganizationMe = (organizationId: string, f: typeof fetch = fetch) =>
+  call<Identity>(f, `${orgPath(organizationId)}/me`, { cache: 'no-store' }, true)
+
+export const isOrganizationUnavailable = (r: Result<unknown>) =>
+  !r.ok && r.kind === 'http' && r.status === 404 && r.error === 'organization_unavailable'
 
 export type Channel = components['schemas']['Channel']
 export type ChannelVisibility = components['schemas']['ChannelVisibility']
@@ -65,22 +78,22 @@ export type ListMessagesQuery = NonNullable<
   import('./api-schema').operations['list_messages']['parameters']['query']
 >
 
-export const listChannels = (f: typeof fetch = fetch) =>
-  call<components['schemas']['ChannelList']>(f, '/api/v1/channels', { cache: 'no-store' }, true)
+export const listChannels = (organizationId: string, f: typeof fetch = fetch) =>
+  call<components['schemas']['ChannelList']>(f, `${orgPath(organizationId)}/channels`, { cache: 'no-store' }, true)
 
-export const createChannel = (body: CreateChannelRequest, f: typeof fetch = fetch) =>
-  call<Channel>(f, '/api/v1/channels', json(body), true)
+export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
+  call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)
 
 /** No cursor = latest page; pages are ascending by seq. */
-export const listMessages = (channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch) => {
+export const listMessages = (organizationId: string, channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch) => {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(query)) if (v !== undefined) qs.set(k, String(v))
   const suffix = qs.size > 0 ? `?${qs}` : ''
-  return call<MessagePage>(f, `/api/v1/channels/${encodeURIComponent(channelId)}/messages${suffix}`, { cache: 'no-store' }, true)
+  return call<MessagePage>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/messages${suffix}`, { cache: 'no-store' }, true)
 }
 
-export const sendMessage = (channelId: string, body: SendMessageRequest, f: typeof fetch = fetch) =>
-  call<Message>(f, `/api/v1/channels/${encodeURIComponent(channelId)}/messages`, json(body), true)
+export const sendMessage = (organizationId: string, channelId: string, body: SendMessageRequest, f: typeof fetch = fetch) =>
+  call<Message>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/messages`, json(body), true)
 
 export type ServerEvent = import('./api-schema').ServerEvent
 export type ClientMessage = import('./api-schema').ClientMessage

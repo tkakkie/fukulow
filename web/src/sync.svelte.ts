@@ -33,7 +33,9 @@ export type ChannelSync = ReturnType<typeof channelAdapter>
 
 export function syncAdapter(sync: Sync) {
   const channels = new Map<string, ChannelSync>()
+  const subscribe = createSubscriber(update => sync.subscribe(update))
   return {
+    get unavailable() { subscribe(); return sync.get().organization === 'unavailable' },
     channel(id: string): ChannelSync {
       let c = channels.get(id)
       if (!c) channels.set(id, (c = channelAdapter(sync, id)))

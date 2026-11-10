@@ -9,13 +9,93 @@
     "version": "0.1.0"
   },
   "paths": {
-    "/api/v1/channels": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Server is responding; returns the plain-text body ok",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": [
+          "crate::auth"
+        ],
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Current session's Member and Organization identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountIdentity"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure while resolving the session identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels": {
       "get": {
         "tags": [
           "crate::channels"
         ],
         "summary": "List public channels of the caller's organization and private channels they belong to.",
         "operationId": "list_channels",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Public Channels and private Channels the Member belongs to in their Organization",
@@ -29,6 +109,16 @@
           },
           "401": {
             "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Non-Member, unknown Organization or deactivated Member: organization_unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -63,6 +153,18 @@
         ],
         "summary": "Create a public or private channel with an organization-unique name.\nNames are compared with ASCII case folding; non-ASCII characters are unchanged.\nA private channel includes its creator as a member in the same transaction.",
         "operationId": "create_channel",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -96,6 +198,16 @@
           },
           "401": {
             "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Non-Member, unknown Organization or deactivated Member: organization_unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -155,7 +267,7 @@
         ]
       }
     },
-    "/api/v1/channels/{id}/messages": {
+    "/api/v1/orgs/{org}/channels/{id}/messages": {
       "get": {
         "tags": [
           "crate::messages"
@@ -163,6 +275,16 @@
         "summary": "List visible channel messages using exclusive per-channel sequence cursors.\nafter_seq and before_seq are mutually exclusive; neither selects the latest page.\nPages are always ascending seq. Continue after_seq with the last seq, or before_seq\n(including older history from the latest page) with the first seq. has_more refers\nto that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries\nreturn 400. Identity and organization come only from the authenticated session.",
         "operationId": "list_messages",
         "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
           {
             "name": "id",
             "in": "path",
@@ -241,7 +363,7 @@
             }
           },
           "404": {
-            "description": "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists",
+            "description": "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -277,6 +399,16 @@
         "summary": "Send a message to a visible channel; topic_id is always null.\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body or channel returns 409.",
         "operationId": "send_message",
         "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
           {
             "name": "id",
             "in": "path",
@@ -330,7 +462,7 @@
             }
           },
           "404": {
-            "description": "Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists",
+            "description": "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -390,35 +522,27 @@
         ]
       }
     },
-    "/api/v1/health": {
-      "get": {
-        "tags": [
-          "crate"
-        ],
-        "operationId": "health",
-        "responses": {
-          "200": {
-            "description": "Server is responding; returns the plain-text body ok",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/me": {
+    "/api/v1/orgs/{org}/me": {
       "get": {
         "tags": [
           "crate::auth"
         ],
-        "operationId": "me",
+        "operationId": "organization_me",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Current session's Member and Organization identity",
+            "description": "Active Member in this Organization",
             "content": {
               "application/json": {
                 "schema": {
@@ -428,7 +552,17 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential",
+            "description": "Account Session ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Non-Member, unknown Organization or deactivated Member: organization_unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -438,7 +572,92 @@
             }
           },
           "500": {
-            "description": "Database failure while resolving the session identity",
+            "description": "Database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/ws": {
+      "get": {
+        "tags": [
+          "crate::realtime"
+        ],
+        "summary": "Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.\nAuthenticate with the session cookie or Authorization: Bearer, never a query token.\nCookie auth requires a matching allowed Origin (configured, same-origin by default);\nreject a missing/foreign Origin with 403. Bearer clients need no Origin header.",
+        "description": "On subscribe: first register the live subscription, queueing events per connection;\nreplay committed messages with seq > after_seq ascending in pages of up to 50\nmessages; flush queued live events with seq > last replayed;\nthen send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):\nduplicates are harmless, gaps are forbidden. Publish only committed new messages.\nQueue overflow closes with 4008 (never silently drops an event); reconnect and\nre-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;\nstop protected delivery and go to Sign in. Membership loss closes only this\nOrganization with 4003: terminal unavailable, never reconnect/resubscribe/retry sends.\nA rejected handshake has no close code: check GET /api/v1/orgs/{org}/me.",
+        "operationId": "upgrade",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade; frames use ClientMessage / ServerEvent"
+          },
+          "400": {
+            "description": "Invalid WebSocket upgrade request after successful authentication and Origin validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Cookie Origin missing or not allowed: origin_not_allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Non-Member, unknown Organization or deactivated Member: organization_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure while resolving the session before WebSocket upgrade",
             "content": {
               "application/json": {
                 "schema": {
@@ -494,7 +713,7 @@
             }
           },
           "400": {
-            "description": "Invalid sign-in JSON, fields, email or password length, or omitted Organization when no sole Organization exists",
+            "description": "Invalid sign-in JSON, fields, email or password length",
             "content": {
               "application/json": {
                 "schema": {
@@ -504,7 +723,7 @@
             }
           },
           "401": {
-            "description": "Email or password does not match an account in the selected Organization",
+            "description": "Email or password does not match an Account",
             "content": {
               "application/json": {
                 "schema": {
@@ -741,73 +960,44 @@
           }
         }
       }
-    },
-    "/api/v1/ws": {
-      "get": {
-        "tags": [
-          "crate::realtime"
-        ],
-        "summary": "Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.\nAuthenticate with the session cookie or Authorization: Bearer, never a query token.\nCookie auth requires a matching allowed Origin (configured, same-origin by default);\nreject a missing/foreign Origin with 403. Bearer clients need no Origin header.",
-        "description": "On subscribe: first register the live subscription, queueing events per connection;\nreplay committed messages with seq > after_seq ascending in pages of up to 50\nmessages; flush queued live events with seq > last replayed;\nthen send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):\nduplicates are harmless, gaps are forbidden. Publish only committed new messages.\nQueue overflow closes with 4008 (never silently drops an event); reconnect and\nre-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;\nstop protected delivery and go to Sign in.",
-        "operationId": "upgrade",
-        "responses": {
-          "101": {
-            "description": "WebSocket upgrade; frames use ClientMessage / ServerEvent"
-          },
-          "400": {
-            "description": "Invalid WebSocket upgrade request after successful authentication and Origin validation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, invalid, ambiguous, expired, or revoked session credential before WebSocket upgrade",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Cookie Origin missing or not allowed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Database failure while resolving the session before WebSocket upgrade",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "cookie": []
-          },
-          {
-            "bearer": []
-          }
-        ]
-      }
     }
   },
   "components": {
     "schemas": {
+      "Account": {
+        "type": "object",
+        "required": [
+          "id",
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "AccountIdentity": {
+        "type": "object",
+        "required": [
+          "account",
+          "organizations"
+        ],
+        "properties": {
+          "account": {
+            "$ref": "#/components/schemas/Account"
+          },
+          "organizations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Organization"
+            }
+          }
+        }
+      },
       "Channel": {
         "type": "object",
         "required": [
@@ -977,14 +1167,10 @@
         "type": "object",
         "required": [
           "id",
-          "email",
           "name",
           "role"
         ],
         "properties": {
-          "email": {
-            "type": "string"
-          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -1166,7 +1352,7 @@
             "minimum": 0
           },
           "identity": {
-            "$ref": "#/components/schemas/Identity"
+            "$ref": "#/components/schemas/AccountIdentity"
           },
           "token": {
             "type": "string",
@@ -1235,14 +1421,6 @@
         "properties": {
           "email": {
             "type": "string"
-          },
-          "organization_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Returned by setup; may be omitted only when exactly one organization exists."
           },
           "password": {
             "type": "string",

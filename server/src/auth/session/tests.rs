@@ -100,9 +100,9 @@ async fn session_signals_are_scoped_latched_and_released_with_last_socket() {
     let other_session = changes.register((organization, vec![2]));
     let other_organization = changes.register((Uuid::new_v4(), vec![1]));
     // Exceed the old broadcast capacity before either affected receiver polls.
-    changes.revoked(organization, vec![1]);
+    changes.revoked(vec![1]);
     for i in 0..2048_u32 {
-        changes.revoked(organization, i.to_be_bytes().to_vec());
+        changes.revoked(i.to_be_bytes().to_vec());
     }
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -119,7 +119,7 @@ async fn session_signals_are_scoped_latched_and_released_with_last_socket() {
     .unwrap()
     .unwrap();
     assert!(!other_session.changed.has_changed().unwrap());
-    assert!(!other_organization.changed.has_changed().unwrap());
+    assert!(other_organization.changed.borrow().revoked);
     drop(first);
     assert!(changes.sessions.lock().unwrap().entries.contains_key(&key));
     let third = changes.register(key.clone());
@@ -135,29 +135,45 @@ async fn session_signals_are_scoped_latched_and_released_with_last_socket() {
 pub(super) async fn fixture(pool: &PgPool) -> (AppState, Auth) {
     let organization = Uuid::new_v4();
     let member = Uuid::new_v4();
-    let hash = vec![1; 32];
+    let account = Uuid::new_v4();
+    let hash = uuid::Uuid::new_v4().as_bytes().repeat(2);
     sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Organization')")
         .bind(organization)
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO users (organization_id, id, email, name, password_hash, role) VALUES ($1, $2, 'member@example.com', 'Member', 'unused', 'member')")
-        .bind(organization).bind(member).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)")
-        .bind(organization)
+    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'unused')")
+        .bind(account)
+        .bind(format!("{account}@example.com"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, 'Member', 'member')")
+        .bind(organization).bind(member).bind(account).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
         .bind(&hash)
-        .bind(member)
+        .bind(account)
         .execute(pool)
         .await
         .unwrap();
     let state = AppState::for_test(pool.clone());
-    let identity = super::super::identity(&state, organization, &hash)
-        .await
-        .unwrap();
+    let identity = super::super::Identity {
+        organization: super::super::Organization {
+            organization_id: organization,
+            name: "Organization".into(),
+        },
+        member: super::super::Member {
+            id: member,
+            name: "Member".into(),
+            role: super::super::Role::Member,
+        },
+    };
     (
         state,
         Auth {
             identity,
+            account_id: account,
+            membership_revision: 0,
             token_hash: hash,
         },
     )
@@ -166,9 +182,7 @@ pub(super) async fn fixture(pool: &PgPool) -> (AppState, Auth) {
 #[sqlx::test]
 async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
     let (state, auth) = fixture(&pool).await;
-    // A valid session with the same hash in another Organization cannot mask revocation.
-    let (_, foreign_auth) = fixture(&pool).await;
-    assert_eq!(auth.token_hash, foreign_auth.token_hash);
+
     for phase in [Phase::Registered, Phase::Checked] {
         let gate = state.session_changes.pause(phase);
         let watch = auth.watch_session(&state);
@@ -190,16 +204,12 @@ async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
                 ))
         );
         // Commit sign-out while paused, then publish its signal before the watcher resumes.
-        sqlx::query("DELETE FROM sessions WHERE organization_id = $1 AND token_hash = $2")
-            .bind(auth.identity.organization.organization_id)
+        sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
             .bind(&auth.token_hash)
             .execute(&pool)
             .await
             .unwrap();
-        state.session_changes.revoked(
-            auth.identity.organization.organization_id,
-            auth.token_hash.clone(),
-        );
+        state.session_changes.revoked(auth.token_hash.clone());
         gate.release.add_permits(1);
         assert!(watch.await.unwrap().is_none());
         assert!(
@@ -211,15 +221,12 @@ async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
                 .entries
                 .is_empty()
         );
-        sqlx::query(
-            "INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(auth.identity.organization.organization_id)
-        .bind(&auth.token_hash)
-        .bind(auth.identity.member.id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
+            .bind(&auth.token_hash)
+            .bind(auth.account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }
 
@@ -259,7 +266,7 @@ async fn old_registration_drop_cannot_remove_new_epoch_and_revoked_is_irreversib
     drop(old);
     assert!(changes.sessions.lock().unwrap().entries[&key].same_channel(&guard.epoch));
     let current = changes.register(key.clone());
-    changes.revoked(key.0, key.1.clone());
+    changes.revoked(key.1.clone());
     current
         .guard
         .epoch
@@ -281,7 +288,7 @@ async fn failed_epoch_closes_but_new_epoch_checks_current_database(pool: PgPool)
         SessionChanges::with_recheck_timing(Duration::from_millis(50), Duration::from_millis(200));
     let mut old = auth.watch_session(&state).await.unwrap().unwrap();
     let mut held = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE account_sessions IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *held)
         .await
         .unwrap();
@@ -303,9 +310,7 @@ async fn failed_epoch_closes_but_new_epoch_checks_current_database(pool: PgPool)
     );
     drop(old);
     // Positive control: sign-out still reaches the new epoch, with session-end semantics.
-    state
-        .session_changes
-        .revoked(auth.identity.organization.organization_id, auth.token_hash);
+    state.session_changes.revoked(auth.token_hash);
     new.ended().await.unwrap();
 }
 
@@ -325,4 +330,107 @@ async fn worker_failure_during_initial_check_is_not_admitted(pool: PgPool) {
     state.session_changes.panic_worker().await;
     checked.release();
     assert!(matches!(watch.await, Err(sqlx::Error::PoolClosed)));
+}
+
+#[tokio::test]
+async fn membership_signals_scope_all_account_sessions_and_preserve_new_revision() {
+    let changes = SessionChanges::default();
+    let organization = Uuid::new_v4();
+    let account = Uuid::new_v4();
+    let first_key = (organization, vec![1]);
+    let first = changes.register_member(first_key.clone(), account, 0);
+    let second = changes.register_member((organization, vec![2]), account, 0);
+    let other_organization = changes.register_member((Uuid::new_v4(), vec![1]), account, 0);
+    let other_account = changes.register_member((organization, vec![3]), Uuid::new_v4(), 0);
+    changes.membership_revoked(organization, account, 1);
+    assert!(first.changed.borrow().membership_revoked);
+    assert!(second.changed.borrow().membership_revoked);
+    assert!(!first.changed.borrow().revoked);
+    assert!(!other_organization.changed.has_changed().unwrap());
+    assert!(!other_account.changed.has_changed().unwrap());
+    let reactivated = changes.register_member(first_key, account, 1);
+    // A delayed old signal cannot kill a connection authorized after reactivation.
+    changes.membership_revoked(organization, account, 1);
+    assert!(!reactivated.changed.borrow().membership_revoked);
+    assert!(first.changed.borrow().membership_revoked);
+    changes.revoked(vec![1]);
+    assert!(reactivated.changed.borrow().revoked);
+    assert!(other_organization.changed.borrow().revoked);
+    assert!(!second.changed.borrow().revoked);
+}
+
+#[sqlx::test]
+async fn membership_connect_race_is_classified_independently_from_session_end(pool: PgPool) {
+    let (state, auth) = fixture(&pool).await;
+    let checked = state.session_changes.pause(Phase::Checked);
+    let watch = auth.watch_session(&state);
+    tokio::pin!(watch);
+    tokio::select! {
+        _ = &mut watch => panic!("initial check did not pause"),
+        _ = checked.entered() => {},
+    }
+    sqlx::query("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2")
+        .bind(auth.identity.organization.organization_id).bind(auth.account_id).execute(&pool).await.unwrap();
+    state.session_changes.membership_revoked(
+        auth.identity.organization.organization_id,
+        auth.account_id,
+        1,
+    );
+    checked.release();
+    let mut socket = watch.await.unwrap().unwrap();
+    assert_eq!(socket.ended().await.unwrap(), 4003);
+}
+
+#[tokio::test]
+async fn revoked_session_cannot_be_restored_by_a_new_membership_revision() {
+    let changes = SessionChanges::default();
+    let key = (Uuid::new_v4(), vec![1]);
+    let account = Uuid::new_v4();
+    let old = changes.register_member(key.clone(), account, 0);
+    changes.revoked(key.1.clone());
+    let new = changes.register_member(key, account, 1);
+    assert!(new.changed.borrow().revoked);
+    assert!(old.guard.epoch.same_channel(&new.guard.epoch));
+    assert_eq!(changes.sessions.lock().unwrap().by_token.len(), 1);
+    assert_eq!(changes.sessions.lock().unwrap().by_member.len(), 1);
+    drop(old);
+    drop(new);
+    let sessions = changes.sessions.lock().unwrap();
+    assert!(sessions.entries.is_empty());
+    assert!(sessions.by_token.is_empty());
+    assert!(sessions.by_member.is_empty());
+}
+
+#[tokio::test]
+async fn stale_membership_registration_cannot_revoke_or_replace_a_newer_epoch() {
+    let changes = SessionChanges::default();
+    let key = (Uuid::new_v4(), vec![1]);
+    let account = Uuid::new_v4();
+    let old = changes.register_member(key.clone(), account, 0);
+    let current = changes.register_member(key.clone(), account, 1);
+    assert!(old.changed.borrow().membership_revoked);
+    assert!(!current.changed.borrow().membership_revoked);
+    let mut stale = SessionWatch {
+        registration: changes.register_member(key.clone(), account, 0),
+        deadline: Instant::now() + Duration::from_secs(60),
+    };
+    assert_eq!(stale.ended().await.unwrap(), 4003);
+    assert!(!current.changed.has_changed().unwrap());
+    assert!(changes.sessions.lock().unwrap().entries[&key].same_channel(&current.guard.epoch));
+    assert!(changes.sessions.lock().unwrap().by_token[&key.1].contains(&key));
+    assert!(changes.sessions.lock().unwrap().by_member[&(key.0, account)].contains(&key));
+    drop(stale);
+    drop(old);
+    assert!(changes.sessions.lock().unwrap().entries[&key].same_channel(&current.guard.epoch));
+    // Revocation remains latched even for a later stale registration.
+    changes.revoked(key.1.clone());
+    let revoked_stale = changes.register_member(key, account, 0);
+    assert!(revoked_stale.changed.borrow().revoked);
+    assert!(revoked_stale.guard.epoch.same_channel(&current.guard.epoch));
+    drop(revoked_stale);
+    drop(current);
+    let sessions = changes.sessions.lock().unwrap();
+    assert!(sessions.entries.is_empty());
+    assert!(sessions.by_token.is_empty());
+    assert!(sessions.by_member.is_empty());
 }

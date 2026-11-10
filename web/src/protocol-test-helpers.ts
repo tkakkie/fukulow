@@ -11,7 +11,7 @@ export const message = (m: ResolvedInput['message'], channel: string): Message =
 export const record = (seq: number, channel = 'A'): Message => ({ channel_id: channel, seq, body: `m${seq}`, id: `id${seq}`,
   sender: 'other', client_message_id: `auto-${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null })
 export function observe(state: State): Observed {
-  return { session: state.session, channels: Object.fromEntries(Object.entries(state.channels).map(([id, c]) => [id, {
+  return { session: state.session, organization: state.organization, channels: Object.fromEntries(Object.entries(state.channels).map(([id, c]) => [id, {
     state: c.state, cursor: c.cursor, messages: c.messages,
     pending: c.pending.map(p => ({ client_message_id: p.clientMessageId, state: p.state })),
   }])) }
@@ -28,6 +28,7 @@ export function protocolClient() {
       const msg = () => message(i.message, channel)
       let input: Input
       switch (i.type) {
+        case 'organization_refused': input = { type: 'organization_unavailable' }; break
         case 'session_start': case 'session_replaced': input = { type: i.type, selfId: 'me' }; break
         case 'connection_ready': input = { type: i.type, connection: state.connection! }; break
         case 'socket_closed': input = { type: i.type, connection: state.connection!, code: i.code as number }; break

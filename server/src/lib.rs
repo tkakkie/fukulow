@@ -53,18 +53,19 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(auth::sign_in).delete(auth::sign_out),
         )
         .route("/api/v1/me", get(auth::me))
+        .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
         .route(
-            "/api/v1/channels",
+            "/api/v1/orgs/{org}/channels",
             get(channels::list_channels).post(channels::create_channel),
         )
         .route(
-            "/api/v1/channels/{id}/messages",
+            "/api/v1/orgs/{org}/channels/{id}/messages",
             get(messages::list_messages)
                 .post(messages::send_message)
                 // 4000 control characters escape to 6 bytes each in JSON, so the global 16 KiB would reject valid bodies.
                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
         )
-        .route("/api/v1/ws", get(realtime::upgrade))
+        .route("/api/v1/orgs/{org}/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .fallback(static_handler)
         .with_state(state)

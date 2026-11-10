@@ -18,7 +18,7 @@ Do not create docs other than `docs/spec.md`, `docs/decisions.md`, `docs/invaria
 - A Tier 1 rule gets a CI check only if it is reliable (with a negative test); until then it is approved but review-enforced.
 - Tier 1, CI: `openapi.json` and generated TS types are regenerated and diff-checked (`make api`); toolchain versions agree.
 - Tier 1, CI: no secrets in the repo (gitleaks, `.gitignore`, review). The repo is public.
-- Tier 1, CI: every table has `organization_id` NOT NULL, except `organizations` and migration bookkeeping.
+- Tier 1, CI: every table has `organization_id` NOT NULL, except exactly `public.organizations`, `public._sqlx_migrations`, `public.accounts` and `public.account_sessions` (schema and name; other schemas are not exempt).
 - Tier 1, CI: migrations are append-only; an existing migration file is never edited or deleted.
 - Tier 1, CI: Rust `unsafe` is forbidden; `unwrap()`, `expect()`, `panic!()` are denied outside `#[cfg(test)]`; startup errors propagate as `Result`.
 - An unavoidable Rust lint exception needs a stated reason and the maintainer's approval; no abstractions just to satisfy a lint.

@@ -24,11 +24,12 @@ async fn body(response: Response) -> Value {
 }
 
 async fn request(app: &Router, method: &str, path: &str, token: &str, input: Value) -> Response {
+    let path = scoped_path(path, token);
     app.clone()
         .oneshot(
             Request::builder()
                 .method(method)
-                .uri(path)
+                .uri(&path)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from(input.to_string()))
@@ -51,26 +52,24 @@ async fn organization(pool: &PgPool) -> Uuid {
 // Members and sessions are test fixtures, not a membership-management API.
 // Allow shared member ids across tenants to expose missing composite-key joins.
 async fn member(pool: &PgPool, organization_id: Uuid, id: Uuid, role: &str) -> String {
-    sqlx::query(
-        "INSERT INTO users (organization_id, id, email, name, password_hash, role) \
-         VALUES ($1, $2, $3, 'Member', 'unused-in-session-fixture', $4)",
-    )
-    .bind(organization_id)
-    .bind(id)
-    .bind(format!("{id}@example.com"))
-    .bind(role)
-    .execute(pool)
-    .await
-    .unwrap();
+    let account_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'unused')")
+        .bind(account_id)
+        .bind(format!("{account_id}@example.com"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, 'Member', $4)")
+        .bind(organization_id).bind(id).bind(account_id).bind(role).execute(pool).await.unwrap();
+    // The prefix is fixture metadata for explicit Organization route construction.
     let token = format!(
         "{organization_id}.{}{}",
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple()
     );
-    sqlx::query("INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)")
-        .bind(organization_id)
+    sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
         .bind(Sha256::digest(token.as_bytes()).to_vec())
-        .bind(id)
+        .bind(account_id)
         .execute(pool)
         .await
         .unwrap();
@@ -111,7 +110,9 @@ async fn channels_require_authentication_without_database_access() {
     let app = router(&pool);
     for method in ["GET", "POST"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
-            let mut request = Request::builder().method(method).uri("/api/v1/channels");
+            let mut request = Request::builder()
+                .method(method)
+                .uri("/api/v1/orgs/00000000-0000-0000-0000-000000000000/channels");
             if let Some(value) = authorization {
                 request = request.header(header::AUTHORIZATION, value);
             }
@@ -242,11 +243,14 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
         let response = app
             .clone()
             .oneshot(
-                Request::get(format!("/api/v1/channels?organization_id={foreign}"))
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header("x-organization-id", foreign.to_string())
-                    .body(Body::empty())
-                    .unwrap(),
+                Request::get(scoped_path(
+                    &format!("/api/v1/channels?organization_id={foreign}"),
+                    token,
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-organization-id", foreign.to_string())
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -268,14 +272,16 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
     let response = app
         .clone()
         .oneshot(
-            Request::post(format!("/api/v1/channels?organization_id={second}"))
-                .header(header::COOKIE, format!("fukulow_session={token_a}"))
-                .header("x-organization-id", second.to_string())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"name": "Scoped", "visibility": "public"}).to_string(),
-                ))
-                .unwrap(),
+            Request::post(format!(
+                "/api/v1/orgs/{first}/channels?organization_id={second}"
+            ))
+            .header(header::COOKIE, format!("fukulow_session={token_a}"))
+            .header("x-organization-id", second.to_string())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"name": "Scoped", "visibility": "public"}).to_string(),
+            ))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -351,7 +357,7 @@ async fn channel_body_limit_and_content_type_rejections_do_not_write(pool: PgPoo
         let response = app
             .clone()
             .oneshot(
-                Request::post("/api/v1/channels")
+                Request::post(scoped_path("/api/v1/channels", &token))
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, content_type)
                     .body(Body::from(
@@ -425,4 +431,234 @@ async fn private_channel_creation_rolls_back_if_membership_insert_fails(pool: Pg
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+fn scoped_path(path: &str, token: &str) -> String {
+    if path.starts_with("/api/v1/channels") || path.starts_with("/api/v1/ws") {
+        let organization = token
+            .split_once('.')
+            .map(|(id, _)| id)
+            .unwrap_or("00000000-0000-0000-0000-000000000000");
+        path.replacen("/api/v1/", &format!("/api/v1/orgs/{organization}/"), 1)
+    } else {
+        path.to_owned()
+    }
+}
+
+async fn extract_auth(state: AppState, token: &str) -> Auth {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(sender)));
+    let app = Router::new()
+        .route(
+            "/api/v1/orgs/{org}/channels",
+            axum::routing::get(move |auth: Auth| {
+                let sender = sender.clone();
+                async move {
+                    sender
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(auth)
+                        .ok()
+                        .unwrap();
+                    StatusCode::OK
+                }
+            }),
+        )
+        .with_state(state);
+    assert_eq!(
+        request(&app, "GET", "/api/v1/channels", token, Value::Null)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    receiver.await.unwrap()
+}
+
+#[sqlx::test]
+async fn reactivation_keeps_member_identity_without_restoring_private_channel_permissions(
+    pool: PgPool,
+) {
+    let app = router(&pool);
+    let organization = organization(&pool).await;
+    let id = Uuid::new_v4();
+    let token = member(&pool, organization, id, "member").await;
+    let private = create(&app, &token, "Private history", "private").await;
+    let public = create(&app, &token, "Public history", "public").await;
+    assert_eq!(
+        list(&app, &token).await["channels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
+        .bind(organization)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "GET", "/api/v1/channels", &token, Value::Null)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2")
+        .bind(organization)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(list(&app, &token).await, json!({"channels":[public]}));
+    let private_id = private["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+    let public_id = public["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+    assert!(
+        !is_visible(&pool, organization, id, private_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        visible_members(&pool, organization, private_id, &[id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        is_visible(&pool, organization, id, public_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        visible_members(&pool, organization, public_id, &[id])
+            .await
+            .unwrap(),
+        vec![id]
+    );
+    for (channel, status) in [
+        (private_id, StatusCode::NOT_FOUND),
+        (public_id, StatusCode::OK),
+    ] {
+        let response = request(
+            &app,
+            "GET",
+            &format!("/api/v1/channels/{channel}/messages"),
+            &token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), status);
+    }
+    let response = request(
+        &app,
+        "POST",
+        &format!("/api/v1/channels/{private_id}/messages"),
+        &token,
+        json!({"client_message_id":Uuid::new_v4(),"body":"Stale grant must not send"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut upgrade = format!("ws://{address}/api/v1/orgs/{organization}/ws")
+        .into_client_request()
+        .unwrap();
+    upgrade.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    for (channel_id, expected) in [(private_id, "error"), (public_id, "subscribed")] {
+        socket
+            .send(Message::text(
+                json!({"type":"subscribe","channel_id":channel_id,"after_seq":0}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
+        assert_eq!(event["type"], expected);
+        assert_eq!(event["channel_id"], channel_id.to_string());
+        if expected == "error" {
+            assert_eq!(event["code"], "channel_not_found");
+        }
+    }
+
+    // A new grant explicitly records the current Member revision.
+    sqlx::query("UPDATE channel_members cm SET membership_revision=u.membership_revision FROM users u WHERE cm.organization_id=$1 AND cm.channel_id=$2 AND cm.member_id=$3 AND u.organization_id=cm.organization_id AND u.id=cm.member_id")
+        .bind(organization).bind(private_id).bind(id).execute(&pool).await.unwrap();
+    assert!(
+        is_visible(&pool, organization, id, private_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        visible_members(&pool, organization, private_id, &[id])
+            .await
+            .unwrap(),
+        vec![id]
+    );
+    socket
+        .send(Message::text(
+            json!({"type":"subscribe","channel_id":private_id,"after_seq":0}).to_string(),
+        ))
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
+    assert_eq!(event["type"], "subscribed");
+    assert_eq!(event["channel_id"], private_id.to_string());
+    let app = router(&pool);
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            &format!("/api/v1/channels/{private_id}/messages"),
+            &token,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    for channel_id in [private_id, public_id] {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                &format!("/api/v1/channels/{channel_id}/messages"),
+                &token,
+                json!({"client_message_id":Uuid::new_v4(),"body":"Current authorization can send"})
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+    }
+    socket.close(None).await.unwrap();
+    server.abort();
+    let historical_grant: Uuid = sqlx::query_scalar(
+        "SELECT member_id FROM channel_members WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(organization)
+    .bind(private["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(historical_grant, id);
 }

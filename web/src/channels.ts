@@ -1,4 +1,3 @@
-import * as defaultApi from './api'
 import type { Channel, ChannelVisibility, CreateChannelRequest, Result } from './api'
 
 export type { Channel, ChannelVisibility }
@@ -25,7 +24,7 @@ export function channelError(r: Extract<Result<unknown>, { ok: false }>): string
 const sessionEndedError = 'セッションが終了しました。'
 
 /** Channel list, selection and creation. `subscribe` fires after every state change. `close` ends the session's list: later async results are dropped. */
-export function createChannels(api: ChannelsApi = defaultApi) {
+export function createChannels(api: ChannelsApi) {
   let state: ChannelsState = { status: 'loading', channels: [], selectedId: null }
   let generation = 0 // bumped by create(): a load that started earlier is stale
   let closed = false // the session ended: nothing from an earlier call may reach this state

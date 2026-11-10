@@ -21,11 +21,12 @@ async fn body(response: Response) -> Value {
 }
 
 async fn request(app: &Router, method: &str, path: &str, token: &str, input: Value) -> Response {
+    let path = scoped_path(path, token);
     app.clone()
         .oneshot(
             Request::builder()
                 .method(method)
-                .uri(path)
+                .uri(&path)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from(input.to_string()))
@@ -47,25 +48,24 @@ async fn organization(pool: &PgPool) -> Uuid {
 }
 
 async fn member(pool: &PgPool, organization_id: Uuid, id: Uuid) -> String {
-    sqlx::query(
-        "INSERT INTO users (organization_id, id, email, name, password_hash, role) \
-         VALUES ($1, $2, $3, 'Member', 'unused', 'member')",
-    )
-    .bind(organization_id)
-    .bind(id)
-    .bind(format!("{id}@example.com"))
-    .execute(pool)
-    .await
-    .unwrap();
+    let account_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'unused')")
+        .bind(account_id)
+        .bind(format!("{account_id}@example.com"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, 'Member', $4)")
+        .bind(organization_id).bind(id).bind(account_id).bind("member").execute(pool).await.unwrap();
+    // The prefix is fixture metadata for explicit Organization route construction.
     let token = format!(
         "{organization_id}.{}{}",
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple()
     );
-    sqlx::query("INSERT INTO sessions (organization_id, token_hash, user_id) VALUES ($1, $2, $3)")
-        .bind(organization_id)
+    sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
         .bind(Sha256::digest(token.as_bytes()).to_vec())
-        .bind(id)
+        .bind(account_id)
         .execute(pool)
         .await
         .unwrap();
@@ -151,9 +151,9 @@ async fn messages_require_authentication_without_database_access() {
     let app = router(&pool);
     for method in ["GET", "POST"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
-            let mut request = Request::builder()
-                .method(method)
-                .uri("/api/v1/channels/not-a-uuid/messages");
+            let mut request = Request::builder().method(method).uri(
+                "/api/v1/orgs/00000000-0000-0000-0000-000000000000/channels/not-a-uuid/messages",
+            );
             if let Some(value) = authorization {
                 request = request.header(header::AUTHORIZATION, value);
             }
@@ -859,4 +859,16 @@ async fn send_route_accepts_the_largest_valid_body_and_still_caps_the_request(po
     )
     .await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+fn scoped_path(path: &str, token: &str) -> String {
+    if path.starts_with("/api/v1/channels") || path.starts_with("/api/v1/ws") {
+        let organization = token
+            .split_once('.')
+            .map(|(id, _)| id)
+            .unwrap_or("00000000-0000-0000-0000-000000000000");
+        path.replacen("/api/v1/", &format!("/api/v1/orgs/{organization}/"), 1)
+    } else {
+        path.to_owned()
+    }
 }

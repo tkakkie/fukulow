@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { restore, setupAndSignIn, signOut } from './auth'
 
 const identity = {
-  member: { id: 'm', email: 'a@example.com', name: 'A', role: 'owner' },
-  organization: { organization_id: 'o', name: 'Org' },
+  account: { id: 'a', email: 'a@example.com' },
+  organizations: [{ organization_id: 'o', name: 'Org' }],
 }
 const j = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 const route = (table: Record<string, () => Response | Promise<Response>>) =>
