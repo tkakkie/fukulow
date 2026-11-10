@@ -16,9 +16,61 @@ use utoipa::{
         crate::channels::Channel, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::channels::ChannelList,
         crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage, crate::messages::ListProjectionQuery, crate::messages::TimelineItem, crate::messages::TimelinePage, crate::messages::TopicPage, crate::messages::TopicSummary, crate::messages::TopicSummaryResponse,
         crate::realtime::ClientMessage, crate::realtime::ServerEvent)),
-    modifiers(&Security, &WebSocketDiscriminators)
+    modifiers(&Security, &WebSocketDiscriminators, &ShutdownResponses)
 )]
 pub struct ApiDoc;
+
+struct ShutdownResponses;
+impl Modify for ShutdownResponses {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::{
+            PartialSchema,
+            openapi::{Content, Header, Response},
+        };
+
+        // The outer middleware affects every API operation, before extraction or admission.
+        let shutdown = Response::builder()
+            .description("This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends")
+            .content("application/json", Content::new(Some(Ref::from_schema_name("ErrorBody"))))
+            .header("Retry-After", Header::builder()
+                .schema(Some(crate::auth::RetryAfterSeconds::schema()))
+                .description(Some("Jittered retry delay in seconds (1 through 5)"))
+                .build())
+            .header("Cache-Control", Header::builder()
+                .description(Some("no-store"))
+                .build())
+            .build();
+        for item in openapi.paths.paths.values_mut() {
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.options,
+                &mut item.head,
+                &mut item.patch,
+                &mut item.trace,
+                &mut item.query,
+            ]
+            .into_iter()
+            .filter_map(Option::as_mut)
+            .chain(item.additional_operations.values_mut())
+            {
+                let mut response = shutdown.clone();
+                if let Some(RefOr::T(admission)) = operation.responses.responses.get("503") {
+                    response.description = format!(
+                        "{}; alternatively, {}",
+                        admission.description, response.description
+                    );
+                }
+                operation
+                    .responses
+                    .responses
+                    .insert("503".into(), response.into());
+            }
+        }
+    }
+}
 
 struct Security;
 impl Modify for Security {

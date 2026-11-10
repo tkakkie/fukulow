@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use axum::{body::Body, http::Request};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, header},
+};
 use fukulow_server::{
     AppState, app,
     messages::Message,
@@ -21,8 +24,143 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// Topic projections add four routes with six described responses each.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 85;
+// All 16 operations document shutdown; five already documented admission 503.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 96;
+
+#[test]
+fn every_api_operation_documents_shutdown_retry_contract() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        let mut operations = 0;
+        for (path, item) in document["paths"].as_object().unwrap() {
+            assert!(
+                path.starts_with("/api/v1/"),
+                "static paths are outside OpenAPI"
+            );
+            for method in HTTP_METHODS {
+                let Some(operation) = item.get(method) else {
+                    continue;
+                };
+                operations += 1;
+                let response = &operation["responses"]["503"];
+                assert_eq!(
+                    response["content"]["application/json"]["schema"],
+                    json!({"$ref": "#/components/schemas/ErrorBody"}),
+                    "{method} {path}"
+                );
+                let description = response["description"].as_str().unwrap();
+                assert!(description.contains("shutting_down"), "{method} {path}");
+                assert!(
+                    description.contains("instance is stopping"),
+                    "{method} {path}"
+                );
+                assert!(
+                    description.contains("same client_message_id"),
+                    "{method} {path}"
+                );
+                let headers = &response["headers"];
+                assert_eq!(
+                    headers["Retry-After"]["schema"]["type"], "integer",
+                    "{method} {path}"
+                );
+                assert_eq!(
+                    headers["Retry-After"]["schema"]["minimum"], 1,
+                    "{method} {path}"
+                );
+                assert_eq!(
+                    headers["Retry-After"]["description"],
+                    "Jittered retry delay in seconds (1 through 5)",
+                    "{method} {path}"
+                );
+                assert_eq!(
+                    headers["Cache-Control"]["description"], "no-store",
+                    "{method} {path}"
+                );
+                if method == "post" && path.ends_with("/messages") {
+                    assert!(description.contains("Send admission queue is full"));
+                    assert!(description.contains("persistence has not started"));
+                } else if path.contains("/timeline") || path.contains("/topics") {
+                    assert!(description.contains("Projection watermark admission unavailable"));
+                }
+            }
+        }
+        assert_eq!(operations, 16);
+    }
+}
+
+#[tokio::test]
+async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_contract() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let state = AppState {
+        pool,
+        shutdown: Default::default(),
+        cookie_secure: true,
+        setup_token: None,
+        sign_in_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        session_cleanup: Default::default(),
+        ws_allowed_origins: Default::default(),
+    };
+    let shutdown = state.shutdown.clone();
+    let router = app(state);
+    shutdown.begin();
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let mut requests = Vec::new();
+    for (path, item) in document["paths"].as_object().unwrap() {
+        let path = path
+            .replace("{org}", &Uuid::nil().to_string())
+            .replace("{id}", &Uuid::nil().to_string())
+            .replace("{topic_id}", &Uuid::nil().to_string());
+        for method in HTTP_METHODS {
+            if item.get(method).is_some() {
+                requests.push((method.to_uppercase(), path.clone()));
+            }
+        }
+    }
+    assert_eq!(requests.len(), 16);
+    requests.extend(
+        [
+            "/",
+            "/assets/missing.js",
+            "/channels/general",
+            "/api/v1/nope",
+        ]
+        .map(|path| ("GET".into(), path.into())),
+    );
+    for (method, path) in requests {
+        // Malformed bodies and absent credentials/Origin must not bypass the outer rejection.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.as_str())
+                    .uri(&path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 503, "{method} {path}");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let retry: u64 = response.headers()[header::RETRY_AFTER]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=5).contains(&retry), "{method} {path}: {retry}");
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"error": "shutting_down"})
+        );
+    }
+}
 
 #[test]
 fn added_error_responses_have_error_body_and_meaningful_descriptions() {

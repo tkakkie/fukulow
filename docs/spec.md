@@ -28,6 +28,10 @@ Later: attachments, reactions, push notifications, bots/webhooks, multiple organ
 - Setup extracts the JSON body before checking `setup_token`. Malformed JSON, missing required fields or invalid field types return 400, oversized bodies return 413, and unsupported content types return 415 even if the token is missing or invalid.
 - After successful extraction, a configured token must match before semantic input validation, password hashing or database access; missing or incorrect tokens return the same generic 401 before and after setup.
 
+## HTTP availability
+- During graceful shutdown, new HTTP API requests return 503 with JSON `ErrorBody` (`error: "shutting_down"`), a jittered `Retry-After` of 1–5 seconds and `Cache-Control: no-store`. This instance is stopping; the outer middleware rejects requests before authentication, extraction or operation admission, including health checks and WebSocket handshakes.
+- Clients retry after `Retry-After`, preserving the same `client_message_id` for sends to retain idempotency (C6). Send-admission 503 (`send admission unavailable`) instead rejects one operation because its queue is full or its 30-second admission wait expired; persistence has not started. Projection-admission 503 (`projection admission unavailable`) is also an operation capacity rejection. Both admission responses use the same retry range and no-store policy.
+
 ## Real-time sync contract
 Behaviour contract for Message delivery. OpenAPI covers only types (REST shapes, `ClientMessage`/`ServerEvent`, close codes); Rust, the web client and a future Kotlin client satisfy this contract independently and need not share an algorithm. Design and review: #91.
 Scope of every key and guarantee: one Organization and one Account Session. The idempotency key is `(organization_id, sender, client_message_id)`. Delivery guarantees assume the supported single-process deployment (`docs/decisions.md`).

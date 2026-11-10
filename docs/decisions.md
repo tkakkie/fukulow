@@ -10,6 +10,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Public repo. Reason: free CI minutes.
 - Migrations run at startup before listening. PostgreSQL 18 persists under `/var/lib/postgresql` (its new data path).
 - Deployment is single-process: live delivery, revocation, throttles and admission are process-local. Multiple server processes need shared publication/revocation and a shared limiter first (#18, #57).
+- #195: shutdown also returns 503 for non-API paths, including static assets and SPA routes; these middleware rejections are outside OpenAPI.
 - A second instance blocked on the migration advisory lock past the 5 s timeout fails startup and relies on Compose `restart: unless-stopped` to retry (#88, #93).
 - PostgreSQL 17+ is required (`transaction_timeout`); on older servers every send/subscription fails loudly. Compose and CI use 18; no startup check (#158).
 - Dependabot security updates were enabled on 2026-11-08 but no security PR has been seen, so do not claim they work. VPS automatic OS security updates are planned with the deploy work.
@@ -80,7 +81,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 
 ## Real-time delivery
 - #195: SIGTERM/SIGINT stop acceptance and reject new requests, broadcast 1001, then drain HTTP, detached sends/notifications and sockets before closing the pool. Count before spawn/upgrade so caller disconnects and task handoffs cannot hide work.
-- #195: retain provisional 60 s overall drain / 75 s Compose grace: 2,048-send SIGTERM drain <=814 ms; idle 10k restart <1 s (measurements.md). This is headroom, not a worst-case bound; pre-admission SQL can exceed it. Expiry skips runtime teardown.
+- #195: retain provisional 60 s drain / 75 s Compose stop_grace_period from measured drains: 2,048-send SIGTERM <=814 ms; idle 10k restart <1 s (measurements.md). These are not guaranteed worst-case times; pre-admission SQL can exceed them. Expiry skips runtime teardown.
+- #195 known limit: on normal exit, Tokio runtime teardown is outside the drain and can run past its 60 s deadline. Retain the current teardown behavior; no larger change now.
 - #195: sockets independently observe one shutdown watch and send Close concurrently, each capped at 1 s; a slow peer cannot serialize 10,000 closes. Upgrade callbacks retain a drain guard before handoff so late scheduling cannot race pool close.
 - #195: SIGKILL, crashes and drain expiry cannot promise COMMIT outcome or Close delivery. Retry the same client_message_id and resubscribe from the gap-free cursor; #135 resolves uncertain COMMITs without duplicate Messages.
 - Subscribe handoff: register live first, replay committed seq > cursor in 50-Message pages, flush newer queued events, then send `subscribed`. Clients dedupe by (channel_id, seq): duplicates allowed, no gaps (#18).

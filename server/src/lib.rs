@@ -108,8 +108,15 @@ pub(crate) async fn reject_new_requests(
     if shutdown.is_stopped() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (
+                    header::RETRY_AFTER,
+                    rand::random_range(1..=5_u64).to_string(),
+                ),
+                (header::CACHE_CONTROL, "no-store".to_owned()),
+            ],
             axum::Json(crate::auth::ErrorBody {
-                error: "server shutting down".into(),
+                error: "shutting_down".into(),
             }),
         )
             .into_response();
