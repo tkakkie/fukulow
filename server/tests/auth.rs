@@ -767,6 +767,93 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn offline_restore_ends_every_account_session_and_preserves_members(pool: PgPool) {
+    let app = router(&pool);
+    let (_, second) = two_organizations(&pool, &app).await;
+    sqlx::query("INSERT INTO accounts (id, email, password_hash) SELECT gen_random_uuid(), 'second@example.com', password_hash FROM accounts LIMIT 1")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) SELECT $1, gen_random_uuid(), id, 'Second', 'member' FROM accounts WHERE email = 'second@example.com'")
+        .bind(second).execute(&pool).await.unwrap();
+    let members: String = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id, id)::text FROM users u",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut credentials = Vec::new();
+    for email in [
+        "owner@example.com",
+        "owner@example.com",
+        "second@example.com",
+    ] {
+        let response = request(
+            &app,
+            "POST",
+            "/api/v1/session",
+            json!({"email": email, "password": PASSWORD}),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let session = body(response).await;
+        credentials.push((
+            cookie,
+            format!("Bearer {}", session["token"].as_str().unwrap()),
+        ));
+    }
+    for (cookie, bearer) in &credentials {
+        for headers in [
+            [("cookie", cookie.as_str())],
+            [("authorization", bearer.as_str())],
+        ] {
+            assert_eq!(
+                request(&app, "GET", "/api/v1/me", Value::Null, &headers)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+        }
+    }
+    sqlx::raw_sql(include_str!("../src/auth/end-all-sessions.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM account_sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
+    for (cookie, bearer) in &credentials {
+        for headers in [
+            [("cookie", cookie.as_str())],
+            [("authorization", bearer.as_str())],
+        ] {
+            assert_eq!(
+                request(&app, "GET", "/api/v1/me", Value::Null, &headers)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+    let after: String = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id, id)::text FROM users u",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(members, after);
+    assert_eq!(sign_in(&app, "", PASSWORD).await.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
 async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;

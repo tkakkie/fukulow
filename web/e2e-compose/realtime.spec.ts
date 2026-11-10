@@ -1,5 +1,7 @@
 import { expect, test, type Page, type WebSocket as ObservedWebSocket } from '@playwright/test'
-import type { Message, ServerEvent } from '../src/api-schema.js'
+import type { components, ServerEvent } from '../src/api-schema.d.ts'
+
+type Message = components['schemas']['Message']
 
 // Empty DB -> setup -> sign in -> create channel -> post -> appears live in a second browser context.
 const owner = { email: 'owner@example.com', password: 'correct horse battery' }
