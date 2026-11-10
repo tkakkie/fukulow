@@ -98,3 +98,17 @@ export const sendMessage = (organizationId: string, channelId: string, body: Sen
 
 export type ServerEvent = import('./api-schema').ServerEvent
 export type ClientMessage = import('./api-schema').ClientMessage
+
+export type Role = components['schemas']['Role']
+export type Member = components['schemas']['Member']
+export type CreateInviteRequest = components['schemas']['CreateInviteRequest']
+export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest']
+export type InviteResponse = components['schemas']['InviteResponse']
+export const listMembers = (organizationId: string, f: typeof fetch = fetch) =>
+  call<components['schemas']['MemberList']>(f, `${orgPath(organizationId)}/members`, { cache: 'no-store' }, true)
+export const changeRole = (organizationId: string, memberId: string, role: Role, f: typeof fetch = fetch) =>
+  call<Member>(f, `${orgPath(organizationId)}/members/${encodeURIComponent(memberId)}/role`, { ...json({ role }), method: 'PATCH' }, true)
+export const createInvite = (organizationId: string, body: CreateInviteRequest, f: typeof fetch = fetch) =>
+  call<InviteResponse>(f, `${orgPath(organizationId)}/invites`, json(body), true)
+export const acceptInvite = (organizationId: string, body: AcceptInviteRequest, f: typeof fetch = fetch) =>
+  call<Identity>(f, `${orgPath(organizationId)}/invites/accept`, json(body), true)

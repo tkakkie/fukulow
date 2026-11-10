@@ -1,7 +1,12 @@
 <script lang="ts">
   import { createAuth } from './auth.svelte'
   import Workspace from './Workspace.svelte'
+  import Members from './MemberList.svelte'
+  import InviteAccept from './InviteAccept.svelte'
+  import { inviteFromLocation } from './members'
+  import { inviteAcceptanceAdapter } from './members.svelte'
 
+  const invitation = inviteAcceptanceAdapter(inviteFromLocation())
   const auth = createAuth()
   auth.load()
 
@@ -40,6 +45,7 @@
 
 <main>
   <h1>fukulow</h1>
+  <InviteAccept model={invitation} signedIn={auth.view.screen === 'app'} accept={input => auth.acceptInvitation(invitation, input)} />
 
   {#if auth.view.screen === 'loading'}
     <p>読み込み中…</p>
@@ -86,11 +92,14 @@
     {/if}
     {#if auth.organizationStatus === 'unavailable'}
       <p role="alert">この組織は利用できません。</p>
+      <button onclick={() => auth.selectOrganization(auth.selectedOrganizationId)}>メンバー資格を再確認</button>
     {:else if auth.organizationStatus === 'error'}
       <p role="alert">サーバーに接続できません。</p>
       <button onclick={() => auth.selectOrganization(auth.selectedOrganizationId)}>再試行</button>
     {:else if session && organization}
-      {#key session}<Workspace {session} />{/key}
+      {#key session}<Workspace {session} canCreateChannels={organization.organization.capabilities.can_create_channels.allowed} />
+        {#if auth.members}<Members model={auth.members} identity={organization} onchanged={() => auth.selectOrganization(auth.selectedOrganizationId)} />{/if}
+      {/key}
       <p>{organization.organization.name} / {organization.member.name} さん</p>
     {:else if identity.organizations.length === 0}
       <p>利用できる組織がありません。</p>

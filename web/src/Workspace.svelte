@@ -5,7 +5,7 @@
   import Timeline from './Timeline.svelte'
 
   // The session's controllers outlive this component: unmounting it never closes the connection.
-  let { session }: { session: SessionModel } = $props()
+  let { session, canCreateChannels }: { session: SessionModel; canCreateChannels: boolean } = $props()
   const channels = $derived(session.channels)
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
@@ -21,7 +21,7 @@
       <p>読み込み中…</p>
     {/if}
     <ChannelList channels={s.channels} selectedId={s.selectedId} onselect={(id) => channels.select(id)} />
-    <CreateChannelForm oncreate={(name, visibility) => channels.create(name, visibility)} />
+    {#if canCreateChannels}<CreateChannelForm oncreate={(name, visibility) => channels.create(name, visibility)} />{/if}
   </aside>
   <div class="main">
     {#if selected}
@@ -33,7 +33,7 @@
       </small>
       {#key selected.id}<Timeline {channel} />{/key}
     {:else if s.status === 'ready'}
-      <p>チャンネルがありません。左のフォームから作成してください。</p>
+      <p>チャンネルがありません。</p>
     {/if}
   </div>
 </div>

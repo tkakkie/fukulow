@@ -72,6 +72,10 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - CI probes health through Caddy HTTPS (local certificate verification off) to exercise proxy routing and TLS startup.
 - Cookie WebSockets require one matching Origin: same Host over HTTPS (HTTP when cookie_secure=false) or `FUKULOW_WS_ALLOWED_ORIGINS`; forwarded headers never decide it. Origin is checked before Auth and Organization parsing; Bearer needs no Origin.
 
+- #144 uses one deny-by-default authorize function, including SQL role sets derived from it. Owner changes Roles/invites any Role; Admin invites non-Owners. Guests need explicit current grants even for public Channels; private grants remain required for every Role.
+- #144 Invites bind email/Role for 7 days; SHA-256 of 256 random bits is stored. Existing Accounts must authenticate; anonymous uniqueness conflicts require sign-in, never email attachment. Activation/consumption is atomic; issued Invites survive issuer demotion until use/expiry.
+- #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
+
 ## Channels and Messages
 - Private Channel creation adds the creator in the same transaction; composite FKs bind memberships to a Channel and Member of the same Organization. Listing is one scoped query, `no-store` (#22).
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
@@ -169,11 +173,12 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 ## Web client
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
 - Web sync is layered (components, adapter, controller, pure protocol, API/transport) so ordering and dedup are testable without Svelte or I/O; only message sync has a protocol (#91/#94). No CI layer check yet (needs a negative test).
-- Capabilities (`{allowed, reason?}` per operation) are added only when the UI must show in advance whether an operation is possible (#91).
+- Capabilities (`{allowed, reason?}`) come from authorize: Organization invite/manage-Roles/create-Channels, Channel add-Members (#144). Server requests re-check independently; #149 owns Channel management endpoints.
 - #120: an async `channel_not_found` carries no subscription generation; if it could belong to a retired or a pending subscription, the controller reconnects with backoff. Cost: one resubscribe of all Channels; other clients must do the same.
 - #97 Svelte 5 adapters only read the controller and forward intents; `createSubscriber` carries change notifications, so state is never copied into `$state`. Session controllers live from Sign in to sign-out/4001/401/replacement, closed by the auth adapter.
 - #195: reconnect uses full jitter [0, min(10 s, 500 ms * 2^attempt)), including the first 4008; only subscribed resets attempts, avoiding handshake retry loops. 4001/4003 remain terminal. History fill keeps deterministic backoff; injected randomness permits exact tests.
 - #146/#148 client classification: 4001 Sign in; 4003 terminal Organization unavailable; 1001/1011 back off and reconnect; 4008 reconnects with bounded retries. A rejected browser handshake never implies 4003 (`GET .../me` confirms).
+- #144 explicit Organization re-selection REST-checks Membership and starts fresh sync only on success, allowing re-invites without sign-out. Failure never loops; old pending sends and work stay fenced, including same-Account vs replaced-Account 401 handling.
 - The auth adapter keeps Account/controller lifetime and Organization selection together (Tier 2 deviation) to avoid an unrelated abstraction in the #146 migration; sync policy stays in the controller/protocol.
 - #200 layout A2 (rail, チャンネル column with トピック accordion, main card, closable right panel), picked by the maintainer from three mockups; surfaces split by tone and radius, not rules. Details in `docs/ui.md`.
 - #200 navigation uses the History API and the existing SPA fallback, with no router dependency: one entry per view or panel layer; in-app back/close controls replace instead of popping, so they never change main or leave the app. URLs are hints; the API decides access.

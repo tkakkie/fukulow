@@ -13,9 +13,13 @@ use uuid::Uuid;
 
 use crate::AppState;
 
+pub mod authorization;
+pub use authorization::{Action, Actor, Capability, OrganizationCapabilities, Resource, authorize};
 mod cleanup;
 #[cfg(test)]
 mod credential_tests;
+pub mod invites;
+pub mod members;
 mod password;
 use password::{check_password, hash_password};
 mod session;
@@ -41,6 +45,10 @@ pub struct ApiError(StatusCode, &'static str, Option<std::time::Duration>);
 impl ApiError {
     pub(crate) fn organization_unavailable() -> Self {
         Self(StatusCode::NOT_FOUND, "organization_unavailable", None)
+    }
+
+    pub(crate) fn forbidden() -> Self {
+        Self(StatusCode::FORBIDDEN, "forbidden", None)
     }
 
     fn unauthorized() -> Self {
@@ -115,7 +123,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, sqlx::Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 pub enum Role {
@@ -129,6 +137,7 @@ pub enum Role {
 pub struct Organization {
     pub organization_id: Uuid,
     pub name: String,
+    pub capabilities: OrganizationCapabilities,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -236,6 +245,7 @@ async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<
         headers(("Cache-Control" = String, description = "no-store"))),
     (status = 500, description = "Database failure while checking whether an Organization exists", body = ErrorBody)))]
 pub async fn setup_status(State(state): State<AppState>) -> Result<Response, ApiError> {
+    authorization::require(Actor::Anonymous, Action::Public, Resource::Global)?;
     let setup_required = !organization_exists(&state.pool).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
@@ -278,6 +288,7 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
     input: SetupRequest,
     hash_password: impl FnOnce(String) -> Hash,
 ) -> Result<Response, ApiError> {
+    authorization::require(Actor::Anonymous, Action::Public, Resource::Global)?;
     if let Some(expected) = &state.setup_token {
         let supplied = input
             .setup_token
@@ -349,6 +360,7 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
             organization: Organization {
                 organization_id,
                 name: organization_name.into(),
+                capabilities: OrganizationCapabilities::for_member(organization_id, Role::Owner),
             },
             member: Member {
                 id,
@@ -450,6 +462,7 @@ async fn sign_in_with_entropy(
     workers: &'static tokio::sync::Semaphore,
     entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
 ) -> Result<NativeSessionResponse, ApiError> {
+    authorization::require(Actor::Anonymous, Action::Public, Resource::Global)?;
     let email = email(&input.email)?;
     if input.password.is_empty() || input.password.len() > 1024 {
         return Err(ApiError::bad_request());
@@ -529,9 +542,9 @@ async fn account_identity(
         .bind(account_id)
         .fetch_one(pool)
         .await?;
-    let organizations = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT o.organization_id, o.name FROM organizations o JOIN users u USING (organization_id) WHERE u.account_id = $1 AND u.deactivated_at IS NULL ORDER BY o.organization_id"
-    ).bind(account_id).fetch_all(pool).await?.into_iter().map(|(organization_id,name)|Organization{organization_id,name}).collect();
+    let organizations = sqlx::query_as::<_, (Uuid, String, Role)>(
+        "SELECT o.organization_id, o.name, u.role FROM organizations o JOIN users u USING (organization_id) WHERE u.account_id = $1 AND u.deactivated_at IS NULL ORDER BY o.organization_id"
+    ).bind(account_id).fetch_all(pool).await?.into_iter().map(|(organization_id,name,role)|Organization{organization_id,name,capabilities: OrganizationCapabilities::for_member(organization_id,role)}).collect();
     Ok(AccountIdentity {
         account: Account {
             id: account_id,
@@ -612,11 +625,15 @@ impl FromRequestParts<AppState> for Auth {
         .await?
         .ok_or_else(ApiError::unauthorized)?;
         let unavailable = || ApiError(StatusCode::NOT_FOUND, "organization_unavailable", None);
-        Ok(Self {
+        let auth = Self {
             identity: Identity {
                 organization: Organization {
                     organization_id: organization,
                     name: row.4.ok_or_else(unavailable)?,
+                    capabilities: OrganizationCapabilities::for_member(
+                        organization,
+                        row.3.ok_or_else(unavailable)?,
+                    ),
                 },
                 member: Member {
                     id: row.1.ok_or_else(unavailable)?,
@@ -627,13 +644,15 @@ impl FromRequestParts<AppState> for Auth {
             account_id: row.0,
             membership_revision: row.5.ok_or_else(unavailable)?,
             token_hash,
-        })
+        };
+        auth.require(Action::ReadOrganization)?;
+        Ok(auth)
     }
 }
 
 // Owned here so Channel authorization can compose one query without owning Member SQL.
 // $1 is always the Organization. Reads never take Member row locks.
-pub(crate) const ACTIVE_MEMBERS_SQL: &str = "SELECT id, membership_revision FROM users WHERE organization_id = $1 AND deactivated_at IS NULL";
+pub(crate) const ACTIVE_MEMBERS_SQL: &str = "SELECT id, membership_revision, role FROM users WHERE organization_id = $1 AND deactivated_at IS NULL";
 
 pub(crate) fn current_member_sql(lock: bool) -> String {
     let locking = if lock { " FOR SHARE" } else { "" };
@@ -710,6 +729,7 @@ fn credential(headers: &HeaderMap, secure: bool) -> Result<&str, ApiError> {
     (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
     (status = 500, description = "Database failure while resolving the session identity", body = ErrorBody)))]
 pub async fn me(State(state): State<AppState>, auth: AccountAuth) -> Result<Response, ApiError> {
+    authorization::require(Actor::Account, Action::Account, Resource::Global)?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(account_identity(&state.pool, auth.account_id).await?),
@@ -723,8 +743,9 @@ pub async fn me(State(state): State<AppState>, auth: AccountAuth) -> Result<Resp
  (status=401,description="Account Session ended",body=ErrorBody),
  (status=404,description="Non-Member, unknown Organization or deactivated Member: organization_unavailable",body=ErrorBody),
  (status=500,description="Database failure",body=ErrorBody)))]
-pub async fn organization_me(auth: Auth) -> impl IntoResponse {
-    ([(header::CACHE_CONTROL, "no-store")], Json(auth.identity))
+pub async fn organization_me(auth: Auth) -> Result<Response, ApiError> {
+    auth.require(Action::ReadOrganization)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(auth.identity)).into_response())
 }
 
 #[utoipa::path(delete, path = "/api/v1/session", security(("cookie" = []), ("bearer" = [])),
@@ -744,6 +765,7 @@ pub async fn sign_out(
         }
         Err(error) => return Err(error),
     };
+    authorization::require(Actor::Account, Action::Account, Resource::Global)?;
     let pool = state.pool.clone();
     let changes = state.session_changes.clone();
     // Finish revocation + notification even if the HTTP caller disconnects.

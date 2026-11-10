@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 17 operations document shutdown; five already documented admission 503.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 104;
+// All 21 operations document shutdown, including Member/Invite operations.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 140;
 
 #[test]
 fn every_api_operation_documents_shutdown_retry_contract() {
@@ -85,7 +85,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 17);
+        assert_eq!(operations, 21);
     }
 }
 
@@ -121,7 +121,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 17);
+    assert_eq!(requests.len(), 21);
     requests.extend(
         [
             "/",
