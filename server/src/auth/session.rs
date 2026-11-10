@@ -32,16 +32,32 @@ pub struct SessionChanges {
     worker: Arc<Once>,
     interval: Duration,
     timeout: Duration,
+    on_fatal: Arc<dyn Fn() + Send + Sync>,
+    #[cfg(test)]
+    default_fatal_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     #[cfg(test)]
     gate: Arc<Mutex<Option<Arc<tests::Gate>>>>,
 }
 impl Default for SessionChanges {
     fn default() -> Self {
+        #[cfg(test)]
+        let default_fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         Self {
             sessions: Default::default(),
             worker: Arc::new(Once::new()),
             interval: RECHECK_INTERVAL,
             timeout: CHECK_TIMEOUT,
+            #[cfg(not(test))]
+            on_fatal: Arc::new(|| std::process::exit(1)),
+            #[cfg(test)]
+            on_fatal: {
+                let calls = default_fatal_calls.clone();
+                Arc::new(move || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            },
+            #[cfg(test)]
+            default_fatal_calls: Some(default_fatal_calls),
             #[cfg(test)]
             gate: Default::default(),
         }

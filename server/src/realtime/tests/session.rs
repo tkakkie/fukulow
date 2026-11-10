@@ -162,7 +162,8 @@ async fn worker_panic_closes_existing_and_new_sockets_with_internal_error(pool: 
     let changes = crate::auth::SessionChanges::with_recheck_timing(
         Duration::from_millis(50),
         Duration::from_secs(1),
-    );
+    )
+    .with_on_fatal(std::sync::Arc::new(|| {}));
     let server = Server::start(crate::app(AppState {
         session_changes: changes.clone(),
         ..f.state.clone()
