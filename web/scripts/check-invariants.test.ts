@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { checkDecisions, MAX_DECISION_LENGTH, checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -212,6 +212,80 @@ describe('reference checking against a fixture repository', () => {
 describe('the real docs/invariants.md', () => {
   it('names only existing, executable tests (static scan; the CLI also reconciles with cargo)', () => {
     expect(checkInvariants(resolve(import.meta.dirname, '../..'))).toEqual([])
+  })
+})
+
+describe('checkDecisions', () => {
+  const doc = (entry: string) => `# Decisions\n\nIntro line that is not an entry.\n\n## Section\n- ${entry}\n`
+
+  it('accepts an entry of exactly MAX_DECISION_LENGTH code points', () => {
+    expect(MAX_DECISION_LENGTH).toBe(300)
+    expect(checkDecisions(doc('a'.repeat(300)))).toEqual([])
+  })
+
+  it('rejects one code point more and names the line', () => {
+    const errors = checkDecisions(doc('a'.repeat(301)))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatch(/^line 6: decision entry is 301 characters \(max 300\)/)
+  })
+
+  it('counts code points, not bytes or UTF-16 units', () => {
+    expect(checkDecisions(doc('`x` ' + '決'.repeat(295) + '😀'))).toEqual([])
+    expect(checkDecisions(doc('`x` ' + '決'.repeat(296) + '😀'))).toHaveLength(1)
+  })
+
+  it('ignores headings, blank lines, prose and tables', () => {
+    const long = 'a'.repeat(400)
+    expect(checkDecisions(`# ${long}\n\n${long}\n\n| ${long} |\n`)).toEqual([])
+  })
+})
+
+describe('checkDecisions continuation lines', () => {
+  it('refuses an indented or lazy continuation of an entry, keeps intro prose and headings', () => {
+    const md = '# Decisions\n\nIntro prose.\n\n## A\nSection note.\n\n- one\n  indented more\n- two\nlazy more\n\n  after blank\n## B\n- three\n'
+    expect(checkDecisions(md)).toEqual([
+      'line 9: continuation of the entry on line 8; keep each decision on one line',
+      'line 11: continuation of the entry on line 10; keep each decision on one line',
+      'line 13: indented line (a list continuation); keep each decision on one line',
+    ])
+  })
+})
+
+describe('checkInvariants also checks docs/decisions.md', () => {
+  const fixture = (decisions: string) => {
+    const root = mkdtempSync(join(tmpdir(), 'inv-dec-'))
+    mkdirSync(join(root, 'docs'), { recursive: true })
+    mkdirSync(join(root, 'server/tests'), { recursive: true })
+    mkdirSync(join(root, 'web'), { recursive: true })
+    writeFileSync(join(root, 'server/tests/a.rs'), '#[test]\nfn ok_test() {}\n')
+    writeFileSync(join(root, 'docs/invariants.md'), '| Rule | Test |\n|---|---|\n| r | \`server/tests/a.rs::ok_test\` |\n')
+    writeFileSync(join(root, 'docs/decisions.md'), decisions)
+    return root
+  }
+
+  it('passes a 300-code-point entry', () => {
+    expect(checkInvariants(fixture(`# Decisions\n\n- ${'a'.repeat(300)}\n`))).toEqual([])
+  })
+
+  it('returns a 301-code-point entry as an error with its line and length', () => {
+    const errors = checkInvariants(fixture(`# Decisions\n\n- ${'a'.repeat(301)}\n`))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatch(/^docs\/decisions\.md: line 3: decision entry is 301 characters \(max 300\)/)
+  })
+
+  it('keeps reporting invariants reference errors unchanged alongside decision errors', () => {
+    const root = fixture(`- ${'a'.repeat(301)}\n`)
+    writeFileSync(join(root, 'docs/invariants.md'), '| Rule | Test |\n|---|---|\n| r | \`server/tests/a.rs::missing\` |\n')
+    const errors = checkInvariants(root)
+    expect(errors).toHaveLength(2)
+    expect(errors[0]).toContain('not a test definition')
+    expect(errors[1]).toMatch(/^docs\/decisions\.md: line 1: decision entry is 301/)
+  })
+})
+
+describe('the real docs/decisions.md', () => {
+  it('exists and keeps every entry within the length limit, one line each', () => {
+    expect(checkDecisions(readFileSync(resolve(import.meta.dirname, '../../docs/decisions.md'), 'utf8'))).toEqual([])
   })
 })
 

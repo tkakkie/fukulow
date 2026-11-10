@@ -1,4 +1,5 @@
 // Verifies that every test named in docs/invariants.md is a real test that CI actually runs.
+// Also checks that every docs/decisions.md entry stays within MAX_DECISION_LENGTH (AGENTS.md "Writing docs").
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
 //
 // A reference is `path::test_name` (path relative to the repository root).
@@ -432,12 +433,39 @@ export function cargoList(root: string): ListedTest[] {
   return listed
 }
 
-/** Static scan only, or reconciled with the real cargo list when `listed` is given. */
+/** Maximum docs/decisions.md entry length in Unicode code points, after the leading `- ` (AGENTS.md "Writing docs"). */
+export const MAX_DECISION_LENGTH = 300
+
+/**
+ * Checks docs/decisions.md: every `- ` entry is at most MAX_DECISION_LENGTH code points, and an entry is one
+ * physical line. A line right after an entry must be blank, a heading or another entry; anything else (an indented
+ * or lazy continuation) is refused, as is any indented line, so a decision cannot be split to dodge the limit. Prose before the first entry
+ * of a section (the file intro, section notes) is not an entry and is not checked.
+ */
+export function checkDecisions(md: string): string[] {
+  const errors: string[] = []
+  const lines = md.split('\n')
+  lines.forEach((text, idx) => {
+    const line = idx + 1
+    if (idx > 0 && lines[idx - 1].startsWith('- ') && text.trim() !== '' && !text.startsWith('- ') && !text.startsWith('#'))
+      errors.push(`line ${line}: continuation of the entry on line ${idx}; keep each decision on one line`)
+    else if (/^\s+\S/.test(text)) errors.push(`line ${line}: indented line (a list continuation); keep each decision on one line`)
+    if (!text.startsWith('- ')) return
+    const entry = [...text.slice(2)]
+    if (entry.length > MAX_DECISION_LENGTH)
+      errors.push(`line ${line}: decision entry is ${entry.length} characters (max ${MAX_DECISION_LENGTH}): ${entry.slice(0, 40).join('')}`)
+  })
+  return errors
+}
+
+/** Static scan only, or reconciled with the real cargo list when `listed` is given. Also checks docs/decisions.md when present. */
 export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
   const { rows, errors } = parseInvariants(readFileSync(join(root, 'docs/invariants.md'), 'utf8'))
   if (rows.length === 0) errors.push('docs/invariants.md: no rows found')
   const known = collectKnownTests(root)
-  return [...errors, ...checkRows(rows, listed ? reconcileWithCargoList(known, listed) : known)]
+  const decisions = join(root, 'docs/decisions.md')
+  const decisionErrors = existsSync(decisions) ? checkDecisions(readFileSync(decisions, 'utf8')).map((e) => `docs/decisions.md: ${e}`) : []
+  return [...errors, ...checkRows(rows, listed ? reconcileWithCargoList(known, listed) : known), ...decisionErrors]
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
@@ -450,7 +478,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
     process.exit(1)
   }
   const errors = checkInvariants(root, listed)
-  for (const e of errors) console.error(`${relative(process.cwd(), join(root, 'docs/invariants.md'))}: ${e}`)
+  for (const e of errors) console.error(e.startsWith('docs/decisions.md: ') ? e : `${relative(process.cwd(), join(root, 'docs/invariants.md'))}: ${e}`)
   if (errors.length > 0) process.exit(1)
-  console.log('invariants: every named test exists and runs in CI')
+  console.log('invariants: every named test exists and runs in CI; decisions entries are within the length limit')
 }
