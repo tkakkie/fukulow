@@ -105,10 +105,12 @@ async fn cancelled_read_only_begin_discards_connection_before_next_write(pool: P
             .execute(&mut *write)
             .await
             .expect("write after cancelled read-only BEGIN must succeed");
-        let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
-            .fetch_one(&mut *write)
-            .await
-            .unwrap();
+        let (write_pid, read_only): (i32, String) =
+            sqlx::query_as("SELECT pg_backend_pid(), current_setting('transaction_read_only')")
+                .fetch_one(&mut *write)
+                .await
+                .unwrap();
+        assert_ne!(write_pid, pid, "cancelled BEGIN must discard the backend");
         assert_eq!(read_only, "off");
         write.commit().await.unwrap();
         single.close().await;
@@ -199,6 +201,36 @@ async fn read_only_body_error_reuses_clean_connection(pool: PgPool) {
     .await;
     assert!(matches!(result, Err(sqlx::Error::RowNotFound)));
     assert_clean_reuse(&pool, &single, pid).await;
+    single.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn failed_rollback_keeps_body_error_and_discards_connection(pool: PgPool) {
+    let single = single_connection_pool(&pool).await;
+    let mut lost_pid = 0;
+    let result = read_only(&single, async |tx: &mut sqlx::PgConnection| {
+        lost_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await?;
+        // Lose the backend so ROLLBACK fails after the body's own error.
+        sqlx::query("SELECT pg_terminate_backend($1, 5000)")
+            .bind(lost_pid)
+            .execute(&pool)
+            .await?;
+        Err::<(), _>(sqlx::Error::RowNotFound)
+    })
+    .await;
+    assert!(
+        matches!(result, Err(sqlx::Error::RowNotFound)),
+        "the body error must survive a failed ROLLBACK: {result:?}"
+    );
+    let (pid, read_only): (i32, String) =
+        sqlx::query_as("SELECT pg_backend_pid(), current_setting('transaction_read_only')")
+            .fetch_one(&single)
+            .await
+            .unwrap();
+    assert_ne!(pid, lost_pid, "a failed ROLLBACK must discard the backend");
+    assert_eq!(read_only, "off");
     single.close().await;
 }
 

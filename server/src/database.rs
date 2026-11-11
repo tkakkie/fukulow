@@ -20,9 +20,12 @@ where
     .await?;
     let result = body(&mut guard.connection).await;
     // End the snapshot even on ordinary body errors; only incomplete work is discarded.
-    sqlx::Executor::execute(&mut *guard.connection, "ROLLBACK").await?;
-    guard.finished = true;
-    result
+    let rolled_back = sqlx::Executor::execute(&mut *guard.connection, "ROLLBACK").await;
+    guard.finished = rolled_back.is_ok();
+    // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
+    let value = result?;
+    rolled_back?;
+    Ok(value)
 }
 
 struct ReadOnlyConnection {
