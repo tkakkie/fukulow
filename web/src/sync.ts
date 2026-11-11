@@ -76,6 +76,7 @@ export function createSync(options: SyncOptions) {
   const timelines = new Map<string, ReturnType<typeof timeline>>()
   const extras = new Map<string, ChannelExtra>()
   const submitted = new Map<string, { channel: string; detached: boolean; restore: () => void }>()
+  let unsubscribeDrafts: (() => void) | undefined
 
   const draftTarget = (channel: string) => ({ organizationId: options.organizationId ?? '', channelId: channel })
   const getExtra = (channel: string): ChannelExtra => {
@@ -98,10 +99,10 @@ export function createSync(options: SyncOptions) {
     }
     const olderError = patch.olderError ?? prev.olderError
     const draft = patch.draft ?? prev.draft
-    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel), draft)
     const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
     if (!olderError && draft === '' && composerError === null) extras.delete(channel)
     else extras.set(channel, { olderError, draft, composerError })
+    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel), draft)
     return true
   }
   function setExtra(channel: string, patch: Partial<ChannelExtra>) {
@@ -129,6 +130,20 @@ export function createSync(options: SyncOptions) {
     if (input.type === 'session_start' || input.type === 'session_replaced' || input.type === 'stop') {
       for (const channel of extras.keys()) extraChanged.add(channel)
       extras.clear()
+      if (input.type === 'stop') {
+        unsubscribeDrafts?.()
+        unsubscribeDrafts = undefined
+      } else {
+        unsubscribeDrafts ??= options.drafts?.subscribe(target => {
+          if (target.organizationId !== (options.organizationId ?? '') || target.topicId != null || target.replyRootId != null) return
+          const extra = extras.get(target.channelId) ?? emptyExtra
+          const draft = options.drafts?.get(target) ?? ''
+          if (extra.draft === draft) return
+          // Detached restores write the Account Session store, outside this controller's lifetime.
+          extras.set(target.channelId, { ...extra, draft })
+          channelListeners.get(target.channelId)?.forEach(listener => listener())
+        })
+      }
     } else {
       if (input.type === 'history_failed') {
         const req = previous.requests[input.request]

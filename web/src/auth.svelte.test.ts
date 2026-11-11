@@ -53,9 +53,9 @@ async function signInAs(s: Stack, id: string) {
   await settle()
 }
 /** Opens Channel A with one history Message and confirms the subscription on the newest session. */
-async function openChannelA(s: Stack) {
+async function openChannelA(s: Stack, hasOlder = false) {
   const net = s.nets.at(-1)!
-  net.pages.A = ok({ messages: [record(100)], has_more: false })
+  net.pages.A = ok({ messages: [record(100)], has_more: hasOlder })
   net.lists[0].resolve(ok({ channels: [channel('A')] }))
   await settle()
   net.subscribed('A', 100)
@@ -577,6 +577,77 @@ it('a late refusal after an Organization switch restores only its unedited draft
     await s.auth.signOut()
   }
 })
+
+/** Return before the old send answers, with an observed Composer and a cached Channel extra. */
+async function returnWithPendingSend(timedOut = false) {
+  const s = stack()
+  await signInAs(s, 'm1')
+  const first = await openChannelA(s)
+  const old = s.auth.session!.sync.channel('A')
+  old.setDraft('送信する本文')
+  const pending = old.submit()
+  if (timedOut) {
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(old.timeline.pending).toMatchObject([{ status: 'failed', retryable: true }])
+  }
+  await s.auth.selectOrganization('other')
+  await openChannelA(s)
+  s.auth.session!.sync.channel('A').setDraft('組織Bの下書き')
+  await s.auth.selectOrganization('o')
+  const returned = await openChannelA(s, true)
+  const current = s.auth.session!.sync.channel('A')
+  // Keep a non-draft extra cached: a store-only write must update it and notify the adapter.
+  returned.pages.A = { ok: false, kind: 'network' }
+  await current.loadOlder()
+  await settle()
+  const composer = await mount(() => current.timeline)
+  expect(composer.last).toMatchObject({ draft: '', olderError: true, pending: [] })
+  // Closing cancels the old wait; cancellation alone never restores text.
+  expect(await pending).toBe(true)
+  return { s, send: first.sends[0], current, composer }
+}
+
+it('A to B to A shows a late 409 restore in the current Composer without user action', async () => {
+  const { s, send, composer } = await returnWithPendingSend()
+  send.resolve({ ok: false, kind: 'http', status: 409 })
+  await settle()
+  expect(composer.last).toMatchObject({ draft: '送信する本文', olderError: true, pending: [] })
+  expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe('送信する本文')
+  expect(s.stores.at(-1)!.get({ organizationId: 'other', channelId: 'A' })).toBe('組織Bの下書き')
+  await composer.unmount()
+  await s.auth.signOut()
+})
+
+it.each(['new text', 'typed then cleared'] as const)(
+  'A to B to A preserves current Composer edits after a late 409: %s', async edit => {
+    const { s, send, current, composer } = await returnWithPendingSend()
+    current.setDraft('新しく編集した下書き')
+    if (edit === 'typed then cleared') current.setDraft('')
+    await settle()
+    const expected = edit === 'new text' ? '新しく編集した下書き' : ''
+    expect(composer.last.draft).toBe(expected)
+    send.resolve({ ok: false, kind: 'http', status: 409 })
+    await settle()
+    expect(composer.last.draft).toBe(expected)
+    expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe(expected)
+    await composer.unmount()
+    await s.auth.signOut()
+  },
+)
+
+it.each(['ACK', 'network', 'timeout', '503'] as const)(
+  'A to B to A never restores an ACK or unknown outcome in the current Composer: %s', async outcome => {
+    const { s, send, composer } = await returnWithPendingSend(outcome === 'timeout')
+    send.resolve(outcome === 'ACK' ? ok(sentBy('m1', 101, send.body.client_message_id, send.body.body))
+      : outcome === 'network' ? { ok: false, kind: 'network' }
+        : { ok: false, kind: 'http', status: outcome === 'timeout' ? 409 : 503 })
+    await settle()
+    expect(composer.last).toMatchObject({ draft: '', pending: [] })
+    expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe('')
+    await composer.unmount()
+    await s.auth.signOut()
+  },
+)
 
 it('checks a direct-link Organization through the API even when it is absent from the Account membership list', async () => {
   vi.stubGlobal('window', { location: { href: '/o/unknown/c/channel' } })
