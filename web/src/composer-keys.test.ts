@@ -96,7 +96,8 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     const panelSrc = readFileSync(join(webDir, 'src/ui/Panel.svelte'), 'utf8')
     expect(panelSrc).toContain('role="tablist"')
     expect(panelSrc).toContain('role="tab"')
-    expect(panelSrc).toContain('aria-controls=')
+    expect(panelSrc).toContain('aria-controls={activeTab === tab.id ? `panel-tabpanel-${tab.id}` : undefined}')
+    expect(panelSrc).not.toContain('aria-controls={`panel-tabpanel-${tab.id}`}')
     expect(panelSrc).toContain('role="tabpanel"')
     expect(panelSrc).toContain('tabindex={activeTab === tab.id ? 0 : -1}')
     expect(panelSrc).toContain('stepTabListKey')
@@ -104,10 +105,18 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     const workspaceSrc = readFileSync(join(webDir, 'src/Workspace.svelte'), 'utf8')
     expect(workspaceSrc).toContain('shouldTogglePanelShortcut')
     expect(workspaceSrc).toContain('resolveSenderName: resolveSender')
+    expect(workspaceSrc).toContain('resolveSkipLinkTargetId')
+    expect(workspaceSrc).toContain('id="channel-content"')
+    expect(workspaceSrc).toContain('id="main-content"')
+    expect(workspaceSrc).toContain('id="panel-content"')
     expect(workspaceSrc).toContain(
       "const effectiveMobileLevel = $derived(!selected && mobileLevel === 'view' ? 'channels' : mobileLevel)",
     )
     expect(workspaceSrc).not.toContain('左のフォーム')
     expect(workspaceSrc).not.toContain('トピックはまだありません。')
+
+    const appSrc = readFileSync(join(webDir, 'src/App.svelte'), 'utf8')
+    expect(appSrc).toContain('href={`#${skipTargetId}`}')
+    expect(appSrc).toContain('bind:skipTargetId={workspaceSkipTargetId}')
   })
 })

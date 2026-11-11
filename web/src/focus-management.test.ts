@@ -5,6 +5,7 @@ import {
   discardAndFocusComposer,
   focusAfterPanelClose,
   focusDialogOnOpen,
+  resolveSkipLinkTargetId,
   restoreFocusAfterDialogClose,
   stepDialogTab,
 } from './focus-management'
@@ -112,5 +113,29 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     expect(restoreFocusAfterDialogClose(goneOpener, fallbackComposer)).toBe(true)
     expect(goneOpener.focus).not.toHaveBeenCalled()
     expect(fallbackComposer.focus).toHaveBeenCalledOnce()
+  })
+
+  it('resolves the skip link target ID to the visible primary region at every phone level and desktop/tablet breakpoint', () => {
+    // Phone (< 600px): targets the active screen's region at each level
+    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'channels', panelOpen: false })).toBe(
+      'channel-content',
+    )
+    expect(resolveSkipLinkTargetId({ viewportWidth: 599, mobileLevel: 'channels', panelOpen: true })).toBe(
+      'channel-content',
+    )
+    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'view', panelOpen: false })).toBe('main-content')
+    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'panel', panelOpen: true })).toBe('panel-content')
+    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'panel', panelOpen: false })).toBe(
+      'main-content',
+    )
+
+    // Tablet and desktop (>= 600px): main-content stays visible across all mobileLevel and panelOpen states
+    for (const viewportWidth of [600, 768, 960, 1280, 1400]) {
+      for (const mobileLevel of ['channels', 'view', 'panel'] as const) {
+        for (const panelOpen of [false, true]) {
+          expect(resolveSkipLinkTargetId({ viewportWidth, mobileLevel, panelOpen })).toBe('main-content')
+        }
+      }
+    }
   })
 })

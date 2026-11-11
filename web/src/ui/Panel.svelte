@@ -13,6 +13,7 @@
   const TAB_IDS: readonly PanelTabId[] = TABS.map((t) => t.id)
 
   let {
+    id = 'panel-content',
     title,
     ariaLabel = '詳細パネル',
     mode = 'tabs',
@@ -24,6 +25,7 @@
     onclose,
     children,
   }: {
+    id?: string
     title: string
     ariaLabel?: string
     mode?: 'tabs' | 'reply'
@@ -49,7 +51,7 @@
   }
 </script>
 
-<aside class="ui-panel" aria-label={ariaLabel}>
+<aside {id} class="ui-panel" aria-label={ariaLabel} tabindex="-1">
   <header class="ui-panel__header">
     <div class="ui-panel__title-row">
       {#if showBack && onback}
@@ -72,7 +74,7 @@
           class="ui-panel__tab"
           class:ui-panel__tab--active={activeTab === tab.id}
           aria-selected={activeTab === tab.id}
-          aria-controls={`panel-tabpanel-${tab.id}`}
+          aria-controls={activeTab === tab.id ? `panel-tabpanel-${tab.id}` : undefined}
           tabindex={activeTab === tab.id ? 0 : -1}
           onclick={() => onselecttab?.(tab.id)}
           onkeydown={handleTabKeydown}

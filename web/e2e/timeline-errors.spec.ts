@@ -242,7 +242,7 @@ test('disables the Composer when the Channel is unavailable', async ({ page }) =
   await expect(sendButton).toBeEnabled()
 })
 
-test('shows 編集 on a definite failed send and restores the text into the Composer', async ({ page }) => {
+test('shows 編集して送り直す on a definite failed send and restores the text into the Composer', async ({ page }) => {
   await signIn(page)
   const target = await createChannel(page, nextChannelName('definite-send-fail'))
 
@@ -265,7 +265,7 @@ test('shows 編集 on a definite failed send and restores the text into the Comp
 
   await expect(composer).toHaveValue('')
   await expect(timeline.getByRole('alert').filter({ hasText: '送信できませんでした。' })).toBeVisible()
-  const editButton = timeline.getByRole('button', { name: '編集' })
+  const editButton = timeline.getByRole('button', { name: '編集して送り直す', exact: true })
   await expect(editButton).toBeVisible()
   await expect(timeline.getByRole('button', { name: '再送する', exact: true })).toHaveCount(0)
 
@@ -312,10 +312,10 @@ test('shows 再送する on an unknown send outcome and resends with the same cl
   await composer.fill(body)
   await sendButton.click()
 
-  // Attempt 1 aborted (network error): unknown outcome offers 再送, never 編集.
+  // Attempt 1 aborted (network error): unknown outcome offers 再送する, never 編集して送り直す.
   await expect(timeline.getByRole('alert').filter({ hasText: '送信を確認できませんでした。' })).toBeVisible()
   await expect(resendButton).toBeVisible()
-  await expect(timeline.getByRole('button', { name: '編集' })).toHaveCount(0)
+  await expect(timeline.getByRole('button', { name: '編集して送り直す', exact: true })).toHaveCount(0)
   expect(sentRequests).toHaveLength(1)
   expect(sentRequests[0].body).toBe(body)
   expect(sentRequests[0].client_message_id).toMatch(uuidPattern)
@@ -326,7 +326,7 @@ test('shows 再送する on an unknown send outcome and resends with the same cl
   expect(sentRequests[1].client_message_id).toBe(sentRequests[0].client_message_id)
   expect(sentRequests[1].body).toBe(body)
   await expect(resendButton).toBeVisible()
-  await expect(timeline.getByRole('button', { name: '編集' })).toHaveCount(0)
+  await expect(timeline.getByRole('button', { name: '編集して送り直す', exact: true })).toHaveCount(0)
 
   // Attempt 3 reaches the real server with the same client_message_id and settles the Message.
   const confirmedRes = page.waitForResponse(

@@ -3,6 +3,32 @@ export type FocusableTarget = {
   isConnected?: boolean
 }
 
+export type MobileLevel = 'channels' | 'view' | 'panel'
+export type SkipLinkTargetId = 'channel-content' | 'main-content' | 'panel-content'
+
+export const MOBILE_BREAKPOINT_PX = 600
+
+/**
+ * Resolves the ID of the currently visible primary region for the page skip link (`メッセージへ移動`)
+ * across desktop/tablet (`>= 600px`) and phone (`< 600px`) levels (`docs/ui.md` §3, §6).
+ */
+export function resolveSkipLinkTargetId(options: {
+  viewportWidth: number
+  mobileLevel: MobileLevel
+  panelOpen: boolean
+}): SkipLinkTargetId {
+  if (options.viewportWidth >= MOBILE_BREAKPOINT_PX) {
+    return 'main-content'
+  }
+  if (options.mobileLevel === 'panel' && options.panelOpen) {
+    return 'panel-content'
+  }
+  if (options.mobileLevel === 'channels') {
+    return 'channel-content'
+  }
+  return 'main-content'
+}
+
 export type RestoreDecision =
   | { action: 'restore_now' }
   | { action: 'confirm_replace'; clientMessageId: string }

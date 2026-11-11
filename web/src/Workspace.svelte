@@ -8,7 +8,12 @@
   import ChannelList from './ChannelList.svelte'
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import CreateChannelForm from './CreateChannelForm.svelte'
-  import { focusAfterPanelClose, focusTarget } from './focus-management'
+  import {
+    focusAfterPanelClose,
+    focusTarget,
+    resolveSkipLinkTargetId,
+    type SkipLinkTargetId,
+  } from './focus-management'
   import Members from './MemberList.svelte'
   import type { membersAdapter } from './members.svelte'
   import Timeline from './Timeline.svelte'
@@ -28,6 +33,7 @@
     selectedOrganizationId = '',
     busy = false,
     authError = '',
+    skipTargetId = $bindable<SkipLinkTargetId>('main-content'),
     resolveSenderName,
     onselectorganization,
     onsignout,
@@ -41,6 +47,7 @@
     selectedOrganizationId?: string
     busy?: boolean
     authError?: string
+    skipTargetId?: SkipLinkTargetId
     resolveSenderName?: (senderId: string) => string
     onselectorganization?: (id: string) => void
     onsignout?: () => void
@@ -73,6 +80,14 @@
   // Fallback to 'channels' when no Channel is selected so phone users can reach Channel creation and sign-out (docs/ui.md §3).
   let mobileLevel = $state<'channels' | 'view' | 'panel'>('view')
   const effectiveMobileLevel = $derived(!selected && mobileLevel === 'view' ? 'channels' : mobileLevel)
+  let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
+  const currentSkipTargetId = $derived(
+    resolveSkipLinkTargetId({
+      viewportWidth,
+      mobileLevel: effectiveMobileLevel,
+      panelOpen,
+    }),
+  )
 
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
@@ -87,6 +102,10 @@
   }
 
   $effect(() => () => announcementController.destroy())
+
+  $effect(() => {
+    skipTargetId = currentSkipTargetId
+  })
 
   // 10 s loading timeout for Channel list (docs/ui.md §5)
   $effect(() => {
@@ -204,7 +223,11 @@
   }
 </script>
 
-<svelte:window onkeydown={handleWindowKeydown} onbeforeunload={handleBeforeUnload} />
+<svelte:window
+  bind:innerWidth={viewportWidth}
+  onkeydown={handleWindowKeydown}
+  onbeforeunload={handleBeforeUnload}
+/>
 
 <div
   class="workspace"
@@ -237,7 +260,7 @@
     </div>
   </nav>
 
-  <nav class="channel-column" aria-label="チャンネル">
+  <nav id="channel-content" class="channel-column" aria-label="チャンネル" tabindex="-1">
     <div class="channel-column__header">
       {#if organizations.length > 1 && onselectorganization}
         <label class="org-switcher">
@@ -299,7 +322,7 @@
     {/if}
   </nav>
 
-  <main id="main-content" class="main-card">
+  <main id="main-content" class="main-card" tabindex="-1">
     {#if selected && currentChannel}
       <header class="main-card__header">
         <div class="main-card__title-group">
@@ -426,6 +449,7 @@
   {#if panelOpen}
     <div class="right-panel-slot">
       <Panel
+        id="panel-content"
         title={selected ? `# ${selected.name}` : '詳細'}
         activeTab={activePanelTab}
         bind:headingRef={panelHeadingRef}

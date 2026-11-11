@@ -68,7 +68,7 @@ test('phone zero-Channels reaches creation and sign-out; creating a Channel and 
     if (msg.type() === 'error') errors.push(`console.error: ${msg.text()}`)
   })
 
-  // 1. Phone width with zero Channels: Channel creation form and sign-out are immediately reachable
+  // 1. Phone width with zero Channels: Channel creation form, sign-out, and skip-link target (#channel-content) are reachable
   await page.setViewportSize({ width: 375, height: 667 })
   await page.goto('/')
   await page.getByLabel('メールアドレス').fill(owner.email)
@@ -81,25 +81,66 @@ test('phone zero-Channels reaches creation and sign-out; creating a Channel and 
   await expect(page.getByRole('button', { name: 'ログアウト' })).toBeVisible()
   await expect(page.getByText('左のフォーム')).toHaveCount(0)
 
-  // 2. Create Channel `general` on phone -> enters view, subscribes live, and shows Composer
+  const skipLink = page.getByRole('link', { name: 'メッセージへ移動' })
+  await expect(skipLink).toHaveAttribute('href', '#channel-content')
+  const channelContent = page.locator('#channel-content')
+  await expect(channelContent).toBeVisible()
+  await skipLink.focus()
+  await page.keyboard.press('Enter')
+  await expect(channelContent).toBeFocused()
+
+  // 2. Create Channel `general` on phone -> enters view, subscribes live, shows Composer, and updates skip-link target (#main-content)
   await page.getByLabel('チャンネル名').fill('general')
   await page.getByRole('button', { name: 'チャンネルを作成' }).click()
   await expect(page.getByRole('heading', { name: 'general' })).toBeVisible()
   await expect(page.getByTestId('live-status')).toHaveText('リアルタイム接続済み')
+
+  await expect(skipLink).toHaveAttribute('href', '#main-content')
+  const mainContent = page.locator('#main-content')
+  await expect(mainContent).toBeVisible()
+  await skipLink.focus()
+  await page.keyboard.press('Enter')
+  await expect(mainContent).toBeFocused()
 
   // 3. Send a Message -> visible in timeline, no effect_update_depth_exceeded or console errors
   await page.getByRole('textbox', { name: 'メッセージ' }).fill('こんにちは、世界')
   await page.getByRole('button', { name: '送信' }).click()
   await expect(page.getByRole('list', { name: 'メッセージ一覧' }).getByText('こんにちは、世界')).toBeVisible()
 
-  // 4. Desktop width: open right panel, navigate ARIA tabs with ArrowRight, close with Escape
+  // 4. Phone panel level: opening the right panel updates skip-link target to #panel-content; closing returns to #main-content
+  await page.getByRole('button', { name: 'パネルを開く(⌘.)' }).click()
+  await expect(skipLink).toHaveAttribute('href', '#panel-content')
+  const panelContent = page.locator('#panel-content')
+  await expect(panelContent).toBeVisible()
+  await skipLink.focus()
+  await page.keyboard.press('Enter')
+  await expect(panelContent).toBeFocused()
+  await page.getByRole('button', { name: 'パネルを閉じる(Esc)' }).click()
+  await expect(skipLink).toHaveAttribute('href', '#main-content')
+
+  // 5. Desktop width: open right panel, verify active-only aria-controls on tabs and desktop skip link, close with Escape
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.getByRole('button', { name: 'パネルを開く(⌘.)' }).click()
+  await expect(skipLink).toHaveAttribute('href', '#main-content')
+
   const topicsTab = page.getByRole('tab', { name: 'トピック' })
+  const overviewTab = page.getByRole('tab', { name: '概要' })
+  const membersTab = page.getByRole('tab', { name: 'メンバー' })
+
   await expect(topicsTab).toHaveAttribute('aria-selected', 'true')
+  await expect(topicsTab).toHaveAttribute('aria-controls', 'panel-tabpanel-topics')
+  await expect(page.locator('#panel-tabpanel-topics')).toBeVisible()
+  await expect(overviewTab).not.toHaveAttribute('aria-controls')
+  await expect(membersTab).not.toHaveAttribute('aria-controls')
+
   await topicsTab.focus()
   await page.keyboard.press('ArrowRight')
-  await expect(page.getByRole('tab', { name: '概要' })).toHaveAttribute('aria-selected', 'true')
+  await expect(overviewTab).toHaveAttribute('aria-selected', 'true')
+  await expect(overviewTab).toHaveAttribute('aria-controls', 'panel-tabpanel-overview')
+  await expect(page.locator('#panel-tabpanel-overview')).toBeVisible()
+  await expect(topicsTab).not.toHaveAttribute('aria-controls')
+  await expect(membersTab).not.toHaveAttribute('aria-controls')
+
   await page.keyboard.press('Escape')
   await expect(page.getByRole('button', { name: 'パネルを開く(⌘.)' })).toBeFocused()
 

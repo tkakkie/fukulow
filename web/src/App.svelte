@@ -5,6 +5,7 @@
     type LiveAnnouncementItem,
   } from './announcements'
   import { createAuth } from './auth.svelte'
+  import { focusTarget, type SkipLinkTargetId } from './focus-management'
   import InviteAccept from './InviteAccept.svelte'
   import { inviteFromLocation } from './members'
   import { inviteAcceptanceAdapter } from './members.svelte'
@@ -28,11 +29,22 @@
   let setupToken = $state('')
   let pageAnnouncement = $state<LiveAnnouncementItem>(announcementQueue.current)
   let loadingTimedOut = $state(false)
+  let workspaceSkipTargetId = $state<SkipLinkTargetId>('main-content')
+  const skipTargetId = $derived<SkipLinkTargetId>(
+    auth.view.screen === 'app' && auth.session && auth.organization ? workspaceSkipTargetId : 'main-content',
+  )
   let lastSigninNotice = ''
   let lastInviteAcceptedNotice = false
 
   function announce(msg: string) {
     pageAnnouncement = announcementQueue.enqueue(msg)
+  }
+
+  function handleSkipToContent(e: MouseEvent) {
+    const target = typeof document !== 'undefined' ? document.getElementById(skipTargetId) : null
+    if (focusTarget(target)) {
+      e.preventDefault()
+    }
   }
 
   function clearSecrets() {
@@ -100,7 +112,7 @@
 </script>
 
 {#if auth.view.screen === 'app'}
-  <a class="skip-link" href="#main-content">メッセージへ移動</a>
+  <a class="skip-link" href={`#${skipTargetId}`} onclick={handleSkipToContent}>メッセージへ移動</a>
 {/if}
 <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
   {#key pageAnnouncement.id}
@@ -135,6 +147,7 @@
             selectedOrganizationId={auth.selectedOrganizationId}
             busy={auth.busy}
             authError={auth.error}
+            bind:skipTargetId={workspaceSkipTargetId}
             onselectorganization={(id) => void auth.selectOrganization(id)}
             onsignout={doSignOut}
             onannounce={announce}
@@ -147,7 +160,7 @@
           <div class="app-fallback__logo" aria-hidden="true">🦉</div>
           <Button variant="icon" ariaLabel="ログアウト" disabled={auth.busy} onclick={doSignOut}>⇥</Button>
         </nav>
-        <main id="main-content" class="app-fallback__main">
+        <main id="main-content" class="app-fallback__main" tabindex="-1">
           <header class="app-fallback__header">
             <h1 class="app-fallback__title">{organization?.organization.name ?? 'fukulow'}</h1>
             {#if identity.organizations.length > 1}
@@ -206,7 +219,7 @@
     {/if}
   </div>
 {:else}
-  <main id="main-content" class="auth-shell">
+  <main id="main-content" class="auth-shell" tabindex="-1">
     <div class="auth-card">
       <div class="auth-card__brand">
         <span class="auth-card__logo" aria-hidden="true">🦉</span>
