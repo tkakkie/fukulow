@@ -13,6 +13,24 @@ it('computes independent scope counts with baseline subtraction live overlap own
   expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2 }, 4, records, main, 'me')).toBe(0)
   expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2 }, 0, records, main, 'me')).toBe(3)
 })
+it('batched Topic snapshots equal independent scope counts with read progress own rows and duplicate replay', async () => {
+  const c = unreadClient(); await c.boot()
+  await c.topics.loadTopic('A', 'T'); await c.topics.loadTopic('A', 'U')
+  const live = [msg(4, 'T'), msg(5, 'U'), msg(6, 'V', 'me'), msg(7, 'T'), msg(8, 'U'), msg(9), msg(10, 'T', 'me'), msg(11, 'U')]
+  for (const m of [...live, live[0], live[3], live[7]]) c.event(m)
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 6, has_more: false,
+    topics: [summary('T', 4, 2, 1), summary('U', 5, 3, 1), summary('V', 6, 0, 0)] }))
+  await c.topics.loadList('A'); await c.present([4, 7], 'T')
+  const snapshot = c.unread.get('A'), records = [...c.history, ...live, live[0], live[3], live[7]]
+  expect(snapshot.topics.T.position).toBe(7)
+  for (const [topic, readSeq, count] of [['T', 2, 1], ['U', 3, 1], ['V', 0, 0]] as const) {
+    const s = snapshot.topics[topic]
+    expect(s.unreadCount, topic).toBe(scopeCount({ asOfSeq: 6, readSeq, count }, s.position!, records, { channel: 'A', topicId: topic }, 'me'))
+  }
+  expect(Object.fromEntries(Object.entries(snapshot.topics).map(([t, s]) => [t, s.unreadCount]))).toEqual({ T: 0, U: 3, V: 0 })
+  expect(snapshot.main.unreadCount).toBe(scopeCount({ asOfSeq: 3, readSeq: 0, count: 1 }, 0, records, main, 'me'))
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
 it('chooses larger W then larger p0 then smaller counts including aggregate ties', () => {
   const b = { asOfSeq: 4, readSeq: 1, count: 3 }
   expect(chooseBaseline(b, { asOfSeq: 3, readSeq: 4, count: 0 })).toBe(b)
@@ -663,6 +681,20 @@ it('C9 cancels the last Channel list retry and explicit selection starts a fresh
   await c.sync.watch('A'); await flush(); expect(c.unread.get('A').unreadCount).toBe(3)
   expect(c.unreadApi.listChannels.mock.calls.length).toBeGreaterThan(n)
   await c.sync.close()
+})
+it('reconnect makes no automatic Unread requests when every known Channel is C9 stopped until selection', async () => {
+  const c = unreadClient(); c.rows.push(row({ id: 'B' })); await c.boot(); await c.sync.watch('B'); await flush()
+  await c.sync.channelUnavailable('A'); await c.sync.channelUnavailable('B')
+  const lists = c.unreadApi.listChannels.mock.calls.length, summaries = c.unreadApi.getTopicSummary.mock.calls.length
+  c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(lists)
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(summaries)
+  expect(c.unread.get('A').stopped).toBe(true); expect(c.unread.get('B').stopped).toBe(true)
+  await c.sync.watch('A'); await flush()
+  expect(c.unreadApi.listChannels.mock.calls.length).toBeGreaterThan(lists)
+  expect(c.unread.get('A').unreadCount).toBe(3); expect(c.unread.get('B').stopped).toBe(true)
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
 it('a failed Topic count stays unresolved during live events until its retry succeeds', async () => {
   const c = unreadClient(); await c.boot(); c.unreadApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'network' })

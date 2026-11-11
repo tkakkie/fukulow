@@ -1,9 +1,48 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Result, TopicSummaryResponse } from './api'
-import { deferred, flush, main, msg, ok, summary, unreadClient } from './unread-test-helpers'
+import { deferred, flush, http, main, msg, ok, summary, unreadClient } from './unread-test-helpers'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
+
+it('a current Topic projection cancels the failed summary retry', async () => {
+  const c = unreadClient(); await c.boot()
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, error: true })
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 4, has_more: false, topics: [summary('T', 4, 0, 2)] }))
+  await c.topics.loadList('A'); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 0, unreadCount: 2, error: false })
+  const n = c.unreadApi.getTopicSummary.mock.calls.length
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(n)
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 0, unreadCount: 2, error: false })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each([
+  { result: 'network failure', response: { ok: false, kind: 'network' } as Result<TopicSummaryResponse> },
+  { result: 'Channel denial', response: http(404, 'channel not found') },
+  { result: 'success', response: ok({ as_of_seq: 5, topic: summary('T', 5, 5, 0) }) },
+])('a current Topic projection fences an in-flight summary $result and its queued refresh', async ({ response }) => {
+  const c = unreadClient(); await c.boot()
+  const old = deferred<Result<TopicSummaryResponse>>()
+  c.unreadApi.getTopicSummary.mockReturnValueOnce(old.promise)
+  c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
+  // A second reconnect queues another summary behind the pending request.
+  c.handlers.at(-1)!.onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 4, has_more: false, topics: [summary('T', 4, 0, 2)] }))
+  await c.topics.loadList('A'); await flush()
+  const n = c.unreadApi.getTopicSummary.mock.calls.length
+  const recovered = c.unread.get('A').topics.T
+  expect(recovered).toMatchObject({ position: 0, unreadCount: 2, error: false, stopped: false })
+  old.resolve(response); await flush()
+  expect(c.unread.get('A').topics.T).toEqual(recovered)
+  expect(c.unread.get('A').stopped).toBe(false)
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(n)
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
 
 it('refetches a Topic baseline below the bootstrap base on entry after navigation cancels its read', async () => {
   const c = unreadClient(); c.summaries.delete('T'); await c.boot()

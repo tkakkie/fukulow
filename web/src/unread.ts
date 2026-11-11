@@ -25,7 +25,7 @@ const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: fa
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
   records: new Map<number, Message>(), aggregate: undefined as UnreadChannel | undefined, accepted: 0, requiredAfter: 0, requiredBase: 0,
   heldPositions: new Map<string, number>(), stopped: false, error: false,
-  summaryReads: new Set<string>(), queuedSummaries: new Set<string>(), ignoredBaselines: new Set<TopicBaseline>(), observedBaselines: new Set<TopicBaseline>(),
+  summaryReads: new Map<string, symbol>(), queuedSummaries: new Set<string>(), ignoredBaselines: new Set<TopicBaseline>(), observedBaselines: new Set<TopicBaseline>(),
   summaryTimers: new Map<string, ReturnType<typeof setTimeout>>(), summaryAttempts: new Map<string, number>() })
 type Channel = ReturnType<typeof channelState>
 type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; presented: Set<number> }
@@ -142,10 +142,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     if (queuedList) { queuedList = false; void refresh() }
   }
-  function count(id: string, c: Channel, topic: string | null): number | null {
+  function count(id: string, c: Channel, topic: string | null, records: Iterable<Message> = c.records.values()): number | null {
     const s = getScope(c, topic)
     if (!s.baseline || s.baseline.asOfSeq < c.requiredBase || s.baseline.readSeq < s.requiredPosition || s.error || s.stopped || c.stopped || c.error) return null
-    return scopeCount(s.baseline, s.position, c.records.values(), { channel: id, topicId: topic }, sync.get().selfId)
+    return scopeCount(s.baseline, s.position, records, { channel: id, topicId: topic }, sync.get().selfId)
   }
   function aggregateCount(id: string, c: Channel): number | null {
     const b = c.aggregate, main = count(id, c, null)
@@ -228,9 +228,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (c.summaryReads.has(topic)) { c.queuedSummaries.add(topic); return }
     const retry = c.summaryTimers.get(topic)
     if (retry !== undefined) { clearTimeout(retry); c.summaryTimers.delete(topic) }
-    c.summaryReads.add(topic)
+    const operation = Symbol()
+    c.summaryReads.set(topic, operation)
     const r = await request(() => options.api.getTopicSummary(id, topic), id)
-    if (!watched(id) || c.token !== token) return
+    if (!watched(id) || c.token !== token || c.summaryReads.get(topic) !== operation) return
     c.summaryReads.delete(topic)
     if (r.ok && r.data.topic.id === topic) {
       acceptScope(s, topicBaseline(r.data.as_of_seq, r.data.topic))
@@ -267,6 +268,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const s = getScope(c, line.topicId)
         acceptScope(s, topicBaseline(line.baseline.asOfSeq, line.baseline.summary))
         if (s.baseline && s.baseline.asOfSeq < c.requiredBase) void refreshTopic(id, line.topicId)
+        else if (!s.error && !s.stopped) {
+          // A current projection supersedes summary work, including a completion still in flight.
+          const retry = c.summaryTimers.get(line.topicId)
+          if (retry !== undefined) clearTimeout(retry)
+          c.summaryTimers.delete(line.topicId); c.summaryAttempts.delete(line.topicId)
+          c.summaryReads.delete(line.topicId); c.queuedSummaries.delete(line.topicId)
+        }
       }
     }
     for (const topic of c.topics.keys()) for (const m of p.topic(topic).messages) c.records.set(m.seq, m)
@@ -303,7 +311,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     resolveBoundary(); notify()
     if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); cancelDeadlines() }
     if ((!before.running && next.running) || (!before.connected && next.connected) || rebootstrap) {
-      void refresh()
+      if (channels.size === 0 || [...channels.keys()].some(watched)) void refresh()
       for (const [id, c] of channels) if (watched(id)) for (const topic of c.topics.keys()) void refreshTopic(id, topic)
     }
   }
@@ -315,6 +323,12 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   })
   function snapshot(id: string) {
     const c = channels.get(id)
+    const topicRecords = new Map<string, Message[]>()
+    for (const m of c?.records.values() ?? []) if (m.topic_id !== null && c?.topics.has(m.topic_id)) {
+      let records = topicRecords.get(m.topic_id)
+      if (!records) topicRecords.set(m.topic_id, records = [])
+      records.push(m)
+    }
     const v = visit?.scope.channel === id ? visit : undefined
     let entry = null
     if (v) {
@@ -326,12 +340,12 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         needsOlder: v.unreadAtEntry !== null && v.unreadAtEntry > 0 && (rows.length === 0 || through < rows[0].seq) }
     }
     return { generation: c?.token ?? null, asOfSeq: c?.aggregate?.as_of_seq ?? null, unreadCount: c ? aggregateCount(id, c) : null, main: c ? scopeSnapshot(id, c, null) : { position: null, unreadCount: null, stopped: false, error: false },
-      topics: Object.fromEntries(c ? [...c.topics.keys()].map(t => [t, scopeSnapshot(id, c, t)]) : []),
+      topics: Object.fromEntries(c ? [...c.topics.keys()].map(t => [t, scopeSnapshot(id, c, t, topicRecords.get(t) ?? [])]) : []),
       entry, stopped: c?.stopped ?? false, error: c?.error ?? false }
   }
-  function scopeSnapshot(id: string, c: Channel, topic: string | null) {
+  function scopeSnapshot(id: string, c: Channel, topic: string | null, records?: Iterable<Message>) {
     const s = getScope(c, topic)
-    return { position: s.baseline ? s.position : null, unreadCount: count(id, c, topic), stopped: s.stopped, error: s.error }
+    return { position: s.baseline ? s.position : null, unreadCount: count(id, c, topic, records), stopped: s.stopped, error: s.error }
   }
   function leave(id?: symbol) {
     if (!visit || (id !== undefined && visit.id !== id)) return
