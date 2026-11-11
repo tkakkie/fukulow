@@ -2,7 +2,9 @@ import { createNavigationTargets } from './navigation-targets'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import { createChannels, type ChannelsApi } from './channels'
-import { createSync, type SyncOptions } from './sync'
+import type { SyncOptions } from './sync'
+import { createTopicSync } from './topic-sync'
+import { topicsApi, type TopicsApi } from './topics'
 
 export type SessionOptions = {
   selfId: string
@@ -10,6 +12,7 @@ export type SessionOptions = {
   /** Account-lifetime owner fences this callback, including late 401s after an Organization switch. */
   onEnded: () => void
   channelsApi?: ChannelsApi
+  topicsApi?: TopicsApi
   sync?: Partial<SyncOptions>
 }
 
@@ -34,14 +37,21 @@ export function createSession(options: SessionOptions) {
     listMessages: (channel, query) => api.listMessages(organizationId, channel, query),
     sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
   } satisfies NonNullable<SyncOptions['api']>
-  const sync = createSync({ ...options.sync, selfId: options.selfId, organizationId,
+  const topicSource = options.topicsApi ?? topicsApi(organizationId)
+  const { sync, topics } = createTopicSync({ ...options.sync, selfId: options.selfId, organizationId,
     api: { listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: (channel, body) => observe(timeline.sendMessage(channel, body)) },
+    topicsApi: {
+      listTimeline: (channel, query) => observe(topicSource.listTimeline(channel, query)),
+      listTopics: (channel, query) => observe(topicSource.listTopics(channel, query)),
+      getTopicSummary: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
+      listTopicMessages: (channel, topic, query) => observe(topicSource.listTopicMessages(channel, topic, query)),
+    },
     checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
     onSessionEnded: notifyEnded,
   })
   const navigationTargets = createNavigationTargets({
-    topic: (channel, topic) => observe(api.getTopicSummary(organizationId, channel, topic)),
+    topic: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
     reply: (channel, message) => observe(api.listReplyChain(organizationId, channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
@@ -87,7 +97,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, channels, navigationTargets,
+    sync, topics, channels, navigationTargets,
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
       const controller = createChannelMembers(organizationId, channel, r => {

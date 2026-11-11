@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   confirmReplaceDraftWithFailedSend,
+  createTopicSummaryFocusController,
   decideEditAndResend,
   discardAndFocusComposer,
   focusAfterPanelClose,
@@ -8,9 +9,12 @@ import {
   focusIfVisible,
   isTargetVisible,
   resolveChannelListNavigation,
+  resolveMainTimelineFocusStatus,
   resolveSkipLinkTargetId,
   restoreFocusAfterDialogClose,
   stepDialogTab,
+  submitAndFocusComposer,
+  type FocusDocument,
   type VisibleFocusableTarget,
 } from './focus-management'
 
@@ -325,5 +329,149 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     expect(isTargetVisible(visibleHeading, visibleStyle)).toBe(true)
     expect(focusIfVisible(visibleHeading, visibleStyle)).toBe(true)
     expect(visibleHeading.focus).toHaveBeenCalledOnce()
+  })
+
+  it('submitAndFocusComposer focuses the submitted Composer synchronously and never steals focus when send settles later', async () => {
+    let resolveSend!: (ok: boolean) => void
+    const onsubmit = vi.fn(
+      () =>
+        new Promise<boolean>((r) => {
+          resolveSend = r
+        }),
+    )
+    const composer = { focus: vi.fn(), isConnected: true }
+
+    submitAndFocusComposer(onsubmit, composer)
+    expect(onsubmit).toHaveBeenCalledOnce()
+    expect(composer.focus).toHaveBeenCalledOnce()
+
+    composer.focus.mockClear()
+    resolveSend(true)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(composer.focus).not.toHaveBeenCalled()
+  })
+
+  it('resolveMainTimelineFocusStatus distinguishes loading, ready, error, unavailable and pending Topic sends', () => {
+    const base = {
+      channelListStatus: 'ready' as const,
+      hasSelectedTimeline: true,
+      organizationUnavailable: false,
+      timelineStatus: 'ready' as const,
+      hasTopics: true,
+      topicsMain: { asOfSeq: 5, loading: false, error: false },
+      topicsUnavailable: false,
+      topicPendingSend: false,
+    }
+    expect(resolveMainTimelineFocusStatus(base)).toBe('ready')
+    expect(resolveMainTimelineFocusStatus({ ...base, topicPendingSend: true })).toBe('loading')
+    expect(
+      resolveMainTimelineFocusStatus({
+        ...base,
+        topicsMain: { asOfSeq: undefined, loading: false, error: false },
+      }),
+    ).toBe('loading')
+    expect(
+      resolveMainTimelineFocusStatus({
+        ...base,
+        topicsMain: { asOfSeq: undefined, loading: false, error: true },
+      }),
+    ).toBe('error')
+    expect(resolveMainTimelineFocusStatus({ ...base, timelineStatus: 'loading' })).toBe('loading')
+    expect(resolveMainTimelineFocusStatus({ ...base, timelineStatus: 'error' })).toBe('error')
+    expect(resolveMainTimelineFocusStatus({ ...base, timelineStatus: 'unavailable' })).toBe('unavailable')
+    expect(resolveMainTimelineFocusStatus({ ...base, topicsUnavailable: true })).toBe('unavailable')
+    expect(resolveMainTimelineFocusStatus({ ...base, organizationUnavailable: true })).toBe('unavailable')
+    expect(resolveMainTimelineFocusStatus({ ...base, hasSelectedTimeline: false, channelListStatus: 'loading' })).toBe(
+      'loading',
+    )
+    expect(resolveMainTimelineFocusStatus({ ...base, hasSelectedTimeline: false, channelListStatus: 'error' })).toBe(
+      'error',
+    )
+  })
+
+  it('createTopicSummaryFocusController waits for delayed summary render, falls back only when ready/error, and cancels on navigation or user focus change', () => {
+    const body = {}
+    let activeElement: unknown = body
+    const focusInListeners = new Set<(event: { target?: unknown }) => void>()
+    const fakeDoc: FocusDocument = {
+      get activeElement() {
+        return activeElement
+      },
+      body,
+      addEventListener(type, listener) {
+        if (type === 'focusin') focusInListeners.add(listener)
+      },
+      removeEventListener(type, listener) {
+        if (type === 'focusin') focusInListeners.delete(listener)
+      },
+    }
+    const ctrl = createTopicSummaryFocusController(() => fakeDoc)
+    const composer = {
+      isConnected: true,
+      focus: vi.fn(() => {
+        activeElement = composer
+        for (const l of focusInListeners) l({ target: composer })
+      }),
+    }
+    const summary = {
+      isConnected: true,
+      focus: vi.fn(() => {
+        activeElement = summary
+        for (const l of focusInListeners) l({ target: summary })
+      }),
+    }
+
+    // 1. Waits while loading, then focuses summary once rendered
+    const backBtn = { isConnected: true }
+    activeElement = backBtn
+    ctrl.syncNavigation({ revision: 1, focus: 'topic-summary' }, 't-1')
+    expect(ctrl.isPending(1)).toBe(true)
+    backBtn.isConnected = false
+    activeElement = body
+
+    expect(ctrl.step({ revision: 1, status: 'loading', findSummary: () => null, composer })).toBe('waiting')
+    expect(composer.focus).not.toHaveBeenCalled()
+    expect(ctrl.isPending(1)).toBe(true)
+
+    expect(ctrl.step({ revision: 1, status: 'ready', findSummary: (id) => (id === 't-1' ? summary : null), composer })).toBe(
+      'focused_summary',
+    )
+    expect(summary.focus).toHaveBeenCalledOnce()
+    expect(composer.focus).not.toHaveBeenCalled()
+    expect(ctrl.isPending(1)).toBe(false)
+
+    // 2. Falls back to Composer when ready and summary is definitively absent
+    summary.focus.mockClear()
+    activeElement = body
+    ctrl.syncNavigation({ revision: 2, focus: 'topic-summary' }, 't-missing')
+    expect(ctrl.step({ revision: 2, status: 'ready', findSummary: () => null, composer })).toBe('focused_composer')
+    expect(composer.focus).toHaveBeenCalledOnce()
+    expect(ctrl.isPending(2)).toBe(false)
+
+    // 3. Cancels when user moves focus via focusin before summary appears
+    composer.focus.mockClear()
+    const otherBtn = { isConnected: true }
+    activeElement = body
+    ctrl.syncNavigation({ revision: 3, focus: 'topic-summary' }, 't-1')
+    activeElement = otherBtn
+    for (const l of focusInListeners) l({ target: otherBtn })
+    expect(ctrl.isPending(3)).toBe(false)
+    expect(focusInListeners.size).toBe(0)
+    ctrl.syncNavigation({ revision: 3, focus: 'topic-summary' }, 't-1')
+    expect(ctrl.isPending(3)).toBe(false)
+    expect(
+      ctrl.step({ revision: 3, status: 'ready', findSummary: () => summary, composer }),
+    ).toBe('cancelled')
+    expect(summary.focus).not.toHaveBeenCalled()
+    expect(composer.focus).not.toHaveBeenCalled()
+
+    // 4. Cancels when a newer navigation supersedes the pending revision
+    activeElement = body
+    ctrl.syncNavigation({ revision: 4, focus: 'topic-summary' }, 't-1')
+    ctrl.syncNavigation({ revision: 5, focus: 'composer' }, null)
+    expect(ctrl.isPending(4)).toBe(false)
+    expect(ctrl.step({ revision: 4, status: 'ready', findSummary: () => summary, composer })).toBe('cancelled')
+    expect(focusInListeners.size).toBe(0)
   })
 })

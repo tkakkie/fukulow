@@ -5,6 +5,7 @@ import { createSession } from './session'
 import { createInviteAcceptance } from './members'
 import { inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter } from './sync.svelte'
+import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
 
@@ -40,7 +41,7 @@ function stack(over: Partial<AuthDeps> = {}) {
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
-      return { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), close }
+      return { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
     },
     ...over,
   }
@@ -579,13 +580,15 @@ it('a late refusal after an Organization switch restores only its unedited draft
 })
 
 /** Return before the old send answers, with an observed Composer and a cached Channel extra. */
-async function returnWithPendingSend(timedOut = false) {
+async function returnWithPendingSend(timedOut = false, target: 'channel' | 'new topic' | 'topic' = 'channel') {
   const s = stack()
   await signInAs(s, 'm1')
   const first = await openChannelA(s)
   const old = s.auth.session!.sync.channel('A')
-  old.setDraft('送信する本文')
-  const pending = old.submit()
+  const oldComposer = target === 'topic' ? old.topic('T') : old
+  oldComposer.setDraft('送信する本文')
+  if (target === 'new topic') old.setTopicDraft('仕様相談')
+  const pending = target === 'topic' ? old.topic('T').submit('仕様相談') : old.submit()
   if (timedOut) {
     await vi.advanceTimersByTimeAsync(30_000)
     expect(old.timeline.pending).toMatchObject([{ status: 'failed', retryable: true }])
@@ -596,11 +599,15 @@ async function returnWithPendingSend(timedOut = false) {
   await s.auth.selectOrganization('o')
   const returned = await openChannelA(s, true)
   const current = s.auth.session!.sync.channel('A')
+  // Topic bootstrap exposes only W to sync. Load an unfiltered window with older history
+  // before exercising sync's older-page error (projection paging has separate state).
+  await current.loadLatest()
   // Keep a non-draft extra cached: a store-only write must update it and notify the adapter.
   returned.pages.A = { ok: false, kind: 'network' }
   await current.loadOlder()
   await settle()
-  const composer = await mount(() => current.timeline)
+  const composer = await mount(() => target === 'topic'
+    ? { ...current.timeline, ...current.topic('T').composer } : current.timeline)
   expect(composer.last).toMatchObject({ draft: '', olderError: true, pending: [] })
   // Closing cancels the old wait; cancellation alone never restores text.
   expect(await pending).toBe(true)
@@ -646,6 +653,144 @@ it.each(['ACK', 'network', 'timeout', '503'] as const)(
     expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe('')
     await composer.unmount()
     await s.auth.signOut()
+  },
+)
+
+it.each(['new topic', 'topic'] as const)(
+  'A to B to A restores a late refusal into the current %s Composer with its Topic intent', async target => {
+    const { s, send, current, composer } = await returnWithPendingSend(false, target)
+    if (target === 'topic') current.setDraft('チャンネルに残す下書き')
+    send.resolve({ ok: false, kind: 'http', status: 409 })
+    await settle()
+    expect(composer.last).toMatchObject({ draft: '送信する本文', olderError: true, pending: [] })
+    expect(composer.last.topicDraft).toBe(target === 'new topic' ? '仕様相談' : '')
+    expect(current.timeline.draft).toBe(target === 'topic' ? 'チャンネルに残す下書き' : '送信する本文')
+    expect(current.topic('other-topic').composer.draft).toBe('')
+    expect(s.stores.at(-1)!.get({ organizationId: 'other', channelId: 'A' })).toBe('組織Bの下書き')
+    await composer.unmount()
+    // Restored text and Topic intent must survive another controller lifetime.
+    await s.auth.selectOrganization('other')
+    await s.auth.selectOrganization('o')
+    const reopened = s.auth.session!.sync.channel('A')
+    expect(target === 'topic' ? reopened.topic('T').composer.draft : reopened.timeline.draft).toBe('送信する本文')
+    expect(reopened.timeline.topicDraft).toBe(target === 'new topic' ? '仕様相談' : '')
+    await s.auth.signOut()
+  },
+)
+
+it.each(['new topic', 'topic'] as const)(
+  'A to B to A protects edits to the current %s draft from an old refusal', async target => {
+    for (const clear of [false, true]) {
+      const { s, send, current, composer } = await returnWithPendingSend(false, target)
+      if (target === 'topic') {
+        current.topic('T').setDraft('新しい本文')
+        if (clear) current.topic('T').setDraft('')
+      } else {
+        // Editing only the Topic name must advance the shared draft revision too.
+        current.setTopicDraft('新しいトピック')
+        if (clear) current.setTopicDraft('')
+      }
+      await settle()
+      send.resolve({ ok: false, kind: 'http', status: 409 })
+      await settle()
+      expect(composer.last.draft).toBe(target === 'topic' && !clear ? '新しい本文' : '')
+      expect(composer.last.topicDraft).toBe(target === 'new topic' && !clear ? '新しいトピック' : '')
+      await composer.unmount()
+      await s.auth.signOut()
+    }
+  },
+)
+
+it.each(['new topic', 'topic'] as const)(
+  'A to B to A never restores an ACK or unknown send into the %s Composer', async target => {
+    for (const outcome of ['ACK', 'network', 'timeout', '503'] as const) {
+      const { s, send, composer } = await returnWithPendingSend(outcome === 'timeout', target)
+      send.resolve(outcome === 'ACK' ? ok({ ...sentBy('m1', 101, send.body.client_message_id, send.body.body), topic_id: 'T' })
+        : outcome === 'network' ? { ok: false, kind: 'network' }
+          : { ok: false, kind: 'http', status: outcome === 'timeout' ? 409 : 503 })
+      await settle()
+      expect(composer.last).toMatchObject({ draft: '', topicDraft: '', pending: [] })
+      await composer.unmount()
+      await s.auth.signOut()
+    }
+  },
+)
+
+it('Topic drafts and Channel topicDraft survive Organization switches, including a Topic name without a body', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  const old = s.auth.session!.sync.channel('A')
+  old.setTopicDraft('仕様相談')
+  await s.auth.selectOrganization('other')
+  // A Topic name alone is still an unsaved draft, outside the old controller.
+  expect(s.auth.hasUnsavedChanges()).toBe(true)
+  await s.auth.selectOrganization('o')
+  expect(s.auth.session!.sync.channel('A').timeline).toMatchObject({ draft: '', topicDraft: '仕様相談' })
+  s.auth.session!.sync.channel('A').topic('T').setDraft('トピックの下書き')
+  await s.auth.selectOrganization('other')
+  expect(s.auth.hasUnsavedChanges()).toBe(true)
+  const other = s.auth.session!.sync.channel('A')
+  expect(other.timeline.topicDraft).toBe('')
+  expect(other.topic('T').composer.draft).toBe('')
+  other.setTopicDraft('組織Bのトピック')
+  other.topic('T').setDraft('組織Bの下書き')
+  await s.auth.selectOrganization('o')
+  expect(s.auth.session!.sync.channel('A').timeline).toMatchObject({ draft: '', topicDraft: '仕様相談' })
+  expect(s.auth.session!.sync.channel('A').topic('T').composer.draft).toBe('トピックの下書き')
+  await s.auth.signOut()
+})
+
+it.each(['new topic', 'topic'] as const)(
+  'settlement, Channel access loss and Account Session end fence late %s draft restores', async target => {
+    for (const end of ['settled', 'Channel access lost', 'sign-out', '4001', '401', 'Account change'] as const) {
+      const s = stack()
+      await signInAs(s, 'm1')
+      const net = await openChannelA(s)
+      const old = s.auth.session!.sync.channel('A')
+      const oldComposer = target === 'topic' ? old.topic('T') : old
+      oldComposer.setDraft('送信する本文')
+      if (target === 'new topic') old.setTopicDraft('仕様相談')
+      const pending = target === 'topic' ? old.topic('T').submit('仕様相談') : old.submit()
+      const send = net.sends[0]
+      if (end === 'settled') {
+        net.event({ type: 'message', message: { ...sentBy('m1', 101, send.body.client_message_id, send.body.body), topic_id: 'T' } })
+        await settle()
+        expect(old.timeline.pending).toEqual([])
+      } else if (end === 'Channel access lost') {
+        net.event({ type: 'channel_access_lost', channel_id: 'A' })
+        await settle()
+        expect(old.timeline.status).toBe('unavailable')
+      }
+      await s.auth.selectOrganization('other')
+      if (end === 'sign-out') await s.auth.signOut()
+      else if (end === '4001') s.nets.at(-1)!.socket.onClose(4001)
+      else if (end === '401') {
+        void s.auth.session!.sync.channel('A').send('401になる送信')
+        s.nets.at(-1)!.sends[0].resolve({ ok: false, kind: 'http', status: 401 })
+      } else if (end === 'Account change') await signInAs(s, 'm2')
+      await settle()
+      send.resolve({ ok: false, kind: 'http', status: 409 })
+      expect(await pending).toBe(true)
+      await settle()
+      expect(s.stores.at(-1)!.hasDrafts(), end).toBe(false)
+      if (end === 'sign-out' || end === '4001' || end === '401') await signInAs(s, 'm1')
+      await s.auth.selectOrganization('o')
+      const current = s.auth.session!.sync.channel('A')
+      expect(current.timeline, end).toMatchObject({ draft: '', topicDraft: '', pending: [] })
+      expect(current.topic('T').composer.draft, end).toBe('')
+      // Old adapters may not insert or erase the current Account Session's Topic intent.
+      if (end !== 'settled' && end !== 'Channel access lost') {
+        current.setTopicDraft('新しいトピック')
+        current.topic('T').setDraft('新しい本文')
+        old.setTopicDraft('古いトピック')
+        oldComposer.setDraft('古い本文')
+        await s.auth.selectOrganization('other')
+        await s.auth.selectOrganization('o')
+        expect(s.auth.session!.sync.channel('A').timeline.topicDraft, end).toBe('新しいトピック')
+        expect(s.auth.session!.sync.channel('A').topic('T').composer.draft, end).toBe('新しい本文')
+      }
+      await s.auth.signOut()
+    }
   },
 )
 

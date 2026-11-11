@@ -617,4 +617,118 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
     expect(second.id).not.toBe(first.id)
     expect(queue.enqueue('')).toBe(second)
   })
+
+  it('suppresses Topic summary moves in Channel view while announcing live arrivals in an open Topic view', () => {
+    const names: Record<string, string> = { tanaka: '田中 美咲', sato: '佐藤 健' }
+    let s = initialAnnouncementState()
+    s = stepAnnouncements(s, { type: 'view_changed', viewId: 'c1/', kind: 'channel', name: 'general' }).state
+    s = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1/',
+      topicId: null,
+      status: 'ready',
+      live: true,
+      messages: [{ ...msg(1, 'tanaka', '初期'), topic_id: null, reply_to: null }],
+      selfId: 'me',
+      nowMs: 1_000,
+    }).state
+
+    // Live Topic message at seq 2 in Channel view (topicId: null) -> suppressed (Topic summary move), advances maxSeq
+    let res = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1/',
+      topicId: null,
+      status: 'ready',
+      live: true,
+      messages: [
+        { ...msg(1, 'tanaka', '初期'), topic_id: null, reply_to: null },
+        { ...msg(2, 'sato', 'トピック発言'), topic_id: 't1', reply_to: null },
+      ],
+      selfId: 'me',
+      nowMs: 4_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    expect(res.announcement).toBeNull()
+    s = res.state
+
+    // Subsequent top-level Channel message at seq 3 -> still contiguous (2 -> 3) and announced
+    res = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1/',
+      topicId: null,
+      status: 'ready',
+      live: true,
+      messages: [
+        { ...msg(1, 'tanaka', '初期'), topic_id: null, reply_to: null },
+        { ...msg(2, 'sato', 'トピック発言'), topic_id: 't1', reply_to: null },
+        { ...msg(3, 'tanaka', 'チャンネル発言'), topic_id: null, reply_to: null },
+      ],
+      selfId: 'me',
+      nowMs: 7_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    expect(res.announcement).toBe('田中 美咲: チャンネル発言')
+
+    // Switch to Topic t1 view -> announces Topic name, ignores Channel/t2 arrivals, announces t1 live arrival
+    const switched = stepAnnouncements(res.state, {
+      type: 'view_changed',
+      viewId: 'c1/t1',
+      kind: 'topic',
+      name: '日報',
+    })
+    expect(switched.announcement).toBe('日報')
+    s = stepAnnouncements(switched.state, {
+      type: 'timeline_updated',
+      viewId: 'c1/t1',
+      topicId: 't1',
+      status: 'ready',
+      live: true,
+      messages: [
+        { ...msg(1, 'tanaka', '初期'), topic_id: null, reply_to: null },
+        { ...msg(2, 'sato', 'トピック発言'), topic_id: 't1', reply_to: null },
+        { ...msg(3, 'tanaka', 'チャンネル発言'), topic_id: null, reply_to: null },
+      ],
+      selfId: 'me',
+      nowMs: 8_000,
+    }).state
+
+    // Live message in another Topic t2 at seq 4 -> not announced in t1, advances maxSeq
+    res = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1/t1',
+      topicId: 't1',
+      status: 'ready',
+      live: true,
+      messages: [
+        { ...msg(1, 'tanaka', '初期'), topic_id: null, reply_to: null },
+        { ...msg(2, 'sato', 'トピック発言'), topic_id: 't1', reply_to: null },
+        { ...msg(3, 'tanaka', 'チャンネル発言'), topic_id: null, reply_to: null },
+        { ...msg(4, 'tanaka', '別トピック'), topic_id: 't2', reply_to: null },
+      ],
+      selfId: 'me',
+      nowMs: 11_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    expect(res.announcement).toBeNull()
+
+    // Live message in t1 at seq 5 -> contiguous (4 -> 5) and announced
+    res = stepAnnouncements(res.state, {
+      type: 'timeline_updated',
+      viewId: 'c1/t1',
+      topicId: 't1',
+      status: 'ready',
+      live: true,
+      messages: [
+        { ...msg(1, 'tanaka', '初期'), topic_id: null, reply_to: null },
+        { ...msg(2, 'sato', 'トピック発言'), topic_id: 't1', reply_to: null },
+        { ...msg(3, 'tanaka', 'チャンネル発言'), topic_id: null, reply_to: null },
+        { ...msg(4, 'tanaka', '別トピック'), topic_id: 't2', reply_to: null },
+        { ...msg(5, 'sato', '日報の更新です'), topic_id: 't1', reply_to: null },
+      ],
+      selfId: 'me',
+      nowMs: 14_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    expect(res.announcement).toBe('佐藤 健: 日報の更新です')
+  })
 })

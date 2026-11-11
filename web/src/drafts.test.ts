@@ -63,3 +63,29 @@ it('draft notifications observe committed writes and stop on unsubscribe or Acco
   expect(ended).not.toHaveBeenCalled()
   expect(current).toHaveBeenCalledExactlyOnceWith(target)
 })
+
+it('stores the Channel Topic name with its body in one revision and fences both on Account Session clear', () => {
+  const drafts = createDraftStore()
+  const old = drafts.scope()
+  const target = { organizationId: 'o', channelId: 'c' }
+  const observed = vi.fn(() => ({
+    text: old.get(target), topicDraft: old.getTopicDraft(target), revision: old.revision(target),
+  }))
+  old.subscribe(observed)
+  old.set(target, '本文', '仕様相談')
+  expect(observed).toHaveReturnedWith({ text: '本文', topicDraft: '仕様相談', revision: 1 })
+  expect(observed).toHaveBeenCalledOnce()
+  old.set(target, '', '次のトピック')
+  expect(drafts.hasDrafts()).toBe(true)
+  expect(observed).toHaveLastReturnedWith({ text: '', topicDraft: '次のトピック', revision: 2 })
+  drafts.clear()
+  expect(old.getTopicDraft(target)).toBe('')
+  old.set(target, '古い本文', '古いトピック')
+  expect(drafts.hasDrafts()).toBe(false)
+  const current = drafts.scope()
+  current.set(target, '', '新しいトピック')
+  old.set(target, '', '')
+  expect(current.getTopicDraft(target)).toBe('新しいトピック')
+  expect(current.revision(target)).toBe(1)
+  expect(observed).toHaveBeenCalledTimes(2)
+})

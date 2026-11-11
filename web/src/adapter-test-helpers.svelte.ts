@@ -1,5 +1,18 @@
 import { flushSync, tick } from 'svelte'
-import type { Channel, ClientMessage, Message, MessagePage, Result, SendMessageRequest, ServerEvent } from './api'
+import type {
+  Channel,
+  ClientMessage,
+  Message,
+  MessagePage,
+  Result,
+  SendMessageRequest,
+  ServerEvent,
+  TimelineItem,
+  TimelinePage,
+  TopicPage,
+  TopicSummary,
+  TopicSummaryResponse,
+} from './api'
 import type { RealtimeHandlers } from './realtime'
 import { record } from './protocol-test-helpers'
 import type { SessionOptions } from './session'
@@ -49,11 +62,43 @@ export function fakeNetwork() {
   const sockets: FakeSocket[] = []
   const history: { channel: string; query?: { after_seq?: number; before_seq?: number } }[] = []
   const pages: Record<string, Result<MessagePage>> = {}
+  const timelines: Record<string, Result<TimelinePage>> = {}
+  const topicLists: Record<string, Result<TopicPage>> = {}
+  const topicSummaries: Record<string, Result<TopicSummaryResponse>> = {}
+  const topicMessages: Record<string, Result<MessagePage>> = {}
   const sends: ({ channel: string; body: SendMessageRequest } & Deferred<Result<Message>>)[] = []
   const lists: Deferred<Result<{ channels: Channel[] }>>[] = []
   const creates: ({ name: string } & Deferred<Result<Channel>>)[] = []
   let ids = 0
-  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'sync'> => ({
+  function toTimelinePage(page: MessagePage): TimelinePage {
+    const byTopic = new Map<string, TopicSummary>()
+    const items: TimelineItem[] = []
+    for (const m of page.messages) {
+      if (m.topic_id === null) {
+        items.push({ kind: 'message', message: m })
+      } else {
+        const prev = byTopic.get(m.topic_id)
+        byTopic.set(m.topic_id, {
+          id: m.topic_id,
+          name: prev?.name ?? m.topic_id,
+          first_seq: prev?.first_seq ?? m.seq,
+          last_seq: m.seq,
+          message_count: (prev?.message_count ?? 0) + 1,
+          latest_message: m,
+          read_seq: 0,
+          unread_count: 0,
+        })
+      }
+    }
+    for (const topic of byTopic.values()) items.push({ kind: 'topic', topic })
+    items.sort((a, b) => (a.kind === 'message' ? a.message.seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.seq : b.topic.last_seq))
+    return {
+      as_of_seq: page.messages.at(-1)?.seq ?? 0,
+      has_more: page.has_more,
+      items,
+    }
+  }
+  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'sync'> => ({
     channelsApi: {
       listChannels() {
         const d = deferred<Result<{ channels: Channel[] }>>()
@@ -64,6 +109,51 @@ export function fakeNetwork() {
         const d = deferred<Result<Channel>>()
         creates.push({ name: body.name, resolve: d.resolve })
         return d.promise
+      },
+    },
+    topicsApi: {
+      async listTimeline(channel, query) {
+        history.push({ channel, query: query?.before_position !== undefined ? { before_seq: query.before_position } : undefined })
+        if (timelines[channel]) return timelines[channel]
+        const page = pages[channel] ?? { ok: true, data: { messages: [], has_more: false } }
+        return page.ok ? { ok: true, data: toTimelinePage(page.data) } : page
+      },
+      async listTopics(channel) {
+        if (topicLists[channel]) return topicLists[channel]
+        const page = pages[channel]
+        if (page && !page.ok) return page
+        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false })
+        return {
+          ok: true,
+          data: {
+            as_of_seq: tl.as_of_seq,
+            has_more: false,
+            topics: tl.items.flatMap(i => (i.kind === 'topic' ? [i.topic] : [])),
+          },
+        }
+      },
+      async getTopicSummary(channel, topic) {
+        const custom = topicSummaries[`${channel}:${topic}`]
+        if (custom) return custom
+        const page = pages[channel]
+        if (page && !page.ok) return page
+        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false })
+        const found = tl.items.find(i => i.kind === 'topic' && i.topic.id === topic)
+        if (found?.kind === 'topic') return { ok: true, data: { as_of_seq: tl.as_of_seq, topic: found.topic } }
+        return { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
+      },
+      async listTopicMessages(channel, topic) {
+        const custom = topicMessages[`${channel}:${topic}`]
+        if (custom) return custom
+        const page = pages[channel]
+        if (page && !page.ok) return page
+        return {
+          ok: true,
+          data: {
+            messages: (page?.data.messages ?? []).filter(m => m.topic_id === topic),
+            has_more: false,
+          },
+        }
       },
     },
     sync: {
@@ -87,7 +177,7 @@ export function fakeNetwork() {
     },
   })
   return {
-    sockets, history, pages, sends, lists, creates, options,
+    sockets, history, pages, timelines, topicLists, topicSummaries, topicMessages, sends, lists, creates, options,
     get socket() { return sockets.at(-1)! },
     event: (e: ServerEvent) => sockets.at(-1)!.onEvent(e),
     subscribed: (channel: string, caught_up_seq: number) =>

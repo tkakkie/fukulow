@@ -275,4 +275,34 @@ describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.m
     })
     expect(gapStep.action).toBe('preserve_anchor')
   })
+
+  it('preserves visual scroll anchor when a Topic summary line moves from above the viewport to the tail while unpinned', () => {
+    let s = initialTimelineScrollState('c1')
+    s = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [{ id: 'topic:t1:2', seq: 2, sender: 'other' }, msg(3), msg(5)],
+      pendingIds: [],
+      selfId: 'me',
+    }).state
+    s = stepTimelineScroll(s, {
+      type: 'scroll',
+      metrics: { scrollTop: 50, scrollHeight: 1000, clientHeight: 500 },
+    }).state
+    expect(s.pinned).toBe(false)
+
+    // Topic t1 moves from position 2 (above tail 5) to position 6 (at tail) due to another member's message
+    const moved = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(3), msg(5), { id: 'topic:t1:6', seq: 6, sender: 'other' }],
+      pendingIds: [],
+      selfId: 'me',
+    })
+    expect(moved.action).toBe('preserve_anchor')
+    expect(moved.state.pinned).toBe(false)
+    expect(moved.state.belowCount).toBe(1)
+  })
 })

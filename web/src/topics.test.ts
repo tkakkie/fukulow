@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { Result, TimelinePage, TopicSummaryResponse } from './api'
+import type { Channel, MessagePage, Result, TimelinePage, TopicPage, TopicSummaryResponse } from './api'
+import { createSession } from './session'
 import { flush } from './sync-test-helpers'
 import { deferred, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { createTopics } from './topics'
@@ -240,10 +241,66 @@ it.each(['unwatch', 'subscription refusal', 'Organization loss', 'session replac
     older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'topic', topic: summary('stale', 3, 1) }], has_more: false }))
     await loading
     expect(c.topics.get('A').topics.some(t => t.topicId === 'stale')).toBe(false)
-    expect(c.topics.get('A').main.asOfSeq).toBeUndefined()
+    if (reason === 'subscription refusal' || reason === 'Organization loss') {
+      expect(c.topics.get('A').main).toMatchObject({ asOfSeq: 10, hasMore: true, loading: false })
+    } else {
+      expect(c.topics.get('A').main.asOfSeq).toBeUndefined()
+    }
     await c.sync.close()
   },
 )
+
+it('C9 and C10 keep loaded Topic projections while fencing in-flight reads', async () => {
+  for (const trigger of ['sync.unavailable', 'ws_4003', 'channel_access_lost'] as const) {
+    const c = topicClient()
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+      as_of_seq: 3,
+      items: [{ kind: 'message', message: msg(3) }],
+      has_more: true,
+    }))
+    await c.sync.start()
+    c.handlers[0].onReady()
+    await c.sync.watch('A')
+    c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 3 })
+
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+      as_of_seq: 3,
+      items: [
+        { kind: 'message', message: msg(1) },
+        { kind: 'topic', topic: summary('T', 2, 1) },
+      ],
+      has_more: false,
+    }))
+    await c.topics.loadMain('A')
+    c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(2, 'T')], has_more: false }))
+    await c.topics.loadTopic('A', 'T')
+
+    // Sync holds only the bootstrap Message at W=3; [1, 2] live in Topic projections.
+    expect(c.sync.get().channels.A.messages.map(m => m.seq)).toEqual([3])
+    expect(c.topics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position))).toEqual([1, 2, 3])
+    expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2])
+
+    const inFlightList = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopics>>>()
+    c.topicsApi.listTopics.mockReturnValueOnce(inFlightList.promise)
+    const loadingList = c.topics.loadList('A')
+    await flush()
+
+    if (trigger === 'sync.unavailable') await c.sync.unavailable()
+    else if (trigger === 'ws_4003') c.handlers[0].onClose(4003)
+    else c.handlers[0].onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await flush()
+
+    expect(c.topics.get('A').unavailable).toBe(true)
+    expect(c.topics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position))).toEqual([1, 2, 3])
+    expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2])
+
+    inFlightList.resolve(ok({ as_of_seq: 3, topics: [summary('stale', 1, 1)], has_more: false }))
+    await loadingList
+    expect(c.topics.get('A').topics.map(t => t.topicId)).toEqual(['T'])
+    expect(c.topics.get('A').list.loading).toBe(false)
+    await c.sync.close()
+  }
+})
 
 it('a late projection response after replaceSession never reaches settleHistory', async () => {
   const c = topicClient()
@@ -536,4 +593,473 @@ it('posting during an older timeline request merges ack, page and echo once with
   expect(c.topics.get('A').lines.flatMap(l => l.kind === 'message' ? [l.message.seq] : [])).toEqual([4, 8, 11])
   expect(c.topics.get('A').topics).toHaveLength(1)
   await c.sync.close()
+})
+
+it('session replacement and close clear Topic projections before sync notifies subscribers and fence in-flight reads', async () => {
+  const c = topicClient()
+  await c.boot()
+  await c.topics.loadTopic('A', 'T')
+  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([5, 10])
+
+  const lateAuth = deferred<Result<TopicSummaryResponse>>()
+  const lateList = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopics>>>()
+  c.topicsApi.getTopicSummary.mockReturnValueOnce(lateAuth.promise)
+  c.topicsApi.listTopics.mockReturnValueOnce(lateList.promise)
+  const loadingSummary = c.topics.loadSummary('A', 'U')
+  const loadingList = c.topics.loadList('A')
+  await flush()
+
+  let snapshotOnReplace: ReturnType<typeof c.topics.get> | undefined
+  let snapshotOnClose: ReturnType<typeof c.topics.get> | undefined
+  c.sync.subscribe(() => {
+    const cur = c.sync.get()
+    if (cur.selfId === 'next' && !snapshotOnReplace) snapshotOnReplace = c.topics.get('A')
+    if (!cur.running && !snapshotOnClose) snapshotOnClose = c.topics.get('A')
+  })
+
+  await c.sync.replaceSession('next')
+  expect(snapshotOnReplace).toBeDefined()
+  expect(snapshotOnReplace!.main.asOfSeq).toBeUndefined()
+  expect(snapshotOnReplace!.topics).toEqual([])
+  expect(snapshotOnReplace!.topic('T').messages).toEqual([])
+
+  // Late 401 and late list from the replaced session are fenced even after the new session watches Channel A
+  c.handlers.at(-1)!.onReady()
+  await c.sync.watch('A')
+  lateAuth.resolve({ ok: false, kind: 'http', status: 401 })
+  lateList.resolve(ok({ as_of_seq: 10, topics: [summary('stale', 2, 1)], has_more: false }))
+  await Promise.all([loadingSummary, loadingList])
+  expect(c.onSessionEnded).not.toHaveBeenCalled()
+  expect(c.topics.get('A').topics.some(t => t.topicId === 'stale')).toBe(false)
+
+  // Hang a new read and verify close clears projections synchronously before sync listeners run and releases timers
+  c.topicsApi.listTopicMessages.mockImplementationOnce(() => new Promise(() => {}))
+  const hanging = c.topics.loadTopic('A', 'T')
+  await flush()
+  await c.sync.close()
+  await hanging
+  expect(snapshotOnClose).toBeDefined()
+  expect(snapshotOnClose!.topics).toEqual([])
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('reconciles Topic snapshots across sync listener ordering and coalesces own-send settlement notifications', async () => {
+  const c = topicClient()
+  const seenInEarlySyncListener: number[][] = []
+  let secondaryTopics!: ReturnType<typeof createTopics>
+  // Subscribe BEFORE secondaryTopics is created so this listener runs before secondaryTopics' sync listener
+  c.sync.subscribe(() => {
+    if (!secondaryTopics) return
+    seenInEarlySyncListener.push(
+      secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position)),
+    )
+  })
+  secondaryTopics = createTopics(c.sync, { api: c.topicsApi })
+  await c.boot()
+  await secondaryTopics.loadMain('A')
+  // Prime snapshot cache on secondaryTopics before the next sync event
+  expect(secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position))).toEqual([8, 10])
+  seenInEarlySyncListener.length = 0
+
+  c.event(11, 'T')
+  expect(seenInEarlySyncListener.at(-1)).toEqual([8, 11])
+  secondaryTopics.close()
+
+  // Older page success returns true and emits one consistent notification even when settling an own send
+  c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  await c.sync.getTimeline('A').send('unknown own')
+  const pending = c.sync.get().channels.A.pending[0]!
+  const own = { ...msg(4), sender: 'me', client_message_id: pending.clientMessageId }
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 10, items: [{ kind: 'message', message: own }], has_more: true }))
+  let topicNotifications = 0
+  const unsub = c.topics.subscribe(() => {
+    topicNotifications++
+  })
+  expect(await c.topics.loadMain('A')).toBe(true)
+  // 1 notification for loading=true, 1 notification for settled page + settleHistory
+  expect(topicNotifications).toBe(2)
+
+  // HTTP 503 returns false
+  c.topicsApi.listTimeline.mockResolvedValueOnce({ ok: false, kind: 'http', status: 503 })
+  expect(await c.topics.loadMain('A')).toBe(false)
+
+  // C9 404 returns false and marks unavailable in a single completion notification
+  topicNotifications = 0
+  c.topicsApi.listTimeline.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'channel_not_found' })
+  expect(await c.topics.loadMain('A')).toBe(false)
+  expect(topicNotifications).toBe(2)
+  expect(c.topics.get('A').unavailable).toBe(true)
+  expect(await c.topics.loadMain('A')).toBe(false)
+  unsub()
+  await c.sync.close()
+})
+
+it('ensureSummary deduplicates concurrent callers, retries retryable failures with backoff, and stops on 404 or close', async () => {
+  const c = topicClient()
+  await c.boot()
+  c.event(11, 'U')
+  expect(c.topics.get('A').topics.find(t => t.topicId === 'U')?.baseline).toBeNull()
+
+  const first = deferred<Result<TopicSummaryResponse>>()
+  c.topicsApi.getTopicSummary
+    .mockReturnValueOnce(first.promise)
+    .mockResolvedValueOnce({ ok: true, data: { as_of_seq: 11, topic: { ...summary('U', 11, 2), name: 'Recovered' } } })
+
+  // Concurrent ensureSummary calls from Timeline + TopicList deduplicate into one HTTP request
+  const p1 = c.topics.ensureSummary('A', 'U')
+  const p2 = c.topics.ensureSummary('A', 'U')
+  await flush()
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+
+  first.resolve({ ok: false, kind: 'http', status: 503 })
+  await Promise.all([p1, p2])
+  // Scheduled retry prevents re-render loops from firing immediately before backoff elapses
+  await c.topics.ensureSummary('A', 'U')
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+
+  await vi.advanceTimersByTimeAsync(500)
+  await flush()
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  expect(c.topics.get('A').topics.find(t => t.topicId === 'U')?.baseline?.summary.name).toBe('Recovered')
+
+  // 404 topic_not_found marks notFound and never schedules retries
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+  await c.topics.ensureSummary('A', 'missing')
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(3)
+  expect(vi.getTimerCount()).toBe(0)
+  await c.sync.close()
+})
+
+it('records notFound per Topic on 404 topic_not_found for summary and Topic history reads', async () => {
+  const c = topicClient()
+  await c.boot()
+  expect(c.topics.get('A').topic('missing').notFound).toBe(false)
+
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+  await c.topics.loadSummary('A', 'missing')
+  expect(c.topics.get('A').topic('missing')).toMatchObject({ notFound: true, error: false })
+  expect(c.topics.get('A').topic('T').notFound).toBe(false)
+  expect(c.topics.get('A').unavailable).toBe(false)
+
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+  await c.topics.loadTopic('A', 'missing-history')
+  expect(c.topics.get('A').topic('missing-history')).toMatchObject({ notFound: true, loading: false, error: false })
+  await c.sync.close()
+})
+
+it('ensureSummary bounds automatic retries on persistent 503 and network failures, enters terminal retryable error, and restarts on explicit retry or new generation', async () => {
+  for (const makeFailure of [
+    () => ({ ok: false as const, kind: 'http' as const, status: 503 }),
+    () => ({ ok: false as const, kind: 'network' as const }),
+  ]) {
+    const c = topicClient()
+    await c.boot()
+    c.event(11, 'U')
+    c.topicsApi.getTopicSummary.mockImplementation(async () => makeFailure())
+
+    // Render-driven subscriber calling ensureSummary on every state notification while baseline is null
+    const unsub = c.topics.subscribe(() => {
+      for (const line of c.topics.get('A').topics) {
+        if (line.baseline === null) void c.topics.ensureSummary('A', line.topicId)
+      }
+    })
+
+    await c.topics.ensureSummary('A', 'U')
+    await vi.advanceTimersByTimeAsync(120_000)
+    await flush()
+
+    const callsAtTerminal = c.topicsApi.getTopicSummary.mock.calls.length
+    expect(callsAtTerminal).toBe(5)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'U')).toMatchObject({
+      baseline: null,
+      summaryError: 'retryable',
+    })
+    expect(c.topics.get('A').topic('U').summaryError).toBe('retryable')
+
+    // Repeated render-driven ensureSummary calls after reaching terminal error make no further automatic requests
+    await c.topics.ensureSummary('A', 'U')
+    await c.topics.ensureSummary('A', 'U')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(callsAtTerminal)
+
+    // Explicit user retry clears terminal error and restarts bounded retry -> succeeds on the retry backoff
+    c.topicsApi.getTopicSummary
+      .mockImplementationOnce(async () => makeFailure())
+      .mockImplementationOnce(async () => ok({ as_of_seq: 11, topic: { ...summary('U', 11, 2), name: 'Recovered U' } }))
+    await c.topics.retrySummary('A', 'U')
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(callsAtTerminal + 1)
+    await vi.advanceTimersByTimeAsync(500)
+    await flush()
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(callsAtTerminal + 2)
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'U')).toMatchObject({
+      messageCount: 2,
+      summaryError: null,
+      baseline: { summary: { name: 'Recovered U' } },
+    })
+    expect(c.topics.get('A').topic('U').summaryError).toBeNull()
+
+    // Another live-only Topic V reaches terminal error, then restarts when a new C9 recovery generation begins
+    c.event(12, 'V')
+    await flush()
+    await vi.advanceTimersByTimeAsync(120_000)
+    await flush()
+    expect(c.topics.get('A').topic('V').summaryError).toBe('retryable')
+    const beforeRecoveryCalls = c.topicsApi.getTopicSummary.mock.calls.length
+
+    c.handlers[0].onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await flush()
+    c.topicsApi.getTopicSummary.mockImplementationOnce(async () =>
+      ok({ as_of_seq: 12, topic: { ...summary('V', 12, 1), name: 'Recovered V' } }),
+    )
+    await c.sync.watch('A')
+    c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 12 })
+    await flush()
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(beforeRecoveryCalls + 1)
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'V')).toMatchObject({
+      summaryError: null,
+      baseline: { summary: { name: 'Recovered V' } },
+    })
+
+    unsub()
+    await c.sync.close()
+  }
+})
+
+it('ensureSummary makes no further automatic requests after non-retryable 400 and 429 despite repeated render-driven calls, and explicit retry restarts', async () => {
+  for (const status of [400, 429] as const) {
+    const c = topicClient()
+    await c.boot()
+    c.event(11, 'U')
+    c.topicsApi.getTopicSummary.mockResolvedValue({ ok: false, kind: 'http', status })
+
+    // Render-driven subscriber calling ensureSummary on every notification
+    const unsub = c.topics.subscribe(() => {
+      const line = c.topics.get('A').topics.find(t => t.topicId === 'U')
+      if (line && line.baseline === null) void c.topics.ensureSummary('A', 'U')
+    })
+
+    await c.topics.ensureSummary('A', 'U')
+    // Repeated render-driven calls and advancing timers cause zero additional automatic requests
+    for (let i = 0; i < 5; i++) {
+      await c.topics.ensureSummary('A', 'U')
+    }
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'U')).toMatchObject({
+      baseline: null,
+      summaryError: 'non_retryable',
+    })
+    expect(c.topics.get('A').topic('U').summaryError).toBe('non_retryable')
+
+    // Explicit retry restarts and resolves the summary baseline
+    c.topicsApi.getTopicSummary.mockResolvedValueOnce(
+      ok({ as_of_seq: 11, topic: { ...summary('U', 11, 1), name: 'Explicit Retry' } }),
+    )
+    await c.topics.retrySummary('A', 'U')
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'U')).toMatchObject({
+      messageCount: 1,
+      summaryError: null,
+      baseline: { summary: { name: 'Explicit Retry' } },
+    })
+
+    unsub()
+    await c.sync.close()
+  }
+})
+
+it('retains Topic window, baselines and paging cursors across C9 loss and same-Channel recovery with replay', async () => {
+  const handlers: import('./realtime').RealtimeHandlers[] = []
+  const controls: unknown[] = []
+  const channelA: Channel = {
+    id: 'A',
+    name: 'general',
+    visibility: 'private',
+    capabilities: {
+      can_add_members: { allowed: false },
+      can_remove_members: { allowed: false },
+      can_leave: { allowed: false },
+    },
+  }
+  const listMessages = vi.fn(async (): Promise<Result<MessagePage>> => ok({ messages: [], has_more: false }))
+  const sendMessage = vi.fn(async () => ok(msg(99)))
+  const topicsApi = {
+    listTimeline: vi.fn(async () => ok(page(10))),
+    listTopics: vi.fn(async (): Promise<Result<TopicPage>> => ok({ as_of_seq: 10, has_more: false, topics: [] })),
+    getTopicSummary: vi.fn(async (): Promise<Result<TopicSummaryResponse>> => ok({ as_of_seq: 10, topic: summary('T', 10, 3) })),
+    listTopicMessages: vi.fn(async (): Promise<Result<MessagePage>> => ok({ messages: [], has_more: false })),
+  }
+  const session = createSession({
+    selfId: 'me',
+    organizationId: 'org-1',
+    onEnded: vi.fn(),
+    channelsApi: {
+      listChannels: vi.fn(async () => ok({ channels: [channelA] })),
+      createChannel: vi.fn(async () => ok(channelA)),
+    },
+    topicsApi,
+    sync: {
+      api: { listMessages, sendMessage },
+      connect(h) {
+        handlers.push(h)
+        return { send: m => { controls.push(m) }, close: vi.fn() }
+      },
+    },
+  })
+
+  handlers[0]!.onReady()
+  await flush()
+  expect(controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
+  handlers[0]!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
+  await flush()
+
+  // 1. Fully load Topic T history (2 pages -> has_more: false) and partially load Topic U (1 page -> has_more: true)
+  topicsApi.listTopicMessages
+    .mockResolvedValueOnce(ok({ messages: [msg(5, 'T'), msg(10, 'T')], has_more: true }))
+    .mockResolvedValueOnce(ok({ messages: [msg(2, 'T')], has_more: false }))
+    .mockResolvedValueOnce(ok({ messages: [msg(7, 'U')], has_more: true }))
+  await session.topics.loadTopic('A', 'T')
+  await session.topics.loadTopic('A', 'T')
+  await session.topics.loadTopic('A', 'U')
+  expect(topicsApi.listTopicMessages.mock.calls).toEqual([
+    ['A', 'T', {}],
+    ['A', 'T', { before_seq: 5 }],
+    ['A', 'U', {}],
+  ])
+
+  // 2. Fully load the Topic list (2 pages -> has_more: false)
+  topicsApi.listTopics
+    .mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('U', 7, 2), summary('T', 10, 3)], has_more: true }))
+    .mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('V', 3, 1)], has_more: false }))
+  await session.topics.loadList('A')
+  await session.topics.loadList('A')
+  expect(topicsApi.listTopics.mock.calls).toEqual([
+    ['A', {}],
+    ['A', { as_of_seq: 10, before_position: 7 }],
+  ])
+
+  const beforeLoss = session.topics.get('A')
+  expect(beforeLoss).toMatchObject({
+    unavailable: false,
+    main: { asOfSeq: 10, before: 8, hasMore: true, loading: false, error: false },
+    list: { asOfSeq: 10, before: 3, hasMore: false, loading: false, error: false },
+  })
+  expect(beforeLoss.topic('T')).toMatchObject({ initialized: true, before: 2, hasMore: false, loading: false, error: false })
+  expect(beforeLoss.topic('T').messages.map(m => m.seq)).toEqual([2, 5, 10])
+  expect(beforeLoss.topic('U')).toMatchObject({ initialized: true, before: 7, hasMore: true })
+  expect(beforeLoss.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
+    ['V', 3, 1],
+    ['U', 7, 2],
+    ['T', 10, 3],
+  ])
+
+  // 3. Lose Channel access (C9): window is kept
+  handlers[0]!.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+  await flush()
+  const duringLoss = session.topics.get('A')
+  expect(duringLoss.unavailable).toBe(true)
+  expect(duringLoss.generation).toBe(beforeLoss.generation)
+  expect(duringLoss.main).toEqual(beforeLoss.main)
+  expect(duringLoss.list).toEqual(beforeLoss.list)
+  expect(duringLoss.topic('T')).toEqual(beforeLoss.topic('T'))
+  expect(duringLoss.topic('U')).toEqual(beforeLoss.topic('U'))
+  expect(duringLoss.topics).toEqual(beforeLoss.topics)
+
+  // 4. Regain Channel access and re-select the same Channel: only generation changes; cursors & baselines stay
+  controls.length = 0
+  topicsApi.listTimeline.mockClear()
+  topicsApi.listTopics.mockClear()
+  topicsApi.listTopicMessages.mockClear()
+  topicsApi.getTopicSummary.mockClear()
+  listMessages.mockClear()
+
+  session.channels.select('A')
+  await flush()
+  expect(controls).toEqual([{ type: 'subscribe', channel_id: 'A', after_seq: 10 }])
+  expect(topicsApi.listTimeline).not.toHaveBeenCalled()
+  expect(topicsApi.listTopics).not.toHaveBeenCalled()
+  expect(topicsApi.listTopicMessages).not.toHaveBeenCalled()
+  expect(topicsApi.getTopicSummary).not.toHaveBeenCalled()
+  expect(listMessages).not.toHaveBeenCalled()
+
+  const onRecovery = session.topics.get('A')
+  expect(onRecovery.unavailable).toBe(false)
+  expect(onRecovery.generation).toBe(beforeLoss.generation + 1)
+  expect(onRecovery.main).toEqual(beforeLoss.main)
+  expect(onRecovery.list).toEqual(beforeLoss.list)
+  expect(onRecovery.topic('T')).toEqual(beforeLoss.topic('T'))
+  expect(onRecovery.topic('U')).toEqual(beforeLoss.topic('U'))
+  expect(onRecovery.topics).toEqual(beforeLoss.topics)
+  expect(onRecovery.lines).toEqual(beforeLoss.lines)
+
+  // 5. Deliver replay (including an at-least-once boundary duplicate seq=10) + handoff watermark
+  handlers[0]!.onEvent({ type: 'message', message: msg(10, 'T') })
+  handlers[0]!.onEvent({ type: 'message', message: msg(11, 'T') })
+  handlers[0]!.onEvent({ type: 'message', message: msg(12, 'V') })
+  handlers[0]!.onEvent({ type: 'message', message: msg(13, null) })
+  handlers[0]!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 13 })
+  await flush()
+
+  expect(session.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 13 })
+  const afterReplay = session.topics.get('A')
+  expect(afterReplay.topic('T').messages.map(m => m.seq)).toEqual([2, 5, 10, 11])
+  expect(afterReplay.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
+    ['U', 7, 2],
+    ['T', 11, 4],
+    ['V', 12, 2],
+  ])
+  expect(
+    afterReplay.lines.map(l =>
+      l.kind === 'message' ? { seq: l.message.seq } : { topic: l.topicId, position: l.position, count: l.messageCount },
+    ),
+  ).toEqual([
+    { seq: 8 },
+    { topic: 'T', position: 11, count: 4 },
+    { topic: 'V', position: 12, count: 2 },
+    { seq: 13 },
+  ])
+
+  // 6. Outgoing paging requests respect retained hasMore, asOfSeq and before cursors
+  await session.topics.loadTopic('A', 'T')
+  await session.topics.loadList('A')
+  expect(topicsApi.listTopicMessages).not.toHaveBeenCalled()
+  expect(topicsApi.listTopics).not.toHaveBeenCalled()
+
+  topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(1, 'U')], has_more: false }))
+  await session.topics.loadTopic('A', 'U')
+  expect(topicsApi.listTopicMessages.mock.calls).toEqual([['A', 'U', { before_seq: 7 }]])
+  expect(session.topics.get('A').topic('U').messages.map(m => m.seq)).toEqual([1, 7])
+  expect(session.topics.get('A').topic('U').hasMore).toBe(false)
+
+  topicsApi.listTimeline.mockResolvedValueOnce(
+    ok({
+      as_of_seq: 10,
+      items: [
+        { kind: 'topic', topic: summary('V', 3, 1) },
+        { kind: 'message', message: msg(4) },
+        { kind: 'topic', topic: summary('U', 7, 2) },
+      ],
+      has_more: false,
+    }),
+  )
+  expect(await session.topics.loadMain('A')).toBe(true)
+  expect(topicsApi.listTimeline.mock.calls).toEqual([['A', { as_of_seq: 10, before_position: 8 }]])
+  expect(
+    session.topics.get('A').lines.map(l =>
+      l.kind === 'message' ? { seq: l.message.seq } : { topic: l.topicId, position: l.position, count: l.messageCount },
+    ),
+  ).toEqual([
+    { seq: 4 },
+    { topic: 'U', position: 7, count: 2 },
+    { seq: 8 },
+    { topic: 'T', position: 11, count: 4 },
+    { topic: 'V', position: 12, count: 2 },
+    { seq: 13 },
+  ])
+
+  session.close()
+  expect(vi.getTimerCount()).toBe(0)
 })

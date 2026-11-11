@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSession } from './session'
 import { syncAdapter } from './sync.svelte'
@@ -273,6 +275,46 @@ describe('sync adapter and the unavailable state (C9)', () => {
     expect(view.last.draft).toBe('')
 
     await view.unmount()
+    session.close()
+  })
+
+  it('types ChannelSync.send from generated SendMessageRequest without hand-written object literals and forwards topic_name', async () => {
+    const src = readFileSync(new URL('./sync.svelte.ts', import.meta.url), 'utf8')
+    const sf = ts.createSourceFile('sync.svelte.ts', src, ts.ScriptTarget.Latest, true)
+    let sendParamType: ts.TypeNode | undefined
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isPropertyAssignment(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === 'send' &&
+        ts.isArrowFunction(node.initializer)
+      ) {
+        sendParamType = node.initializer.parameters[1]?.type
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sf)
+    expect(sendParamType).toBeDefined()
+    expect(ts.isTypeLiteralNode(sendParamType!)).toBe(false)
+    expect(sendParamType!.getText(sf)).toContain('SendMessageRequest')
+
+    const net = fakeNetwork()
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    const { session, sync } = start(net)
+    await loadChannels(net)
+    net.subscribed('A', 100)
+    await settle()
+
+    const a = sync.channel('A')
+    void a.send('hello topic', { topic_name: 'Release' })
+    await settle()
+    expect(net.sends[0]?.body).toEqual({
+      client_message_id: 'me-c1',
+      body: 'hello topic',
+      topic_name: 'Release',
+    })
+    net.sends[0].resolve(ok(sentBy('me', 101, 'me-c1', 'hello topic')))
+    await settle()
     session.close()
   })
 })

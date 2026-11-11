@@ -11,11 +11,13 @@
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import CreateChannelForm from './CreateChannelForm.svelte'
   import {
+    createTopicSummaryFocusController,
     focusAfterPanelClose,
     focusIfVisible,
     focusTarget,
     MOBILE_BREAKPOINT_PX,
     resolveChannelListNavigation,
+    resolveMainTimelineFocusStatus,
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
@@ -24,6 +26,8 @@
   import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
   import Timeline from './Timeline.svelte'
+  import TopicList from './TopicList.svelte'
+  import TopicView from './TopicView.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Panel, { type PanelTabId } from './ui/Panel.svelte'
@@ -78,6 +82,22 @@
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
+  const currentTopics = $derived(selected ? session.topics(selected.id) : null)
+  const currentTopicsState = $derived(currentTopics ? currentTopics.state : null)
+  const allTopicsKnown = $derived(
+    currentTopicsState
+      ? currentTopicsState.list.asOfSeq !== undefined
+        ? !currentTopicsState.list.hasMore
+        : currentTopicsState.main.asOfSeq !== undefined && !currentTopicsState.main.hasMore
+      : false,
+  )
+  const resolvedTopicName = $derived(
+    route?.topicId
+      ? currentTopicsState?.topics.find((t) => t.topicId === route.topicId)?.baseline?.summary.name ||
+        session.navigationTargets?.state.topic.name ||
+        ''
+      : '',
+  )
   const organizationUnavailable = $derived(session.sync.unavailable)
   const otherOrg = $derived(organizations.find((o) => o.organization_id !== currentOrganizationId))
 
@@ -106,8 +126,11 @@
 
   let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
+  let focusTopicInputNext = false
+  const topicSummaryFocus = createTopicSummaryFocusController()
 
   const channelMemberController = $derived(panelOpen && activePanelTab === 'members' && selected ? session.channelMembers?.(selected.id) : undefined)
   const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
@@ -115,7 +138,7 @@
     const controller = channelMemberController
     return () => controller?.close()
   })
-  let lastViewId = ''
+  let lastViewId = $state('')
 
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
@@ -150,7 +173,22 @@
   })
 
   $effect(() => {
+    topicSummaryFocus.syncNavigation(navigation.get(), navigation.getReturningTopicId())
+    const unsubscribe = navigation.subscribe(() => {
+      topicSummaryFocus.syncNavigation(navigation.get(), navigation.getReturningTopicId())
+    })
+    return () => {
+      unsubscribe()
+      topicSummaryFocus.destroy()
+    }
+  })
+
+  $effect(() => {
     const state = nav.state
+    if (state.focus === 'topic-summary') {
+      focusTopicInputNext = false
+      return
+    }
     // Wait for API-owned Channel selection and the rendered destination before focusing.
     if (!state.target || state.target.organizationId !== currentOrganizationId) return
     const revision = state.revision
@@ -163,30 +201,82 @@
       }
       else if (state.focus === 'tab') focusTarget(document.getElementById(`panel-tab-${activePanelTab}`))
       else if (state.focus === 'opener') focusAfterPanelClose(navigation.getOpener(), mainComposerRef)
-      else if (state.focus === 'topic-summary') {
-        const topic = navigation.getReturningTopicId()
-        const summary = topic ? document.querySelector<HTMLElement>(`[data-topic-id="${CSS.escape(topic)}"]`) : null
-        if (!focusTarget(summary)) focusTarget(mainComposerRef)
+      else {
+        const preferTopicInput = focusTopicInputNext
+        focusTopicInputNext = false
+        if (!(preferTopicInput && focusTarget(mainTopicInputRef))) {
+          focusTarget(mainComposerRef)
+        }
       }
-      else focusTarget(mainComposerRef)
     })
+  })
+
+  $effect(() => {
+    const state = nav.state
+    const returningTopicId = navigation.getReturningTopicId()
+    topicSummaryFocus.syncNavigation(state, returningTopicId)
+    if (
+      state.focus !== 'topic-summary' ||
+      !state.target ||
+      state.target.organizationId !== currentOrganizationId ||
+      !topicSummaryFocus.isPending(state.revision)
+    ) {
+      return
+    }
+    const revision = state.revision
+    void currentTimeline?.messages.length
+    void currentTopicsState?.lines.length
+    const status = resolveMainTimelineFocusStatus({
+      channelListStatus,
+      hasSelectedTimeline: Boolean(selected && currentChannel && route?.channelId === selected.id && !route?.topicId),
+      organizationUnavailable,
+      timelineStatus: currentTimeline?.status ?? null,
+      hasTopics: Boolean(currentTopics),
+      topicsMain: currentTopicsState?.main ?? null,
+      topicsUnavailable: Boolean(currentTopicsState?.unavailable),
+      topicPendingSend: Boolean(
+        returningTopicId &&
+          currentTimeline?.pending.some((p) => p.status === 'sending' && !p.replyTo && p.topicId === returningTopicId),
+      ),
+    })
+    const composer = mainComposerRef
+    let cancelled = false
+    void tick().then(() => {
+      if (cancelled || nav.state.revision !== revision) return
+      topicSummaryFocus.step({
+        revision,
+        status,
+        findSummary: (topic) =>
+          document.querySelector<HTMLElement>(`#main-content [data-topic-id="${CSS.escape(topic)}"]`),
+        composer: mainComposerRef ?? composer,
+      })
+    })
+    return () => {
+      cancelled = true
+    }
   })
 
   $effect(() => {
     if (!selected) { lastViewId = ''; return }
     if (s.status === 'loading') return
     const viewId = `${selected.id}/${route?.topicId ?? ''}`
-    if (route?.topicId && session.navigationTargets?.state.topic.status === 'loading') return
+    if (route?.topicId && !resolvedTopicName && session.navigationTargets?.state.topic.status === 'loading') return
     if (viewId === lastViewId) return
     lastViewId = viewId
-    announcementController.onViewChanged({ viewId, kind: route?.topicId ? 'topic' : 'channel', name: route?.topicId ? (session.navigationTargets?.state.topic.name || 'トピック') : selected.name })
+    announcementController.onViewChanged({
+      viewId,
+      kind: route?.topicId ? 'topic' : 'channel',
+      name: route?.topicId ? (resolvedTopicName || 'トピック') : selected.name,
+    })
   })
 
   // Track timeline updates for live-message announcements and offline state (docs/ui.md §6)
   $effect(() => {
-    if (!selected || route?.topicId || !currentTimeline) return
+    const viewId = selected ? `${selected.id}/${route?.topicId ?? ''}` : ''
+    if (!selected || !currentTimeline || viewId !== lastViewId) return
     announcementController.onTimelineUpdated({
-      viewId: selected.id,
+      viewId,
+      topicId: route?.topicId ?? null,
       status: currentTimeline.status,
       live: currentLive,
       messages: currentTimeline.messages,
@@ -199,6 +289,43 @@
     const navigated = nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
     if (id === s.selectedId || navigated === false) channels.select(id)
     drawerOpen = false
+  }
+
+  function handleSelectTopic(topicId: string) {
+    if (!selected || !currentOrganizationId) return
+    nav.navigate({
+      type: 'topic',
+      topicId,
+      phone: viewportWidth < MOBILE_BREAKPOINT_PX,
+    })
+    drawerOpen = false
+  }
+
+  function handleStartNewTopic() {
+    if (!selected || !currentOrganizationId) return
+    let navigated = false
+    if (route?.topicId) {
+      focusTopicInputNext = true
+      navigated = Boolean(
+        nav.navigate({
+          type: 'channel',
+          organizationId: currentOrganizationId,
+          channelId: selected.id,
+        }),
+      )
+      if (viewportWidth < MOBILE_BREAKPOINT_PX && route.panel) {
+        navigated = Boolean(nav.navigate({ type: 'close' })) || navigated
+      }
+    } else if (viewportWidth < MOBILE_BREAKPOINT_PX && panelOpen) {
+      focusTopicInputNext = true
+      navigated = Boolean(nav.navigate({ type: 'close' }))
+    }
+    if (!navigated) {
+      focusTopicInputNext = false
+      void tick().then(() => {
+        if (!focusTarget(mainTopicInputRef)) focusTarget(mainComposerRef)
+      })
+    }
   }
 
   async function handleCreateChannel(name: string, visibility: 'public' | 'private'): Promise<string | null> {
@@ -341,7 +468,16 @@
         <Skeleton rows={3} label="チャンネルを読み込み中" />
       {/if}
 
-      <ChannelList channels={s.channels} selectedId={s.selectedId} onselect={handleSelectChannel} />
+      <ChannelList
+        channels={s.channels}
+        selectedId={s.selectedId}
+        activeTopicId={route?.channelId === s.selectedId ? (route?.topicId ?? null) : null}
+        topics={currentTopicsState && selected?.id === s.selectedId ? currentTopicsState.topics : []}
+        allTopicsKnown={selected?.id === s.selectedId ? allTopicsKnown : false}
+        onselect={handleSelectChannel}
+        onselecttopic={handleSelectTopic}
+        onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
+      />
       {#if !organizationUnavailable && canCreateChannels}
         <CreateChannelForm oncreate={handleCreateChannel} />
       {/if}
@@ -380,10 +516,19 @@
               ‹
             </Button>
           </span>
-          {#if route?.topicId && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
-            <Button variant="quiet" onclick={() => nav.navigate({ type: 'topic-back' })}># {selected.name} ›</Button>
+          {#if route?.topicId}
+            <Button
+              variant="quiet"
+              onclick={() => nav.navigate({ type: 'topic-back' })}
+            >
+              <span aria-hidden="true">‹</span>
+              <span>チャンネルへ戻る</span>
+            </Button>
+            <span class="main-card__crumb"># {selected.name} ›</span>
           {/if}
-          <h1 class="main-card__title">{route?.topicId ? (session.navigationTargets?.state.topic.name || 'トピック') : selected.name}</h1>
+          <h1 class="main-card__title">
+            {route?.topicId ? (resolvedTopicName || 'トピック') : selected.name}
+          </h1>
         </div>
         <div class="main-card__header-actions">
           <small class="live-status" data-testid="live-status" data-live={currentLive}>
@@ -401,23 +546,39 @@
         </div>
       </header>
       <div class="main-card__body">
-        {#if route?.topicId && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
-          {#if session.navigationTargets?.state.topic.status === 'loading'}
-            <Skeleton rows={3} label="トピックを読み込み中" />
-          {:else if session.navigationTargets?.state.topic.status === 'error'}
-            <StatusBanner tone="danger" role="alert" message="トピックを読み込めませんでした。" actionLabel="再試行" onaction={() => { if (route) void session.navigationTargets?.load(route, true) }} />
-          {:else}
-            <EmptyState title={session.navigationTargets?.state.topic.status === 'unavailable' ? 'このトピックは利用できません。' : 'トピック表示は準備中です。'} actionLabel="チャンネルへ戻る" onaction={() => nav.navigate({ type: 'topic-back' })} />
-          {/if}
+        {#if route?.topicId && currentTopics}
+          {#key `${selected.id}:${route.topicId}`}
+            <TopicView
+              channel={currentChannel}
+              topics={currentTopics}
+              channelId={selected.id}
+              topicId={route.topicId}
+              topicName={resolvedTopicName}
+              topicStatus={session.navigationTargets?.state.topic.status ?? 'idle'}
+              selfId={organization?.member.id ?? ''}
+              {organizationUnavailable}
+              reconnecting={announcementView.reconnecting}
+              bind:composerRef={mainComposerRef}
+              onretrytopicmeta={() => {
+                if (route) void session.navigationTargets?.load(route, true)
+              }}
+              ongoToChannelList={goToChannelList}
+              onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
+              onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+            />
+          {/key}
         {:else}
         {#key selected.id}
           <Timeline
             channel={currentChannel}
+            topics={currentTopics}
             channelId={selected.id}
             selfId={organization?.member.id ?? ''}
             {organizationUnavailable}
             reconnecting={announcementView.reconnecting}
             bind:composerRef={mainComposerRef}
+            bind:topicInputRef={mainTopicInputRef}
+            onopentopic={handleSelectTopic}
             ongoToChannelList={goToChannelList}
             onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
             onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
@@ -526,10 +687,18 @@
             <EmptyState title={session.navigationTargets?.state.reply.status === 'unavailable' ? 'この返信のつながりは利用できません。' : '返信のつながりの表示は準備中です。'} />
           {/if}
         {:else if activePanelTab === 'topics'}
-          <EmptyState
-            title="トピック一覧は準備中です。"
-            description="メインタイムラインからメッセージを閲覧・送信できます。"
-          />
+          {#if currentTopics && selected}
+            <TopicList
+              topics={currentTopics}
+              channelId={selected.id}
+              activeTopicId={route?.topicId ?? null}
+              unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
+              onselecttopic={handleSelectTopic}
+              onstartnewtopic={organizationUnavailable || currentTimeline?.status === 'unavailable' ? undefined : handleStartNewTopic}
+            />
+          {:else}
+            <EmptyState title="チャンネルを選んでください。" />
+          {/if}
         {:else if activePanelTab === 'overview'}
           <EmptyState
             title="チャンネル概要は準備中です。"
@@ -695,9 +864,20 @@
 
   .main-card__title-group {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-8);
     min-width: 0;
+  }
+
+  .main-card__crumb {
+    font-size: var(--font-size-14);
+    font-weight: var(--font-weight-medium);
+    color: var(--text2);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .main-card__title {

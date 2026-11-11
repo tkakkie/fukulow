@@ -24,7 +24,7 @@ test('creating a Channel opens it and pushes its URL while preserving the open t
   const historyReads: string[] = []
   page.on('request', request => {
     const path = new URL(request.url()).pathname
-    if (request.method() === 'GET' && path.endsWith('/messages')) historyReads.push(path)
+    if (request.method() === 'GET' && (path.endsWith('/messages') || path.endsWith('/timeline'))) historyReads.push(path)
   })
   const name = `Created navigation-${crypto.randomUUID()}`
   await page.getByRole('textbox', { name: 'チャンネル名', exact: true }).fill(name)
@@ -136,7 +136,7 @@ test('Topic back keeps the panel and announces the API Topic name; reload adds n
   expect(await page.evaluate(() => history.length)).toBe(length)
   await page.getByRole('button', { name: 'チャンネルへ戻る', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`${first}\\?panel=members$`))
-  await expect(composer(page)).toBeFocused()
+  await expect(page.locator(`#main-content [data-topic-id="${message.topic_id}"]`)).toBeFocused()
   expect(await page.evaluate(() => history.length)).toBe(length)
 })
 

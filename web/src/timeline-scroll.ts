@@ -184,6 +184,10 @@ export function stepTimelineScroll(
       const newPendingAdded = !pendingUnchanged && input.pendingIds.some((id) => !prev.pendingIds.has(id))
       const addedMessages = seqsUnchanged ? [] : input.messages.filter((m) => !prev.seenSeqs.has(m.seq))
       const insertedAboveTail = addedMessages.filter((m) => prev.maxSeq !== null && m.seq < prev.maxSeq)
+      const removedAboveTail =
+        !seqsUnchanged &&
+        prev.maxSeq !== null &&
+        [...prev.seenSeqs].some((seq) => seq < prev.maxSeq! && !seenSeqs.has(seq))
       const appendedAtTail = addedMessages.filter((m) => prev.maxSeq === null || m.seq > prev.maxSeq)
       const ownSendAtTail =
         newPendingAdded || (appendedAtTail.length > 0 && appendedAtTail.every((m) => m.sender === input.selfId))
@@ -203,7 +207,7 @@ export function stepTimelineScroll(
         }
       }
 
-      if (insertedAboveTail.length > 0 && appendedAtTail.length === 0) {
+      if ((insertedAboveTail.length > 0 || removedAboveTail) && appendedAtTail.length === 0) {
         return {
           state: {
             ...prev,
@@ -241,7 +245,7 @@ export function stepTimelineScroll(
             seenSeqs,
             pendingIds,
           },
-          action: insertedAboveTail.length > 0 ? 'preserve_anchor' : 'none',
+          action: insertedAboveTail.length > 0 || removedAboveTail ? 'preserve_anchor' : 'none',
         }
       }
 

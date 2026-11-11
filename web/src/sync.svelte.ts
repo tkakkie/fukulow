@@ -1,7 +1,17 @@
 import { createSubscriber } from 'svelte/reactivity'
-import { MESSAGE_BODY_MAX, messageBodyError, type createSync, type TimelineState } from './sync'
+import type { SendMessageRequest } from './api'
+import {
+  foldTopicName,
+  MESSAGE_BODY_MAX,
+  messageBodyError,
+  TOPIC_NAME_MAX,
+  topicNameError,
+  type createSync,
+  type TimelineState,
+  type TopicComposerState,
+} from './sync'
 
-export { MESSAGE_BODY_MAX, messageBodyError }
+export { foldTopicName, MESSAGE_BODY_MAX, messageBodyError, TOPIC_NAME_MAX, topicNameError }
 
 type Sync = ReturnType<typeof createSync>
 
@@ -14,6 +24,19 @@ type Sync = ReturnType<typeof createSync>
 function channelAdapter(sync: Sync, channel: string) {
   const timeline = sync.getTimeline(channel)
   const subscribe = createSubscriber(update => timeline.subscribe(update))
+  const topics = new Map<string, ReturnType<typeof topicAdapter>>()
+  function topicAdapter(topicId: string) {
+    const tc = timeline.topic(topicId)
+    return {
+      get composer(): TopicComposerState {
+        subscribe()
+        return tc.get()
+      },
+      setDraft: (draft: string) => tc.setDraft(draft),
+      submit: (topicName: string) => tc.submit(topicName),
+      restore: (clientMessageId: string) => tc.restore(clientMessageId),
+    }
+  }
   return {
     get timeline(): TimelineState {
       subscribe()
@@ -27,11 +50,17 @@ function channelAdapter(sync: Sync, channel: string) {
     loadLatest: () => timeline.loadLatest(),
     loadOlder: () => timeline.loadOlder(),
     setDraft: (draft: string) => timeline.setDraft(draft),
+    setTopicDraft: (topicDraft: string) => timeline.setTopicDraft(topicDraft),
     submit: () => timeline.submit(),
-    send: (body: string) => timeline.send(body),
+    send: (body: string, target?: Pick<SendMessageRequest, 'topic_name' | 'reply_to'>) => timeline.send(body, target),
     retry: (clientMessageId: string) => timeline.retry(clientMessageId),
     restore: (clientMessageId: string) => timeline.restore(clientMessageId),
     discard: (clientMessageId: string) => timeline.discard(clientMessageId),
+    topic(topicId: string) {
+      let t = topics.get(topicId)
+      if (!t) topics.set(topicId, (t = topicAdapter(topicId)))
+      return t
+    },
   }
 }
 export type ChannelSync = ReturnType<typeof channelAdapter>
