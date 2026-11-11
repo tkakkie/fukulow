@@ -119,7 +119,7 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     else assert.equal(previousRole, '')
     run([...previous, 'stop', 'app'])
     // No down -v: the named volume was created by the old deployment.
-    dc('up', '-d', '--no-build', 'db')
+    dc('up', '-d', '--wait', '--no-build', 'db') // healthcheck: psql may hit "starting up" otherwise
     const before = snapshot()
     assert.equal(sql(roleQuery), previousRole)
     dc('run', '--rm', 'migrate', 'roles')
