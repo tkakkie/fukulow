@@ -430,10 +430,13 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
       selfId: 'me',
       resolveSenderName: (id) => names[id] ?? 'メンバー',
     })
+    expect(announced).toEqual(['# general'])
+    nowMs = 3_500
+    scheduledFn!()
     expect(announced).toEqual(['# general', '田中 美咲: お疲れ様です'])
 
     // Disconnect schedules 2 s reconnect timer, then announces when elapsed
-    nowMs = 2_000
+    nowMs = 4_000
     ctrl.onTimelineUpdated({
       viewId: 'c1',
       status: 'ready',
@@ -445,12 +448,58 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
     expect(ctrl.get().reconnecting).toBe(false)
     expect(scheduledFn).not.toBeNull()
 
-    nowMs = 4_000
+    nowMs = 6_000
     scheduledFn!()
     expect(ctrl.get().reconnecting).toBe(true)
     expect(announced.at(-1)).toBe('再接続しています…')
 
     ctrl.destroy()
+  })
+
+  it('emits one final burst update after 2 s, keeps duplicate snapshots silent and cancels stale view timers', () => {
+    let nowMs = 1_000
+    const announced: string[] = []
+    const timers = new Map<number, () => void>()
+    let timerId = 0
+    const ctrl = createAnnouncementController({
+      now: () => nowMs,
+      onAnnounce: (text) => announced.push(text),
+      schedule: (fn) => { timers.set(++timerId, fn); return timerId },
+      cancel: (id) => { timers.delete(id as number) },
+    })
+    const update = (messages: AnnounceableMessage[]) => ctrl.onTimelineUpdated({
+      viewId: 'c1', status: 'ready', live: true, messages, selfId: 'me', resolveSenderName: () => '田中 美咲',
+    })
+    ctrl.onViewChanged({ viewId: 'c1', kind: 'channel', name: 'general' })
+    update([msg(1, 'tanaka', '履歴')])
+    nowMs = 2_000
+    update([msg(1, 'tanaka', '履歴'), msg(2, 'tanaka', '1')])
+    nowMs = 2_500
+    update([msg(1, 'tanaka', '履歴'), msg(2, 'tanaka', '1'), msg(3, 'tanaka', '2')])
+    nowMs = 3_000
+    const messages = [msg(1, 'tanaka', '履歴'), msg(2, 'tanaka', '1'), msg(3, 'tanaka', '2'), msg(4, 'tanaka', '3')]
+    update(messages)
+    update(messages)
+    expect(announced).toEqual(['# general'])
+    expect(timers.size).toBe(1)
+    nowMs = 4_000
+    const flush = [...timers.values()][0]
+    flush()
+    expect(announced).toEqual(['# general', '新着メッセージ 3件'])
+    update(messages)
+    expect(timers.size).toBe(0)
+    // A separate window returns to the individual preview; changing view drops it.
+    nowMs = 5_000
+    update([...messages, msg(5, 'tanaka', '古い表示')])
+    expect(timers.size).toBe(1)
+    ctrl.onViewChanged({ viewId: 'c2', kind: 'channel', name: 'other' })
+    expect(timers.size).toBe(0)
+    expect(announced).toEqual(['# general', '新着メッセージ 3件', '# other'])
+    ctrl.onTimelineUpdated({ viewId: 'c2', status: 'ready', live: true, messages: [], selfId: 'me' })
+    ctrl.onTimelineUpdated({ viewId: 'c2', status: 'ready', live: true, messages: [msg(1, 'tanaka', '終了後は読まない')], selfId: 'me' })
+    expect(timers.size).toBe(1)
+    ctrl.destroy()
+    expect(timers.size).toBe(0)
   })
 
   it('coalesces a contiguous batch of multiple live Messages in one update and ignores non-contiguous batches', () => {

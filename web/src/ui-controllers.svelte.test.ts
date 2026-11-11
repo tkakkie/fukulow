@@ -34,8 +34,11 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     const subScroll = createSubscriber((u) => scrollCtrl.subscribe(u))
 
     const announced: string[] = []
+    let flushAnnouncement: (() => void) | undefined
     const announceCtrl = createAnnouncementController({
       onAnnounce: (m) => announced.push(m),
+      schedule: (fn) => { flushAnnouncement = fn; return 1 },
+      cancel: () => {},
     })
     const subAnnounce = createSubscriber((u) => announceCtrl.subscribe(u))
 
@@ -132,6 +135,8 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
       })
       await settle()
       expect(announceEffectRuns - announceRunsBeforeLive).toBe(1)
+      expect(announced).toEqual(['# general'])
+      flushAnnouncement!()
       expect(announced).toEqual(['# general', '田中 美咲: ようこそ'])
     } finally {
       stop()
@@ -268,12 +273,15 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     const queue = createLiveAnnouncementQueue()
     const observedKeys: number[] = []
     let nowMs = 1_000
+    let flushAnnouncement: (() => void) | undefined
     let ctrl!: ReturnType<typeof createAnnouncementController>
 
     const stop = $effect.root(() => {
       let pageAnnouncement = $state<LiveAnnouncementItem>(queue.current)
       ctrl = createAnnouncementController({
         now: () => nowMs,
+        schedule: (fn) => { flushAnnouncement = fn; return 1 },
+        cancel: () => {},
         onAnnounce: (msg) => {
           pageAnnouncement = queue.enqueue(msg)
         },
@@ -308,6 +316,8 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
         selfId: 'me',
         resolveSenderName: () => '田中 美咲',
       })
+      nowMs = 4_000
+      flushAnnouncement!()
       await settle()
 
       // Second identical live Message after the 2 s burst window produces the same string,
@@ -321,7 +331,8 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
         selfId: 'me',
         resolveSenderName: () => '田中 美咲',
       })
-
+      nowMs = 7_000
+      flushAnnouncement!()
       await settle()
       expect(queue.current.text).toBe('田中 美咲: 了解です')
       expect(observedKeys).toEqual([1, 2, 3])
