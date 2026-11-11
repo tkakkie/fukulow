@@ -5,7 +5,7 @@ permissions:
   contents: read
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
       postgres:
@@ -20,6 +20,8 @@ jobs:
           --health-retries 15
     env:
       DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
+      # A Playwright bump must update the tag and digest together.
+      PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.0-noble@sha256:6e3fb709361521eb27161606e6da6d2674e5e89fa16516cb37d6fdd91372273d
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -37,8 +39,24 @@ jobs:
           target/debug/fukulow-server migrate
       - name: Use only the app role for browser tests
         run: echo 'DATABASE_URL=postgres://fukulow_app:ci-e2e-app-only@127.0.0.1:5432/postgres' >> "$GITHUB_ENV"
-      - run: npm --prefix web exec -- playwright install --with-deps chromium
-      - run: npm --prefix web run e2e
+      # Keep Rust and its cache on the runner; only the browser tests need the image's libraries.
+      # Host networking preserves the loopback Postgres URL and Playwright webServer URL.
+      - name: Run smoke with preinstalled Chromium (no apt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! timeout 60s docker pull "$PLAYWRIGHT_IMAGE"; then
+            echo '::error::Playwright image pull failed or exceeded 60 seconds'
+            exit 1
+          fi
+          docker run --pull never --rm --init --network host --ipc host \
+            --user "$(id -u):$(id -g)" \
+            --env CI --env DATABASE_URL \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            --volume "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+            --workdir "$GITHUB_WORKSPACE/web" \
+            --entrypoint "$(command -v node)" \
+            "$PLAYWRIGHT_IMAGE" node_modules/@playwright/test/cli.js test
       - name: Upload restricted E2E failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v7

@@ -231,3 +231,98 @@ test('keyboard path: create Topic, open Topic view, send a Message, and return t
   await expect(returnedSummary).toBeFocused()
   await expect(returnedSummary).toContainText('2件›')
 })
+
+// These tests use real HTTP persistence and server WebSocket delivery. The route only controls transport timing.
+test('Topic view reconnect replays a Message sent during the WebSocket drop exactly once', async ({ page }) => {
+  let hold = false
+  const held: (() => void)[] = []
+  let disconnect!: () => Promise<void>
+  await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
+    const server = ws.connectToServer()
+    ws.onMessage(raw => { if (hold) held.push(() => server.send(raw)); else server.send(raw) })
+    disconnect = async () => { await ws.close({ code: 1011 }); await server.close({ code: 1011 }) }
+  })
+  const base = `/api/v1/orgs/${orgId}/channels/${channelId}`
+  const firstResponse = await secretSafe(() => page.request.post(`${base}/messages`, {
+    data: { client_message_id: crypto.randomUUID(), body: 'before drop', topic_name: 'Reconnect Topic' },
+  }))
+  expect(firstResponse.ok()).toBe(true)
+  const first = await secretSafe(() => firstResponse.json())
+  await page.goto(`/o/${orgId}/c/${channelId}/t/${first.topic_id}`)
+  await expect(page.getByRole('heading', { name: 'Reconnect Topic', exact: true })).toBeVisible()
+  await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+  await expect(page.locator('.topic-view__item')).toHaveCount(1)
+  await messageComposer(page).fill('draft across reconnect')
+  hold = true
+  await disconnect()
+  await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'false')
+  const response = await secretSafe(() => page.request.post(`${base}/messages`, {
+    data: { client_message_id: crypto.randomUUID(), body: 'sent during drop', topic_name: 'Reconnect Topic' },
+  }))
+  expect(response.ok()).toBe(true)
+  await expect.poll(() => held.length).toBeGreaterThan(0)
+  hold = false
+  for (const release of held.splice(0)) release()
+  await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+  const rows = page.locator('.topic-view__item')
+  await expect(rows).toHaveCount(2)
+  await expect(rows.nth(0)).toContainText('before drop')
+  await expect(rows.nth(1)).toContainText('sent during drop')
+  await expect(rows.filter({ hasText: 'sent during drop' })).toHaveCount(1)
+  await expect(messageComposer(page)).toHaveValue('draft across reconnect')
+  await page.getByRole('button', { name: 'チャンネルへ戻る', exact: true }).click()
+  await expect(page.locator('#main-content button[data-topic-id]')).toHaveCount(1)
+  await expect(page.locator('#main-content button[data-topic-id]')).toContainText('2件›')
+})
+
+test('removing a private Channel Member shows C9 in the open Topic while another Channel stays usable', async ({ page, browser }) => {
+  const base = `/api/v1/orgs/${orgId}`
+  const created = await secretSafe(() => page.request.post(`${base}/channels`, {
+    data: { name: `private-topic-${crypto.randomUUID()}`, visibility: 'private' },
+  }))
+  expect(created.ok()).toBe(true)
+  const privateChannel = await secretSafe(() => created.json())
+  const email = `topic-member-${crypto.randomUUID()}@example.invalid`
+  const password = 'Topic membership test password'
+  const invitation = await secretSafe(() => page.request.post(`${base}/invites`, { data: { email, role: 'member' } }))
+  expect(invitation.ok()).toBe(true)
+  const invite = await secretSafe(() => invitation.json())
+  const context = await browser.newContext()
+  try {
+    const accepted = await secretSafe(() => context.request.post(`${base}/invites/accept`, {
+      data: { token: invite.token, email, name: 'Topic Member', password },
+    }))
+    expect(accepted.ok()).toBe(true)
+    const identity = await secretSafe(() => accepted.json())
+    const grant = await secretSafe(() => page.request.post(`${base}/channels/${privateChannel.id}/members`, { data: { member_id: identity.member.id } }))
+    expect(grant.ok()).toBe(true)
+    const sent = await secretSafe(() => page.request.post(`${base}/channels/${privateChannel.id}/messages`, {
+      data: { client_message_id: crypto.randomUUID(), body: 'private Topic history', topic_name: 'Private Topic' },
+    }))
+    expect(sent.ok()).toBe(true)
+    const message = await secretSafe(() => sent.json())
+    const login = await secretSafe(() => context.request.post('/api/v1/session', { data: { email, password } }))
+    expect(login.ok()).toBe(true)
+    const memberPage = await context.newPage()
+    await memberPage.setViewportSize({ width: 1280, height: 800 })
+    await memberPage.goto(`/o/${orgId}/c/${privateChannel.id}/t/${message.topic_id}`)
+    await expect(memberPage.getByRole('heading', { name: 'Private Topic', exact: true })).toBeVisible()
+    await expect(memberPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    await expect(memberPage.locator('.topic-view__item')).toContainText('private Topic history')
+    await messageComposer(memberPage).fill('private Topic draft')
+    const removed = await secretSafe(() => page.request.delete(`${base}/channels/${privateChannel.id}/members/${identity.member.id}`))
+    expect(removed.ok()).toBe(true)
+    await expect(memberPage.getByRole('alert')).toContainText('このチャンネルは利用できません。')
+    await expect(messageComposer(memberPage)).toBeDisabled()
+    await expect(messageComposer(memberPage)).toHaveValue('private Topic draft')
+    await expect(memberPage.locator('.topic-view__item')).toContainText('private Topic history')
+    await expect(memberPage.getByRole('button', { name: '再試行', exact: true })).toHaveCount(0)
+    await memberPage.locator('#channel-content .channel-list button').filter({ hasText: channelName }).click()
+    await expect(memberPage.getByRole('heading', { level: 1, name: channelName, exact: true })).toBeVisible()
+    await expect(messageComposer(memberPage)).toBeEnabled()
+    await messageComposer(memberPage).fill('other Channel still works')
+    await memberPage.locator('#main-content').getByRole('button', { name: '送信', exact: true }).click()
+    await expect(memberPage.locator('#main-content .timeline-list__item[data-message-id]').filter({ hasText: 'other Channel still works' })).toHaveCount(1)
+    await expect(memberPage.locator('#main-content .timeline-list__item[data-status]')).toHaveCount(0)
+  } finally { await context.close() }
+})
