@@ -17,6 +17,15 @@ test('both profiles require a nonempty setup token before starting containers', 
   }
 })
 
+test('the shipped deployment example cannot start either profile without a setup token', () => {
+  for (const profile of ['caddy', 'nginx']) {
+    const result = spawnSync('docker', ['compose', '--env-file', '.env.example', '-f', 'compose.yml', '--profile', profile, 'config'],
+      { cwd, env: { PATH: process.env.PATH }, encoding: 'utf8' })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /FUKULOW_SETUP_TOKEN/)
+  }
+})
+
 test('both profiles isolate the database and trust only the fixed proxy IP, including custom prefixes', () => {
   for (const profile of ['caddy', 'nginx']) {
     for (const prefix of ['172.30.94', '172.29.193']) {
@@ -31,7 +40,7 @@ test('both profiles isolate the database and trust only the fixed proxy IP, incl
       assert.equal(config.services[profile].networks.edge.ipv4_address, `${prefix}.2`)
       assert.equal(app.environment.FUKULOW_TRUSTED_PROXIES, `${prefix}.2`)
       assert.equal(app.environment.FUKULOW_CLIENT_IP_HEADER, 'x-forwarded-for')
-      assert.deepEqual(config.networks.edge.ipam.config, [{ subnet: `${prefix}.0/29`, gateway: `${prefix}.1` }])
+      assert.deepEqual(config.networks.edge.ipam.config, [{ subnet: `${prefix}.0/29`, gateway: `${prefix}.1`, ip_range: `${prefix}.4/30` }])
     }
   }
 })

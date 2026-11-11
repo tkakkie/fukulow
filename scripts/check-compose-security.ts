@@ -1,7 +1,7 @@
 // Disposable first-start/restart and proxy-spoofing check; never reads deployment .env.
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,7 +14,9 @@ const directory = mkdtempSync(join(tmpdir(), project))
 const override = join(directory, 'compose.yml')
 const image = process.env.CHECK_COMPOSE_IMAGE || `${project}-app`
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-e2e-db-test-only',
-  FUKULOW_SETUP_TOKEN: 'compose-e2e-setup-test-only', FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || '172.30.194',
+  FUKULOW_SETUP_TOKEN: 'compose-e2e-setup-test-only',
+  // Per-run private subnets; restart checks use a separate second-octet range.
+  FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(128, 192)}.${randomInt(256)}`,
   FUKULOW_COOKIE_SECURE: 'false' }
 const helper = `${project}-untrusted`
 const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
@@ -24,6 +26,10 @@ const owner = { email: 'compose-owner@example.test', password: 'compose-owner-pa
 writeFileSync(override, `services:
   app:
     image: ${image}
+    ports: ["127.0.0.1::8080"]
+    networks:
+      edge:
+        gw_priority: 1
   caddy:
     ports: !override ["127.0.0.1::443", "127.0.0.1::80"]
   nginx:
@@ -36,11 +42,11 @@ async function check(profile: string) {
     proxy('up', '-d', '--no-build', '--wait')
     const port = proxy('port', profile, profile === 'caddy' ? '443' : '80')
     const url = `${profile === 'caddy' ? 'https' : 'http'}://${port.replace('127.0.0.1:', 'localhost:')}`
-    const request = (path: string, data?: unknown, forwarded?: string) => {
+    const request = (path: string, data?: unknown, forwarded?: string, baseUrl = url) => {
       const args = ['--insecure', '--silent', '--show-error', '--max-time', '10', '-w', '\n%{http_code}']
       if (data !== undefined) args.push('-H', 'Content-Type: application/json', '--data', JSON.stringify(data))
       if (forwarded) args.push('-H', `X-Forwarded-For: ${forwarded}`)
-      const response = execFileSync('curl', [...args, url + path], { encoding: 'utf8' }).trim()
+      const response = execFileSync('curl', [...args, baseUrl + path], { encoding: 'utf8' }).trim()
       const boundary = response.lastIndexOf('\n')
       return { status: Number(response.slice(boundary + 1)), body: response.slice(0, boundary) }
     }
@@ -51,7 +57,7 @@ async function check(profile: string) {
     }
     const app = proxy('ps', '-q', 'app')
     const [state] = JSON.parse(run(['inspect', app]))
-    assert.deepEqual(state.HostConfig.PortBindings, {})
+    assert.equal(state.HostConfig.PortBindings['8080/tcp'][0].HostIp, '127.0.0.1')
     assert.deepEqual(request('/api/v1/setup'), { status: 200, body: '{"setup_required":true}' })
     const setup = { ...owner, organization_name: 'Compose', name: 'Owner' }
     for (const token of [undefined, 'wrong-token-test-only']) {
@@ -101,14 +107,27 @@ async function check(profile: string) {
         assert.equal(await signIn(${JSON.stringify(owner)}), ${exhaust ? 429 : 200});
       `)
     }
-    proxy('restart', 'app')
-    for (let n = 0; ; n++) {
-      try { if (request('/api/v1/session', owner).status === 200) break } catch { /* restart */ }
-      if (n === 59) throw new Error('Sign-in did not recover after restart')
-      await delay(1000)
+    async function restartApp() {
+      proxy('restart', 'app')
+      for (let n = 0; ; n++) {
+        try { if (request('/api/v1/session', owner).status === 200) break } catch { /* restart */ }
+        if (n === 59) throw new Error('Sign-in did not recover after restart')
+        await delay(1000)
+      }
     }
+    // Reset budgets first: the host may appear as the same client IP through
+    // the public proxy and the debug publication. Prefer edge as its gateway.
+    await restartApp()
+    const debugUrl = `http://${proxy('port', 'app', '8080')}`
+    assert.equal(request('/api/v1/session', owner, undefined, debugUrl).status, 200)
+    for (let n = 1; n <= 20; n++) {
+      assert.equal(request('/api/v1/session', { email: `debug${n}@example.test`, password: 'wrong-password-test-only' },
+        `198.51.100.${n}`, debugUrl).status, 401)
+    }
+    assert.equal(request('/api/v1/session', owner, '192.0.2.199', debugUrl).status, 429)
+    await restartApp()
     assert.equal(request('/api/v1/setup').body, '{"setup_required":false}')
-    console.log(`PASS ${profile}: token, sign-in, untrusted/public spoofing, independent client budgets, restart, retained setup`)
+    console.log(`PASS ${profile}: token, sign-in, backend/public/debug-port spoofing, independent client budgets, restart, retained setup`)
   } finally {
     spawnSync('docker', ['rm', '-f', helper], { cwd, env, stdio: 'ignore' })
     proxy('down', '-v', '--remove-orphans')
@@ -116,13 +135,14 @@ async function check(profile: string) {
 }
 
 try {
+  console.log(`project=${project} edge=${env.FUKULOW_EDGE_PREFIX}.0/29`)
   if (!process.env.CHECK_COMPOSE_IMAGE) {
     console.log('Building disposable security-check image...')
     execFileSync('docker', [...compose, 'build', 'app'], { cwd, env, stdio: 'inherit' })
   }
-  for (const token of [undefined, '']) {
+  for (const token of [undefined, '', ' \t', '\u2003', 'setup-token-local-test-only', ' setup-token-local-test-only ']) {
     const result = spawnSync('docker', ['run', '--rm', '--network', 'none', '-e', 'FUKULOW_COOKIE_SECURE=false',
-      ...(token === undefined ? [] : ['-e', 'FUKULOW_SETUP_TOKEN=']), image], { cwd, env, encoding: 'utf8' })
+      ...(token === undefined ? [] : ['-e', `FUKULOW_SETUP_TOKEN=${token}`]), image], { cwd, env, encoding: 'utf8' })
     assert.equal(result.status, 1)
     assert.match(result.stderr, /FUKULOW_SETUP_TOKEN must/)
     assert.equal(result.stdout, '')

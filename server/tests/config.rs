@@ -5,7 +5,16 @@ use std::process::Command;
 #[test]
 fn startup_requires_setup_token_regardless_of_cookie_security() {
     for cookie_secure in [None, Some("true"), Some("false")] {
-        for setup_token in [None, Some(""), Some("setup-token-test-only")] {
+        for setup_token in [
+            None,
+            Some(""),
+            Some(" \t\n"),
+            Some("\u{2003}"),
+            Some("setup-token-local-test-only"),
+            Some(" setup-token-local-test-only\t"),
+            Some("setup-token-test-only"),
+            Some(" custom-setup-token-test-only "),
+        ] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
             command.env_clear().env("DATABASE_URL", "invalid-test-url");
             if let Some(value) = cookie_secure {
@@ -17,13 +26,18 @@ fn startup_requires_setup_token_regardless_of_cookie_security() {
             let output = command.output().unwrap();
             assert!(!output.status.success());
             let error = String::from_utf8(output.stderr).unwrap();
-            if setup_token == Some("setup-token-test-only") {
+            if matches!(
+                setup_token,
+                Some("setup-token-test-only" | " custom-setup-token-test-only ")
+            ) {
                 assert!(!error.contains("FUKULOW_SETUP_TOKEN"), "{error}");
                 assert!(!error.is_empty());
             } else {
                 assert!(error.contains("FUKULOW_SETUP_TOKEN must"), "{error}");
             }
             assert!(!error.contains("setup-token-test-only"));
+            assert!(!error.contains("setup-token-local-test-only"));
+            assert!(!error.contains("custom-setup-token-test-only"));
             assert!(output.stdout.is_empty());
         }
     }
@@ -55,6 +69,16 @@ fn startup_rejects_partial_or_invalid_proxy_configuration_before_database_access
         ),
         (
             Some("2001:db8::/129"),
+            Some("x-forwarded-for"),
+            "FUKULOW_TRUSTED_PROXIES must contain",
+        ),
+        (
+            Some("192.0.2.0/+24"),
+            Some("x-forwarded-for"),
+            "FUKULOW_TRUSTED_PROXIES must contain",
+        ),
+        (
+            Some("192.0.2.0/024"),
             Some("x-forwarded-for"),
             "FUKULOW_TRUSTED_PROXIES must contain",
         ),

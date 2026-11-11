@@ -5,14 +5,18 @@ api:
 
 K6_IMAGE := grafana/k6:1.8.2
 LOAD_DOCKER_NETWORK ?= host
-BASE_URL ?= http://127.0.0.1:8080
+# Default Compose Caddy endpoint; set BASE_URL to the deployed FUKULOW_DOMAIN URL.
+BASE_URL ?= https://localhost
 LOAD_NOFILE ?= 65536
 LOAD_CONTAINER_NAME ?=
 
 # Quote make-expanded values as single shell arguments, including embedded apostrophes.
 shell_quote = '$(subst ','"'"',$(1))'
 
-# Linux uses host networking; on macOS use LOAD_DOCKER_NETWORK=bridge BASE_URL=http://host.docker.internal:8080.
+# Linux uses host networking. For nginx set BASE_URL=http://localhost.
+# Caddy's localhost certificate needs K6_INSECURE_SKIP_TLS_VERIFY=true for local checks.
+# On macOS use LOAD_DOCKER_NETWORK=bridge and a proxy URL reachable from Docker
+# (e.g. BASE_URL=http://host.docker.internal for the nginx profile).
 # Credentials/settings are passed from the environment, never put in the image or result artifacts.
 load:
 	docker run --rm $(if $(LOAD_CONTAINER_NAME),--name $(call shell_quote,$(LOAD_CONTAINER_NAME))) \

@@ -4,7 +4,11 @@ use sqlx::postgres::PgPoolOptions;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let setup_token = match std::env::var("FUKULOW_SETUP_TOKEN") {
-        Ok(token) if token.is_empty() => return Err("FUKULOW_SETUP_TOKEN must not be empty".into()),
+        Ok(token) if token.trim().is_empty() || token.trim() == "setup-token-local-test-only" => {
+            return Err(
+                "FUKULOW_SETUP_TOKEN must be nonblank and not the published example".into(),
+            );
+        }
         Ok(token) => token,
         Err(_) => return Err("FUKULOW_SETUP_TOKEN must be set to a nonempty value".into()),
     };

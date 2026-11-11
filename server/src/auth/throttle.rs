@@ -35,7 +35,13 @@ impl ProxyNetwork {
         const ERROR: &str =
             "FUKULOW_TRUSTED_PROXIES must contain comma-separated IP addresses or CIDRs";
         let (address, prefix) = match value.split_once('/') {
-            Some((address, prefix)) => (address, Some(prefix.parse::<u8>().map_err(|_| ERROR)?)),
+            Some((address, prefix)) => {
+                let parsed = prefix.parse::<u8>().map_err(|_| ERROR)?;
+                if prefix != parsed.to_string() {
+                    return Err(ERROR);
+                }
+                (address, Some(parsed))
+            }
             None => (value, None),
         };
         let address = address.parse::<IpAddr>().map_err(|_| ERROR)?;
@@ -602,6 +608,10 @@ mod tests {
             (Some("192.0.2.0/33"), Some("x-forwarded-for")),
             (Some("2001:db8::/129"), Some("x-forwarded-for")),
             (Some("192.0.2.0/-1"), Some("x-forwarded-for")),
+            (Some("192.0.2.0/+24"), Some("x-forwarded-for")),
+            (Some("192.0.2.0/024"), Some("x-forwarded-for")),
+            (Some("2001:db8::/+24"), Some("x-forwarded-for")),
+            (Some("2001:db8::/024"), Some("x-forwarded-for")),
             (Some("192.0.2.0/24/1"), Some("x-forwarded-for")),
             (Some("192.0.2.1,"), Some("x-forwarded-for")),
             (Some("192.0.2.1"), Some("")),
