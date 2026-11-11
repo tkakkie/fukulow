@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net'
 // JavaScript sees only 1006 and must use the independent REST probe to classify the failure.
 async function fixture(mode: 'membership' | 'network' | 'server') {
   let upgrades = 0, memberChecks = 0
+  const capabilities = { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } }
   const dist = resolve(import.meta.dirname, '../dist')
   const server = createServer(async (req, res) => {
     const path = new URL(req.url!, 'http://localhost').pathname
@@ -16,7 +17,7 @@ async function fixture(mode: 'membership' | 'network' | 'server') {
       res.end(JSON.stringify(body))
     }
     if (path === '/api/v1/me') return json({ account: { id: 'account', email: 'a@example.com' },
-      organizations: [{ organization_id: 'o', name: 'Org' }] })
+      organizations: [{ organization_id: 'o', name: 'Org', capabilities }] })
     if (path === '/api/v1/orgs/o/me') {
       memberChecks++
       if (memberChecks > 1) {
@@ -24,8 +25,9 @@ async function fixture(mode: 'membership' | 'network' | 'server') {
         if (mode === 'network') { req.socket.destroy(); return }
         return json({ error: 'internal_error' }, 503)
       }
-      return json({ organization: { organization_id: 'o', name: 'Org' }, member: { id: 'm', name: 'Alice', role: 'owner' } })
+      return json({ organization: { organization_id: 'o', name: 'Org', capabilities }, member: { id: 'm', name: 'Alice', role: 'owner' } })
     }
+    if (path === '/api/v1/orgs/o/members') return json({ members: [] })
     if (path === '/api/v1/orgs/o/channels') return json({ channels: [] })
     const file = resolve(dist, path === '/' ? 'index.html' : `.${path}`)
     if (!file.startsWith(`${dist}/`)) { res.writeHead(404); res.end(); return }

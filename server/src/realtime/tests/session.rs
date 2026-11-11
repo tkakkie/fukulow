@@ -227,6 +227,15 @@ async fn membership_loss_closes_all_account_sessions_only_in_its_organization(po
     let foreign = organization(&pool).await;
     let foreign_member = add_organization_membership(&pool, foreign, account).await;
     let foreign_channel = channel(&pool, foreign, foreign_member, false).await;
+    sqlx::query(
+        "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
+    )
+    .bind(foreign)
+    .bind(foreign_channel)
+    .bind(foreign_member)
+    .execute(&pool)
+    .await
+    .unwrap();
     let second = another_session(&pool, f.organization, f.member).await;
     let mut a1 = f.server.connect(&f.token).await;
     let mut a2 = f.server.connect(&second).await;
@@ -291,6 +300,15 @@ async fn account_session_end_closes_every_organization_but_leaves_other_sessions
     let foreign = organization(&pool).await;
     let foreign_member = add_organization_membership(&pool, foreign, account).await;
     let foreign_channel = channel(&pool, foreign, foreign_member, false).await;
+    sqlx::query(
+        "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
+    )
+    .bind(foreign)
+    .bind(foreign_channel)
+    .bind(foreign_member)
+    .execute(&pool)
+    .await
+    .unwrap();
     let second = another_session(&pool, f.organization, f.member).await;
     let mut a1 = f.server.connect(&f.token).await;
     let mut b1 = connect_organization(&f.server, &f.token, foreign).await;

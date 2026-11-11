@@ -970,14 +970,18 @@ async fn session_cannot_access_another_organization(pool: PgPool) {
     sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Foreign member','owner')").bind(foreign).bind(shared_id).bind(account).execute(&pool).await.unwrap();
     let session = body(sign_in(&app, "", PASSWORD).await).await;
     let auth = format!("Bearer {}", session["token"].as_str().unwrap());
+    let guard = additional_owner(&pool, first_id).await;
     let mut refusal = None;
     for organization in [foreign, Uuid::new_v4(), first_id] {
         if organization == first_id {
-            sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1")
-                .bind(first_id)
-                .execute(&pool)
-                .await
-                .unwrap();
+            sqlx::query(
+                "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id<>$2",
+            )
+            .bind(first_id)
+            .bind(guard)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         for suffix in ["me", "channels", "ws"] {
             let response = request(
@@ -1499,22 +1503,27 @@ async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool:
             .await
             .is_err()
     );
-    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1")
+    let guard = additional_owner(&pool, organization).await;
+    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
+        .bind(guard)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1")
+    sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
+        .bind(guard)
         .execute(&pool)
         .await
         .unwrap();
-    let (member, revision): (Uuid, i64) =
-        sqlx::query_as("SELECT id,membership_revision FROM users WHERE organization_id=$1")
-            .bind(organization)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (member, revision): (Uuid, i64) = sqlx::query_as(
+        "SELECT id,membership_revision FROM users WHERE organization_id=$1 AND id<>$2",
+    )
+    .bind(organization)
+    .bind(guard)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(member.to_string(), identity["member"]["id"]);
     assert_eq!(revision, 1);
 }
@@ -1997,4 +2006,17 @@ async fn web_and_native_share_account_and_ip_failure_budgets(pool: PgPool) {
             assert_throttled(response).await;
         }
     }
+}
+
+async fn additional_owner(pool: &PgPool, organization: Uuid) -> Uuid {
+    let account = Uuid::new_v4();
+    let member = Uuid::new_v4();
+    sqlx::query("INSERT INTO accounts (id,email,password_hash) VALUES ($1,$2,'unused')")
+        .bind(account)
+        .bind(format!("{account}@test.invalid"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Other Owner','owner')").bind(organization).bind(member).bind(account).execute(pool).await.unwrap();
+    member
 }

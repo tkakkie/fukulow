@@ -368,3 +368,92 @@ async fn visibility_modes_preserve_membership_revision_and_private_grant_denials
         vec![(id, 1)]
     );
 }
+
+#[sqlx::test]
+async fn guest_visibility_requires_explicit_current_grants_and_role_is_read_afresh(pool: PgPool) {
+    let org = organization(&pool).await;
+    let id = Uuid::new_v4();
+    let token = member(&pool, org, id, "member").await;
+    let app = router(&pool);
+    let public = Uuid::parse_str(
+        create(&app, &token, "Public", "public").await["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let private = Uuid::parse_str(
+        create(&app, &token, "Private", "private").await["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let guest = Uuid::new_v4();
+    let guest_token = member(&pool, org, guest, "guest").await;
+    for channel in [public, private] {
+        assert_visibility_modes(&pool, org, (guest, 0), channel, Some(false)).await;
+    }
+    assert_eq!(
+        list(&app, &guest_token).await["channels"],
+        serde_json::json!([])
+    );
+    // A foreign Organization's explicit grant must not confer access.
+    let other = organization(&pool).await;
+    member(&pool, other, guest, "guest").await;
+    sqlx::query(
+        "INSERT INTO channels (organization_id,id,name,visibility) VALUES ($1,$2,'Other','public')",
+    )
+    .bind(other)
+    .bind(public)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
+    )
+    .bind(other)
+    .bind(public)
+    .bind(guest)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_visibility_modes(&pool, org, (guest, 0), public, Some(false)).await;
+    for channel in [public, private] {
+        sqlx::query(
+            "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
+        )
+        .bind(org)
+        .bind(channel)
+        .bind(guest)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_visibility_modes(&pool, org, (guest, 0), channel, Some(true)).await;
+    }
+    assert_eq!(
+        list(&app, &guest_token).await["channels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND member_id=$2")
+        .bind(org)
+        .bind(guest)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for role in ["owner", "admin", "member", "guest"] {
+        // Use a second Owner so the role transition itself stays valid.
+        let guard = Uuid::new_v4();
+        member(&pool, org, guard, "owner").await;
+        sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2")
+            .bind(org)
+            .bind(guest)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_visibility_modes(&pool, org, (guest, 0), public, Some(role != "guest")).await;
+        assert_visibility_modes(&pool, org, (guest, 0), private, Some(false)).await;
+    }
+}

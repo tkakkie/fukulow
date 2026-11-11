@@ -98,6 +98,22 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/me", get(auth::me))
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
         .route(
+            "/api/v1/orgs/{org}/members",
+            get(auth::members::list_members),
+        )
+        .route(
+            "/api/v1/orgs/{org}/members/{id}/role",
+            axum::routing::patch(auth::members::change_role),
+        )
+        .route(
+            "/api/v1/orgs/{org}/invites",
+            axum::routing::post(auth::invites::create_invite),
+        )
+        .route(
+            "/api/v1/orgs/{org}/invites/accept",
+            axum::routing::post(auth::invites::accept_invite),
+        )
+        .route(
             "/api/v1/orgs/{org}/channels",
             get(messages::list_channels).post(channels::create_channel),
         )
@@ -278,8 +294,13 @@ async fn security_headers(State(secure): State<bool>, request: Request, next: Ne
 }
 
 #[utoipa::path(get, path = "/api/v1/health", responses((status = 200, description = "Server is responding; returns the plain-text body ok", body = String, content_type = "text/plain")))]
-async fn health() -> &'static str {
-    "ok"
+async fn health() -> Result<&'static str, auth::ApiError> {
+    auth::authorization::require(
+        auth::Actor::Anonymous,
+        auth::Action::Public,
+        auth::Resource::Global,
+    )?;
+    Ok("ok")
 }
 
 async fn static_handler(uri: Uri) -> Response {
