@@ -400,7 +400,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     fence(channel, c); prune(c); notify()
     if (!c.stopped) {
       // fence() drops in-flight and scheduled list retries for this Channel; restart any recovery they owned.
-      if (c.requiredAfter > 0 || !c.main.baseline || listNeedsRecovery(c)) void refresh()
+      if (c.error || c.requiredAfter > 0 || !c.main.baseline || listNeedsRecovery(c)) void refresh()
       for (const [topic, s] of c.topics) if (!s.stopped && needsRecovery(c, s) &&
         !c.summaryReads.has(topic) && !c.summaryTimers.has(topic)) void refreshTopic(channel, topic)
     }
