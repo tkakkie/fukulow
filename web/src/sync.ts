@@ -578,6 +578,11 @@ export function createSync(options: SyncOptions) {
           if (!accepted) restore()
           return accepted
         },
+        retry(clientMessageId: string): Promise<void> {
+          const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
+          if (!p?.reply_to) return Promise.resolve()
+          return dispatch({ type: 'user_retry', channel, clientMessageId })
+        },
         restore(clientMessageId: string): boolean {
           if (!state.running) return false
           const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)

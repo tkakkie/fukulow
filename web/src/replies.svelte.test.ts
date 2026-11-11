@@ -104,6 +104,22 @@ it('channel.reply(replyRootId) manages per-chain drafts, hasUnsavedChanges, subm
   expect(await sendPromise).toBe(true)
   expect(c.sendMessage).toHaveBeenLastCalledWith('A', expect.objectContaining({ body: '最初の返信', reply_to: 'id1' }))
 
+  // Retryable network failure to a cold descendant (not in replies.state.messages) can be retried via rc.retry()
+  c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  rc.setDraft('コールド子孫への返信')
+  expect(await rc.submit('cold-descendant-id')).toBe(true)
+  await settle()
+  const retryablePending = channel.timeline.pending.find(
+    (p) => p.replyTo === 'cold-descendant-id' && p.status === 'failed' && p.retryable,
+  )
+  expect(retryablePending).toBeDefined()
+  await rc.retry(retryablePending!.clientMessageId)
+  expect(c.sendMessage).toHaveBeenLastCalledWith('A', {
+    client_message_id: retryablePending!.clientMessageId,
+    body: 'コールド子孫への返信',
+    reply_to: 'cold-descendant-id',
+  })
+
   // Failed non-retryable send can be restored into the Reply Composer via rc.restore()
   c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'http', status: 400, error: 'invalid_message' })
   rc.setDraft('失敗する返信')

@@ -219,7 +219,33 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await expect(confirmedTopicReply).toBeInViewport()
     await expect(topicMessageRow.getByRole('button', { name: '返信 50件›', exact: true })).toBeVisible()
 
-    // Close with × from Topic view
+    // 6b. Confirmed rows in ReplyPanel expose 返信 / 返信 n件› and Enter/R on a focused reply row replaces the chain and focuses the Reply Composer
+    const panelTopicRootItem = panel.locator(`[data-message-id="${topicRoot.id}"]`)
+    const panelTopicReplyItem = panel.locator(`[data-message-id="${topicReply.id}"]`)
+    await expect(panelTopicRootItem).toHaveClass(/reply-panel__item--root/)
+    await expect(panelTopicRootItem.getByRole('button', { name: '返信 50件›', exact: true })).toBeVisible()
+    const nestedReplyBtn = panelTopicReplyItem.getByRole('button', { name: '返信', exact: true })
+    await expect(nestedReplyBtn).toBeVisible()
+    await nestedReplyBtn.click()
+    await expect(page).toHaveURL(
+      new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}\\?panel=reply:${topicReply.id}$`),
+    )
+    await expect(replyComposer(page)).toBeFocused()
+    await expect(panelTopicRootItem).toHaveClass(/reply-panel__item--root/)
+
+    // ArrowUp from empty Reply Composer focuses the latest row in ReplyPanel; pressing R opens its chain and focuses Reply Composer
+    await page.keyboard.press('ArrowUp')
+    const latestPanelRow = panel.locator('.ui-message-row[data-focusable="true"]').last()
+    await expect(latestPanelRow).toBeFocused()
+    await page.keyboard.press('r')
+    const confirmedTopicReplyId = await confirmedTopicReply.getAttribute('data-message-id')
+    expect(confirmedTopicReplyId).toBeTruthy()
+    await expect(page).toHaveURL(
+      new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}\\?panel=reply:${confirmedTopicReplyId}$`),
+    )
+    await expect(replyComposer(page)).toBeFocused()
+
+    // Close with × from Topic view (returns focus to the original Topic view opener even after replacing the chain in-panel)
     await panel.getByRole('button', { name: 'パネルを閉じる(Esc)', exact: true }).click()
     await expect(panel).toHaveCount(0)
     await expect(page).toHaveURL(new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}$`))

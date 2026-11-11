@@ -807,6 +807,7 @@
               {organizationUnavailable}
               bind:composerRef={replyComposerRef}
               resolveSenderName={resolveSender}
+              onopenreplies={handleOpenReplies}
               onretrytarget={() => {
                 if (route) void session.navigationTargets?.load(route, true)
               }}

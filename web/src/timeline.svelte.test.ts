@@ -4134,10 +4134,39 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     await settle()
     expect(net.sends).toHaveLength(1)
+    const firstClientMsgId = net.sends[0].body.client_message_id
     expect(net.sends[0].body).toMatchObject({
       body: 'ページング前の子孫URLからの返信',
       reply_to: rDesc2.id,
     })
+
+    // Network failure on the cold descendant send renders 再送する, and clicking 再送する retries before rDesc2 is paged into w.messages
+    net.sends[0].resolve({ ok: false, kind: 'network' })
+    await settle()
+    flushSync()
+    expect(buttonsByText(panel, '再送する')).toHaveLength(1)
+    buttonsByText(panel, '再送する')[0].click()
+    flushSync()
+    await settle()
+    expect(net.sends).toHaveLength(2)
+    expect(net.sends[1].body).toEqual({
+      client_message_id: firstClientMsgId,
+      body: 'ページング前の子孫URLからの返信',
+      reply_to: rDesc2.id,
+    })
+    net.sends[1].resolve(
+      ok({
+        ...record(11, 'c1'),
+        id: 'cold-desc-reply-ack',
+        sender: 'me',
+        client_message_id: firstClientMsgId,
+        body: 'ページング前の子孫URLからの返信',
+        reply_to: rDesc2.id,
+        reply_root_id: mRoot.id,
+      }),
+    )
+    await settle()
+    flushSync()
 
     // Page in rDesc2 with さらに返信を読み込む
     buttonsByText(panel, 'さらに返信を読み込む')[0].click()
@@ -4155,8 +4184,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     buttonsByText(panel, '送信')[0].click()
     flushSync()
     await settle()
-    expect(net.sends).toHaveLength(2)
-    expect(net.sends[1].body).toMatchObject({
+    expect(net.sends).toHaveLength(3)
+    expect(net.sends[2].body).toMatchObject({
       body: '子孫URLからの返信',
       reply_to: rDesc2.id,
     })
@@ -4290,6 +4319,185 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const panelRows = queryAll(panel, '.ui-message-row[data-focusable="true"]')
     expect(panelRows).toHaveLength(1)
     expect(panelRows[0].getAttribute('tabindex')).toBe('0')
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('renders 返信 / 返信 n件› on confirmed rows in ReplyPanel and opens a reply row chain via button click or Enter/R (replacing the current one and focusing its Reply Composer while preserving the root row and roving tabindex)', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const mRoot = { ...record(1, 'c1'), id: 'm-root', body: 'ルート本文' }
+    const r1 = { ...record(2, 'c1'), id: 'r-1', reply_to: mRoot.id, reply_root_id: mRoot.id, body: '子返信1' }
+    const r2 = { ...record(3, 'c1'), id: 'r-2', reply_to: r1.id, reply_root_id: mRoot.id, body: '孫返信2' }
+
+    net.timelines.c1 = ok({
+      as_of_seq: 1,
+      has_more: false,
+      items: [{ kind: 'message', message: mRoot }],
+    })
+    const chainPayload = ok({
+      root_id: mRoot.id,
+      messages: [mRoot, r1, r2],
+      has_more: false,
+    })
+    net.replyChains[`c1:${mRoot.id}`] = chainPayload
+    net.replyChains[`c1:${r1.id}`] = chainPayload
+    net.replyChains[`c1:${r2.id}`] = chainPayload
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 3)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const pushSpy = vi.fn()
+    const replaceSpy = vi.fn()
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: {
+        get href() {
+          return href
+        },
+      } as Location,
+      history: {
+        get state() {
+          return historyState
+        },
+        pushState(state: unknown, _: string, url?: string | URL | null) {
+          pushSpy(url)
+          historyState = state
+          href = String(url)
+        },
+        replaceState(state: unknown, _: string, url?: string | URL | null) {
+          replaceSpy(url)
+          historyState = state
+          href = String(url)
+        },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+    await settle()
+    flushSync()
+
+    // Open mRoot's Reply chain from main timeline (pushState)
+    const mRootMainRow = host.querySelector(`#main-content [data-message-id="${mRoot.id}"]`)!
+    mRootMainRow.querySelector('button')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(href).toBe(`/o/org-1/c/c1?panel=reply:${mRoot.id}`)
+    expect(pushSpy).toHaveBeenCalledTimes(1)
+    replaceSpy.mockClear()
+
+    const panel = host.querySelector('#panel-content')!
+    const rootItem = panel.querySelector(`[data-message-id="${mRoot.id}"]`)!
+    const r1Item = panel.querySelector(`[data-message-id="${r1.id}"]`)!
+    const r2Item = panel.querySelector(`[data-message-id="${r2.id}"]`)!
+
+    // Root row keeps .reply-panel__item--root, and confirmed rows show replyCount / 返信 actions
+    expect(rootItem.classList.contains('reply-panel__item--root')).toBe(true)
+    expect(r1Item.classList.contains('reply-panel__item--root')).toBe(false)
+    expect(buttonsByText(rootItem, '返信 2件›')).toHaveLength(1)
+    expect(buttonsByText(r1Item, '返信 1件›')).toHaveLength(1)
+    expect(buttonsByText(r2Item, '返信')).toHaveLength(1)
+
+    // Roving tabindex defaults to the latest row (r2)
+    const panelRows = queryAll(panel, '.ui-message-row[data-focusable="true"]')
+    expect(panelRows).toHaveLength(3)
+    expect(panelRows.map((r) => r.getAttribute('tabindex'))).toEqual(['-1', '-1', '0'])
+
+    // 1. ArrowUp from empty Reply Composer focuses latest row (r2), ArrowUp moves to r1, and pressing R opens r1's chain (replaceState) and focuses Reply Composer
+    const replyTextarea = panel.querySelector('textarea')!
+    expect(testDoc.activeElement).toBe(replyTextarea)
+    const upFromComposer = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    upFromComposer.key = 'ArrowUp'
+    replyTextarea.dispatchEvent(upFromComposer)
+    flushSync()
+    expect(testDoc.activeElement).toBe(panelRows[2])
+
+    const upToR1 = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    upToR1.key = 'ArrowUp'
+    panelRows[2].dispatchEvent(upToR1)
+    flushSync()
+    expect(testDoc.activeElement).toBe(panelRows[1])
+    expect(panelRows.map((r) => r.getAttribute('tabindex'))).toEqual(['-1', '0', '-1'])
+
+    const keyR = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    keyR.key = 'r'
+    panelRows[1].dispatchEvent(keyR)
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(href).toBe(`/o/org-1/c/c1?panel=reply:${r1.id}`)
+    expect(pushSpy).toHaveBeenCalledTimes(1)
+    expect(replaceSpy).toHaveBeenCalledWith(`/o/org-1/c/c1?panel=reply:${r1.id}`)
+    expect(testDoc.activeElement).toBe(panel.querySelector('textarea'))
+    expect(panel.querySelector(`[data-message-id="${mRoot.id}"]`)!.classList.contains('reply-panel__item--root')).toBe(true)
+
+    // Submitting now sends reply_to: r1.id
+    replyTextarea.value = 'r1への返信'
+    replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    buttonsByText(panel, '送信')[0].click()
+    flushSync()
+    await settle()
+    expect(net.sends.at(-1)?.body).toMatchObject({
+      body: 'r1への返信',
+      reply_to: r1.id,
+    })
+
+    // 2. Clicking the inline 返信 button on r2 replaces the chain with r2.id and focuses Reply Composer
+    const r2ReplyBtn = buttonsByText(panel.querySelector(`[data-message-id="${r2.id}"]`)!, '返信')[0]
+    r2ReplyBtn.focus()
+    r2ReplyBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(href).toBe(`/o/org-1/c/c1?panel=reply:${r2.id}`)
+    expect(pushSpy).toHaveBeenCalledTimes(1)
+    expect(replaceSpy).toHaveBeenLastCalledWith(`/o/org-1/c/c1?panel=reply:${r2.id}`)
+    expect(testDoc.activeElement).toBe(panel.querySelector('textarea'))
 
     navigation.destroy()
     await unmount(instance)

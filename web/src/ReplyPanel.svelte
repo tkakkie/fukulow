@@ -10,7 +10,7 @@
     discardAndFocusComposer,
     focusTarget,
   } from './focus-management'
-  import type { RepliesAdapter } from './replies.svelte'
+  import { countRepliesByMessageId, type RepliesAdapter } from './replies.svelte'
   import type { ChannelSync } from './sync.svelte'
   import {
     applyTimelineScrollAction,
@@ -38,6 +38,7 @@
     organizationUnavailable = false,
     composerRef = $bindable(null),
     resolveSenderName,
+    onopenreplies,
     onretrytarget,
     ongoToChannelList,
     onrecheckmembership,
@@ -53,6 +54,7 @@
     organizationUnavailable?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     resolveSenderName?: (senderId: string) => string
+    onopenreplies?: (message: Message, opener?: HTMLElement | null) => void
     onretrytarget?: () => void
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
@@ -131,6 +133,9 @@
       : retained.key === currentKey
         ? retained.messages
         : [],
+  )
+  const replyCounts = $derived(
+    countRepliesByMessageId([s.messages, rState.messages, visibleMessages]),
   )
   const chainMessageIds = $derived(
     new Set([anchorMessageId, effectiveRootId, ...visibleMessages.map((m) => m.id)]),
@@ -374,8 +379,12 @@
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
                 body={m.body}
+                replyCount={replyCounts.get(m.id) ?? 0}
                 focusable
                 rovingTabindex={rovingRowId === m.id ? 0 : -1}
+                onopenreplies={onopenreplies && !targetUnavailable
+                  ? (opener) => onopenreplies(m, opener)
+                  : undefined}
                 onrowfocus={() => {
                   activeRowId = m.id
                 }}
@@ -390,7 +399,7 @@
                 pendingStatus={p.status}
                 retryable={p.retryable}
                 {targetUnavailable}
-                onretry={() => void replies.retry(p.clientMessageId)}
+                onretry={() => void rc.retry(p.clientMessageId)}
                 onrestore={() => handleRestoreRequest(p.clientMessageId)}
                 ondiscard={() => handleDiscard(p.clientMessageId)}
               />
