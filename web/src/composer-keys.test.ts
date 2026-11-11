@@ -110,7 +110,7 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     expect(workspaceSrc).toContain('id="main-content"')
     expect(workspaceSrc).toContain('id="panel-content"')
     expect(workspaceSrc).toContain(
-      "const effectiveMobileLevel = $derived(!selected && mobileLevel === 'view' ? 'channels' : mobileLevel)",
+      "const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')",
     )
     expect(workspaceSrc).not.toContain('左のフォーム')
     expect(workspaceSrc).not.toContain('トピックはまだありません。')

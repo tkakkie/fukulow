@@ -29,11 +29,11 @@ function stack(over: Partial<AuthDeps> = {}) {
     setupAndSignIn: vi.fn(),
     signOut: vi.fn(async () => true),
     getOrganization: vi.fn(async () => ok(member(signedIn))),
-    openSession(selfId, onEnded): SessionModel {
+    openSession(selfId, onEnded, organizationId, drafts): SessionModel {
       const net = fakeNetwork()
       nets.push(net)
       ended.push(onEnded)
-      const session = createSession({ selfId, onEnded, ...net.options(selfId) })
+      const session = createSession({ selfId, onEnded, ...net.options(selfId), organizationId, sync: { ...net.options(selfId).sync, drafts } })
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
@@ -440,4 +440,42 @@ it('accepting an Invite rechecks Membership in the current Account Session; repl
   await accepting
   expect(s.auth.organization!.member.id).toBe('m2')
   expect(s.nets).toHaveLength(3)
+})
+
+it('Account Session drafts survive Organization controller replacement and are dropped at sign-out, expiry and Account replacement', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  await openChannelA(s)
+  s.auth.session!.sync.channel('A').setDraft('組織の下書き')
+  await s.auth.selectOrganization('other')
+  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('')
+  s.auth.session!.sync.channel('A').setDraft('別の組織')
+  await s.auth.selectOrganization('o')
+  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('組織の下書き')
+  await s.auth.signOut()
+  await signInAs(s, 'm1')
+  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('')
+  s.auth.session!.sync.channel('A').setDraft('期限切れ')
+  s.ended.at(-1)!()
+  await settle()
+  await signInAs(s, 'm1')
+  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('')
+  s.auth.session!.sync.channel('A').setDraft('アカウント切り替え')
+  await signInAs(s, 'm2')
+  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('')
+  await s.auth.signOut()
+})
+
+it('checks a direct-link Organization through the API even when it is absent from the Account membership list', async () => {
+  vi.stubGlobal('window', { location: { href: '/o/unknown/c/channel' } })
+  try {
+    const s = stack({
+      restore: vi.fn(async () => ({ screen: 'app' as const, identity: { ...identity('m1'), organizations: [] } })),
+      getOrganization: vi.fn(async () => ({ ok: false as const, kind: 'http' as const, status: 404, error: 'organization_unavailable' })),
+    })
+    await s.auth.load()
+    expect(s.deps.getOrganization).toHaveBeenCalledWith('unknown')
+    expect(s.auth.organizationStatus).toBe('unavailable')
+    expect(s.auth.session).toBeNull()
+  } finally { vi.unstubAllGlobals() }
 })

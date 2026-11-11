@@ -4,6 +4,7 @@
     LOADING_TIMEOUT_MS,
     type LiveAnnouncementItem,
   } from './announcements'
+  import { createNavigation } from './navigation'
   import { createAuth } from './auth.svelte'
   import { focusTarget, type SkipLinkTargetId } from './focus-management'
   import InviteAccept from './InviteAccept.svelte'
@@ -17,7 +18,13 @@
   import Workspace from './Workspace.svelte'
 
   const invitation = inviteAcceptanceAdapter(inviteFromLocation())
+  const navigation = createNavigation()
   const auth = createAuth()
+  $effect(() => () => navigation.destroy())
+  $effect(() => navigation.subscribe(() => {
+    const target = navigation.get().target
+    if (target && target.organizationId !== auth.selectedOrganizationId) void auth.selectOrganization(target.organizationId)
+  }))
   void auth.load()
 
   const announcementQueue = createLiveAnnouncementQueue()
@@ -111,6 +118,8 @@
   })
 </script>
 
+<svelte:window onbeforeunload={(event) => { if (!auth.session && auth.hasUnsavedChanges()) event.preventDefault() }} />
+
 {#if auth.view.screen === 'app'}
   <a class="skip-link" href={`#${skipTargetId}`} onclick={handleSkipToContent}>メッセージへ移動</a>
 {/if}
@@ -140,6 +149,7 @@
         {#key session}
           <Workspace
             {session}
+            {navigation}
             canCreateChannels={organization.organization.capabilities.can_create_channels.allowed}
             members={auth.members}
             {organization}

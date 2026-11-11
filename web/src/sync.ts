@@ -1,3 +1,4 @@
+import type { DraftStore } from './drafts'
 import * as api from './api'
 import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
@@ -11,6 +12,7 @@ export type TimelineApi = {
 type Wait = Extract<Effect, { type: 'wait' }>
 export type SyncOptions = {
   selfId: string
+  drafts?: DraftStore
   organizationId?: string
   checkMembership?: () => Promise<Result<unknown>>
   api?: TimelineApi
@@ -74,7 +76,16 @@ export function createSync(options: SyncOptions) {
   const timelines = new Map<string, ReturnType<typeof timeline>>()
   const extras = new Map<string, ChannelExtra>()
 
-  const getExtra = (channel: string): ChannelExtra => extras.get(channel) ?? emptyExtra
+  const draftTarget = (channel: string) => ({ organizationId: options.organizationId ?? '', channelId: channel })
+  const getExtra = (channel: string): ChannelExtra => {
+    const existing = extras.get(channel)
+    if (existing) return existing
+    const draft = options.drafts?.get(draftTarget(channel)) ?? ''
+    if (!draft) return emptyExtra
+    const extra = { ...emptyExtra, draft }
+    extras.set(channel, extra)
+    return extra
+  }
   function putExtra(channel: string, patch: Partial<ChannelExtra>): boolean {
     const prev = getExtra(channel)
     if (
@@ -86,6 +97,7 @@ export function createSync(options: SyncOptions) {
     }
     const olderError = patch.olderError ?? prev.olderError
     const draft = patch.draft ?? prev.draft
+    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel), draft)
     const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
     if (!olderError && draft === '' && composerError === null) extras.delete(channel)
     else extras.set(channel, { olderError, draft, composerError })
@@ -347,6 +359,7 @@ export function createSync(options: SyncOptions) {
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     hasUnsavedChanges(): boolean {
+      if (options.drafts?.hasDrafts()) return true
       for (const extra of extras.values()) {
         if (extra.draft.length > 0) return true
       }

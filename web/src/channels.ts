@@ -63,6 +63,8 @@ export function createChannels(api: ChannelsApi) {
     select(id: string) {
       if (state.channels.some((c) => c.id === id)) set({ selectedId: id })
     },
+    /** A URL hint may be absent from the list; only sync's API response decides availability. */
+    selectHint(id: string) { set({ selectedId: id }) },
     /** Creates the channel and selects it; returns an error message on failure. The name is sent unchanged (#72: the server rejects surrounding whitespace; never trim here). */
     async create(req: CreateChannelRequest): Promise<{ error: string } | { channel: Channel }> {
       const r = await api.createChannel(req)
