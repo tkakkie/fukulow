@@ -13,6 +13,7 @@ export const deferred = <T>() => {
 }
 export const msg = (seq: number, topic: string | null = null): Message => ({ ...record(seq), topic_id: topic })
 export const summary = (id: string, last: number, count: number): TopicSummary => ({
+  read_seq: 0, unread_count: 0,
   id, name: `Topic ${id}`, first_seq: 1, last_seq: last, message_count: count, latest_message: msg(last, id),
 })
 export const page = (w = 10): TimelinePage => ({ as_of_seq: w, has_more: true,
@@ -42,4 +43,3 @@ export function topicClient() {
     event(seq: number, topic: string | null = null) { handlers.at(-1)!.onEvent({ type: 'message', message: msg(seq, topic) }) },
   }
 }
-

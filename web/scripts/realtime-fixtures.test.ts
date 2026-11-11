@@ -14,6 +14,7 @@ import {
   type ClientUnderTest,
   type Effect,
   type Message,
+  type ObservedChannel,
   type ResolvedInput,
 } from './realtime-fixtures.ts'
 
@@ -87,6 +88,32 @@ describe('realtime fixtures: the committed contract/realtime/', () => {
 describe('realtime fixtures: validation', () => {
   it('accepts the minimal valid fixtures (positive control)', () => {
     expect(checkFixtures(fixtureDir())).toEqual([])
+  })
+
+  it('runs P8 server vocabulary and rejects invalid Unread steps and references', () => {
+    const steps = [
+      { do: 'mark_read', as: 'alice', channel: 'general', read_seq: 2, expect_read_seq: 2 },
+      { do: 'unread', as: 'alice', channel: 'general', expect: { as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, topic_counts: {} } },
+    ]
+    const unread = (f: any) => { f.delivery.scenarios[0].covers = ['P8']; f.delivery.scenarios[0].steps = structuredClone(steps) }
+    expect(problemsOf(unread)).toBe('')
+    expect(problemsOf((f) => { unread(f); delete f.delivery.scenarios[0].steps[1].expect.as_of_seq })).toContain('missing required property "as_of_seq"')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[1].expect.as_of_seq = -1 })).toContain('below the minimum')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].read_seq = -1 })).toContain('below the minimum')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[1].as = 'unknown' })).toContain('undeclared member unknown')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].channel = 'unknown' })).toContain('undeclared channel unknown')
+    expect(problemsOf((f) => { unread(f); delete f.delivery.scenarios[0].steps[1].expect.unread_count })).toContain('missing required property "unread_count"')
+  })
+
+  it('validates proposed P8 client baselines and keeps merge scenarios proposed for #143', () => {
+    const unread = JSON.parse(readFileSync(join(defaultDir, 'client/unread.json'), 'utf8'))
+    const useUnread = (f: any) => { f.client = structuredClone(unread) }
+    expect(problemsOf(useUnread)).toBe('')
+    expect(problemsOf((f) => { useUnread(f); delete f.client.scenarios[0].proposed })).toContain('planned vocabulary')
+    const baseline = (f: any) => f.client.scenarios[0].steps.find((s: any) => s.input.type === 'unread_result').input
+    expect(problemsOf((f) => { useUnread(f); delete baseline(f).baseline.as_of_seq })).toContain('missing required property "as_of_seq"')
+    expect(problemsOf((f) => { useUnread(f); baseline(f).baseline.as_of_seq = -1 })).toContain('below the minimum')
+    expect(problemsOf((f) => { useUnread(f); baseline(f).respond_to = 'unknown' })).toContain('not bound by an earlier step')
   })
 
   it('rejects malformed JSON', () => {
@@ -165,7 +192,8 @@ describe('realtime fixtures: validation', () => {
     const propose = (f: any) => (f.client.scenarios[0].proposed = { owner: ['#138'] })
     expect(problemsOf(topicPage)).toContain('input.messages[0].topic is planned vocabulary; mark the scenario proposed')
     expect(problemsOf((f) => f.delivery.scenarios[0].steps.push({ do: 'main_timeline', as: 'alice', channel: 'general', query: { as_of_seq: 0 }, expect: { status: 200, as_of_seq: 0, items: [], has_more: false } }))).toBe('')
-    expect(problemsOf((f) => (f.delivery.scenarios[0].covers = ['P8']))).toContain('covers is planned vocabulary')
+    expect(problemsOf((f) => (f.delivery.scenarios[0].covers = ['P8']))).toBe('')
+    expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P8']))).toContain('covers is planned vocabulary')
     expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P1']))).toContain('covers is planned vocabulary')
     // A planned key inside a forbidden or never pattern would silently match nothing; it must fail too.
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].effects = { forbidden: [{ type: 'fetch_history', before_position: 4 }] }))).toContain('before_position is planned vocabulary')
@@ -375,12 +403,106 @@ describe('realtime fixtures: client pilot (out-of-order 100, 102, 101 via ack an
   })
 })
 
+// P8 reference only: no production Unread client (#143). Transport effects just bind fixture responses;
+// the model retains unique Channel events and recomputes counts from the winning REST baseline.
+type UnreadBaseline = NonNullable<ObservedChannel['unread']>
+type UnreadBug = 'accept-covered' | 'no-dedup' | 'global-dedup' | 'accept-older' | 'accept-older-position'
+  | 'accept-stale-topic-count' | 'drop-early' | 'drop-on-reconnect' | 'drop-suffix' | 'count-own'
+function unreadReference(bug?: UnreadBug): ClientUnderTest {
+  const channels = new Map<string, { baseline?: UnreadBaseline; events: Message[] }>()
+  let request = 0
+  const effect = (type: string, fields: Record<string, unknown> = {}): Effect[] => [{ type, ...fields, request: ++request }]
+  return {
+    feed(input) {
+      const channel = (input.channel ?? input.respond_to?.channel) as string
+      const state = channels.get(channel) ?? { events: [] }
+      if (channel) channels.set(channel, state)
+      switch (input.type) {
+        case 'session_start': return effect('connect')
+        case 'watch': return effect('fetch_history', { channel, page: 'latest' })
+        case 'history_result': return effect('subscribe', { channel, after_seq: Math.max(0, ...input.messages!.map(m => m.seq)) })
+        case 'load_unread': return effect('fetch_unread', { channel })
+        case 'socket_closed': return effect('wait', { purpose: 'reconnect_backoff' })
+        case 'timer_elapsed': return effect('connect')
+        case 'connection_ready':
+          if (bug === 'drop-on-reconnect') for (const c of channels.values()) c.events = []
+          return []
+        case 'message': {
+          const message = input.message!
+          if (bug === 'drop-early' && !state.baseline) return []
+          const seen = bug === 'global-dedup' ? [...channels.values()].flatMap(c => c.events) : state.events
+          if (bug === 'no-dedup' || !seen.some(m => m.seq === message.seq)) state.events.push(message)
+          return []
+        }
+        case 'unread_result': {
+          const next = input.baseline as UnreadBaseline
+          const old = state.baseline
+          if (!old || bug === 'accept-older' || next.as_of_seq > old.as_of_seq
+            || (next.as_of_seq === old.as_of_seq && (bug === 'accept-older-position' || next.read_seq > old.read_seq
+              || (next.read_seq === old.read_seq && (bug === 'accept-stale-topic-count'
+                || (next.unread_count <= old.unread_count && next.main_unread_count <= old.main_unread_count)))))) {
+            state.baseline = next
+            if (bug === 'drop-suffix') state.events = []
+          }
+          return []
+        }
+        default: return []
+      }
+    },
+    observe() {
+      return { channels: Object.fromEntries([...channels].map(([id, { baseline, events }]) => {
+        const suffix = baseline ? events.filter(m => (bug === 'accept-covered' || m.seq > baseline.as_of_seq)
+          && m.seq > baseline.read_seq && (bug === 'count-own' || m.sender !== 'me')) : []
+        return [id, { cursor: null, messages: [], pending: [], ...(baseline ? { unread: {
+          ...baseline,
+          main_unread_count: baseline.main_unread_count + suffix.filter(m => !m.topic).length,
+          unread_count: baseline.unread_count + suffix.length,
+        } } : {}) }]
+      })) }
+    },
+  }
+}
+
+describe('realtime fixtures: P8 Unread reference merge (production client pending #143)', () => {
+  const events = loadClientScenario('unread-events-before-rest-late-duplicate-and-replay')
+  const reconnect = loadClientScenario('unread-reconnect-larger-baseline-then-read-position-wins')
+  const topicRead = loadClientScenario('unread-topic-only-mark-read-equal-baseline-both-orders')
+
+  it('unread-events-before-rest-late-duplicate-and-replay', () => {
+    expect(runClientScenario(events, unreadReference())).toEqual([])
+  })
+
+  it('unread-reconnect-larger-baseline-then-read-position-wins', () => {
+    expect(runClientScenario(reconnect, unreadReference())).toEqual([])
+  })
+
+  it('unread-topic-only-mark-read-equal-baseline-both-orders', () => {
+    expect(runClientScenario(topicRead, unreadReference())).toEqual([])
+  })
+
+  it.each([
+    ['accept-covered', events], ['no-dedup', events], ['global-dedup', events],
+    ['drop-early', events], ['drop-on-reconnect', events], ['count-own', events],
+    ['accept-older', reconnect], ['accept-older-position', reconnect], ['drop-suffix', reconnect],
+    ['accept-stale-topic-count', topicRead],
+  ] as const)('rejects %s merge logic', (bug, scenario) => {
+    expect(runClientScenario(scenario, unreadReference(bug)).join('\n')).toContain(' unread is')
+  })
+})
+
 describe('realtime fixtures: runner semantics', () => {
   const scripted = (emit: (input: ResolvedInput) => Effect[]): ClientUnderTest => ({
     feed: emit,
     observe: () => ({ channels: {} }),
   })
   const scenario = (steps: unknown[], never: unknown[] = []) => ({ id: 't', steps, never }) as unknown as ClientScenario
+
+  it('rejects a missing Unread observation', () => {
+    const steps = [{ input: { type: 'watch', channel: 'A' }, observe: { channels: { A: { unread: {
+      as_of_seq: 0, read_seq: 0, main_unread_count: 0, unread_count: 0,
+    } } } } }]
+    expect(runClientScenario(scenario(steps), scripted(() => [])).join()).toContain('unread is undefined, expected')
+  })
 
   it('needs required effects, supports any_of, times and ordered, and ignores extra effect fields', () => {
     const steps = [

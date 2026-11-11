@@ -150,6 +150,20 @@ pub(super) enum Step {
     },
     History(HistorySpec),
     MainTimeline(TimelineSpec),
+    MarkRead {
+        #[serde(rename = "as")]
+        member: String,
+        channel: ChannelRef,
+        topic_name: Option<String>,
+        read_seq: i64,
+        expect_read_seq: i64,
+    },
+    Unread {
+        #[serde(rename = "as")]
+        member: String,
+        channel: ChannelRef,
+        expect: UnreadExpectation,
+    },
     ReplyChain(ReplyChainSpec),
     Expect {
         socket: String,
@@ -231,6 +245,27 @@ pub(super) struct TimelineTopic {
     pub name: String,
     pub last_seq: i64,
     pub message_count: i64,
+    #[serde(default)]
+    pub read_seq: i64,
+    #[serde(default)]
+    pub unread_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UnreadExpectation {
+    pub as_of_seq: i64,
+    pub read_seq: i64,
+    pub main_unread_count: i64,
+    pub unread_count: i64,
+    pub topic_counts: std::collections::BTreeMap<String, UnreadTopic>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UnreadTopic {
+    pub read_seq: i64,
+    pub unread_count: i64,
 }
 
 #[derive(Debug, Deserialize)]
