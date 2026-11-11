@@ -2,6 +2,8 @@ import type { Result, TimelinePage, TopicSummary } from './api'
 import { createTopics, type TopicsApi } from './topics'
 import { createTopicSync } from './topic-sync'
 import { createReplySync } from './reply-sync'
+import { createUnread } from './unread'
+import type { UnreadChannel } from './api'
 import { expandMessage } from '../scripts/realtime-fixtures'
 import type { Effect as FixtureEffect, ResolvedInput } from '../scripts/realtime-fixtures'
 import { createSync, type SyncOptions } from './sync'
@@ -10,7 +12,7 @@ import { message, observe, record } from './protocol-test-helpers'
 export { scenarios, record } from './protocol-test-helpers'
 
 export const flush = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
-export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopicSync = false, withReplySync = false) {
+export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopicSync = false, withReplySync = false, withUnread = false) {
   let emitted: FixtureEffect[] = []
   let nextId = 'unused'
   const sockets: (RealtimeHandlers & { closed: boolean; connection: Connection })[] = []
@@ -68,8 +70,21 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
   const sync = replyComposition?.sync ?? composition?.sync ?? createSync(options)
   const replies = replyComposition?.replies
   const topics = composition?.topics ?? createTopics(sync, { api: topicsApi })
+  let unreadSubject: string | undefined
+  const unreadIds = new Set<string>()
+  const unread = withUnread ? createUnread(sync, { api: {
+    listChannels: () => {
+      const channel = unreadSubject; unreadSubject = undefined
+      return channel ? request({ type: 'fetch_unread', channel }) : Promise.resolve({ ok: true, data: { channels: [] } })
+    },
+    markRead: async () => ({ ok: false, kind: 'network' }),
+    getTopicSummary: async () => ({ ok: false, kind: 'network' }),
+  } }) : undefined
   const client = {
-    sync, topics, replies, sockets, allEffects,
+    sync: { ...sync,
+      async close() { unread?.close(); await sync.close() },
+      replaceSession(selfId: string) { unread?.replaceSession(); return sync.replaceSession(selfId) },
+    }, topics, replies, unread, sockets, allEffects,
     observe: () => {
       const observation = observe(sync.get())
       for (const [channel, c] of Object.entries(observation.channels)) {
@@ -85,6 +100,13 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         for (const effect of allEffects) if (effect.channel === channel && typeof effect.topic === 'string') ids.add(effect.topic)
         c.topics = Object.fromEntries([...ids].map(id => [id, { visible: projection.topic(id).messages.map(m => m.seq) }]))
       }
+      for (const id of unreadIds) {
+        const u = unread!.get(id)
+        const channel = observation.channels[id] ??= { cursor: null, messages: [], pending: [] }
+        if (u.asOfSeq !== null && u.unreadCount !== null && u.main.position !== null && u.main.unreadCount !== null) channel.unread = {
+          as_of_seq: u.asOfSeq, read_seq: u.main.position, main_unread_count: u.main.unreadCount, unread_count: u.unreadCount,
+        }
+      }
       return observation
     },
     async feed(i: ResolvedInput) {
@@ -98,7 +120,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
       switch (i.type) {
         case 'organization_refused': void sync.unavailable(); break
         case 'session_start': void sync.start(); break
-        case 'session_replaced': void sync.replaceSession('me'); break
+        case 'session_replaced': void client.sync.replaceSession('me'); break
         case 'connection_ready': socket.onReady(); break
         case 'socket_closed': socket.onClose(i.code as number); break
         case 'message': socket.onEvent({ type: 'message', message: message(i.message, channel) }); break
@@ -121,6 +143,11 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
           ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }) }
           : { ok: false, kind: 'network' }); break
         case 'load_main_timeline': void topics.loadMain(channel); break
+        case 'load_unread': unreadIds.add(channel); unreadSubject = channel; void unread!.refresh(); break
+        case 'unread_result': resolve({ ok: true, data: { channels: [{ id: channel, name: channel, visibility: 'public',
+          capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: false } },
+          ...(i.baseline as Pick<UnreadChannel, 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count'>),
+        }] } }); break
         case 'open_topic': void topics.loadTopic(channel, i.topic as string); break
         case 'main_timeline_result': {
           const items = i.items as ({ kind: 'message'; message: Record<string, unknown> } | { kind: 'topic'; topic: { name: string; last_seq: number; message_count: number } })[]

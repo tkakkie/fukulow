@@ -17,7 +17,7 @@ export type SignInRequest = components['schemas']['SignInRequest']
 
 /** Result of an API call. `network` covers fetch failures and 5xx, including admission 503
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
-export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string } | { ok: false; kind: 'network' }
+export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string } | { ok: false; kind: 'network'; retryAfterMs?: number }
 
 async function call<T>(
   fetchFn: typeof fetch,
@@ -28,7 +28,11 @@ async function call<T>(
   try {
     // Cookie auth only: the HttpOnly session cookie is sent by the browser; no token is stored.
     const res = await fetchFn(path, { credentials: 'same-origin', ...init })
-    if (res.status >= 500) return { ok: false, kind: 'network' }
+    if (res.status >= 500) {
+      const header = res.headers.get('Retry-After')
+      const delay = header === null ? NaN : /^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()
+      return { ok: false, kind: 'network', ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) }
+    }
     if (!res.ok) {
       let error: string | undefined
       try { error = ((await res.json()) as components['schemas']['ErrorBody']).error } catch { /* Status remains authoritative for malformed errors. */ }
@@ -156,3 +160,13 @@ export const removeChannelMember = (org: string, channel: string, member: string
   call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members/${encodeURIComponent(member)}`, { method: 'DELETE' }, false)
 
 export type MemberList = components['schemas']['MemberList']
+
+export type ChannelList = components['schemas']['ChannelList']
+export type UnreadChannel = components['schemas']['UnreadChannel']
+export type MarkReadRequest = components['schemas']['MarkReadRequest']
+export type ReadPosition = components['schemas']['ReadPosition']
+
+export const markChannelRead = (org: string, channel: string, body: MarkReadRequest, f: typeof fetch = fetch) =>
+  call<ReadPosition>(f, `${channelPath(org, channel)}/read`, { ...json(body), method: 'PUT' }, true)
+export const markTopicRead = (org: string, channel: string, topic: string, body: MarkReadRequest, f: typeof fetch = fetch) =>
+  call<ReadPosition>(f, `${channelPath(org, channel)}/topics/${encodeURIComponent(topic)}/read`, { ...json(body), method: 'PUT' }, true)

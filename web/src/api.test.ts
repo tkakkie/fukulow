@@ -52,7 +52,7 @@ describe('channel and message calls', () => {
       status: 503, headers: { 'Retry-After': '3' },
     }))
     const input = { body: 'x', client_message_id: 'same-key' }
-    expect(await sendMessage('o', 'c', input, m)).toEqual({ ok: false, kind: 'network' })
+    expect(await sendMessage('o', 'c', input, m)).toEqual({ ok: false, kind: 'network', retryAfterMs: 3000 })
     expect(m.mock.calls[0][0]).toBe('/api/v1/orgs/o/channels/c/messages')
     expect(JSON.parse(m.mock.calls[0][1].body)).toEqual(input)
   })
