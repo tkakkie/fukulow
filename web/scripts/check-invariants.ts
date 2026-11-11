@@ -226,7 +226,7 @@ export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
     const cells = text.replace(/^\||\|\s*$/g, '').split('|').map((c) => c.trim())
     if (cells[0] === 'Rule' || /^-+$/.test(cells[0])) return
     let rule = cells[0]
-    const tag = /^\{#([a-z0-9]+(?:-[a-z0-9]+)*)\} /.exec(rule)
+    const tag = /^\{#([a-z0-9]+(?:-[a-z0-9]+)*)\} (?=\S)/.exec(rule) // exactly one space, so the Rule text is canonical
     if (rule.startsWith('{#') && !tag) errors.push(`line ${line}: malformed rule ID tag: ${rule}`)
     if (tag) rule = rule.slice(tag[0].length)
     const cell = cells[1] ?? ''
@@ -539,6 +539,10 @@ export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
       if (previous) errors.push(at + ': duplicate Rule text (first at ' + previous + '): ' + row.rule)
       else rules.set(row.rule, at)
       if (row.id) {
+        // An ID is only for a row that no test name identifies within its part.
+        const suffix = (ref: string) => ref.slice(ref.lastIndexOf('::') + 2)
+        const unique = row.names.map(suffix).find((n) => rows.filter((r) => r.names.some((ref) => suffix(ref) === n)).length === 1)
+        if (unique) errors.push(at + ': rule ID is unnecessary; reference the row by its unique test name ' + unique + ': #' + row.id)
         const previousId = ids.get(row.id)
         if (previousId) errors.push(at + ': duplicate rule ID (first at ' + previousId + '): #' + row.id)
         else ids.set(row.id, at)

@@ -344,8 +344,8 @@ describe('split invariants', () => {
 
   it('rejects duplicate rule IDs across parts and names both places (negative)', () => {
     const { root, put } = fixture()
-    put('docs/invariants/a.md', table('{#shared} first') + cross('b', '`#shared`'))
-    put('docs/invariants/b.md', table('{#shared} second') + cross('a', '`#shared`'))
+    put('docs/invariants/a.md', table('{#shared} first') + table('twin a') + cross('b', '`#shared`'))
+    put('docs/invariants/b.md', table('{#shared} second') + table('twin b') + cross('a', '`#shared`'))
     expect(checkInvariants(root)).toEqual([
       'docs/invariants/b.md: line 3: duplicate rule ID (first at docs/invariants/a.md: line 3): #shared',
     ])
@@ -353,7 +353,7 @@ describe('split invariants', () => {
 
   it('rejects duplicate Rule text after stripping the ID tag (negative)', () => {
     const { root, put } = fixture()
-    put('docs/invariants/a.md', table('{#first-row} first'))
+    put('docs/invariants/a.md', table('{#first-row} first') + table('twin'))
     put('docs/invariants/b.md', table('first') + cross('a', '`#first-row`'))
     expect(checkInvariants(root)).toEqual([
       'docs/invariants/b.md: line 3: duplicate Rule text (first at docs/invariants/a.md: line 3): first',
@@ -369,21 +369,23 @@ describe('split invariants', () => {
   it('rejects a rule ID that exists only in another part (negative)', () => {
     const { root, put } = fixture()
     put('docs/invariants/a.md', table('first') + cross('b', '`#elsewhere`'))
-    put('docs/invariants/b.md', table('{#elsewhere} second') + cross('a', '`#elsewhere`'))
-    expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 7: rule ID not found in a.md: #elsewhere'])
+    put('docs/invariants/b.md', table('{#elsewhere} second') + table('twin') + cross('a', '`#elsewhere`'))
+    expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 10: rule ID not found in a.md: #elsewhere'])
   })
 
-  it('rejects an unreferenced rule ID even if a bullet uses its test name (negative)', () => {
+  it('rejects an unreferenced rule ID (negative)', () => {
     const { root, put } = fixture()
-    put('docs/invariants/a.md', table('{#unused} first'))
-    put('docs/invariants/b.md', table('second') + cross('a', '`ok_test`'))
+    put('docs/invariants/a.md', table('{#unused} first') + table('twin'))
     expect(checkInvariants(root)).toEqual(['docs/invariants/a.md: line 3: rule ID is never referenced: #unused'])
   })
 
-  it.each(['`ok_test`, `#first-row`', '`#first-row`, `ok_test`', '`#first-row`, `#first-row`'])(
-    'rejects the same row twice in one bullet: %s (negative)', (tokens) => {
+  it.each([
+    ['`#first-row`, `#first-row`', table('{#first-row} first') + table('twin')],
+    ['`ok_test`, `ok_test`', table('first')],
+  ])(
+    'rejects the same row twice in one bullet: %s (negative)', (tokens, a) => {
       const { root, put } = fixture()
-      put('docs/invariants/a.md', table('{#first-row} first'))
+      put('docs/invariants/a.md', a)
       put('docs/invariants/b.md', table('second') + cross('a', tokens))
       const last = tokens.slice(tokens.lastIndexOf(', ') + 2).slice(1, -1)
       expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 7: same row referenced twice in a.md: ' + last])
@@ -392,9 +394,24 @@ describe('split invariants', () => {
 
   it('allows referencing the same row in separate bullets', () => {
     const { root, put } = fixture()
-    put('docs/invariants/a.md', table('{#first-row} first'))
-    put('docs/invariants/b.md', table('second') + cross('a', '`#first-row`') + '- [a](a.md): `ok_test`\n')
+    put('docs/invariants/a.md', table('{#first-row} first') + table('twin'))
+    put('docs/invariants/b.md', table('second') + cross('a', '`#first-row`') + '- [a](a.md): `#first-row`\n')
     expect(checkInvariants(root)).toEqual([])
+  })
+
+  it('rejects an ID on a row that a unique test name already identifies (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('{#first-row} first'))
+    put('docs/invariants/b.md', table('second') + cross('a', '`#first-row`'))
+    expect(checkInvariants(root)).toEqual([
+      'docs/invariants/a.md: line 3: rule ID is unnecessary; reference the row by its unique test name ok_test: #first-row',
+    ])
+  })
+
+  it('rejects extra whitespace after an ID tag, so the Rule text stays canonical (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('{#first-row}  first') + table('twin'))
+    expect(checkInvariants(root)).toContain('docs/invariants/a.md: line 3: malformed rule ID tag: {#first-row}  first')
   })
 })
 
