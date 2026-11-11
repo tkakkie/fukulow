@@ -82,7 +82,9 @@ export function createSession(options: SessionOptions) {
         else if (!closed && api.isOrganizationUnavailable(r)) terminate()
       }, api, () => { void sync.channelUnavailable(channel) })
       memberControllers.set(channel, controller)
-      if (sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable') controller.unavailable()
+      const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
+      memberAvailability.set(channel, lost)
+      if (lost) controller.unavailable()
       else void controller.load()
       return controller
     },

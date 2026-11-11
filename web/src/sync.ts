@@ -175,7 +175,8 @@ export function createSync(options: SyncOptions) {
                   // no generation id, so this could be an old async error or the new refusal. Do not
                   // consume a reply or invalidate either generation; reconnect to establish a wire fence.
                   // The server serializes controls/live delivery: a new subscribed handoff ends that ambiguity.
-                  if ((confirmed.has(channel) && pending?.length) || (event.type === 'channel_access_lost' && (pending?.length || !confirmed.has(channel) || confirmed.get(channel) !== state.channels[channel]?.subscription?.id) && state.channels[channel]?.state !== 'unavailable')) {
+                  // Unwatched Channels consume late replies without reconnecting.
+                  if (state.channels[channel]?.watched && ((confirmed.has(channel) && pending?.length) || (event.type === 'channel_access_lost' && (pending?.length || !confirmed.has(channel) || confirmed.get(channel) !== state.channels[channel]?.subscription?.id) && state.channels[channel]?.state !== 'unavailable'))) {
                     if (state.connection === effect.id && state.connected) {
                       const own = socket?.transport
                       void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
