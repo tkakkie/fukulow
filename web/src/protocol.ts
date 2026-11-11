@@ -80,31 +80,36 @@ const sameFields = <T extends object>(a: T, b: T) => {
 }
 
 /** All policy lives here. Tokens are deterministic local generations, never wire ids. */
-export function step(previous: State, input: Input): { state: State; effects: Effect[] } {
-  let state: State = { ...previous, channels: { ...previous.channels },
-    requests: { ...previous.requests }, timers: { ...previous.timers } }
-  const channels = state.channels
+export function step(previous: State, input: Input): { state: State; effects: Effect[]; changedChannels: ReadonlySet<string> } {
+  let state: State = { ...previous, requests: { ...previous.requests }, timers: { ...previous.timers } }
   const touched = new Set<string>()
   const effects: Effect[] = []
   const token = () => state.next++
   const channel = (id: string) => {
     if (!touched.has(id)) {
+      if (state.channels === previous.channels) state.channels = { ...previous.channels }
       state.channels[id] = state.channels[id] ? { ...state.channels[id] } : emptyChannel()
       touched.add(id)
     }
     return state.channels[id]
   }
+  const clearChannels = () => {
+    for (const id of Object.keys(previous.channels)) touched.add(id)
+    state.channels = touched.size ? {} : previous.channels
+  }
   const finish = () => {
-    let changed = false
     for (const id of touched) {
       const before = previous.channels[id]
-      if (before && state.channels[id] && sameFields(before, state.channels[id])) state.channels[id] = before
-      else changed = true
+      const after = state.channels[id]
+      if (before === after || (before && after && sameFields(before, after))) {
+        if (after) state.channels[id] = before
+        touched.delete(id)
+      }
     }
-    if (!changed && state.channels === channels) state.channels = previous.channels
+    if (touched.size === 0) state.channels = previous.channels
     if (sameFields(previous.requests, state.requests)) state.requests = previous.requests
     if (sameFields(previous.timers, state.timers)) state.timers = previous.timers
-    return { state: sameFields(previous, state) ? previous : state, effects }
+    return { state: sameFields(previous, state) ? previous : state, effects, changedChannels: touched }
   }
   const cancel = (id: number | undefined) => {
     if (id === undefined || !state.timers[id]) return
@@ -134,7 +139,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     state.running = state.connected = false
     state.connection = null
     state.requests = {}
-    state.channels = {}
+    clearChannels()
     effects.push({ type: 'close' })
     if (signIn) { state.session = 'sign_in_required'; effects.push({ type: 'sign_in' }) }
   }
@@ -233,11 +238,12 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
 
   if (input.type === 'session_start' || input.type === 'session_replaced') {
     if (state.running) stop(false)
+    else clearChannels()
     state = { ...initialState(input.selfId), next: state.next, running: true }
     connect()
-    return { state, effects }
+    return { state, effects, changedChannels: touched }
   }
-  if (input.type === 'stop') { stop(false); return { state, effects } }
+  if (input.type === 'stop') { stop(false); return { state, effects, changedChannels: touched } }
   if (input.type === 'organization_unavailable' || (input.type === 'socket_closed' &&
     input.connection === state.connection && input.code === 4003)) {
     if (!state.running) return finish()

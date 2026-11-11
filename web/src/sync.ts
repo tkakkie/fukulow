@@ -118,27 +118,19 @@ export function createSync(options: SyncOptions) {
           }
         }
       }
-      if (state.channels !== previous.channels) {
-        for (const channel in previous.channels) {
-          if (!Object.hasOwn(previous.channels, channel)) continue
-          const prev = previous.channels[channel]
-          const next = state.channels[channel]
-          if (prev !== next && clearOlderError(channel, prev, next)) extraChanged.add(channel)
-        }
-        for (const channel in state.channels) {
-          if (Object.hasOwn(state.channels, channel) && !Object.hasOwn(previous.channels, channel) &&
-            clearOlderError(channel, undefined, state.channels[channel])) {
-            extraChanged.add(channel)
-          }
+      for (const channel of result.changedChannels) {
+        if (clearOlderError(channel, previous.channels[channel], state.channels[channel])) {
+          extraChanged.add(channel)
         }
       }
     }
     if (state !== previous) listeners.forEach(l => l())
-    channelListeners.forEach((listeners, channel) => {
-      if (state.channels[channel] !== previous.channels[channel] || extraChanged.has(channel)) {
-        listeners.forEach(l => l())
-      }
-    })
+    for (const channel of result.changedChannels) {
+      channelListeners.get(channel)?.forEach(l => l())
+    }
+    for (const channel of extraChanged) {
+      if (!result.changedChannels.has(channel)) channelListeners.get(channel)?.forEach(l => l())
+    }
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 

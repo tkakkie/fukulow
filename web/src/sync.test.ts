@@ -634,21 +634,50 @@ it('controller skips unchanged Channels during olderError bookkeeping and keeps 
     }
   }
 
+  let ownKeysCalls = 0
+  let bReads = 0
+  let cReads = 0
+  const trackChannels = () => {
+    const raw = client.sync.get().channels
+    client.sync.get().channels = new Proxy(raw, {
+      ownKeys(target) {
+        ownKeysCalls++
+        return Reflect.ownKeys(target)
+      },
+      get(target, prop, receiver) {
+        if (prop === 'B') bReads++
+        else if (prop === 'C') cReads++
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+  }
+
+  trackChannels()
   await client.feed({ type: 'message', channel: 'A', message: record(101) })
+  trackChannels()
   const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hi' }))
     .find(e => e.type === 'send')!
+  trackChannels()
   await client.feed({ type: 'ack', respond_to: send, message: { ...record(102), sender: 'me', client_message_id: 'c1', body: 'hi' } })
+  trackChannels()
   const grace = (await client.feed({ type: 'message', channel: 'A', message: record(104) })).find(e => e.type === 'wait')!
+  trackChannels()
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
 
+  // Each of the 5 dispatches clones previous.channels once inside step; controller dispatch enumerates/reads 0 unchanged keys.
+  expect(ownKeysCalls).toBe(5)
+  expect(bReads).toBe(5)
+  expect(cReads).toBe(5)
   expect(visits).toBe(0)
   expect(client.sync.get().channels.B).toBe(bChannel)
   expect(client.sync.get().channels.C).toBe(cChannel)
   expect(b.get()).toBe(bSnapshot)
   expect(c.get()).toBe(cSnapshot)
 
-  // When a 4001 terminal close empties state.channels, Channels removed from previous.channels still clear olderError.
-  await client.feed({ type: 'socket_closed', code: 4001 })
+  // When a 401 on Channel A empties state.channels, unrelated Channel B removed from previous.channels still clears olderError.
+  const send2 = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c2', body: 'bye' }))
+    .find(e => e.type === 'send')!
+  await client.feed({ type: 'send_failed', respond_to: send2, status: 401 })
   expect(b.get()).toMatchObject({ olderError: false, draft: 'draft B' })
   await client.sync.close()
 })
