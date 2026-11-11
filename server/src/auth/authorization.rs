@@ -1,4 +1,4 @@
-use super::{ApiError, Auth, Role};
+use super::{ALL_ROLES, ApiError, Auth, Role};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -145,7 +145,7 @@ impl Auth {
 // Deriving both sets from authorize keeps SQL and resource Capabilities in agreement.
 pub(crate) fn channel_roles_sql(explicit: bool) -> String {
     let organization = Uuid::nil();
-    [Role::Owner, Role::Admin, Role::Member, Role::Guest]
+    ALL_ROLES
         .into_iter()
         .filter(|role| {
             authorize(
@@ -177,9 +177,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_role_list_contains_every_variant_exactly_once() {
+        let mut seen = [false; 4];
+        for role in ALL_ROLES {
+            // No wildcard: adding a Role requires extending this coverage check.
+            let index = match role {
+                Role::Owner => 0,
+                Role::Admin => 1,
+                Role::Member => 2,
+                Role::Guest => 3,
+            };
+            assert!(!seen[index], "duplicate Role: {role:?}");
+            seen[index] = true;
+        }
+        assert!(seen.into_iter().all(|present| present));
+    }
+
+    #[test]
     fn authorization_denies_unlisted_combinations_and_covers_every_role() {
         let org = Uuid::new_v4();
-        for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+        for role in ALL_ROLES {
             let actor = Actor::Member {
                 organization: org,
                 role,
@@ -197,7 +214,7 @@ mod tests {
                 .allowed
             );
             assert!(!authorize(actor, Action::Account, Resource::Global).allowed);
-            for target in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+            for target in ALL_ROLES {
                 assert_eq!(
                     authorize(actor, Action::Invite(target), Resource::Organization(org)).allowed,
                     role == Role::Owner || (role == Role::Admin && target != Role::Owner)

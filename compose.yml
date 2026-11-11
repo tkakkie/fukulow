@@ -5,6 +5,7 @@ services:
     image: fukulow-app
     build: .
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     environment:
       FUKULOW_ADDR: 0.0.0.0:8080
       DATABASE_URL: postgres://fukulow_app:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}@db:5432/fukulow
@@ -24,6 +25,7 @@ services:
 
   migrate:
     image: fukulow-app
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     entrypoint: ["fukulow-server", "migrate"]
     command: []
     restart: "no"
@@ -36,8 +38,9 @@ services:
         condition: service_healthy
 
   db:
-    image: postgres:18
+    image: postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     networks: [backend]
     environment:
       POSTGRES_USER: fukulow
@@ -58,8 +61,9 @@ services:
 
   caddy:
     profiles: ["caddy"]
-    image: caddy:2
+    image: caddy:2.11.9@sha256:0c2243efcf437ab7f7a978f1027fcf0d4f9be8a75df27b1b3fbc5dbe0ffa8cf0
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     depends_on: [app]
     networks:
       edge:
@@ -74,8 +78,9 @@ services:
 
   nginx:
     profiles: ["nginx"]
-    image: nginx:1
+    image: nginx:1.31.8@sha256:165ddde8751e75a1c907d24ef10d9f6deb08b57e0fe56caf67512486aff76d82
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     depends_on: [app]
     networks:
       edge:

@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
-use rand::{TryRngCore, rngs::OsRng};
+use rand::{TryRng, rngs::SysRng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -136,6 +136,8 @@ pub enum Role {
     Member,
     Guest,
 }
+
+pub(crate) const ALL_ROLES: [Role; 4] = [Role::Owner, Role::Admin, Role::Member, Role::Guest];
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Organization {
@@ -509,7 +511,7 @@ async fn sign_in_with_entropy(
 }
 
 fn fill_random(bytes: &mut [u8]) -> Result<(), ApiError> {
-    OsRng
+    SysRng
         .try_fill_bytes(bytes)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))
 }
@@ -714,6 +716,18 @@ pub async fn deactivate_member(
         }
         Ok(())
     }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
+}
+
+// Cross-module trigger tests mutate Membership through its owning module.
+#[cfg(test)]
+pub(crate) async fn set_member_active_for_test(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: Uuid,
+    active: bool,
+) {
+    sqlx::query("UPDATE users SET deactivated_at=CASE WHEN $3 THEN NULL ELSE now() END WHERE organization_id=$1 AND id=$2")
+        .bind(organization).bind(member).bind(active).execute(pool).await.unwrap();
 }
 
 fn credential_hash(headers: &HeaderMap, secure: bool) -> Result<Vec<u8>, ApiError> {
