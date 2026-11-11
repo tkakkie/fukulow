@@ -74,6 +74,30 @@ export type AnnouncementControllerOptions = {
   cancel?: (handle: unknown) => void
 }
 
+export type LiveAnnouncementItem = {
+  id: number
+  text: string
+}
+
+/**
+ * Assigns a fresh monotonic `id` to every non-empty announcement so keying the single polite
+ * `role="status"` region mutates the DOM even when two consecutive announcements share identical text.
+ */
+export function createLiveAnnouncementQueue() {
+  let seq = 0
+  let current: LiveAnnouncementItem = { id: 0, text: '' }
+  return {
+    get current(): LiveAnnouncementItem {
+      return current
+    },
+    enqueue(text: string): LiveAnnouncementItem {
+      if (!text) return current
+      current = { id: ++seq, text }
+      return current
+    },
+  }
+}
+
 function sameSeqs(set: ReadonlySet<number>, list: readonly number[]): boolean {
   if (set.size !== list.length) return false
   for (const seq of list) {
@@ -250,14 +274,19 @@ export function stepAnnouncements(
       const addedAtTail = added.filter((m) => prev.maxSeq === null || m.seq > prev.maxSeq)
       const addedBelowTail = added.filter((m) => prev.maxSeq !== null && m.seq <= prev.maxSeq)
 
-      // Per spec S3, replay finishes before `subscribed` (`live`), and pages/fills either insert below `maxSeq`, arrive in batches, or jump non-contiguously.
+      const isContiguousTail =
+        addedAtTail.length > 0 &&
+        addedAtTail.every((m, idx) =>
+          idx === 0 ? prev.maxSeq === null || m.seq === prev.maxSeq + 1 : m.seq === addedAtTail[idx - 1].seq + 1,
+        )
+
+      // Per spec S3, replay finishes before `subscribed` (`live`), and pages/fills either insert below `maxSeq` or jump non-contiguously.
       const isLiveTailDelivery =
         prev.wasLive &&
         input.live &&
         input.status === 'ready' &&
         addedBelowTail.length === 0 &&
-        addedAtTail.length === 1 &&
-        (prev.maxSeq === null || addedAtTail[0].seq === prev.maxSeq + 1)
+        isContiguousTail
 
       const liveFromOthers = isLiveTailDelivery
         ? addedAtTail.filter((m) => m.sender !== input.selfId && !prev.announcedSeqs.has(m.seq))

@@ -31,6 +31,7 @@
     reconnecting = false,
     composerRef = $bindable(null),
     ongoToChannelList,
+    onswitchorganization,
   }: {
     channel: ChannelSync
     channelId?: string
@@ -39,6 +40,7 @@
     reconnecting?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     ongoToChannelList?: () => void
+    onswitchorganization?: () => void
   } = $props()
 
   const s = $derived(channel.timeline)
@@ -183,13 +185,24 @@
 </script>
 
 <section class="timeline-section" aria-label="タイムライン">
-  {#if reconnecting && s.status === 'ready'}
+  {#if reconnecting && !organizationUnavailable && s.status === 'ready'}
     <div class="timeline-section__banner">
       <StatusBanner tone="info" role={null} message="再接続しています…" />
     </div>
   {/if}
 
-  {#if s.status === 'unavailable'}
+  {#if organizationUnavailable}
+    <div class="timeline-section__banner">
+      <StatusBanner
+        tone="danger"
+        role="alert"
+        message="この組織は利用できません。"
+        detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
+        actionLabel={onswitchorganization ? '組織を切り替える' : undefined}
+        onaction={onswitchorganization}
+      />
+    </div>
+  {:else if s.status === 'unavailable'}
     <div class="timeline-section__banner">
       <StatusBanner
         tone="danger"
@@ -216,11 +229,11 @@
   {/if}
 
   <div class="timeline-scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if s.status === 'loading' && !scrollView.loadingTimedOut && s.messages.length === 0 && s.pending.length === 0}
+    {#if !organizationUnavailable && s.status === 'loading' && !scrollView.loadingTimedOut && s.messages.length === 0 && s.pending.length === 0}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
 
-    {#if s.hasOlder && s.status !== 'unavailable'}
+    {#if s.hasOlder && !targetUnavailable}
       <div class="timeline-older">
         <Button variant="secondary" disabled={s.loadingOlder} onclick={loadOlderWithAnchor}>
           以前のメッセージを読み込む
@@ -258,7 +271,7 @@
           </li>
         {/each}
       </ul>
-    {:else if s.status === 'ready'}
+    {:else if s.status === 'ready' && !organizationUnavailable}
       <EmptyState
         title="まだメッセージがありません。"
         description="下の入力欄から最初のメッセージを送信できます。"

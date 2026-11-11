@@ -256,6 +256,12 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     effects.push({ type: 'close' })
     return finish()
   }
+  if (input.type === 'user_discard' && (state.running || state.organization === 'unavailable')) {
+    const c = state.channels[input.channel]
+    if (c?.pending.some(p => p.clientMessageId === input.clientMessageId && p.state !== 'sending'))
+      channel(input.channel).pending = c.pending.filter(p => p.clientMessageId !== input.clientMessageId || p.state === 'sending')
+    return finish()
+  }
   if (!state.running) return finish()
 
   switch (input.type) {
@@ -320,12 +326,6 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const c = channel(input.channel)
       const p = c.pending.find(p => p.clientMessageId === input.clientMessageId)
       if (p?.state === 'unknown' && c.state !== 'unavailable') attempt(input.channel, p)
-      break
-    }
-    case 'user_discard': {
-      const c = channel(input.channel)
-      if (c.pending.some(p => p.clientMessageId === input.clientMessageId && p.state !== 'sending'))
-        c.pending = c.pending.filter(p => p.clientMessageId !== input.clientMessageId || p.state === 'sending')
       break
     }
     case 'event': {

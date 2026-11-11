@@ -340,6 +340,15 @@ export function createSync(options: SyncOptions) {
     close: () => dispatch({ type: 'stop' }),
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
+    hasUnsavedChanges(): boolean {
+      for (const extra of extras.values()) {
+        if (extra.draft.length > 0) return true
+      }
+      for (const c of Object.values(state.channels)) {
+        if (c.pending.length > 0) return true
+      }
+      return false
+    },
     getTimeline(channel: string) {
       let t = timelines.get(channel)
       if (!t) { t = timeline(channel); timelines.set(channel, t) }

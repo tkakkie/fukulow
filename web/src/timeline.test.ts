@@ -151,3 +151,39 @@ it('reports loadOlder failures in olderError and clears olderError on retry', as
   })
   await sync.close()
 })
+
+it('tracks unsaved drafts and pending sends across all Channels for session-level beforeunload checks', async () => {
+  const sendMessage = vi.fn().mockResolvedValue({ ok: false, kind: 'network' })
+  const sync = createSync({
+    selfId: 'me',
+    newId: () => 'c1',
+    connect: () => ({ send() {}, close() {} }),
+    api: { listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [], has_more: false } }), sendMessage },
+  })
+  await sync.start()
+  const a = sync.getTimeline('A')
+  const b = sync.getTimeline('B')
+
+  expect(sync.hasUnsavedChanges()).toBe(false)
+
+  // Draft in Channel A while viewing Channel B still marks the session dirty
+  a.setDraft('書きかけのメッセージ')
+  await sync.watch('B')
+  expect(b.get().draft).toBe('')
+  expect(b.get().pending).toEqual([])
+  expect(sync.hasUnsavedChanges()).toBe(true)
+
+  a.setDraft('')
+  expect(sync.hasUnsavedChanges()).toBe(false)
+
+  // Failed/pending send in Channel A while Channel B is active still marks the session dirty
+  await a.send('未送信メッセージ')
+  await sync.unwatch('A')
+  expect(a.get().pending).toHaveLength(1)
+  expect(b.get().pending).toEqual([])
+  expect(sync.hasUnsavedChanges()).toBe(true)
+
+  a.discard('c1')
+  expect(sync.hasUnsavedChanges()).toBe(false)
+  await sync.close()
+})

@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { LOADING_TIMEOUT_MS } from './announcements'
+  import {
+    createLiveAnnouncementQueue,
+    LOADING_TIMEOUT_MS,
+    type LiveAnnouncementItem,
+  } from './announcements'
   import { createAuth } from './auth.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
@@ -11,13 +15,20 @@
   const auth = createAuth()
   void auth.load()
 
+  const announcementQueue = createLiveAnnouncementQueue()
+
   let organizationName = $state('')
   let name = $state('')
   let email = $state('')
   let password = $state('')
   let setupToken = $state('')
-  let pageAnnouncement = $state('')
+  let pageAnnouncement = $state<LiveAnnouncementItem>(announcementQueue.current)
   let loadingTimedOut = $state(false)
+  let lastSigninNotice = ''
+
+  function announce(msg: string) {
+    pageAnnouncement = announcementQueue.enqueue(msg)
+  }
 
   function clearSecrets() {
     password = ''
@@ -62,8 +73,12 @@
 
   // Announce sign-in notice through the single page role="status" region (docs/ui.md §6)
   $effect(() => {
-    if (auth.view.screen === 'signin' && auth.view.notice) {
-      pageAnnouncement = auth.view.notice
+    const notice = auth.view.screen === 'signin' ? (auth.view.notice ?? '') : ''
+    if (notice && notice !== lastSigninNotice) {
+      lastSigninNotice = notice
+      announce(notice)
+    } else if (!notice) {
+      lastSigninNotice = ''
     }
   })
 </script>
@@ -71,7 +86,13 @@
 {#if auth.view.screen === 'app'}
   <a class="skip-link" href="#main-content">メッセージへ移動</a>
 {/if}
-<div class="sr-only" role="status" aria-live="polite" aria-atomic="true">{pageAnnouncement}</div>
+<div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+  {#key pageAnnouncement.id}
+    {#if pageAnnouncement.text}
+      <span>{pageAnnouncement.text}</span>
+    {/if}
+  {/key}
+</div>
 
 {#if auth.view.screen === 'app'}
   {@const identity = auth.view.identity}
@@ -79,7 +100,7 @@
   {@const organization = auth.organization}
   {@const otherOrg = identity.organizations.find((o) => o.organization_id !== auth.selectedOrganizationId)}
 
-  {#if session && organization && auth.organizationStatus !== 'unavailable' && auth.organizationStatus !== 'error'}
+  {#if session && organization}
     {#key session}
       <Workspace
         {session}
@@ -90,9 +111,7 @@
         authError={auth.error}
         onselectorganization={(id) => void auth.selectOrganization(id)}
         onsignout={doSignOut}
-        onannounce={(msg) => {
-          pageAnnouncement = msg
-        }}
+        onannounce={announce}
       />
     {/key}
   {:else}

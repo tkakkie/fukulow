@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   createAnnouncementController,
+  createLiveAnnouncementQueue,
   formatLiveMessageAnnouncement,
   formatMessagePreview,
   initialAnnouncementState,
@@ -450,5 +451,121 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
     expect(announced.at(-1)).toBe('再接続しています…')
 
     ctrl.destroy()
+  })
+
+  it('coalesces a contiguous batch of multiple live Messages in one update and ignores non-contiguous batches', () => {
+    let s = initialAnnouncementState()
+    s = stepAnnouncements(s, {
+      type: 'view_changed',
+      viewId: 'c1',
+      kind: 'channel',
+      name: 'general',
+    }).state
+
+    // Initialize at seq 10
+    s = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1',
+      status: 'ready',
+      live: true,
+      messages: [msg(10, 'tanaka', '初期')],
+      selfId: 'me',
+      nowMs: 1_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    }).state
+
+    // Two contiguous live Messages from others arrive in a single batched update -> 新着メッセージ 2件
+    const batch1 = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1',
+      status: 'ready',
+      live: true,
+      messages: [msg(10, 'tanaka', '初期'), msg(11, 'tanaka', '1件目'), msg(12, 'sato', '2件目')],
+      selfId: 'me',
+      nowMs: 2_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    s = batch1.state
+    expect(batch1.announcement).toBe('新着メッセージ 2件')
+    expect(s.burstCount).toBe(2)
+
+    // Another contiguous batch within the 2 s window -> accumulates into 新着メッセージ 4件
+    const batch2 = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1',
+      status: 'ready',
+      live: true,
+      messages: [
+        msg(10, 'tanaka', '初期'),
+        msg(11, 'tanaka', '1件目'),
+        msg(12, 'sato', '2件目'),
+        msg(13, 'tanaka', '3件目'),
+        msg(14, 'sato', '4件目'),
+      ],
+      selfId: 'me',
+      nowMs: 3_500,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    s = batch2.state
+    expect(batch2.announcement).toBe('新着メッセージ 4件')
+    expect(s.burstCount).toBe(4)
+
+    // Contiguous batch after the 2 s window containing own send + 1 message from another -> announces the 1 message
+    const batchMixed = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1',
+      status: 'ready',
+      live: true,
+      messages: [
+        msg(10, 'tanaka', '初期'),
+        msg(11, 'tanaka', '1件目'),
+        msg(12, 'sato', '2件目'),
+        msg(13, 'tanaka', '3件目'),
+        msg(14, 'sato', '4件目'),
+        msg(15, 'me', '自分の送信'),
+        msg(16, 'tanaka', '相手の返信'),
+      ],
+      selfId: 'me',
+      nowMs: 6_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    s = batchMixed.state
+    expect(batchMixed.announcement).toBe('田中 美咲: 相手の返信')
+
+    // Non-contiguous batch (gap at seq 18) -> not announced
+    const gapped = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1',
+      status: 'ready',
+      live: true,
+      messages: [
+        msg(10, 'tanaka', '初期'),
+        msg(11, 'tanaka', '1件目'),
+        msg(12, 'sato', '2件目'),
+        msg(13, 'tanaka', '3件目'),
+        msg(14, 'sato', '4件目'),
+        msg(15, 'me', '自分の送信'),
+        msg(16, 'tanaka', '相手の返信'),
+        msg(17, 'tanaka', 'ギャップ前'),
+        msg(19, 'sato', 'ギャップ後'),
+      ],
+      selfId: 'me',
+      nowMs: 9_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    expect(gapped.announcement).toBeNull()
+  })
+
+  it('createLiveAnnouncementQueue produces a distinct keyed item for consecutive identical announcement strings', () => {
+    const queue = createLiveAnnouncementQueue()
+    expect(queue.current).toEqual({ id: 0, text: '' })
+
+    const first = queue.enqueue('田中 美咲: こんにちは')
+    const second = queue.enqueue('田中 美咲: こんにちは')
+
+    expect(first).toEqual({ id: 1, text: '田中 美咲: こんにちは' })
+    expect(second).toEqual({ id: 2, text: '田中 美咲: こんにちは' })
+    expect(second.id).not.toBe(first.id)
+    expect(queue.enqueue('')).toBe(second)
   })
 })

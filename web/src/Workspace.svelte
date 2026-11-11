@@ -48,6 +48,8 @@
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
+  const organizationUnavailable = $derived(session.sync.unavailable)
+  const otherOrg = $derived(organizations.find((o) => o.organization_id !== selectedOrganizationId))
 
   const announcementController = createAnnouncementController({
     onAnnounce: (msg) => onannounce?.(msg),
@@ -187,10 +189,9 @@
     }
   }
 
-  // Best-effort prompt for the active Channel's unsent draft or pending sends (docs/ui.md §3).
+  // Best-effort prompt for any Channel's unsent draft or pending send in the session (docs/ui.md §3).
   function handleBeforeUnload(e: BeforeUnloadEvent) {
-    if (!currentTimeline) return
-    if (currentTimeline.draft.length > 0 || currentTimeline.pending.length > 0) {
+    if (session.sync.hasUnsavedChanges()) {
       e.preventDefault()
     }
   }
@@ -251,7 +252,7 @@
     </div>
 
     <div class="channel-column__scroll">
-      {#if s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut)}
+      {#if !organizationUnavailable && (s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut))}
         <StatusBanner
           tone="danger"
           role="alert"
@@ -263,12 +264,14 @@
             void channels.load()
           }}
         />
-      {:else if s.status === 'loading' && s.channels.length === 0}
+      {:else if !organizationUnavailable && s.status === 'loading' && s.channels.length === 0}
         <Skeleton rows={3} label="チャンネルを読み込み中" />
       {/if}
 
       <ChannelList channels={s.channels} selectedId={s.selectedId} onselect={handleSelectChannel} />
-      <CreateChannelForm oncreate={handleCreateChannel} />
+      {#if !organizationUnavailable}
+        <CreateChannelForm oncreate={handleCreateChannel} />
+      {/if}
     </div>
 
     {#if authError}
@@ -316,12 +319,40 @@
             channel={currentChannel}
             channelId={selected.id}
             selfId={organization?.member.id ?? ''}
-            organizationUnavailable={session.sync.unavailable}
+            {organizationUnavailable}
             reconnecting={announcementView.reconnecting}
             bind:composerRef={mainComposerRef}
             ongoToChannelList={goToChannelList}
+            onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
           />
         {/key}
+      </div>
+    {:else if organizationUnavailable}
+      <header class="main-card__header">
+        <div class="main-card__title-group">
+          <span class="mobile-only">
+            <Button
+              variant="icon"
+              ariaLabel="チャンネル一覧へ戻る"
+              onclick={() => {
+                mobileLevel = 'channels'
+              }}
+            >
+              ‹
+            </Button>
+          </span>
+          <h1 class="main-card__title">{organization?.organization.name ?? 'fukulow'}</h1>
+        </div>
+      </header>
+      <div class="main-card__empty">
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message="この組織は利用できません。"
+          detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
+          actionLabel={otherOrg && onselectorganization ? '組織を切り替える' : undefined}
+          onaction={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+        />
       </div>
     {:else if s.status === 'ready'}
       <header class="main-card__header">
