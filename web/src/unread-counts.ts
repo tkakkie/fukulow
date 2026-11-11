@@ -29,6 +29,11 @@ export function scopeCount(b: ScopeBaseline, position: number, records: Iterable
   }
   return Math.max(0, count)
 }
+export function needsUnreadRecord(seq: number, baseline: ScopeBaseline | undefined, aggregateAfter: number, visitAfter: number): boolean {
+  // Keep the whole baseline window: later local reads still need its rows for subtraction.
+  // Aggregate reconciliation and the visit's fixed entry boundary can require older rows too.
+  return seq > Math.min(baseline?.readSeq ?? 0, aggregateAfter, visitAfter)
+}
 export function coveredThrough(position: number, coverage: Coverage[]): number {
   let through = position
   for (const range of [...coverage].sort((a, b) => a.after - b.after)) {
