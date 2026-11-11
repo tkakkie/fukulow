@@ -3,7 +3,7 @@ import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, 
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
 import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
-import { selectMainTimeline, selectTopicMessages, type TopicBaseline } from './topic-selectors'
+import { selectMainTimeline, selectTopicMessages, type TopicBaseline, type TopicSummaryError } from './topic-selectors'
 
 type Sync = ReturnType<typeof createSync>
 export type TopicsApi = {
@@ -18,9 +18,12 @@ export const topicsApi = (organizationId: string): TopicsApi => ({
   getTopicSummary: (c, t) => api.getTopicSummary(organizationId, c, t),
   listTopicMessages: (c, t, q) => api.listTopicMessages(organizationId, c, t, q),
 })
+const MAX_SUMMARY_RETRIES = 4
 type Paging = { asOfSeq?: number; before?: number; hasMore: boolean; loading: boolean; error: boolean }
 type TopicWindow = { messages: Map<number, Message>; before?: number; initialized: boolean; hasMore: boolean; loading: boolean; error: boolean; notFound: boolean }
-type SummaryRetry = { attempt: number; timer?: ReturnType<typeof setTimeout> }
+type SummaryRetry = { attempt: number; timer?: ReturnType<typeof setTimeout>; terminal?: TopicSummaryError }
+const isRetryableSummaryFailure = <T>(r: Exclude<Result<T>, { ok: true }>) =>
+  r.kind === 'network' || (r.kind === 'http' && r.status >= 500)
 const paging = (): Paging => ({ hasMore: true, loading: false, error: false })
 const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, loading: false, error: false, notFound: false })
 const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
@@ -81,6 +84,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         clearWindowTimers(w)
         windows.delete(id)
       } else if ((before?.state === 'unavailable' || w.unavailable) && after.state !== 'unavailable') {
+        clearWindowTimers(w)
         w.unavailable = false
         w.generation = nextGeneration++
       } else if (!next.running || next.organization === 'unavailable' || after.state === 'unavailable') {
@@ -192,7 +196,14 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const syncState = closed ? undefined : sync.get()
     const c = syncState?.channels[channel]
     const messages = c?.messages ?? []
+    const summaryErrorFor = (topicId: string): TopicSummaryError | null =>
+      w.baselines.has(topicId) || w.topics.get(topicId)?.notFound
+        ? null
+        : (w.summaryRetries.get(topicId)?.terminal ?? null)
     const merged = selectMainTimeline(messages, w.messages.values(), w.baselines.values())
+    for (const item of merged) {
+      if (item.kind === 'topic' && item.baseline === null) item.summaryError = summaryErrorFor(item.topicId)
+    }
     // List/summary baselines supply counts, while main pages and sync records supply main membership.
     const visibleTopics = new Set([...w.mainTopics, ...messages.flatMap(m => m.topic_id ? [m.topic_id] : [])])
     const lines = merged.filter(l => l.kind === 'message' || visibleTopics.has(l.topicId))
@@ -200,8 +211,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     function topic(topicId: string) {
       const t = w.topics.get(topicId)
       return { messages: selectTopicMessages(topicId, messages, t?.messages.values() ?? []),
+        before: t?.before,
         initialized: t?.initialized ?? false,
-        loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false, notFound: t?.notFound ?? false }
+        loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false,
+        notFound: t?.notFound ?? false, summaryError: summaryErrorFor(topicId) }
     }
     return { generation: w.generation, lines, topics: merged.filter(l => l.kind === 'topic'),
       main: { ...w.main }, list: { ...w.list },
@@ -212,7 +225,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         return value
       } }
   }
-  async function loadSummary(channel: string, topicId: string) {
+  async function fetchSummary(channel: string, topicId: string) {
     const w = getWindow(channel)
     if (!current(channel, w) || w.summaries.has(topicId)) return
     const pendingRetry = w.summaryRetries.get(topicId)
@@ -241,37 +254,90 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     }
     return result
   }
+  async function loadSummary(channel: string, topicId: string) {
+    const w = getWindow(channel)
+    if (!current(channel, w) || w.summaries.has(topicId)) return
+    const hadTerminal = w.summaryRetries.get(topicId)?.terminal !== undefined
+    clearSummaryRetry(w, topicId)
+    const pending = fetchSummary(channel, topicId)
+    if (hadTerminal) notify()
+    const result = await pending
+    if (
+      result &&
+      !result.ok &&
+      current(channel, w) &&
+      !w.baselines.has(topicId) &&
+      !w.topics.get(topicId)?.notFound &&
+      !w.summaries.has(topicId)
+    ) {
+      w.summaryRetries.set(topicId, {
+        attempt: MAX_SUMMARY_RETRIES,
+        terminal: isRetryableSummaryFailure(result) ? 'retryable' : 'non_retryable',
+      })
+      notify()
+    }
+    return result
+  }
   async function ensureSummary(channel: string, topicId: string) {
     const w = getWindow(channel)
+    const existingRetry = w.summaryRetries.get(topicId)
     if (
       !current(channel, w) ||
       w.baselines.has(topicId) ||
       w.topics.get(topicId)?.notFound ||
       w.summaries.has(topicId) ||
-      w.summaryRetries.get(topicId)?.timer !== undefined
+      existingRetry?.timer !== undefined ||
+      existingRetry?.terminal !== undefined
     ) {
       return
     }
-    const result = await loadSummary(channel, topicId)
-    if (!result || result.ok) return
-    const retryable = result.kind === 'network' || (result.kind === 'http' && result.status >= 500)
+    const result = await fetchSummary(channel, topicId)
+    if (!result) return
+    const latestRetry = w.summaryRetries.get(topicId)
     if (
-      !retryable ||
       !current(channel, w) ||
       w.baselines.has(topicId) ||
       w.topics.get(topicId)?.notFound ||
       w.summaries.has(topicId) ||
-      w.summaryRetries.get(topicId)?.timer !== undefined
+      latestRetry?.timer !== undefined ||
+      latestRetry?.terminal !== undefined
     ) {
       return
     }
-    const attempt = w.summaryRetries.get(topicId)?.attempt ?? 0
+    const attempt = latestRetry?.attempt ?? 0
+    if (result.ok || !isRetryableSummaryFailure(result)) {
+      w.summaryRetries.set(topicId, { attempt, terminal: 'non_retryable' })
+      notify()
+      return
+    }
+    if (attempt >= MAX_SUMMARY_RETRIES) {
+      w.summaryRetries.set(topicId, { attempt, terminal: 'retryable' })
+      notify()
+      return
+    }
     const timer = setTimeout(() => {
       const entry = w.summaryRetries.get(topicId)
       if (entry) entry.timer = undefined
       void ensureSummary(channel, topicId)
     }, backoffCap(attempt))
     w.summaryRetries.set(topicId, { attempt: attempt + 1, timer })
+  }
+  async function retrySummary(channel: string, topicId: string) {
+    const w = getWindow(channel)
+    if (!current(channel, w)) return
+    if (w.summaries.has(topicId)) {
+      const entry = w.summaryRetries.get(topicId)
+      if (entry) {
+        entry.attempt = 0
+        entry.terminal = undefined
+      }
+      return
+    }
+    const hadTerminal = w.summaryRetries.get(topicId)?.terminal !== undefined
+    clearSummaryRetry(w, topicId)
+    const pending = ensureSummary(channel, topicId)
+    if (hadTerminal) notify()
+    await pending
   }
   return {
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
@@ -318,6 +384,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     },
     loadSummary,
     ensureSummary,
+    retrySummary,
     async loadTopic(channel: string, topicId: string) {
       const w = getWindow(channel)
       let t = w.topics.get(topicId)

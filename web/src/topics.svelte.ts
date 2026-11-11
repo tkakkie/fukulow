@@ -11,6 +11,7 @@ export function topicsAdapter(topics: Topics, channel: string) {
     loadTopic: (id: string) => topics.loadTopic(channel, id),
     loadSummary: (id: string) => topics.loadSummary(channel, id),
     ensureSummary: (id: string) => topics.ensureSummary(channel, id),
+    retrySummary: (id: string) => topics.retrySummary(channel, id),
   }
 }
 export type TopicsAdapter = ReturnType<typeof topicsAdapter>

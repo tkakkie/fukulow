@@ -30,7 +30,7 @@
       void topics.loadList()
     }
     for (const topic of state.topics) {
-      if (topic.baseline === null) {
+      if (topic.baseline === null && topic.summaryError === null) {
         void topics.ensureSummary(topic.topicId)
       }
     }
@@ -71,6 +71,9 @@
               messageCount={t.messageCount ?? undefined}
               latestBody={t.latestMessage.body}
               onclick={() => onselecttopic(t.topicId)}
+              onretry={!unavailable && !state.unavailable && t.summaryError === 'retryable'
+                ? () => void topics.retrySummary(t.topicId)
+                : undefined}
             />
           </li>
         {/each}

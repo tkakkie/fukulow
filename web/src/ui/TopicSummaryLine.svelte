@@ -1,5 +1,6 @@
 <script lang="ts">
   import Badge from './Badge.svelte'
+  import StatusBanner from './StatusBanner.svelte'
 
   let {
     name,
@@ -9,6 +10,7 @@
     latestBody,
     unreadCount = 0,
     onclick,
+    onretry,
   }: {
     name: string
     topicId?: string
@@ -17,31 +19,49 @@
     latestBody?: string
     unreadCount?: number
     onclick?: () => void
+    onretry?: () => void
   } = $props()
 </script>
 
-<button
-  type="button"
-  data-topic-id={topicId}
-  aria-current={selected ? 'true' : undefined}
-  class="ui-topic-summary"
-  {onclick}
->
-  <span class="ui-topic-summary__header">
-    <span class="ui-topic-summary__title">トピック: {name}</span>
-    {#if messageCount !== undefined}
-      <span class="ui-topic-summary__count">{messageCount}件›</span>
+<div class="ui-topic-summary-group">
+  <button
+    type="button"
+    data-topic-id={topicId}
+    aria-current={selected ? 'true' : undefined}
+    class="ui-topic-summary"
+    {onclick}
+  >
+    <span class="ui-topic-summary__header">
+      <span class="ui-topic-summary__title">トピック: {name}</span>
+      {#if messageCount !== undefined}
+        <span class="ui-topic-summary__count">{messageCount}件›</span>
+      {/if}
+      {#if unreadCount > 0}
+        <Badge kind="unread" count={unreadCount} />
+      {/if}
+    </span>
+    {#if latestBody}
+      <span class="ui-topic-summary__preview">{latestBody}</span>
     {/if}
-    {#if unreadCount > 0}
-      <Badge kind="unread" count={unreadCount} />
-    {/if}
-  </span>
-  {#if latestBody}
-    <span class="ui-topic-summary__preview">{latestBody}</span>
+  </button>
+  {#if onretry}
+    <StatusBanner
+      tone="danger"
+      role="alert"
+      message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+      actionLabel="再試行"
+      onaction={onretry}
+    />
   {/if}
-</button>
+</div>
 
 <style>
+  .ui-topic-summary-group {
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
+  }
+
   .ui-topic-summary {
     display: grid;
     gap: var(--space-4);

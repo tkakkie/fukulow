@@ -2500,4 +2500,163 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await unmount(instance)
     sessionModel.close()
   })
+
+  it('stops automatic summary retries at terminal error, offers 再試行 only for retryable failures, and restarts on click', async () => {
+    vi.useFakeTimers()
+    let retryableCalls = 0
+    let nonRetryableCalls = 0
+    let allowSuccess = false
+    const net = fakeNetwork()
+    const baseOptions = net.options('me')
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...baseOptions,
+      topicsApi: {
+        ...baseOptions.topicsApi!,
+        async getTopicSummary(channelId, topicId) {
+          if (topicId === 't-503') {
+            retryableCalls++
+            if (!allowSuccess) return { ok: false, kind: 'http', status: 503 }
+            return ok({
+              as_of_seq: 2,
+              topic: {
+                id: 't-503',
+                name: '手動再試行トピック',
+                first_seq: 2,
+                last_seq: 2,
+                message_count: 1,
+                latest_message: { ...record(2, channelId), id: 'm-2', sender: 'other', body: '一時障害本文', topic_id: 't-503' },
+                read_seq: 0,
+                unread_count: 0,
+              },
+            })
+          }
+          if (topicId === 't-429') {
+            nonRetryableCalls++
+            return { ok: false, kind: 'http', status: 429 }
+          }
+          return baseOptions.topicsApi!.getTopicSummary(channelId, topicId)
+        },
+      },
+    })
+    const topicAdapters = new Map<string, TopicsAdapter>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics(channelId: string) {
+        let a = topicAdapters.get(channelId)
+        if (!a) {
+          a = topicsAdapter(rawSession.topics, channelId)
+          topicAdapters.set(channelId, a)
+        }
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: () => rawSession.close(),
+    }
+
+    const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'root', topic_id: null }
+    net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
+    net.topicLists.c1 = ok({ as_of_seq: 1, has_more: false, topics: [] })
+
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+
+    let href = '/o/org-1/c/c1?panel=topics'
+    let historyState: unknown = null
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: {
+        get state() { return historyState },
+        pushState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+        replaceState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+      },
+      innerWidth: 1280,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        navigation,
+        session: sessionModel,
+        organization: {
+          member: { id: 'me', name: '自分', role: 'owner' },
+          organization: {
+            organization_id: 'org-1',
+            name: 'Acme',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    await settle()
+    net.subscribed('c1', 1)
+    await settle()
+    flushSync()
+
+    // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 429 Topic t-429
+    net.event({
+      type: 'message',
+      message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一時障害本文', topic_id: 't-503' },
+    })
+    net.event({
+      type: 'message',
+      message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-429' },
+    })
+    await settle()
+    flushSync()
+
+    // Non-retryable 429 stops immediately at 1 request with no retry button
+    expect(nonRetryableCalls).toBe(1)
+
+    // Advance past bounded backoff budget; persistent 503 stops at 5 requests and shows 再試行 on t-503 only
+    await vi.advanceTimersByTimeAsync(120_000)
+    await settle()
+    flushSync()
+    expect(retryableCalls).toBe(5)
+    expect(nonRetryableCalls).toBe(1)
+
+    const mainRetryButtons = queryAll(host, '#main-content button').filter((b) => b.textContent?.trim() === '再試行')
+    const panelRetryButtons = queryAll(host, '#panel-content button').filter((b) => b.textContent?.trim() === '再試行')
+    expect(mainRetryButtons).toHaveLength(1)
+    expect(panelRetryButtons).toHaveLength(1)
+
+    // Subsequent live traffic re-renders both Timeline and TopicList without triggering any more summary calls
+    net.event({
+      type: 'message',
+      message: { ...record(4, 'c1'), id: 'm-4', sender: 'other', body: '後続メッセージ', topic_id: null },
+    })
+    await settle()
+    flushSync()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(retryableCalls).toBe(5)
+    expect(nonRetryableCalls).toBe(1)
+
+    // 2. Clicking 再試行 on the summary line restarts and displays the resolved Topic name and count
+    allowSuccess = true
+    mainRetryButtons[0]!.click()
+    await settle()
+    flushSync()
+    expect(retryableCalls).toBe(6)
+    expect(host.querySelector('#main-content')?.textContent).toContain('トピック: 手動再試行トピック')
+    expect(host.querySelector('#main-content')?.textContent).toContain('1件›')
+    expect(host.querySelector('#panel-content')?.textContent).toContain('トピック: 手動再試行トピック')
+    expect(queryAll(host, '#main-content button').filter((b) => b.textContent?.trim() === '再試行')).toHaveLength(0)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
 })

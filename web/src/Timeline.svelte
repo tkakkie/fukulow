@@ -168,7 +168,7 @@
       void topics.loadMain()
     }
     for (const topic of tState.topics) {
-      if (topic.baseline === null) {
+      if (topic.baseline === null && topic.summaryError === null) {
         void topics.ensureSummary(topic.topicId)
       }
     }
@@ -335,6 +335,9 @@
                 messageCount={line.messageCount ?? undefined}
                 latestBody={line.latestMessage.body}
                 onclick={() => onopentopic?.(line.topicId)}
+                onretry={!targetUnavailable && line.summaryError === 'retryable' && topics
+                  ? () => void topics.retrySummary(line.topicId)
+                  : undefined}
               />
             </li>
           {/if}

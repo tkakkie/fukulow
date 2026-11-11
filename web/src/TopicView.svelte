@@ -154,7 +154,7 @@
     scrollController.resetLoadingTimeout()
     if (topicStatus === 'error') onretrytopicmeta?.()
     requestedHistoryFor = ''
-    void topics.loadSummary(topicId)
+    void topics.retrySummary(topicId)
     void topics.loadTopic(topicId)
   }
 
@@ -164,7 +164,7 @@
     const key = `${channelId}:${topicId}:${tState.generation}`
     if (targetUnavailable || s.status === 'loading') return
     const hasBaseline = tState.topics.some((t) => t.topicId === topicId && t.baseline !== null)
-    if (!hasBaseline) {
+    if (!hasBaseline && view.summaryError === null) {
       void topics.ensureSummary(topicId)
     }
     if (!view.initialized && view.hasMore && !view.loading && !view.error && requestedHistoryFor !== key) {
