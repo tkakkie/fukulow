@@ -1,6 +1,14 @@
 <script lang="ts">
   import { channelNameTooLong, type ChannelVisibility } from './channels.svelte'
-  let { oncreate }: { oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null> } = $props()
+  import Button from './ui/Button.svelte'
+  import Input from './ui/Input.svelte'
+  import StatusBanner from './ui/StatusBanner.svelte'
+
+  let {
+    oncreate,
+  }: {
+    oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null>
+  } = $props()
 
   let name = $state('')
   let error = $state('')
@@ -21,8 +29,19 @@
   }
 </script>
 
-<form onsubmit={submit}>
-  <label>チャンネル名 <input name="channel_name" required bind:value={name} /></label>
-  {#if error}<p role="alert">{error}</p>{/if}
-  <button type="submit" disabled={busy || name === ''}>チャンネルを作成</button>
+<form class="create-channel-form" onsubmit={submit}>
+  <Input label="チャンネル名" name="channel_name" required bind:value={name} />
+  {#if error}
+    <StatusBanner tone="danger" role="alert" message={error} />
+  {/if}
+  <Button variant="primary" type="submit" disabled={busy || name === ''}>チャンネルを作成</Button>
 </form>
+
+<style>
+  .create-channel-form {
+    display: grid;
+    gap: var(--space-8);
+    padding-top: var(--space-12);
+    min-width: 0;
+  }
+</style>

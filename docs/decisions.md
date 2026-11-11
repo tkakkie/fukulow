@@ -199,6 +199,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #200 layout A2 (rail, チャンネル column with トピック accordion, main card, closable right panel), picked by the maintainer from three mockups; surfaces split by tone and radius, not rules. Details in `docs/ui.md`.
 - #200 navigation uses the History API and the existing SPA fallback, with no router dependency: one entry per view or panel layer; in-app back/close controls replace instead of popping, so they never change main or leave the app. URLs are hints; the API decides access.
 - #200 drafts live in controller memory per target for the Account Session, never in web storage; theme and text size are the only planned `ui-settings.ts` keys (enum values, per device, #48).
+- #200 skips `@axe-core/playwright` and checks WCAG 2.2 AA token contrast, token-only component styles and single polite status-region structure in vitest (`ui-tokens.test.ts`), avoiding a new dependency while running in fast CI.
 - Sprint 1 web acceptance: `npm --prefix web run e2e:compose` against `docker compose --profile caddy up` from an empty database (#19).
 
 ## Load testing and measurement

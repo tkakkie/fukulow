@@ -1,20 +1,51 @@
 <script lang="ts">
+  import {
+    createLiveAnnouncementQueue,
+    LOADING_TIMEOUT_MS,
+    type LiveAnnouncementItem,
+  } from './announcements'
   import { createAuth } from './auth.svelte'
-  import Workspace from './Workspace.svelte'
-  import Members from './MemberList.svelte'
+  import { focusTarget, type SkipLinkTargetId } from './focus-management'
   import InviteAccept from './InviteAccept.svelte'
   import { inviteFromLocation } from './members'
   import { inviteAcceptanceAdapter } from './members.svelte'
+  import Button from './ui/Button.svelte'
+  import EmptyState from './ui/EmptyState.svelte'
+  import Input from './ui/Input.svelte'
+  import Skeleton from './ui/Skeleton.svelte'
+  import StatusBanner from './ui/StatusBanner.svelte'
+  import Workspace from './Workspace.svelte'
 
   const invitation = inviteAcceptanceAdapter(inviteFromLocation())
   const auth = createAuth()
-  auth.load()
+  void auth.load()
+
+  const announcementQueue = createLiveAnnouncementQueue()
 
   let organizationName = $state('')
   let name = $state('')
   let email = $state('')
   let password = $state('')
   let setupToken = $state('')
+  let pageAnnouncement = $state<LiveAnnouncementItem>(announcementQueue.current)
+  let loadingTimedOut = $state(false)
+  let workspaceSkipTargetId = $state<SkipLinkTargetId>('main-content')
+  const skipTargetId = $derived<SkipLinkTargetId>(
+    auth.view.screen === 'app' && auth.session && auth.organization ? workspaceSkipTargetId : 'main-content',
+  )
+  let lastSigninNotice = ''
+  let lastInviteAcceptedNotice = false
+
+  function announce(msg: string) {
+    pageAnnouncement = announcementQueue.enqueue(msg)
+  }
+
+  function handleSkipToContent(e: MouseEvent) {
+    const target = typeof document !== 'undefined' ? document.getElementById(skipTargetId) : null
+    if (focusTarget(target)) {
+      e.preventDefault()
+    }
+  }
 
   function clearSecrets() {
     password = ''
@@ -41,76 +72,422 @@
   async function doSignOut() {
     if (await auth.signOut()) clearSecrets()
   }
+
+  // 10 s loading timeout -> retryable error (docs/ui.md §5)
+  $effect(() => {
+    const isLoading =
+      auth.view.screen === 'loading' ||
+      (auth.view.screen === 'app' && auth.organizationStatus === 'loading' && !auth.session)
+    if (!isLoading) {
+      loadingTimedOut = false
+      return
+    }
+    const timer = setTimeout(() => {
+      loadingTimedOut = true
+    }, LOADING_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  })
+
+  // Announce sign-in notice through the single page role="status" region (docs/ui.md §6)
+  $effect(() => {
+    const notice = auth.view.screen === 'signin' ? (auth.view.notice ?? '') : ''
+    if (notice && notice !== lastSigninNotice) {
+      lastSigninNotice = notice
+      announce(notice)
+    } else if (!notice) {
+      lastSigninNotice = ''
+    }
+  })
+
+  // Announce invite-accepted notice through the single page role="status" region (docs/ui.md §6)
+  $effect(() => {
+    const accepted = invitation.state.accepted && auth.view.screen !== 'app'
+    if (accepted && !lastInviteAcceptedNotice) {
+      lastInviteAcceptedNotice = true
+      announce('招待を受けました。ログインしてください。')
+    } else if (!accepted) {
+      lastInviteAcceptedNotice = false
+    }
+  })
 </script>
 
-<main>
-  <h1>fukulow</h1>
-  {#if auth.view.screen === 'app' || auth.view.screen === 'signin' || auth.view.screen === 'setup'}
-    <InviteAccept model={invitation} signedIn={auth.view.screen === 'app'} accept={input => auth.acceptInvitation(invitation, input)} />
-  {/if}
+{#if auth.view.screen === 'app'}
+  <a class="skip-link" href={`#${skipTargetId}`} onclick={handleSkipToContent}>メッセージへ移動</a>
+{/if}
+<div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+  {#key pageAnnouncement.id}
+    {#if pageAnnouncement.text}
+      <span>{pageAnnouncement.text}</span>
+    {/if}
+  {/key}
+</div>
 
-  {#if auth.view.screen === 'loading'}
-    <p>読み込み中…</p>
-  {:else if auth.view.screen === 'error'}
-    <p role="alert">サーバーに接続できません。</p>
-    <button onclick={() => auth.load()}>再試行</button>
-  {:else if auth.view.screen === 'setup'}
-    <h2>初期セットアップ</h2>
-    <form onsubmit={submitSetup}>
-      <label>組織名 <input name="organization_name" required bind:value={organizationName} /></label>
-      <label>オーナーの名前 <input name="name" required bind:value={name} autocomplete="name" /></label>
-      <label>メールアドレス <input name="email" type="email" required bind:value={email} autocomplete="username" /></label>
-      <label>パスワード（12文字以上）
-        <input name="password" type="password" required minlength="12" bind:value={password} autocomplete="new-password" />
-      </label>
-      <label>セットアップトークン
-        <input name="setup_token" type="password" required bind:value={setupToken} autocomplete="off" />
-        <small>管理者から受け取ったトークンを入力してください。</small>
-      </label>
-      {#if auth.error}<p role="alert">{auth.error}</p>{/if}
-      <button type="submit" disabled={auth.busy}>セットアップして開始</button>
-    </form>
-  {:else if auth.view.screen === 'signin'}
-    <h2>ログイン</h2>
-    <form onsubmit={submitSignIn}>
-      {#if auth.view.notice}<p role="status">{auth.view.notice}</p>{/if}
-      <label>メールアドレス <input name="email" type="email" required bind:value={email} autocomplete="username" /></label>
-      <label>パスワード
-        <input name="password" type="password" required bind:value={password} autocomplete="current-password" />
-      </label>
-      {#if auth.error}<p role="alert">{auth.error}</p>{/if}
-      <button type="submit" disabled={auth.busy}>ログイン</button>
-    </form>
-  {:else if auth.view.screen === 'app'}
-    {@const identity = auth.view.identity}
-    {@const session = auth.session}
-    {@const organization = auth.organization}
-    {#if identity.organizations.length > 1}
-      <label>組織
-        <select value={auth.selectedOrganizationId} onchange={e => auth.selectOrganization(e.currentTarget.value)}>
-          {#each identity.organizations as org}<option value={org.organization_id}>{org.name}</option>{/each}
-        </select>
-      </label>
-    {/if}
-    {#if auth.organizationStatus === 'unavailable'}
-      <p role="alert">この組織は利用できません。</p>
-      <button onclick={() => auth.selectOrganization(auth.selectedOrganizationId)}>メンバー資格を再確認</button>
-    {:else if auth.organizationStatus === 'error'}
-      <p role="alert">サーバーに接続できません。</p>
-      <button onclick={() => auth.selectOrganization(auth.selectedOrganizationId)}>再試行</button>
-    {:else if session && organization}
-      {#key session}<Workspace {session} canCreateChannels={organization.organization.capabilities.can_create_channels.allowed} />
-        {#if auth.members}<Members model={auth.members} identity={organization} onchanged={id => {
-          if (id === organization.member.id) auth.selectOrganization(auth.selectedOrganizationId)
-        }} />{/if}
-      {/key}
-      <p>{organization.organization.name} / {organization.member.name} さん</p>
-    {:else if identity.organizations.length === 0}
-      <p>利用できる組織がありません。</p>
+{#if auth.view.screen === 'app'}
+  {@const identity = auth.view.identity}
+  {@const session = auth.session}
+  {@const organization = auth.organization}
+  {@const otherOrg = identity.organizations.find((o) => o.organization_id !== auth.selectedOrganizationId)}
+
+  <div class="app-shell">
+    <InviteAccept
+      model={invitation}
+      signedIn={true}
+      accept={(input) => auth.acceptInvitation(invitation, input)}
+    />
+
+    {#if session && organization}
+      <div class="app-shell__body">
+        {#key session}
+          <Workspace
+            {session}
+            canCreateChannels={organization.organization.capabilities.can_create_channels.allowed}
+            members={auth.members}
+            {organization}
+            organizations={identity.organizations}
+            selectedOrganizationId={auth.selectedOrganizationId}
+            busy={auth.busy}
+            authError={auth.error}
+            bind:skipTargetId={workspaceSkipTargetId}
+            onselectorganization={(id) => void auth.selectOrganization(id)}
+            onsignout={doSignOut}
+            onannounce={announce}
+          />
+        {/key}
+      </div>
     {:else}
-      <p>読み込み中…</p>
+      <div class="app-fallback">
+        <nav class="app-fallback__rail" aria-label="メインナビゲーション">
+          <div class="app-fallback__logo" aria-hidden="true">🦉</div>
+          <Button variant="icon" ariaLabel="ログアウト" disabled={auth.busy} onclick={doSignOut}>⇥</Button>
+        </nav>
+        <main id="main-content" class="app-fallback__main" tabindex="-1">
+          <header class="app-fallback__header">
+            <h1 class="app-fallback__title">{organization?.organization.name ?? 'fukulow'}</h1>
+            {#if identity.organizations.length > 1}
+              <label class="app-fallback__org-switcher">
+                <span class="app-fallback__org-label">組織</span>
+                <select
+                  class="app-fallback__org-select"
+                  value={auth.selectedOrganizationId}
+                  onchange={(e) => void auth.selectOrganization(e.currentTarget.value)}
+                >
+                  {#each identity.organizations as org (org.organization_id)}
+                    <option value={org.organization_id}>{org.name}</option>
+                  {/each}
+                </select>
+              </label>
+            {/if}
+          </header>
+
+          {#if auth.organizationStatus === 'unavailable'}
+            <StatusBanner
+              tone="danger"
+              role="alert"
+              message="この組織は利用できません。"
+              detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
+              actionLabel="メンバー資格を再確認"
+              onaction={() => void auth.selectOrganization(auth.selectedOrganizationId)}
+              secondaryActionLabel={otherOrg ? '組織を切り替える' : undefined}
+              onsecondaryaction={otherOrg ? () => void auth.selectOrganization(otherOrg.organization_id) : undefined}
+            />
+          {:else if auth.organizationStatus === 'error' || loadingTimedOut}
+            <StatusBanner
+              tone="danger"
+              role="alert"
+              message="サーバーに接続できません。"
+              detail="通信状況を確認して、もう一度お試しください。"
+              actionLabel="再試行"
+              onaction={() => {
+                loadingTimedOut = false
+                void auth.selectOrganization(auth.selectedOrganizationId)
+              }}
+            />
+          {:else if identity.organizations.length === 0}
+            <EmptyState
+              title="利用できる組織がありません。"
+              description="招待を受けるか、別のアカウントでログインしてください。"
+            />
+          {:else}
+            <Skeleton rows={3} label="組織を読み込み中" />
+          {/if}
+
+          {#if auth.error}
+            <StatusBanner tone="danger" role="alert" message={auth.error} />
+          {/if}
+        </main>
+      </div>
     {/if}
-    {#if auth.error}<p role="alert">{auth.error}</p>{/if}
-    <button onclick={doSignOut} disabled={auth.busy}>ログアウト</button>
-  {/if}
-</main>
+  </div>
+{:else}
+  <main id="main-content" class="auth-shell" tabindex="-1">
+    <div class="auth-card">
+      <div class="auth-card__brand">
+        <span class="auth-card__logo" aria-hidden="true">🦉</span>
+        <span class="auth-card__name">fukulow</span>
+      </div>
+
+      {#if auth.view.screen === 'signin' || auth.view.screen === 'setup'}
+        <InviteAccept
+          model={invitation}
+          signedIn={false}
+          accept={(input) => auth.acceptInvitation(invitation, input)}
+        />
+      {/if}
+
+      {#if auth.view.screen === 'loading' && !loadingTimedOut}
+        <h1 class="auth-card__title">fukulow</h1>
+        <Skeleton rows={3} label="読み込み中" />
+      {:else if auth.view.screen === 'error' || (auth.view.screen === 'loading' && loadingTimedOut)}
+        <h1 class="auth-card__title">fukulow</h1>
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message="サーバーに接続できません。"
+          detail="通信状況を確認して、もう一度お試しください。"
+          actionLabel="再試行"
+          onaction={() => {
+            loadingTimedOut = false
+            void auth.load()
+          }}
+        />
+      {:else if auth.view.screen === 'setup'}
+        <h1 class="auth-card__title">初期セットアップ</h1>
+        <form class="auth-form" onsubmit={submitSetup}>
+          <Input label="組織名" name="organization_name" required bind:value={organizationName} />
+          <Input label="オーナーの名前" name="name" required autocomplete="name" bind:value={name} />
+          <Input
+            label="メールアドレス"
+            name="email"
+            type="email"
+            required
+            autocomplete="username"
+            bind:value={email}
+          />
+          <Input
+            label="パスワード（12文字以上）"
+            name="password"
+            type="password"
+            required
+            minlength={12}
+            autocomplete="new-password"
+            bind:value={password}
+          />
+          <Input
+            label="セットアップトークン"
+            name="setup_token"
+            type="password"
+            required
+            autocomplete="off"
+            hint="管理者から受け取ったトークンを入力してください。"
+            bind:value={setupToken}
+          />
+          {#if auth.error}
+            <StatusBanner tone="danger" role="alert" message={auth.error} />
+          {/if}
+          <Button variant="primary" type="submit" disabled={auth.busy}>セットアップして開始</Button>
+        </form>
+      {:else if auth.view.screen === 'signin'}
+        <h1 class="auth-card__title">ログイン</h1>
+        <form class="auth-form" onsubmit={submitSignIn}>
+          {#if auth.view.notice}
+            <StatusBanner tone="info" role={null} message={auth.view.notice} />
+          {/if}
+          <Input
+            label="メールアドレス"
+            name="email"
+            type="email"
+            required
+            autocomplete="username"
+            bind:value={email}
+          />
+          <Input
+            label="パスワード"
+            name="password"
+            type="password"
+            required
+            autocomplete="current-password"
+            bind:value={password}
+          />
+          {#if auth.error}
+            <StatusBanner tone="danger" role="alert" message={auth.error} />
+          {/if}
+          <Button variant="primary" type="submit" disabled={auth.busy}>ログイン</Button>
+        </form>
+      {/if}
+    </div>
+  </main>
+{/if}
+
+<style>
+  .app-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    background-color: var(--app);
+  }
+
+  .app-shell__body {
+    flex: 1 1 0%;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  .auth-shell {
+    height: 100%;
+    overflow-y: auto;
+    display: grid;
+    place-items: center;
+    padding: var(--space-16);
+    background-color: var(--app);
+    min-width: 0;
+  }
+
+  .auth-card {
+    display: grid;
+    gap: var(--space-16);
+    width: 100%;
+    max-width: 24rem;
+    min-width: 0;
+    padding: var(--space-24);
+    background-color: var(--surface);
+    color: var(--text);
+    border-radius: var(--radius-16);
+  }
+
+  .auth-card__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-8);
+  }
+
+  .auth-card__logo {
+    display: grid;
+    place-items: center;
+    width: var(--touch-target);
+    height: var(--touch-target);
+    background-color: var(--amber);
+    color: var(--on-amber);
+    border-radius: var(--radius-10);
+    font-size: var(--font-size-17);
+  }
+
+  .auth-card__name {
+    font-size: var(--font-size-15);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text2);
+  }
+
+  .auth-card__title {
+    margin: 0;
+    font-size: var(--font-size-20);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text);
+  }
+
+  .auth-form {
+    display: grid;
+    gap: var(--space-12);
+    width: 100%;
+    min-width: 0;
+  }
+
+  .app-fallback {
+    flex: 1 1 0%;
+    display: grid;
+    grid-template-columns: var(--rail-width) minmax(0, 1fr);
+    gap: var(--region-gap);
+    height: 100%;
+    min-height: 0;
+    padding: var(--space-8);
+    background-color: var(--app);
+    min-width: 0;
+  }
+
+  .app-fallback__rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-8) var(--space-4);
+    background-color: var(--navbox);
+    border-radius: var(--radius-16);
+    min-width: 0;
+  }
+
+  .app-fallback__logo {
+    display: grid;
+    place-items: center;
+    width: var(--touch-target);
+    height: var(--touch-target);
+    background-color: var(--amber);
+    color: var(--on-amber);
+    border-radius: var(--radius-10);
+    font-size: var(--font-size-17);
+  }
+
+  .app-fallback__main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-16);
+    padding: var(--space-24);
+    background-color: var(--surface);
+    border-radius: var(--radius-16);
+    overflow-y: auto;
+    min-width: 0;
+  }
+
+  .app-fallback__header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-12);
+    min-width: 0;
+  }
+
+  .app-fallback__title {
+    margin: 0;
+    font-size: var(--font-size-20);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text);
+  }
+
+  .app-fallback__org-switcher {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-8);
+    min-width: 0;
+  }
+
+  .app-fallback__org-label {
+    font-size: var(--font-size-13);
+    color: var(--text2);
+  }
+
+  .app-fallback__org-select {
+    min-height: var(--touch-target);
+    padding: var(--space-4) var(--space-8);
+    background-color: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-8);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-14);
+  }
+
+  @media (max-width: 599px) {
+    .app-fallback {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: 1fr auto;
+      padding: var(--space-4);
+    }
+
+    .app-fallback__rail {
+      grid-row: 2;
+      flex-direction: row;
+      padding: var(--space-4) var(--space-12);
+    }
+  }
+</style>
