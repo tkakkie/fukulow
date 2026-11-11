@@ -1558,11 +1558,14 @@ async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &st
                 .contains("Member rows must never be truncated")
         );
     }
-    let member: Uuid = sqlx::query_scalar("SELECT id FROM users")
+    // check_member_identity adds a guard Owner (#221 last-Owner rule): look up the setup Member.
+    let member: Uuid = identity["member"]["id"].as_str().unwrap().parse().unwrap();
+    let preserved: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM users WHERE id = $1)")
+        .bind(member)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(member.to_string(), identity["member"]["id"]);
+    assert!(preserved);
 }
 
 #[sqlx::test]
