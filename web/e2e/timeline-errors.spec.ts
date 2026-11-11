@@ -267,7 +267,7 @@ test('shows 編集 on a definite failed send and restores the text into the Comp
   await expect(timeline.getByRole('alert').filter({ hasText: '送信できませんでした。' })).toBeVisible()
   const editButton = timeline.getByRole('button', { name: '編集' })
   await expect(editButton).toBeVisible()
-  await expect(timeline.getByRole('button', { name: '再送' })).toHaveCount(0)
+  await expect(timeline.getByRole('button', { name: '再送する', exact: true })).toHaveCount(0)
 
   await editButton.click()
   await expect(composer).toHaveValue(body)
@@ -285,7 +285,7 @@ test('shows 編集 on a definite failed send and restores the text into the Comp
   await expect(timeline.getByRole('alert')).toHaveCount(0)
 })
 
-test('shows 再送 on an unknown send outcome and resends with the same client_message_id', async ({ page }) => {
+test('shows 再送する on an unknown send outcome and resends with the same client_message_id', async ({ page }) => {
   await signIn(page)
   const target = await createChannel(page, nextChannelName('unknown-send-retry'))
 
@@ -306,14 +306,14 @@ test('shows 再送 on an unknown send outcome and resends with the same client_m
   const timeline = page.getByRole('region', { name: 'タイムライン' })
   const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
   const sendButton = timeline.getByRole('button', { name: '送信' })
-  const resendButton = timeline.getByRole('button', { name: '再送' })
+  const resendButton = timeline.getByRole('button', { name: '再送する', exact: true })
 
   const body = `idempotent-retry-${Date.now()}`
   await composer.fill(body)
   await sendButton.click()
 
   // Attempt 1 aborted (network error): unknown outcome offers 再送, never 編集.
-  await expect(timeline.getByRole('alert').filter({ hasText: '送信できませんでした。' })).toBeVisible()
+  await expect(timeline.getByRole('alert').filter({ hasText: '送信を確認できませんでした。' })).toBeVisible()
   await expect(resendButton).toBeVisible()
   await expect(timeline.getByRole('button', { name: '編集' })).toHaveCount(0)
   expect(sentRequests).toHaveLength(1)
