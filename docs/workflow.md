@@ -80,7 +80,7 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
 - Every Issue comment, review and PR body ends with `AI: <name> / model: <id> / effort: <level>`. Everything on GitHub is in English.
 
 ## 6. Conflicts and CI
-- Conflict: in the PR worktree `git fetch origin && git merge origin/main`; resolve; run Commands; push. `docs/decisions.md` conflicts: keep both sides' current decisions (it holds only current decisions and may be rewritten within the writing limits in its header).
+- Conflict: in the PR worktree `git fetch origin && git merge origin/main`; resolve; run Commands; push. `docs/decisions/` part conflicts: keep both sides' current decisions (parts hold only current decisions and may be rewritten within the writing limits in the `docs/decisions.md` header).
 - CI does not start after a conflict-resolving merge push (no permission denial involved): push an empty commit (`git commit --allow-empty -m "Trigger CI"`).
 - If `gh run rerun` is denied, never work around it (no empty commit, no other trigger): set `status:needs-decision` with the exact request for the maintainer.
 - A green check on a conflicting PR is stale: resolve the conflict first, then trust only CI on the new head.
