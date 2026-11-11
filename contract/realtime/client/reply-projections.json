@@ -1,0 +1,87 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "reply-chain-root-paging-live-overlap",
+      "title": "Reply chain paging includes siblings and live Messages from any anchor without cursor evidence",
+      "covers": ["P1","P6","C1","C2","C3"],
+      "layer": "controller",
+      "never": [{"type":"fetch_history","page":"after"},{"type":"wait","purpose":"reorder_grace"}],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"f0"}]}},
+        {"input":{"type":"history_result","respond_to":"f0","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"s0","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2,"reply_to":"id1","reply_root_id":"id1"}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":3,"reply_to":"id2","reply_root_id":"id1"}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":4}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":5,"reply_to":"unloaded-parent","reply_root_id":"id1"}}},
+        {"input":{"type":"reply_chain_result","respond_to":"r0","root_id":"id1","messages":[{"seq":1},{"seq":2,"reply_to":"id1","reply_root_id":"id1"}],"has_more":true},"observe":{"channels":{"A":{"cursor":5,"reply_chain":{"root_id":"id1","visible":[1,2,3,5],"has_more":true}}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":2,"as":"r1"}]}},
+        {"input":{"type":"reply_chain_result","respond_to":"r1","root_id":"id1","messages":[{"seq":3,"reply_to":"id2","reply_root_id":"id1"},{"seq":5,"reply_to":"unloaded-parent","reply_root_id":"id1"},{"seq":7,"reply_to":"id5","reply_root_id":"id1"}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history"},{"type":"subscribe"}]},"observe":{"channels":{"A":{"cursor":5,"reply_chain":{"root_id":"id1","visible":[1,2,3,5,7],"has_more":false}}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"forbidden":[{"type":"fetch_reply_chain"}]}}
+      ]
+    },
+    {
+      "id": "reply-chain-descendant-in-topic",
+      "title": "Reply chain paging includes siblings and live Messages from any anchor without cursor evidence",
+      "covers": ["P1","P6","C1","C2","C3"],
+      "layer": "controller",
+      "never": [{"type":"fetch_history","page":"after"},{"type":"wait","purpose":"reorder_grace"}],
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"f0"}]}},
+        {"input":{"type":"history_result","respond_to":"f0","messages":[{"seq":1,"topic":"T"}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"s0","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":3,"reply_to":"id2","reply_root_id":"id1","topic":"T"}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id3","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2,"reply_to":"id1","reply_root_id":"id1","topic":"T"}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":3,"reply_to":"id2","reply_root_id":"id1","topic":"T"}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":4}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":5,"reply_to":"unloaded-parent","reply_root_id":"id1","topic":"T"}}},
+        {"input":{"type":"reply_chain_result","respond_to":"r0","root_id":"id1","messages":[{"seq":1,"topic":"T"},{"seq":2,"reply_to":"id1","reply_root_id":"id1","topic":"T"}],"has_more":true},"observe":{"channels":{"A":{"cursor":5,"reply_chain":{"root_id":"id1","visible":[1,2,3,5],"has_more":true,"topic":"T"}}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id3","after_seq":2,"as":"r1"}]}},
+        {"input":{"type":"reply_chain_result","respond_to":"r1","root_id":"id1","messages":[{"seq":3,"reply_to":"id2","reply_root_id":"id1","topic":"T"},{"seq":5,"reply_to":"unloaded-parent","reply_root_id":"id1","topic":"T"},{"seq":7,"reply_to":"id5","reply_root_id":"id1","topic":"T"}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history"},{"type":"subscribe"}]},"observe":{"channels":{"A":{"cursor":5,"reply_chain":{"root_id":"id1","visible":[1,2,3,5,7],"has_more":false,"topic":"T"}}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"forbidden":[{"type":"fetch_reply_chain"}]}}
+      ]
+    },
+    {
+      "id": "reply-chain-page-settles-send-before-ack-and-echo",
+      "title": "Reply projection settles a pending send while page ACK and echo keep one canonical Message",
+      "covers": ["P1","P6","P7","C1","C2","C5","C6"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"f0"}]}},
+        {"input":{"type":"history_result","respond_to":"f0","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"s0","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"local","reply_to":"id1"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","reply_to":"id1","as":"send0"}]}},
+        {"input":{"type":"reply_chain_result","respond_to":"r0","root_id":"id1","messages":[{"seq":1},{"seq":2,"reply_to":"id1","reply_root_id":"id1","sender":"me","client_message_id":"c1","body":"canonical"}],"has_more":false},"effects":{"forbidden":[{"type":"fetch_history"},{"type":"wait"}]},"observe":{"channels":{"A":{"cursor":1,"pending":[],"reply_chain":{"root_id":"id1","visible":[1,2],"has_more":false}}}}},
+        {"input":{"type":"ack","respond_to":"send0","message":{"seq":2,"reply_to":"id1","reply_root_id":"id1","sender":"me","client_message_id":"c1","body":"canonical"}},"observe":{"channels":{"A":{"cursor":1,"pending":[],"reply_chain":{"root_id":"id1","visible":[1,2],"has_more":false}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2,"reply_to":"id1","reply_root_id":"id1","sender":"me","client_message_id":"c1","body":"canonical"}},"observe":{"channels":{"A":{"cursor":2,"pending":[],"reply_chain":{"root_id":"id1","visible":[1,2],"has_more":false}}}}}
+      ]
+    },
+    {
+      "id": "reply-chain-retry-keeps-send-intent",
+      "title": "An unknown Reply outcome retries with the same id and parent and converges canonically",
+      "covers": ["P6","P7","C1","C5","C6"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"f0"}]}},
+        {"input":{"type":"history_result","respond_to":"f0","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"s0"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"s0","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"local","reply_to":"id1"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","reply_to":"id1","as":"send0"}]}},
+        {"input":{"type":"send_failed","respond_to":"send0","status":"network"},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","reply_to":"id1","as":"send1"}]}},
+        {"input":{"type":"ack","respond_to":"send1","message":{"seq":2,"reply_to":"id1","reply_root_id":"id1","sender":"me","client_message_id":"c1","body":"canonical"}},"observe":{"channels":{"A":{"pending":[],"reply_chain":{"root_id":"id1","visible":[1,2]}}}}}
+      ]
+    }
+  ]
+}
