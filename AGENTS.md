@@ -61,5 +61,5 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 ## Workflow essentials
 - Own worktree, branch `claude/|codex/|antigravity/<topic>`. Never push to `main`; only the maintainer merges (or tells an AI to).
 - Implement only an Issue with "Done when" and `status:ready`; set `status:working`; draft PR; CI green; maintainer always reviews.
-- At most one status label, set by the AI handing off: `working` (AI busy), `ai-review` (CI/AI/Copilot), `ready` (may start), `human-review` (maintainer; entry conditions in `docs/workflow.md` §2, §5), `needs-decision` (question in last comment). Also `security`, `bug`, `risk:needs-review` (auth, permissions, real-time, migrations), `blocked`; every Issue has a milestone.
+- At most one status label, set by the AI handing off: `working` (AI busy), `ai-review` (CI/AI/Copilot), `ready` (may start), `human-review` (maintainer; entry conditions in `docs/workflow.md` §2, §5), `needs-decision` (question in last comment). Also `security`, `bug`, `risk:needs-review` (auth, permissions, real-time, migrations), `blocked`; every Issue has a milestone (a sprint, or `Backlog` if unscheduled).
 - GitHub text in English (Japanese only for UI strings). AI comments, reviews, PR bodies end with `AI: <name> / model: <id> / effort: <level>`.
