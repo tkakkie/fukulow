@@ -80,7 +80,7 @@
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
-  const currentTopics = $derived(selected ? session.topics?.(selected.id) ?? null : null)
+  const currentTopics = $derived(selected ? session.topics(selected.id) : null)
   const currentTopicsState = $derived(currentTopics ? currentTopics.state : null)
   const allTopicsKnown = $derived(
     currentTopicsState
@@ -135,7 +135,7 @@
     const controller = channelMemberController
     return () => controller?.close()
   })
-  let lastViewId = ''
+  let lastViewId = $state('')
 
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
@@ -458,14 +458,15 @@
               ‹
             </Button>
           </span>
-          {#if route?.topicId && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
+          {#if route?.topicId}
             <Button
               variant="quiet"
-              ariaLabel="チャンネルへ戻る"
               onclick={() => nav.navigate({ type: 'topic-back' })}
             >
-              ‹ # {selected.name} ›
+              <span aria-hidden="true">‹</span>
+              <span>チャンネルへ戻る</span>
             </Button>
+            <span class="main-card__crumb"># {selected.name} ›</span>
           {/if}
           <h1 class="main-card__title">
             {route?.topicId ? (resolvedTopicName || 'トピック') : selected.name}
@@ -487,32 +488,27 @@
         </div>
       </header>
       <div class="main-card__body">
-        {#if route?.topicId && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
-          {#if currentTopics}
-            {#key `${selected.id}:${route.topicId}`}
-              <TopicView
-                channel={currentChannel}
-                topics={currentTopics}
-                channelId={selected.id}
-                topicId={route.topicId}
-                topicName={resolvedTopicName}
-                topicStatus={session.navigationTargets?.state.topic.status ?? 'idle'}
-                selfId={organization?.member.id ?? ''}
-                {organizationUnavailable}
-                reconnecting={announcementView.reconnecting}
-                bind:composerRef={mainComposerRef}
-                onretrytopicmeta={() => {
-                  if (route) void session.navigationTargets?.load(route, true)
-                }}
-              />
-            {/key}
-          {:else if session.navigationTargets?.state.topic.status === 'loading'}
-            <Skeleton rows={3} label="トピックを読み込み中" />
-          {:else if session.navigationTargets?.state.topic.status === 'error'}
-            <StatusBanner tone="danger" role="alert" message="トピックを読み込めませんでした。" actionLabel="再試行" onaction={() => { if (route) void session.navigationTargets?.load(route, true) }} />
-          {:else}
-            <EmptyState title={session.navigationTargets?.state.topic.status === 'unavailable' ? 'このトピックは利用できません。' : 'トピック表示は準備中です。'} />
-          {/if}
+        {#if route?.topicId && currentTopics}
+          {#key `${selected.id}:${route.topicId}`}
+            <TopicView
+              channel={currentChannel}
+              topics={currentTopics}
+              channelId={selected.id}
+              topicId={route.topicId}
+              topicName={resolvedTopicName}
+              topicStatus={session.navigationTargets?.state.topic.status ?? 'idle'}
+              selfId={organization?.member.id ?? ''}
+              {organizationUnavailable}
+              reconnecting={announcementView.reconnecting}
+              bind:composerRef={mainComposerRef}
+              onretrytopicmeta={() => {
+                if (route) void session.navigationTargets?.load(route, true)
+              }}
+              ongoToChannelList={goToChannelList}
+              onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
+              onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+            />
+          {/key}
         {:else}
         {#key selected.id}
           <Timeline
@@ -810,9 +806,20 @@
 
   .main-card__title-group {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-8);
     min-width: 0;
+  }
+
+  .main-card__crumb {
+    font-size: var(--font-size-14);
+    font-weight: var(--font-weight-medium);
+    color: var(--text2);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .main-card__title {

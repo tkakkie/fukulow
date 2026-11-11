@@ -1,4 +1,5 @@
 import { createSubscriber } from 'svelte/reactivity'
+import type { SendMessageRequest } from './api'
 import {
   foldTopicName,
   MESSAGE_BODY_MAX,
@@ -51,7 +52,7 @@ function channelAdapter(sync: Sync, channel: string) {
     setDraft: (draft: string) => timeline.setDraft(draft),
     setTopicDraft: (topicDraft: string) => timeline.setTopicDraft(topicDraft),
     submit: () => timeline.submit(),
-    send: (body: string, target?: { topic_name?: string | null; reply_to?: string | null }) => timeline.send(body, target),
+    send: (body: string, target?: Pick<SendMessageRequest, 'topic_name' | 'reply_to'>) => timeline.send(body, target),
     retry: (clientMessageId: string) => timeline.retry(clientMessageId),
     restore: (clientMessageId: string) => timeline.restore(clientMessageId),
     discard: (clientMessageId: string) => timeline.discard(clientMessageId),

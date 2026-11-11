@@ -1180,6 +1180,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const sessionModel = {
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
       close: rawSession.close,
     }
     net.socket.onReady()
@@ -1679,10 +1680,24 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     expect(announcements).toEqual(['田中: トピックへの新着通知'])
 
-    // Return to Channel -> focuses the Topic's summary line and preserves the Channel draft
-    const backToChannelBtn = queryAll(host, '#main-content button').find(
-      (b) => b.getAttribute('aria-label') === 'チャンネルへ戻る',
+    // Active Topic in panel TopicList carries aria-current="true", inactive Topics do not
+    const panelButtons = queryAll(host, '#panel-content button[data-topic-id]')
+    const activePanelBtn = panelButtons.find((b) => b.getAttribute('data-topic-id') === 't-1')!
+    const inactivePanelBtn = panelButtons.find((b) => b.getAttribute('data-topic-id') === 't-2')!
+    expect(activePanelBtn.getAttribute('aria-current')).toBe('true')
+    expect(inactivePanelBtn.getAttribute('aria-current')).toBeNull()
+
+    // Header shows # general › and a back button whose accessible name contains its visible text (WCAG 2.5.3)
+    expect(host.querySelector('#main-content .main-card__crumb')?.textContent.trim()).toBe('# general ›')
+    const backToChannelBtn = queryAll(host, '#main-content .main-card__header button').find((b) =>
+      b.textContent.includes('チャンネルへ戻る'),
     )!
+    expect(backToChannelBtn).toBeDefined()
+    expect(backToChannelBtn.getAttribute('aria-label')).toBeNull()
+    const accessibleBtnText = queryAll(backToChannelBtn, 'span:not([aria-hidden="true"])')
+      .map((el) => el.textContent.trim())
+      .join('')
+    expect(accessibleBtnText).toBe('チャンネルへ戻る')
     backToChannelBtn.click()
     flushSync()
     await tick()
@@ -1706,6 +1721,780 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       (el) => el.getAttribute('aria-label') === 'メッセージ',
     )!
     expect(disabledComposer.disabled).toBe(true)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('keeps TopicView, Topic draft, loaded Topic history and failed Topic send 破棄 visible across C9 and C10', async () => {
+    for (const loss of ['c9', 'c10'] as const) {
+      const net = fakeNetwork()
+      const rawSession = createSession({
+        selfId: 'me',
+        organizationId: 'org-1',
+        onEnded: () => {},
+        ...net.options('me'),
+      })
+      const topicAdapters = new Map<string, TopicsAdapter>()
+      const sessionModel = {
+        channels: channelsAdapter(rawSession.channels),
+        sync: syncAdapter(rawSession.sync),
+        topics(channelId: string) {
+          let a = topicAdapters.get(channelId)
+          if (!a) {
+            a = topicsAdapter(rawSession.topics, channelId)
+            topicAdapters.set(channelId, a)
+          }
+          return a
+        },
+        navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+        close: () => rawSession.close(),
+      }
+
+      const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'トピック履歴1', topic_id: 't-1' }
+      const m2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: 'チャンネル本文2', topic_id: null }
+      net.timelines.c1 = ok({
+        as_of_seq: 2,
+        has_more: false,
+        items: [
+          {
+            kind: 'topic',
+            topic: {
+              id: 't-1',
+              name: '継続トピック',
+              first_seq: 1,
+              last_seq: 1,
+              message_count: 1,
+              latest_message: m1,
+              read_seq: 0,
+              unread_count: 0,
+            },
+          },
+          { kind: 'message', message: m2 },
+        ],
+      })
+      net.topicMessages['c1:t-1'] = ok({ messages: [m1], has_more: false })
+      net.topicSummaries['c1:t-1'] = ok({
+        as_of_seq: 2,
+        topic: {
+          id: 't-1',
+          name: '継続トピック',
+          first_seq: 1,
+          last_seq: 1,
+          message_count: 1,
+          latest_message: m1,
+          read_seq: 0,
+          unread_count: 0,
+        },
+      })
+
+      net.socket.onReady()
+      net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+
+      let href = '/o/org-1/c/c1/t/t-1'
+      let historyState: unknown = null
+      const navigation = createNavigation({
+        location: { get href() { return href } },
+        history: {
+          get state() { return historyState },
+          pushState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+          replaceState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+        },
+        innerWidth: 1280,
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as NavigationBrowser)
+
+      const host = testDoc.createElement('div')
+      testDoc.body.appendChild(host)
+      const instance = mount(Workspace, {
+        target: host as unknown as Element,
+        props: {
+          navigation,
+          session: sessionModel,
+          organization: {
+            member: { id: 'me', name: '自分', role: 'owner' },
+            organization: {
+              organization_id: 'org-1',
+              name: 'Acme',
+              capabilities: {
+                can_create_channels: { allowed: true },
+                can_invite: { allowed: true },
+                can_manage_roles: { allowed: true },
+              },
+            },
+          },
+          selectedOrganizationId: 'org-1',
+          onselectorganization: () => {},
+        },
+      })
+
+      await settle()
+      net.subscribed('c1', 2)
+      await settle()
+      flushSync()
+
+      // Send from Topic t-1 (stays in flight) and type a new Topic draft
+      const topicTextarea = queryAll(host, '#main-content textarea').find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+      topicTextarea.value = 'トピックから送信中だった本文'
+      topicTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      host.querySelector('#main-content form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      flushSync()
+
+      topicTextarea.value = '消えてはいけないトピック下書き'
+      topicTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+
+      if (loss === 'c9') {
+        net.event({ type: 'channel_access_lost', channel_id: 'c1' })
+      } else {
+        await rawSession.sync.unavailable()
+      }
+      await settle()
+      flushSync()
+
+      expect(host.querySelector('#main-content .topic-view')).not.toBeNull()
+      expect(host.querySelector('#main-content')?.textContent).toContain(
+        loss === 'c9' ? 'このチャンネルは利用できません。' : 'この組織は利用できません。',
+      )
+      expect(host.querySelector('#main-content')?.textContent).toContain('トピック履歴1')
+      expect(host.querySelector('#main-content')?.textContent).toContain('トピックから送信中だった本文')
+
+      const afterTextarea = queryAll(host, '#main-content textarea').find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+      expect(afterTextarea.value).toBe('消えてはいけないトピック下書き')
+      expect(afterTextarea.disabled).toBe(true)
+
+      const discardBtns = buttonsByText(host, '破棄')
+      expect(discardBtns).toHaveLength(1)
+      discardBtns[0].click()
+      flushSync()
+      await settle()
+      flushSync()
+      expect(host.querySelector('#main-content')?.textContent).not.toContain('トピックから送信中だった本文')
+
+      navigation.destroy()
+      await unmount(instance)
+      sessionModel.close()
+    }
+  })
+
+  it('confirms before replacing a Topic-name-only draft and restores body with its original Topic intent', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...net.options('me'),
+    })
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 0)
+    await settle()
+
+    const ch = syncAdapter(rawSession.sync).channel('c1')
+    const tp = topicsAdapter(rawSession.topics, 'c1')
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Timeline, {
+      target: host as unknown as Element,
+      props: { channel: ch, topics: tp, channelId: 'c1', selfId: 'me' },
+    })
+    flushSync()
+
+    // Submit a send to "Original topic" and have the server refuse it (400)
+    const topicInput = queryAll(host, 'input').find((el) => el.getAttribute('aria-label') === 'トピック名')!
+    const textarea = queryAll(host, 'textarea').find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+    topicInput.value = 'Original topic'
+    topicInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    textarea.value = '拒否されたトピック本文'
+    textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    host.querySelector('form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    await settle()
+    net.sends[0].resolve({ ok: false, kind: 'http', status: 400 })
+    await settle()
+    flushSync()
+
+    // Type ONLY "Different topic" into the Topic-name field (body draft stays empty)
+    topicInput.value = 'Different topic'
+    topicInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    expect(textarea.value).toBe('')
+
+    buttonsByText(host, '編集して送り直す')[0].click()
+    flushSync()
+    const dialog = host.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog?.textContent).toContain('入力中の下書きを置き換えますか？')
+
+    // Cancel keeps both "Different topic" and the failed "Original topic" send
+    buttonsByText(host, 'キャンセル')[0].click()
+    flushSync()
+    expect(topicInput.value).toBe('Different topic')
+    expect(ch.timeline.pending).toHaveLength(1)
+
+    // Confirm replaces with both the refused body AND "Original topic"
+    buttonsByText(host, '編集して送り直す')[0].click()
+    flushSync()
+    buttonsByText(host, '置き換える')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(textarea.value).toBe('拒否されたトピック本文')
+    expect(topicInput.value).toBe('Original topic')
+    expect(ch.timeline.pending).toHaveLength(0)
+
+    await unmount(instance)
+    rawSession.close()
+  })
+
+  it('recovers an open Topic history after a C8 cursor clamp without remounting TopicView', async () => {
+    vi.useFakeTimers()
+    const net = fakeNetwork()
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...net.options('me'),
+    })
+    const topicAdapters = new Map<string, TopicsAdapter>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics(channelId: string) {
+        let a = topicAdapters.get(channelId)
+        if (!a) {
+          a = topicsAdapter(rawSession.topics, channelId)
+          topicAdapters.set(channelId, a)
+        }
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: () => rawSession.close(),
+    }
+
+    const m5 = { ...record(5, 'c1'), id: 'm-5', sender: 'other', body: 'クランプ前メッセージ', topic_id: 't-1' }
+    const m10 = { ...record(10, 'c1'), id: 'm-10', sender: 'other', body: 'ブートストラップ末尾', topic_id: null }
+    net.timelines.c1 = ok({
+      as_of_seq: 10,
+      has_more: false,
+      items: [
+        {
+          kind: 'topic',
+          topic: {
+            id: 't-1',
+            name: 'クランプ検証',
+            first_seq: 5,
+            last_seq: 5,
+            message_count: 1,
+            latest_message: m5,
+            read_seq: 0,
+            unread_count: 0,
+          },
+        },
+        { kind: 'message', message: m10 },
+      ],
+    })
+    net.topicMessages['c1:t-1'] = ok({ messages: [m5], has_more: false })
+    net.topicSummaries['c1:t-1'] = ok({
+      as_of_seq: 10,
+      topic: {
+        id: 't-1',
+        name: 'クランプ検証',
+        first_seq: 5,
+        last_seq: 5,
+        message_count: 1,
+        latest_message: m5,
+        read_seq: 0,
+        unread_count: 0,
+      },
+    })
+
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+
+    let href = '/o/org-1/c/c1/t/t-1'
+    let historyState: unknown = null
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: {
+        get state() { return historyState },
+        pushState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+        replaceState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+      },
+      innerWidth: 1280,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        navigation,
+        session: sessionModel,
+        organization: {
+          member: { id: 'me', name: '自分', role: 'owner' },
+          organization: {
+            organization_id: 'org-1',
+            name: 'Acme',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    await settle()
+    net.subscribed('c1', 10)
+    await settle()
+    flushSync()
+    const sectionBefore = host.querySelector('#main-content .topic-view')
+    expect(sectionBefore).not.toBeNull()
+    expect(host.querySelector('#main-content')?.textContent).toContain('クランプ前メッセージ')
+
+    // Reconnect with C8 clamp (caught_up_seq=2 < after_seq=10)
+    const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'クランプ後のTopic履歴', topic_id: 't-1' }
+    const m2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: 'クランプ後の末尾', topic_id: null }
+    net.timelines.c1 = ok({
+      as_of_seq: 2,
+      has_more: false,
+      items: [
+        {
+          kind: 'topic',
+          topic: {
+            id: 't-1',
+            name: 'クランプ検証',
+            first_seq: 1,
+            last_seq: 1,
+            message_count: 1,
+            latest_message: m1,
+            read_seq: 0,
+            unread_count: 0,
+          },
+        },
+        { kind: 'message', message: m2 },
+      ],
+    })
+    net.topicMessages['c1:t-1'] = ok({ messages: [m1], has_more: false })
+
+    net.socket.onClose(1006)
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    net.socket.onReady()
+    await settle()
+    net.subscribed('c1', 2)
+    await settle()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(host.querySelector('#main-content .topic-view')).toBe(sectionBefore)
+    expect(host.querySelector('#main-content')?.textContent).toContain('クランプ後のTopic履歴')
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('shows initial Topic-list error and retry even when the timeline already supplied Topics', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...net.options('me'),
+    })
+    const topicAdapters = new Map<string, TopicsAdapter>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics(channelId: string) {
+        let a = topicAdapters.get(channelId)
+        if (!a) {
+          a = topicsAdapter(rawSession.topics, channelId)
+          topicAdapters.set(channelId, a)
+        }
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: () => rawSession.close(),
+    }
+
+    const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'タイムライン既知トピック', topic_id: 't-known' }
+    const m2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一覧で取得される古いトピック', topic_id: 't-older' }
+    net.timelines.c1 = ok({
+      as_of_seq: 2,
+      has_more: true,
+      items: [
+        {
+          kind: 'topic',
+          topic: {
+            id: 't-known',
+            name: '既知トピック',
+            first_seq: 1,
+            last_seq: 1,
+            message_count: 1,
+            latest_message: m1,
+            read_seq: 0,
+            unread_count: 0,
+          },
+        },
+        { kind: 'message', message: { ...record(2, 'c1'), id: 'm-root', sender: 'other', body: 'root', topic_id: null } },
+      ],
+    })
+    net.topicLists.c1 = { ok: false, kind: 'http', status: 503 }
+
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+
+    let href = '/o/org-1/c/c1?panel=topics'
+    let historyState: unknown = null
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: {
+        get state() { return historyState },
+        pushState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+        replaceState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+      },
+      innerWidth: 1280,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        navigation,
+        session: sessionModel,
+        organization: {
+          member: { id: 'me', name: '自分', role: 'owner' },
+          organization: {
+            organization_id: 'org-1',
+            name: 'Acme',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    await settle()
+    net.subscribed('c1', 2)
+    await settle()
+    flushSync()
+
+    const panel = host.querySelector('#panel-content')!
+    expect(panel.textContent).toContain('トピック: 既知トピック')
+    expect(panel.textContent).toContain('トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。')
+    const retryBtn = queryAll(panel, 'button').find((b) => b.textContent.trim() === '再試行')
+    expect(retryBtn).toBeDefined()
+
+    net.topicLists.c1 = ok({
+      as_of_seq: 2,
+      has_more: false,
+      topics: [
+        {
+          id: 't-older',
+          name: '古いトピック',
+          first_seq: 1,
+          last_seq: 1,
+          message_count: 1,
+          latest_message: m2,
+          read_seq: 0,
+          unread_count: 0,
+        },
+        {
+          id: 't-known',
+          name: '既知トピック',
+          first_seq: 1,
+          last_seq: 1,
+          message_count: 1,
+          latest_message: m1,
+          read_seq: 0,
+          unread_count: 0,
+        },
+      ],
+    })
+    retryBtn!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(panel.textContent).toContain('トピック: 古いトピック')
+    expect(panel.textContent).not.toContain('トピックを読み込めませんでした。')
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('announces the first live Message after opening a Topic whose name was still loading', async () => {
+    vi.useFakeTimers()
+    let resolveNavSummary!: (res: ReturnType<typeof ok<{ as_of_seq: number; topic: { id: string; name: string; first_seq: number; last_seq: number; message_count: number; latest_message: ReturnType<typeof record>; read_seq: number; unread_count: number } }>>) => void
+    const navSummaryPromise = new Promise<ReturnType<typeof ok<{ as_of_seq: number; topic: { id: string; name: string; first_seq: number; last_seq: number; message_count: number; latest_message: ReturnType<typeof record>; read_seq: number; unread_count: number } }>>>((r) => {
+      resolveNavSummary = r
+    })
+    const net = fakeNetwork()
+    const baseOptions = net.options('me')
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...baseOptions,
+      topicsApi: {
+        ...baseOptions.topicsApi!,
+        getTopicSummary(channelId, topicId) {
+          if (topicId === 't-slow') return navSummaryPromise
+          return baseOptions.topicsApi!.getTopicSummary(channelId, topicId)
+        },
+      },
+    })
+    const topicAdapters = new Map<string, TopicsAdapter>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics(channelId: string) {
+        let a = topicAdapters.get(channelId)
+        if (!a) {
+          a = topicsAdapter(rawSession.topics, channelId)
+          topicAdapters.set(channelId, a)
+        }
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: () => rawSession.close(),
+    }
+
+    const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: '既存本文', topic_id: null }
+    net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
+    net.topicMessages['c1:t-slow'] = ok({ messages: [], has_more: false })
+
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const announcements: string[] = []
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: {
+        get state() { return historyState },
+        pushState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+        replaceState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+      },
+      innerWidth: 1280,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        navigation,
+        session: sessionModel,
+        organization: {
+          member: { id: 'me', name: '自分', role: 'owner' },
+          organization: {
+            organization_id: 'org-1',
+            name: 'Acme',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+        },
+        selectedOrganizationId: 'org-1',
+        resolveSenderName: (id) => (id === 'other' ? '佐藤' : '自分'),
+        onannounce: (msg) => announcements.push(msg),
+      },
+    })
+
+    await settle()
+    net.subscribed('c1', 1)
+    await settle()
+    flushSync()
+    expect(announcements.at(-1)).toBe('# general')
+
+    // Open Topic t-slow while its summary/name is still loading
+    navigation.navigate({ type: 'topic', topicId: 't-slow', phone: false })
+    flushSync()
+    await settle()
+    flushSync()
+
+    // Now resolve the Topic name (without changing currentTimeline)
+    const mSlow = { ...record(1, 'c1'), id: 'm-slow', sender: 'other', body: '初回', topic_id: 't-slow' }
+    resolveNavSummary(
+      ok({
+        as_of_seq: 1,
+        topic: {
+          id: 't-slow',
+          name: '遅延読込トピック',
+          first_seq: 1,
+          last_seq: 1,
+          message_count: 1,
+          latest_message: mSlow,
+          read_seq: 0,
+          unread_count: 0,
+        },
+      }),
+    )
+    await settle()
+    flushSync()
+    expect(announcements.at(-1)).toBe('遅延読込トピック')
+
+    // First live arrival in t-slow must be announced, NOT eaten as the initial baseline!
+    announcements.length = 0
+    net.event({
+      type: 'message',
+      message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '遅延後の最初の新着', topic_id: 't-slow' },
+    })
+    await settle()
+    flushSync()
+    await vi.advanceTimersByTimeAsync(2_000)
+    flushSync()
+    expect(announcements).toEqual(['佐藤: 遅延後の最初の新着'])
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('retries a failed Topic summary read via controller policy and updates both Timeline and TopicList', async () => {
+    vi.useFakeTimers()
+    let summaryCalls = 0
+    const net = fakeNetwork()
+    const baseOptions = net.options('me')
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...baseOptions,
+      topicsApi: {
+        ...baseOptions.topicsApi!,
+        async getTopicSummary(channelId, topicId) {
+          if (topicId === 't-retry') {
+            summaryCalls++
+            if (summaryCalls === 1) return { ok: false, kind: 'http', status: 503 }
+            return ok({
+              as_of_seq: 2,
+              topic: {
+                id: 't-retry',
+                name: '再取得成功トピック',
+                first_seq: 2,
+                last_seq: 2,
+                message_count: 1,
+                latest_message: { ...record(2, channelId), id: 'm-2', sender: 'other', body: '本文', topic_id: 't-retry' },
+                read_seq: 0,
+                unread_count: 0,
+              },
+            })
+          }
+          return baseOptions.topicsApi!.getTopicSummary(channelId, topicId)
+        },
+      },
+    })
+    const topicAdapters = new Map<string, TopicsAdapter>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics(channelId: string) {
+        let a = topicAdapters.get(channelId)
+        if (!a) {
+          a = topicsAdapter(rawSession.topics, channelId)
+          topicAdapters.set(channelId, a)
+        }
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: () => rawSession.close(),
+    }
+
+    const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'root', topic_id: null }
+    net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
+    net.topicLists.c1 = ok({ as_of_seq: 1, has_more: false, topics: [] })
+
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+
+    let href = '/o/org-1/c/c1?panel=topics'
+    let historyState: unknown = null
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: {
+        get state() { return historyState },
+        pushState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+        replaceState(s: unknown, _t: string, url: string) { historyState = s; href = url },
+      },
+      innerWidth: 1280,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        navigation,
+        session: sessionModel,
+        organization: {
+          member: { id: 'me', name: '自分', role: 'owner' },
+          organization: {
+            organization_id: 'org-1',
+            name: 'Acme',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    await settle()
+    net.subscribed('c1', 1)
+    await settle()
+    flushSync()
+
+    // Live arrival for unknown Topic t-retry triggers summary read from both Timeline and TopicList (deduped to 1 call)
+    net.event({
+      type: 'message',
+      message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '本文', topic_id: 't-retry' },
+    })
+    await settle()
+    flushSync()
+    expect(summaryCalls).toBe(1)
+    expect(host.querySelector('#main-content')?.textContent).toContain('トピック: トピック')
+
+    // After backoff elapses, controller retries and both Timeline and TopicList display the resolved Topic name
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    flushSync()
+    expect(summaryCalls).toBe(2)
+    expect(host.querySelector('#main-content')?.textContent).toContain('トピック: 再取得成功トピック')
+    expect(host.querySelector('#panel-content')?.textContent).toContain('トピック: 再取得成功トピック')
 
     navigation.destroy()
     await unmount(instance)

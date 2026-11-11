@@ -575,7 +575,7 @@ export function createSync(options: SyncOptions) {
         draftRevision++
         putExtra(channel, {
           draft: current.draft ? `${current.draft}\n${p.body}` : p.body,
-          ...(p.topic_name && !current.topicDraft ? { topicDraft: p.topic_name } : {}),
+          topicDraft: p.topic_name ?? '',
           composerError: null,
         })
         void dispatch({ type: 'user_discard', channel, clientMessageId })

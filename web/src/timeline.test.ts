@@ -273,6 +273,49 @@ it('restores only non-retryable failed sends into the Composer draft for editing
   await sync.close()
 })
 
+it('restores a refused send together with its Topic intent and replaces any conflicting Topic-name draft', async () => {
+  let id = 0
+  const sendMessage = vi.fn().mockResolvedValue({ ok: false, kind: 'http', status: 400 })
+  const sync = createSync({
+    selfId: 'me',
+    newId: () => `c${++id}`,
+    connect: () => ({ send() {}, close() {} }),
+    api: { listMessages: vi.fn(), sendMessage },
+  })
+  await sync.start()
+  const t = sync.getTimeline('A')
+
+  // 1. Refused Topic send restored while user typed a different Topic name
+  t.setTopicDraft('Original topic')
+  t.setDraft('body for original')
+  expect(await t.submit()).toBe(true)
+  expect(t.get().pending).toEqual([
+    {
+      clientMessageId: 'c1',
+      body: 'body for original',
+      topicName: 'Original topic',
+      status: 'failed',
+      retryable: false,
+    },
+  ])
+
+  t.setTopicDraft('Different topic')
+  expect(t.restore('c1')).toBe(true)
+  expect(t.get().draft).toBe('body for original')
+  expect(t.get().topicDraft).toBe('Original topic')
+
+  // 2. Refused Channel-root send restored while user typed a Topic name clears topicDraft
+  t.setTopicDraft('')
+  t.setDraft('root body')
+  expect(await t.submit()).toBe(true)
+  t.setTopicDraft('Different topic')
+  t.setDraft('')
+  expect(t.restore('c2')).toBe(true)
+  expect(t.get().draft).toBe('root body')
+  expect(t.get().topicDraft).toBe('')
+  await sync.close()
+})
+
 it('reports loadOlder failures in olderError and clears olderError on retry', async () => {
   let resolveRetry!: (r: Result<MessagePage>) => void
   const listMessages = vi.fn()

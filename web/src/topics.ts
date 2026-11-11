@@ -1,6 +1,7 @@
 import * as api from './api'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
+import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import { selectMainTimeline, selectTopicMessages, type TopicBaseline } from './topic-selectors'
 
@@ -19,11 +20,12 @@ export const topicsApi = (organizationId: string): TopicsApi => ({
 })
 type Paging = { asOfSeq?: number; before?: number; hasMore: boolean; loading: boolean; error: boolean }
 type TopicWindow = { messages: Map<number, Message>; before?: number; initialized: boolean; hasMore: boolean; loading: boolean; error: boolean; notFound: boolean }
+type SummaryRetry = { attempt: number; timer?: ReturnType<typeof setTimeout> }
 const paging = (): Paging => ({ hasMore: true, loading: false, error: false })
 const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, loading: false, error: false, notFound: false })
-const window = () => ({ main: paging(), list: paging(), messages: new Map<number, Message>(),
+const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
   mainTopics: new Set<string>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
-  summaries: new Set<string>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
+  summaries: new Set<string>(), summaryRetries: new Map<string, SummaryRetry>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
 type Window = ReturnType<typeof window>
 type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
 
@@ -37,7 +39,29 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   let closed = false
   let batching = false
   let sessionToken = 0
+  let nextGeneration = 1
+  const clearSummaryRetry = (w: Window, topicId: string) => {
+    const retry = w.summaryRetries.get(topicId)
+    if (!retry) return
+    if (retry.timer !== undefined) clearTimeout(retry.timer)
+    w.summaryRetries.delete(topicId)
+  }
+  const clearWindowTimers = (w: Window) => {
+    for (const retry of w.summaryRetries.values()) {
+      if (retry.timer !== undefined) clearTimeout(retry.timer)
+    }
+    w.summaryRetries.clear()
+  }
+  const freezeWindow = (w: Window) => {
+    clearWindowTimers(w)
+    w.reads.clear()
+    w.summaries.clear()
+    w.main.loading = false
+    w.list.loading = false
+    for (const t of w.topics.values()) t.loading = false
+  }
   const cancelReads = () => {
+    for (const w of windows.values()) clearWindowTimers(w)
     deadlines.forEach((resolve, timer) => { clearTimeout(timer); resolve() })
     deadlines.clear()
   }
@@ -46,12 +70,22 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const reconcileSync = () => {
     const next = sync.get()
     if (next === previous) return false
-    for (const [id] of windows) {
+    for (const [id, w] of windows) {
       const before = previous.channels[id], after = next.channels[id]
-      if (!next.running || !after || after.state === 'unavailable' ||
-        before?.state === 'unavailable' ||
-        (before?.watched && !after.watched) || (!before?.watched && after.watched && windows.get(id)?.unavailable) ||
-        (before?.cursor != null && after.cursor === null)) windows.delete(id)
+      if (
+        !after ||
+        (before?.watched && !after.watched) ||
+        (!before?.watched && after.watched && w.unavailable) ||
+        (before?.cursor != null && after.cursor === null)
+      ) {
+        clearWindowTimers(w)
+        windows.delete(id)
+      } else if ((before?.state === 'unavailable' || w.unavailable) && after.state !== 'unavailable') {
+        w.unavailable = false
+        w.generation = nextGeneration++
+      } else if (!next.running || next.organization === 'unavailable' || after.state === 'unavailable') {
+        freezeWindow(w)
+      }
     }
     if (!next.running) cancelReads()
     previous = next
@@ -65,7 +99,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   const getWindow = (channel: string) => {
     let w = windows.get(channel)
-    if (!w) windows.set(channel, w = window())
+    if (!w) windows.set(channel, w = window(nextGeneration++))
     return w
   }
   const unsubscribe = sync.subscribe(() => {
@@ -74,9 +108,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   })
   const current = (channel: string, w: Window) => {
     if (!closed) reconcileSync()
-    return !closed && sync.get().running &&
-      sync.get().organization === 'available' && windows.get(channel) === w && !w.unavailable &&
-      sync.get().channels[channel]?.watched === true
+    const s = sync.get()
+    return !closed && s.running &&
+      s.organization === 'available' && windows.get(channel) === w && !w.unavailable &&
+      s.channels[channel]?.watched === true && s.channels[channel]?.state !== 'unavailable'
   }
 
   async function read<T>(channel: string, w: Window, slot: ReadSlot, run: () => Promise<Result<T>>, bootstrap = false) {
@@ -102,7 +137,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
         // C9: refuse sends and resubscription until explicit user selection.
         w.unavailable = true
-        w.main.loading = w.list.loading = false
+        freezeWindow(w)
         withSync(() => { void sync.channelUnavailable(channel) })
         windows.set(channel, w)
         notify()
@@ -114,6 +149,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   function mergeBaselines(w: Window, response: Pick<TopicPage, 'as_of_seq' | 'topics'>) {
     for (const summary of response.topics) {
+      clearSummaryRetry(w, summary.id)
       const old = w.baselines.get(summary.id)
       if (!old || response.as_of_seq > old.asOfSeq) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
     }
@@ -152,8 +188,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     return isCurrent() ? result : { ok: false, kind: 'network' }
   }
   function snapshot(channel: string) {
-    const w = closed ? window() : getWindow(channel)
-    const c = closed ? undefined : sync.get().channels[channel]
+    const w = closed ? window(0) : getWindow(channel)
+    const syncState = closed ? undefined : sync.get()
+    const c = syncState?.channels[channel]
     const messages = c?.messages ?? []
     const merged = selectMainTimeline(messages, w.messages.values(), w.baselines.values())
     // List/summary baselines supply counts, while main pages and sync records supply main membership.
@@ -166,13 +203,75 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         initialized: t?.initialized ?? false,
         loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false, notFound: t?.notFound ?? false }
     }
-    return { lines, topics: merged.filter(l => l.kind === 'topic'),
-      main: { ...w.main }, list: { ...w.list }, unavailable: w.unavailable || c?.state === 'unavailable',
+    return { generation: w.generation, lines, topics: merged.filter(l => l.kind === 'topic'),
+      main: { ...w.main }, list: { ...w.list },
+      unavailable: w.unavailable || c?.state === 'unavailable' || syncState?.organization === 'unavailable',
       topic(topicId: string) {
         let value = topicSnapshots.get(topicId)
         if (!value) topicSnapshots.set(topicId, value = topic(topicId))
         return value
       } }
+  }
+  async function loadSummary(channel: string, topicId: string) {
+    const w = getWindow(channel)
+    if (!current(channel, w) || w.summaries.has(topicId)) return
+    const pendingRetry = w.summaryRetries.get(topicId)
+    if (pendingRetry?.timer !== undefined) {
+      clearTimeout(pendingRetry.timer)
+      pendingRetry.timer = undefined
+    }
+    w.summaries.add(topicId)
+    const { result, isCurrent } = await read(channel, w, `summary:${topicId}`, () => options.api.getTopicSummary(channel, topicId))
+    if (!isCurrent()) return
+    w.summaries.delete(topicId)
+    if (result.ok) {
+      const existing = w.topics.get(topicId)
+      if (existing) existing.notFound = false
+      mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
+      withSync(() => { void sync.settleHistory(channel, [result.data.topic.latest_message]) })
+      notify()
+    } else if (result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found') {
+      clearSummaryRetry(w, topicId)
+      let t = w.topics.get(topicId)
+      if (!t) w.topics.set(topicId, t = topicWindow())
+      if (!t.notFound) {
+        t.notFound = true
+        notify()
+      }
+    }
+    return result
+  }
+  async function ensureSummary(channel: string, topicId: string) {
+    const w = getWindow(channel)
+    if (
+      !current(channel, w) ||
+      w.baselines.has(topicId) ||
+      w.topics.get(topicId)?.notFound ||
+      w.summaries.has(topicId) ||
+      w.summaryRetries.get(topicId)?.timer !== undefined
+    ) {
+      return
+    }
+    const result = await loadSummary(channel, topicId)
+    if (!result || result.ok) return
+    const retryable = result.kind === 'network' || (result.kind === 'http' && result.status >= 500)
+    if (
+      !retryable ||
+      !current(channel, w) ||
+      w.baselines.has(topicId) ||
+      w.topics.get(topicId)?.notFound ||
+      w.summaries.has(topicId) ||
+      w.summaryRetries.get(topicId)?.timer !== undefined
+    ) {
+      return
+    }
+    const attempt = w.summaryRetries.get(topicId)?.attempt ?? 0
+    const timer = setTimeout(() => {
+      const entry = w.summaryRetries.get(topicId)
+      if (entry) entry.timer = undefined
+      void ensureSummary(channel, topicId)
+    }, backoffCap(attempt))
+    w.summaryRetries.set(topicId, { attempt: attempt + 1, timer })
   }
   return {
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
@@ -217,29 +316,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       }
       notify()
     },
-    async loadSummary(channel: string, topicId: string) {
-      const w = getWindow(channel)
-      if (!current(channel, w) || w.summaries.has(topicId)) return
-      w.summaries.add(topicId)
-      const { result, isCurrent } = await read(channel, w, `summary:${topicId}`, () => options.api.getTopicSummary(channel, topicId))
-      if (!isCurrent()) return
-      w.summaries.delete(topicId)
-      if (result.ok) {
-        const existing = w.topics.get(topicId)
-        if (existing) existing.notFound = false
-        mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
-        withSync(() => { void sync.settleHistory(channel, [result.data.topic.latest_message]) })
-        notify()
-      } else if (result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found') {
-        let t = w.topics.get(topicId)
-        if (!t) w.topics.set(topicId, t = topicWindow())
-        if (!t.notFound) {
-          t.notFound = true
-          notify()
-        }
-      }
-      return result
-    },
+    loadSummary,
+    ensureSummary,
     async loadTopic(channel: string, topicId: string) {
       const w = getWindow(channel)
       let t = w.topics.get(topicId)
@@ -261,10 +339,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       }
       notify()
     },
-    replaceSession() { sessionToken++; windows.clear(); cancelReads(); notify() },
+    replaceSession() { sessionToken++; cancelReads(); windows.clear(); notify() },
     close() {
-      closed = true; unsubscribe(); windows.clear()
-      cancelReads(); notify(); listeners.clear()
+      closed = true; unsubscribe(); cancelReads(); windows.clear()
+      notify(); listeners.clear()
     },
   }
 }

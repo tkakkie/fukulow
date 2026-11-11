@@ -151,32 +151,25 @@
     else void channel.loadLatest()
   }
 
-  let lastSummaryChannel = ''
-  const requestedSummaries = new Set<string>()
   let requestedMainFor = ''
 
   $effect(() => () => scrollController.destroy())
 
   $effect(() => {
-    if (channelId !== lastSummaryChannel) {
-      lastSummaryChannel = channelId
-      requestedSummaries.clear()
-      requestedMainFor = ''
-    }
     if (!topics || !tState || targetUnavailable || s.status !== 'ready') return
+    const mainKey = `${channelId}:${tState.generation}`
     if (
       tState.main.asOfSeq === undefined &&
       !tState.main.loading &&
       !tState.main.error &&
-      requestedMainFor !== channelId
+      requestedMainFor !== mainKey
     ) {
-      requestedMainFor = channelId
+      requestedMainFor = mainKey
       void topics.loadMain()
     }
     for (const topic of tState.topics) {
-      if (topic.baseline === null && !requestedSummaries.has(topic.topicId)) {
-        requestedSummaries.add(topic.topicId)
-        void topics.loadSummary(topic.topicId)
+      if (topic.baseline === null) {
+        void topics.ensureSummary(topic.topicId)
       }
     }
   })
@@ -217,7 +210,7 @@
   }
 
   function handleRestoreRequest(clientMessageId: string) {
-    const decision = decideEditAndResend(clientMessageId, s.draft)
+    const decision = decideEditAndResend(clientMessageId, s.draft, s.topicDraft)
     if (decision.action === 'restore_now') {
       if (channel.restore(clientMessageId)) {
         focusTarget(composerRef)
@@ -233,7 +226,6 @@
     if (!id) return
     const target = mainPending.find((p) => p.clientMessageId === id && p.status === 'failed')
     const canRestore = !targetUnavailable && Boolean(target)
-    if (canRestore && target?.topicName) channel.setTopicDraft('')
     confirmReplaceDraftWithFailedSend(
       id,
       s.draft,
@@ -241,6 +233,10 @@
       (draft) => channel.setDraft(draft),
       (targetId) => channel.restore(targetId),
       composerRef,
+      {
+        currentTopicDraft: s.topicDraft,
+        setTopicDraft: (topicDraft) => channel.setTopicDraft(topicDraft),
+      },
     )
   }
 

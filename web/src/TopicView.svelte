@@ -37,6 +37,9 @@
     reconnecting = false,
     composerRef = $bindable(null),
     onretrytopicmeta,
+    ongoToChannelList,
+    onrecheckmembership,
+    onswitchorganization,
   }: {
     channel: ChannelSync
     topics: TopicsAdapter
@@ -49,6 +52,9 @@
     reconnecting?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     onretrytopicmeta?: () => void
+    ongoToChannelList?: () => void
+    onrecheckmembership?: () => void
+    onswitchorganization?: () => void
   } = $props()
 
   const s = $derived(channel.timeline)
@@ -56,9 +62,12 @@
   const composerState = $derived(tc.composer)
   const tState = $derived(topics.state)
   const view = $derived(tState.topic(topicId))
-  const topicUnavailable = $derived(topicStatus === 'unavailable' || view.notFound)
+  const channelUnavailable = $derived(s.status === 'unavailable' || tState.unavailable)
+  const topicUnavailable = $derived(
+    !organizationUnavailable && !channelUnavailable && (topicStatus === 'unavailable' || view.notFound),
+  )
   const targetUnavailable = $derived(
-    organizationUnavailable || s.status === 'unavailable' || tState.unavailable || topicUnavailable,
+    organizationUnavailable || channelUnavailable || topicUnavailable,
   )
   const pending = $derived(
     s.pending.filter(
@@ -81,7 +90,6 @@
 
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
-  let requestedSummaryFor = ''
   let requestedHistoryFor = ''
 
   function measureItems(container: HTMLElement): ItemRect[] {
@@ -145,7 +153,6 @@
   function retryInitial() {
     scrollController.resetLoadingTimeout()
     if (topicStatus === 'error') onretrytopicmeta?.()
-    requestedSummaryFor = ''
     requestedHistoryFor = ''
     void topics.loadSummary(topicId)
     void topics.loadTopic(topicId)
@@ -154,12 +161,11 @@
   $effect(() => () => scrollController.destroy())
 
   $effect(() => {
-    const key = `${channelId}:${topicId}`
+    const key = `${channelId}:${topicId}:${tState.generation}`
     if (targetUnavailable || s.status === 'loading') return
     const hasBaseline = tState.topics.some((t) => t.topicId === topicId && t.baseline !== null)
-    if (!hasBaseline && requestedSummaryFor !== key) {
-      requestedSummaryFor = key
-      void topics.loadSummary(topicId)
+    if (!hasBaseline) {
+      void topics.ensureSummary(topicId)
     }
     if (!view.initialized && view.hasMore && !view.loading && !view.error && requestedHistoryFor !== key) {
       requestedHistoryFor = key
@@ -251,7 +257,31 @@
     </div>
   {/if}
 
-  {#if !targetUnavailable && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
+  {#if organizationUnavailable}
+    <div class="topic-view__banner">
+      <StatusBanner
+        tone="danger"
+        role="alert"
+        message="この組織は利用できません。"
+        detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
+        actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
+        onaction={onrecheckmembership}
+        secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
+        onsecondaryaction={onswitchorganization}
+      />
+    </div>
+  {:else if channelUnavailable}
+    <div class="topic-view__banner">
+      <StatusBanner
+        tone="danger"
+        role="alert"
+        message="このチャンネルは利用できません。"
+        detail="アクセス権がないか、削除された可能性があります。"
+        actionLabel={ongoToChannelList ? 'チャンネル一覧へ' : undefined}
+        onaction={ongoToChannelList}
+      />
+    </div>
+  {:else if !targetUnavailable && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
     <div class="topic-view__banner">
       <StatusBanner
         tone="danger"
@@ -264,7 +294,7 @@
   {/if}
 
   <div class="topic-view__scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if topicUnavailable}
+    {#if topicUnavailable && view.messages.length === 0 && pending.length === 0}
       <EmptyState
         title="このトピックは利用できません。"
         description="削除されたか、URLが正しくない可能性があります。"
@@ -272,6 +302,12 @@
     {:else if effectiveStatus === 'loading' && !scrollView.loadingTimedOut && view.messages.length === 0 && pending.length === 0}
       <Skeleton rows={4} label="トピックを読み込み中" />
     {:else}
+      {#if topicUnavailable}
+        <EmptyState
+          title="このトピックは利用できません。"
+          description="削除されたか、URLが正しくない可能性があります。"
+        />
+      {/if}
       {#if view.initialized && view.hasMore && !targetUnavailable}
         <div class="topic-view__older">
           <Button variant="secondary" disabled={view.loading} onclick={loadOlderWithAnchor}>

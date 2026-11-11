@@ -5,6 +5,7 @@ import { createSession } from './session'
 import { createInviteAcceptance } from './members'
 import { inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter } from './sync.svelte'
+import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
 
@@ -40,7 +41,7 @@ function stack(over: Partial<AuthDeps> = {}) {
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
-      return { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), close }
+      return { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
     },
     ...over,
   }

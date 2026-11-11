@@ -139,17 +139,22 @@ export function discardAndFocusComposer(
  * Decides whether `編集して送り直す` can restore immediately or must first ask to replace an existing draft
  * (`docs/ui.md` §5 "Send refused": `入力中の下書きを置き換えますか？`).
  */
-export function decideEditAndResend(clientMessageId: string, currentDraft: string): RestoreDecision {
-  if (currentDraft.length > 0) {
+export function decideEditAndResend(
+  clientMessageId: string,
+  currentDraft: string,
+  currentTopicDraft = '',
+): RestoreDecision {
+  if (currentDraft.length > 0 || currentTopicDraft.length > 0) {
     return { action: 'confirm_replace', clientMessageId }
   }
   return { action: 'restore_now' }
 }
 
 /**
- * Replaces the current Composer draft with the refused send's body (via `setDraft('')` + `restore(id)`)
- * and moves focus to the Composer (`docs/ui.md` §5 "Send refused").
- * Checks `canRestore` first and restores `currentDraft` if `restore` fails so the user's draft is never lost.
+ * Replaces the current Composer draft (and optional Topic-name draft) with the refused send's body
+ * (via `setDraft('')` + `restore(id)`) and moves focus to the Composer (`docs/ui.md` §5 "Send refused").
+ * Checks `canRestore` first and restores `currentDraft` (and `currentTopicDraft`) if `restore` fails
+ * so the user's draft is never lost.
  */
 export function confirmReplaceDraftWithFailedSend(
   clientMessageId: string,
@@ -158,12 +163,18 @@ export function confirmReplaceDraftWithFailedSend(
   setDraft: (draft: string) => void,
   restore: (id: string) => boolean,
   composer: FocusableTarget | null | undefined,
+  topicDraftOptions?: {
+    currentTopicDraft: string
+    setTopicDraft: (topicDraft: string) => void
+  },
 ): boolean {
   if (!canRestore) return false
   setDraft('')
+  topicDraftOptions?.setTopicDraft('')
   const restored = restore(clientMessageId)
   if (!restored) {
     setDraft(currentDraft)
+    topicDraftOptions?.setTopicDraft(topicDraftOptions.currentTopicDraft)
     return false
   }
   focusTarget(composer)

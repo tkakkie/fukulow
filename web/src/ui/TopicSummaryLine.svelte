@@ -4,6 +4,7 @@
   let {
     name,
     topicId,
+    selected = false,
     messageCount,
     latestBody,
     unreadCount = 0,
@@ -11,6 +12,7 @@
   }: {
     name: string
     topicId?: string
+    selected?: boolean
     messageCount?: number
     latestBody?: string
     unreadCount?: number
@@ -18,7 +20,13 @@
   } = $props()
 </script>
 
-<button type="button" data-topic-id={topicId} class="ui-topic-summary" {onclick}>
+<button
+  type="button"
+  data-topic-id={topicId}
+  aria-current={selected ? 'true' : undefined}
+  class="ui-topic-summary"
+  {onclick}
+>
   <span class="ui-topic-summary__header">
     <span class="ui-topic-summary__title">トピック: {name}</span>
     {#if messageCount !== undefined}

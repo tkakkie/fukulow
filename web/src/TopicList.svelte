@@ -8,14 +8,13 @@
 
   let {
     topics,
-    channelId,
     activeTopicId = null,
     unavailable = false,
     onselecttopic,
     onstartnewtopic,
   }: {
     topics: TopicsAdapter
-    channelId: string
+    channelId?: string
     activeTopicId?: string | null
     unavailable?: boolean
     onselecttopic: (topicId: string) => void
@@ -24,22 +23,15 @@
 
   const state = $derived(topics.state)
   const orderedTopics = $derived([...state.topics].reverse())
-  let lastSummaryChannel = ''
-  const requestedSummaries = new Set<string>()
 
   $effect(() => {
-    if (channelId !== lastSummaryChannel) {
-      lastSummaryChannel = channelId
-      requestedSummaries.clear()
-    }
     if (unavailable || state.unavailable) return
     if (state.list.asOfSeq === undefined && !state.list.loading && !state.list.error) {
       void topics.loadList()
     }
     for (const topic of state.topics) {
-      if (topic.baseline === null && !requestedSummaries.has(topic.topicId)) {
-        requestedSummaries.add(topic.topicId)
-        void topics.loadSummary(topic.topicId)
+      if (topic.baseline === null) {
+        void topics.ensureSummary(topic.topicId)
       }
     }
   })
@@ -48,61 +40,67 @@
 <div class="topic-list-panel">
   {#if unavailable || state.unavailable}
     <StatusBanner tone="danger" role="alert" message="このチャンネルは利用できません。" />
-  {:else if state.list.loading && orderedTopics.length === 0}
-    <Skeleton rows={3} label="トピックを読み込み中" />
-  {:else if state.list.error && orderedTopics.length === 0}
-    <StatusBanner
-      tone="danger"
-      role="alert"
-      message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-      actionLabel="再試行"
-      onaction={() => void topics.loadList()}
-    />
-  {:else if orderedTopics.length === 0}
-    <EmptyState
-      title="まだトピックがありません。"
-      description="メッセージ入力欄でトピック名を指定して最初のメッセージを送信すると、トピックが作成されます。"
-      actionLabel={onstartnewtopic ? '新しいトピックを作成' : undefined}
-      onaction={onstartnewtopic}
-    />
   {:else}
-    {#if onstartnewtopic}
-      <div class="topic-list-panel__actions">
-        <Button variant="secondary" onclick={onstartnewtopic}>＋ 新しいトピック</Button>
-      </div>
+    {#if state.list.asOfSeq === undefined && state.list.error}
+      <StatusBanner
+        tone="danger"
+        role="alert"
+        message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+        actionLabel="再試行"
+        onaction={() => void topics.loadList()}
+      />
     {/if}
 
-    <ul class="topic-list-panel__list" aria-label="トピック一覧">
-      {#each orderedTopics as t (t.topicId)}
-        <li
-          class="topic-list-panel__item"
-          class:topic-list-panel__item--active={activeTopicId === t.topicId}
-        >
-          <TopicSummaryLine
-            name={t.baseline?.summary.name ?? 'トピック'}
-            messageCount={t.messageCount ?? undefined}
-            latestBody={t.latestMessage.body}
-            onclick={() => onselecttopic(t.topicId)}
-          />
-        </li>
-      {/each}
-    </ul>
+    {#if orderedTopics.length > 0}
+      {#if onstartnewtopic}
+        <div class="topic-list-panel__actions">
+          <Button variant="secondary" onclick={onstartnewtopic}>＋ 新しいトピック</Button>
+        </div>
+      {/if}
 
-    {#if state.list.asOfSeq !== undefined && state.list.hasMore}
-      <div class="topic-list-panel__older">
-        <Button variant="secondary" disabled={state.list.loading} onclick={() => void topics.loadList()}>
-          以前のトピックを読み込む
-        </Button>
-        {#if state.list.error}
-          <StatusBanner
-            tone="danger"
-            role="alert"
-            message="以前のトピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-            actionLabel="再試行"
-            onaction={() => void topics.loadList()}
-          />
-        {/if}
-      </div>
+      <ul class="topic-list-panel__list" aria-label="トピック一覧">
+        {#each orderedTopics as t (t.topicId)}
+          <li
+            class="topic-list-panel__item"
+            class:topic-list-panel__item--active={activeTopicId === t.topicId}
+          >
+            <TopicSummaryLine
+              topicId={t.topicId}
+              selected={activeTopicId === t.topicId}
+              name={t.baseline?.summary.name ?? 'トピック'}
+              messageCount={t.messageCount ?? undefined}
+              latestBody={t.latestMessage.body}
+              onclick={() => onselecttopic(t.topicId)}
+            />
+          </li>
+        {/each}
+      </ul>
+
+      {#if state.list.asOfSeq !== undefined && state.list.hasMore}
+        <div class="topic-list-panel__older">
+          <Button variant="secondary" disabled={state.list.loading} onclick={() => void topics.loadList()}>
+            以前のトピックを読み込む
+          </Button>
+          {#if state.list.error}
+            <StatusBanner
+              tone="danger"
+              role="alert"
+              message="以前のトピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+              actionLabel="再試行"
+              onaction={() => void topics.loadList()}
+            />
+          {/if}
+        </div>
+      {/if}
+    {:else if state.list.loading}
+      <Skeleton rows={3} label="トピックを読み込み中" />
+    {:else if !state.list.error}
+      <EmptyState
+        title="まだトピックがありません。"
+        description="メッセージ入力欄でトピック名を指定して最初のメッセージを送信すると、トピックが作成されます。"
+        actionLabel={onstartnewtopic ? '新しいトピックを作成' : undefined}
+        onaction={onstartnewtopic}
+      />
     {/if}
   {/if}
 </div>

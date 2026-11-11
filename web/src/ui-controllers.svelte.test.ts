@@ -14,6 +14,7 @@ import { createAuth } from './auth.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { syncAdapter } from './sync.svelte'
+import { topicsAdapter } from './topics.svelte'
 import {
   createTimelineScrollController,
   initialTimelineScrollState,
@@ -224,6 +225,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
         return {
           channels: channelsAdapter(session.channels),
           sync: syncAdapter(session.sync),
+          topics: (id) => topicsAdapter(session.topics, id),
           close: session.close,
         }
       },
