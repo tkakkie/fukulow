@@ -42,6 +42,7 @@ function isServerEvent(value: unknown): value is ServerEvent {
   if (!isObject(value)) return false
   switch (value.type) {
     case 'message': return isMessage(value.message)
+    case 'channel_access_lost': return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
     case 'subscribed': return typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
     case 'error': return typeof value.code === 'string' &&
       (value.channel_id === undefined || value.channel_id === null || typeof value.channel_id === 'string')

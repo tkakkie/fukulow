@@ -692,3 +692,5 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
     .unwrap();
     assert_eq!(historical_grant, id);
 }
+
+mod management;

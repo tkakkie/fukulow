@@ -119,6 +119,10 @@ pub async fn change_role(
         .bind(org).bind(id).bind(input.role).fetch_optional(&mut *tx).await.map_err(member_write_error)?
         .ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
     tx.commit().await?;
+    state
+        .session_changes
+        .recheck_subscriptions(&state.pool, SubscriptionScope::Member(org, id))
+        .await;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(Member {
@@ -139,4 +143,24 @@ pub(crate) fn member_write_error(error: sqlx::Error) -> ApiError {
     } else {
         error.into()
     }
+}
+
+// Batched Channel fallback composes this projection; auth retains table ownership.
+pub(crate) const ACTIVE_SCOPED_MEMBERS_SQL: &str = "SELECT organization_id,id,name,role,membership_revision FROM users WHERE deactivated_at IS NULL";
+
+pub(crate) async fn active_target(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    id: Uuid,
+) -> Result<(Member, i64), ApiError> {
+    let row: (String,Role,i64) = sqlx::query_as("SELECT name,role,membership_revision FROM users WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL")
+        .bind(organization).bind(id).fetch_optional(connection).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
+    Ok((
+        Member {
+            id,
+            name: row.0,
+            role: row.1,
+        },
+        row.2,
+    ))
 }

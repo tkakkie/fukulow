@@ -25,7 +25,7 @@ use password::{check_password, hash_password};
 mod session;
 mod throttle;
 pub use cleanup::SessionCleanup;
-pub use session::SessionChanges;
+pub use session::{SessionChanges, SubscriptionRecheck, SubscriptionScope};
 pub use throttle::SignInThrottle;
 
 // Bound Argon2 memory/CPU work independently from Tokio blocking-thread capacity.
@@ -41,7 +41,11 @@ pub struct ErrorBody {
 }
 
 #[derive(Debug)]
-pub struct ApiError(StatusCode, &'static str, Option<std::time::Duration>);
+pub struct ApiError(
+    pub(crate) StatusCode,
+    pub(crate) &'static str,
+    pub(crate) Option<std::time::Duration>,
+);
 impl ApiError {
     pub(crate) fn organization_unavailable() -> Self {
         Self(StatusCode::NOT_FOUND, "organization_unavailable", None)
@@ -54,7 +58,7 @@ impl ApiError {
     fn unauthorized() -> Self {
         Self(StatusCode::UNAUTHORIZED, "invalid credentials", None)
     }
-    fn bad_request() -> Self {
+    pub(crate) fn bad_request() -> Self {
         Self(StatusCode::BAD_REQUEST, "invalid input", None)
     }
     fn throttled(retry: std::time::Duration) -> Self {
@@ -703,10 +707,13 @@ pub async fn deactivate_member(
         let mut tx = state.pool.begin().await?;
         sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
             .bind(organization).fetch_optional(&mut *tx).await?;
-        let revision: Option<i64> = sqlx::query_scalar("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING membership_revision")
+        let revision: Option<(Uuid, i64)> = sqlx::query_as("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING id, membership_revision")
             .bind(organization).bind(account).fetch_optional(&mut *tx).await?;
         tx.commit().await?;
-        if let Some(revision) = revision { state.session_changes.membership_revoked(organization,account,revision); }
+        if let Some((member, revision)) = revision {
+            state.session_changes.membership_revoked(organization,account,revision);
+            state.session_changes.recheck_subscriptions(&state.pool, SubscriptionScope::Member(organization, member)).await;
+        }
         Ok(())
     }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
 }

@@ -179,7 +179,7 @@ async fn unread_guest_creation_activation_and_public_channel_creation_require_gr
 
 #[sqlx::test]
 async fn unread_all_roles_visibility_grants_and_access_changes_match_positions(pool: PgPool) {
-    let (_, org, owner, _, _) = fixture(&pool).await;
+    let (app, org, owner, _, owner_token) = fixture(&pool).await;
     role(&pool, org, owner, "owner").await;
     // Include a second scope in every comparison against production visibility.
     let _ = fixture(&pool).await;
@@ -189,7 +189,7 @@ async fn unread_all_roles_visibility_grants_and_access_changes_match_positions(p
         for private in [false, true] {
             for granted in [false, true] {
                 let viewer = Uuid::new_v4();
-                member(&pool, org, viewer).await;
+                let viewer_token = member(&pool, org, viewer).await;
                 role(&pool, org, viewer, initial_role).await;
                 let channel = Uuid::new_v4();
                 super::super::channel(&pool, org, channel, owner, private).await;
@@ -257,6 +257,64 @@ async fn unread_all_roles_visibility_grants_and_access_changes_match_positions(p
                 .unwrap();
                 assert_positions_match_visibility(&pool).await;
                 revoke(&pool, org, channel, viewer).await;
+                assert_positions_match_visibility(&pool).await;
+                // #149 explicit stale renewal, duplicate add, leave and removal
+                // must use the same lifecycle predicate as production visibility.
+                sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id,membership_revision) SELECT organization_id,$2,id,membership_revision-1 FROM users WHERE organization_id=$1 AND id=$3")
+                    .bind(org).bind(channel).bind(viewer).execute(&pool).await.unwrap();
+                assert_positions_match_visibility(&pool).await;
+                for _ in 0..2 {
+                    assert_eq!(
+                        request(
+                            &app,
+                            "POST",
+                            &format!("/api/v1/channels/{channel}/members"),
+                            &owner_token,
+                            json!({"member_id":viewer})
+                        )
+                        .await
+                        .status(),
+                        StatusCode::NO_CONTENT
+                    );
+                    assert_positions_match_visibility(&pool).await;
+                }
+                assert_eq!(
+                    request(
+                        &app,
+                        "DELETE",
+                        &format!("/api/v1/channels/{channel}/members/{viewer}"),
+                        &viewer_token,
+                        Value::Null
+                    )
+                    .await
+                    .status(),
+                    StatusCode::NO_CONTENT
+                );
+                assert_positions_match_visibility(&pool).await;
+                assert_eq!(
+                    request(
+                        &app,
+                        "POST",
+                        &format!("/api/v1/channels/{channel}/members"),
+                        &owner_token,
+                        json!({"member_id":viewer})
+                    )
+                    .await
+                    .status(),
+                    StatusCode::NO_CONTENT
+                );
+                assert_eq!(
+                    request(
+                        &app,
+                        "DELETE",
+                        &format!("/api/v1/channels/{channel}/members/{viewer}"),
+                        &owner_token,
+                        Value::Null
+                    )
+                    .await
+                    .status(),
+                    StatusCode::NO_CONTENT
+                );
                 assert_positions_match_visibility(&pool).await;
             }
         }

@@ -37,11 +37,24 @@ pub struct Channel {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ChannelCapabilities {
     pub can_add_members: Capability,
+    pub can_remove_members: Capability,
+    pub can_leave: Capability,
 }
 
 impl ChannelCapabilities {
     fn for_visible(organization: Uuid, role: Role, public: bool) -> Self {
+        let actor = Actor::Member {
+            organization,
+            role,
+            channel_member: true,
+        };
+        let resource = Resource::Channel {
+            organization,
+            public,
+        };
         Self {
+            can_remove_members: authorize(actor, Action::RemoveChannelMembers, resource),
+            can_leave: authorize(actor, Action::LeaveChannel, resource),
             can_add_members: authorize(
                 Actor::Member {
                     organization,
@@ -258,7 +271,61 @@ pub(crate) async fn is_visible_for_write(
     member: (Uuid, i64),
     channel_id: Uuid,
 ) -> Result<Option<bool>, sqlx::Error> {
-    member_visibility(connection, organization_id, member, channel_id, true).await
+    // Lock Member first, then the grant through COMMIT. DELETE/renewal cannot
+    // pass an admitted send or mark-read; public non-Guests need no grant.
+    let sql = format!("SELECT role FROM ({}) u", auth::current_member_sql(true));
+    let role: Option<Role> = sqlx::query_scalar(&sql)
+        .bind(organization_id)
+        .bind(member.0)
+        .bind(member.1)
+        .fetch_optional(&mut *connection)
+        .await?;
+    let Some(role) = role else {
+        return Ok(None);
+    };
+    let public: Option<bool> = sqlx::query_scalar(
+        "SELECT visibility = 'public' FROM channels WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(organization_id)
+    .bind(channel_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(public) = public else {
+        return Ok(Some(false));
+    };
+    if authorize(
+        Actor::Member {
+            organization: organization_id,
+            role,
+            channel_member: false,
+        },
+        Action::ReadChannel,
+        Resource::Channel {
+            organization: organization_id,
+            public,
+        },
+    )
+    .allowed
+    {
+        return Ok(Some(true));
+    }
+    let grant: Option<Uuid> = sqlx::query_scalar("SELECT member_id FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR SHARE")
+        .bind(organization_id).bind(channel_id).bind(member.0).bind(member.1).fetch_optional(connection).await?;
+    Ok(Some(
+        authorize(
+            Actor::Member {
+                organization: organization_id,
+                role,
+                channel_member: grant.is_some(),
+            },
+            Action::ReadChannel,
+            Resource::Channel {
+                organization: organization_id,
+                public,
+            },
+        )
+        .allowed,
+    ))
 }
 
 async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
@@ -287,6 +354,7 @@ pub(crate) fn member_visibility_sql(lock: bool) -> String {
     )
 }
 
+#[cfg(test)]
 fn visible_members_sql() -> String {
     format!(
         "SELECT v.id, v.membership_revision FROM ({}) v \
@@ -297,6 +365,7 @@ fn visible_members_sql() -> String {
 }
 
 // Match each socket's captured revision, including multiple epochs for the same Member.
+#[cfg(test)]
 pub(crate) async fn visible_members(
     pool: &sqlx::PgPool,
     organization_id: Uuid,
@@ -313,5 +382,29 @@ pub(crate) async fn visible_members(
         .await
 }
 
+mod access;
+pub mod members;
+pub use access::AccessChanges;
+pub(crate) use access::AccessWatch;
+
+pub(crate) async fn member_access(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    channel: Uuid,
+    members: &[(Uuid, i64)],
+) -> Result<Vec<(Uuid, i64, bool)>, sqlx::Error> {
+    let (ids, revisions): (Vec<_>, Vec<_>) = members.iter().copied().unzip();
+    let sql = format!(
+        "SELECT v.id,v.membership_revision,v.visible FROM ({}) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision",
+        visibility_sql(&auth::candidate_members_sql(), "$2")
+    );
+    sqlx::query_as(&sql)
+        .bind(organization)
+        .bind(channel)
+        .bind(ids)
+        .bind(revisions)
+        .fetch_all(pool)
+        .await
+}
 #[cfg(test)]
 mod tests;

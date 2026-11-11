@@ -15,6 +15,8 @@
     type SkipLinkTargetId,
   } from './focus-management'
   import Members from './MemberList.svelte'
+  import ChannelMembers from './ChannelMembers.svelte'
+  import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
   import Timeline from './Timeline.svelte'
   import Button from './ui/Button.svelte'
@@ -93,6 +95,12 @@
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
 
+  const channelMemberController = $derived(panelOpen && activePanelTab === 'members' && selected ? session.channelMembers?.(selected.id) : undefined)
+  const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
+  $effect(() => {
+    const controller = channelMemberController
+    return () => controller?.close()
+  })
   let lastViewId = ''
 
   function resolveSender(senderId: string): string {
@@ -469,9 +477,11 @@
             description={selected ? `# ${selected.name}（${selected.visibility === 'private' ? 'プライベート' : 'パブリック'}）` : undefined}
           />
         {:else}
-          <EmptyState
-            title="メンバー一覧は準備中です。"
-          />
+          {#if channelMemberModel && selected && organization}
+            <ChannelMembers model={channelMemberModel} channel={selected} self={organization.member.id} candidates={members?.state.members ?? []} />
+          {:else}
+            <EmptyState title="チャンネルを選んでください。" />
+          {/if}
         {/if}
       </Panel>
     </div>

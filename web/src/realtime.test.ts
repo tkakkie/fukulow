@@ -93,3 +93,13 @@ it('forwards Reply chain membership when the parent is not loaded and rejects ma
   }
   expect(handlers.onEvent).not.toHaveBeenCalled()
 })
+
+it('validates the channel-only access-loss event and rejects missing, malformed or extra fields', () => {
+  const socket: SocketLike = { send() {}, close() {}, onopen: null, onmessage: null, onclose: null }
+  const onEvent = vi.fn(); const connection = connectRealtime({ onReady() {}, onClose() {}, onEvent }, () => socket)
+  for (const event of [{ type: 'channel_access_lost' }, { type: 'channel_access_lost', channel_id: null },
+    { type: 'channel_access_lost', channel_id: 'A', name: 'protected' }]) socket.onmessage?.({ data: JSON.stringify(event) })
+  expect(onEvent).not.toHaveBeenCalled()
+  socket.onmessage?.({ data: JSON.stringify({ type: 'channel_access_lost', channel_id: 'A' }) })
+  expect(onEvent).toHaveBeenCalledExactlyOnceWith({ type: 'channel_access_lost', channel_id: 'A' }); connection.close()
+})

@@ -66,7 +66,7 @@
     },
     {
       "id": "losing-private-membership-stops-delivery-but-keeps-the-socket-open",
-      "title": "A Member removed from a private Channel after subscribing receives nothing more and the socket stays open; a new subscribe is refused with channel_not_found; other subscribers are unaffected",
+      "title": "A Member removed from a private Channel after subscribing receives channel_access_lost and no more protected frames; the socket stays open; a new subscribe is refused with channel_not_found; other subscribers are unaffected",
       "covers": ["S2","S4"],
       "rust": {"existing_tests":["server/src/realtime/tests.rs::live_delivery_rechecks_private_membership_after_subscription"]},
       "setup": {"organizations":["o1","o2"],"members":[{"id":"alice","organization":"o1"},{"id":"bob","organization":"o1"},{"id":"carol","organization":"o2"}],"channels":[{"id":"secret","organization":"o1","visibility":"private","creator":"alice","members":["bob"]},{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
@@ -83,7 +83,7 @@
         {"do":"remove_membership","member":"bob","channel":"secret"},
         {"do":"post","as":"alice","channel":"secret","label":"after"},
         {"do":"expect","socket":"sa","events":[{"type":"message","channel":"secret","from_post":"after"}]},
-        {"do":"expect","socket":"sb","events":[{"type":"silent","barrier":{"channel":"general","caught_up_seq":0}}]},
+        {"do":"expect","socket":"sb","events":[{"type":"channel_access_lost","channel":"secret"},{"type":"silent","barrier":{"channel":"general","caught_up_seq":0}}]},
         {"do":"subscribe","socket":"sb","channel":"secret","after_seq":0},
         {"do":"expect","socket":"sb","events":[{"type":"error","channel":"secret","code":"channel_not_found"}]}
       ]

@@ -96,6 +96,7 @@ async fn delivery_reads_role_after_subscription_and_after_http_response(pool: Pg
         .unwrap();
     gate.release.add_permits(1);
     f.state.message_delivery.flush().await;
+    access_loss::access_lost(&mut socket, f.channel).await;
     silent(&mut socket).await;
     let mut replay = f.server.connect(&token).await;
     subscribe(&mut replay, f.channel, 0).await;
@@ -109,6 +110,9 @@ async fn delivery_reads_role_after_subscription_and_after_http_response(pool: Pg
     .execute(&pool)
     .await
     .unwrap();
+    subscribe(&mut socket, f.channel, 1).await;
+    assert_eq!(event(&mut socket).await["message"], blocked);
+    ready(&mut socket, f.channel, 2).await;
     let allowed = send(
         &f,
         &f.token,
@@ -118,7 +122,6 @@ async fn delivery_reads_role_after_subscription_and_after_http_response(pool: Pg
     )
     .await;
     // Shared-gap recovery includes only messages authorized at its fresh decision.
-    assert_eq!(event(&mut socket).await["message"], blocked);
     assert_eq!(event(&mut socket).await["message"], allowed);
     subscribe(&mut replay, f.channel, 0).await;
     for _ in 0..3 {

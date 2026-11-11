@@ -508,6 +508,7 @@
     },
     "DeliveryEvent": {
       "oneOf": [
+        {"type":"object","required":["type","channel"],"properties":{"type":{"const":"channel_access_lost"},"channel":{"$ref":"#/$defs/ChannelRef"}},"additionalProperties":false},
         {
           "$comment": "A {type:message} event. seqs = the Channel's Messages with these seqs, one event per seq in the listed order (a range expands ascending). from_post = the event's message equals the canonical Message the labelled post returned. At least one of seqs / from_post (semantic); if seqs is specified it must be non-empty, including when from_post is also specified. Empty SeqLists elsewhere remain valid. A range ChannelRef expands per Channel.",
           "type": "object",
@@ -680,6 +681,7 @@
     "Input": {
       "$comment": "What happened outside the client. 'me' is the signed-in Member; other labels are other Members. Request/response pairing is by respond_to (see ClientScenario); a response delivered after the client has moved on (timer already obsolete, session replaced, Channel reset) is a stale completion and must change nothing.",
       "oneOf": [
+        {"type":"object","required":["type","channel"],"properties":{"type":{"const":"channel_access_lost"},"channel":{"$ref":"#/$defs/Label"}},"additionalProperties":false},
         {"$comment":"Planned (#143, P8). Refetch a Channel Unread baseline, including on reconnect.","type":"object","required":["type","channel"],"properties":{"type":{"const":"load_unread"},"channel":{"$ref":"#/$defs/Label"}},"additionalProperties":false},
         {"$comment":"Planned (#143, P8). A Channel-list REST baseline arrives, possibly after its events or a newer response.","type":"object","required":["type","channel","respond_to","baseline"],"properties":{"type":{"const":"unread_result"},"channel":{"$ref":"#/$defs/Label"},"respond_to":{"$ref":"#/$defs/Label"},"baseline":{"$ref":"#/$defs/UnreadBaseline"}},"additionalProperties":false},
         { "$comment": "Controller-only P6: open the chain from a confirmed root or descendant, including a Topic Message.", "type":"object","required":["type","channel","message"],"properties":{"type":{"const":"open_reply_chain"},"channel":{"$ref":"#/$defs/Label"},"message":{"$ref":"#/$defs/MessageSpec"}},"additionalProperties":false},

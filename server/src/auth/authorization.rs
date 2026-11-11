@@ -24,6 +24,8 @@ pub enum Action {
     ChangeRole,
     ReadChannel,
     AddChannelMembers,
+    RemoveChannelMembers,
+    LeaveChannel,
 }
 
 #[derive(Clone, Copy)]
@@ -76,7 +78,10 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
             let visible = channel_member || (public && !matches!(role, Role::Guest));
             match action {
                 Action::ReadChannel => visible,
-                Action::AddChannelMembers => visible && matches!(role, Role::Owner | Role::Admin),
+                Action::AddChannelMembers | Action::RemoveChannelMembers => {
+                    visible && matches!(role, Role::Owner | Role::Admin)
+                }
+                Action::LeaveChannel => visible,
                 _ => false,
             }
         }
@@ -235,6 +240,33 @@ mod tests {
                         (explicit || (public && role != Role::Guest))
                             && matches!(role, Role::Owner | Role::Admin)
                     );
+                    assert_eq!(
+                        authorize(actor, Action::RemoveChannelMembers, resource).allowed,
+                        (explicit || (public && role != Role::Guest))
+                            && matches!(role, Role::Owner | Role::Admin)
+                    );
+                    assert_eq!(
+                        authorize(actor, Action::LeaveChannel, resource).allowed,
+                        explicit || (public && role != Role::Guest)
+                    );
+                    for action in [
+                        Action::ReadChannel,
+                        Action::AddChannelMembers,
+                        Action::RemoveChannelMembers,
+                        Action::LeaveChannel,
+                    ] {
+                        assert!(
+                            !authorize(
+                                actor,
+                                action,
+                                Resource::Channel {
+                                    organization: Uuid::new_v4(),
+                                    public
+                                }
+                            )
+                            .allowed
+                        );
+                    }
                 }
             }
         }
