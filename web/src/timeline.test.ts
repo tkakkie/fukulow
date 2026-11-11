@@ -1,9 +1,163 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createSync } from './sync'
+import { createDraftStore } from './drafts'
+import { fakeNetwork, ok, sentBy, settle } from './adapter-test-helpers.svelte'
 import type { Message, MessagePage, Result } from './api'
 import { record } from './protocol-test-helpers'
 
 afterEach(() => vi.useRealTimers())
+it('a timed-out send cannot restore its draft after stop and a late 409', async () => {
+  vi.useFakeTimers()
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts, requestTimeoutMs: 1000 })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  const sending = a.submit()
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(await sending).toBe(true)
+  const pending = sync.get().channels.A.pending[0]
+  expect(pending.state).toBe('unknown')
+  expect(sync.get().requests[pending.request]).toBeUndefined()
+  await sync.close()
+  net.sends[0].resolve({ ok: false, kind: 'http', status: 409 })
+  await settle()
+  expect(a.get().draft).toBe('')
+  expect(drafts.hasDrafts()).toBe(false)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('a stalled transport drops its submitted draft entry at the deadline and cannot restore later', async () => {
+  vi.useFakeTimers()
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts, requestTimeoutMs: 1000 })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  const sending = a.submit()
+  const id = net.sends[0].body.client_message_id
+  // Observe release before the underlying transport settles, without exposing controller internals.
+  const deletion = vi.spyOn(Map.prototype, 'delete')
+  let removed: boolean
+  try {
+    await vi.advanceTimersByTimeAsync(1000)
+    removed = deletion.mock.calls.some(([key], index) => key === id && deletion.mock.results[index]?.value === true)
+  } finally {
+    deletion.mockRestore()
+  }
+  expect(removed).toBe(true)
+  expect(await sending).toBe(true)
+  expect(a.get().pending).toMatchObject([{ clientMessageId: id, status: 'failed', retryable: true }])
+  await sync.close()
+  net.sends[0].resolve({ ok: false, kind: 'http', status: 409 })
+  await settle()
+  expect(a.get().draft).toBe('')
+  expect(drafts.hasDrafts()).toBe(false)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each([400, 403, 404, 409, 413, 415, 200, 'network', 503] as const)(
+  'Organization close cancels submit and restores only a late definite refusal: %s', async status => {
+    vi.useFakeTimers()
+    const drafts = createDraftStore()
+    const net = fakeNetwork()
+    const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+    await sync.start()
+    await sync.watch('A')
+    const a = sync.getTimeline('A')
+    a.setDraft('送信する本文')
+    const sending = a.submit()
+    await sync.close()
+    expect(await sending).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(drafts.hasDrafts()).toBe(false)
+    const send = net.sends[0]
+    send.resolve(status === 200 ? ok(sentBy('me', 1, send.body.client_message_id, send.body.body))
+      : status === 'network' ? { ok: false, kind: 'network' } : { ok: false, kind: 'http', status })
+    await settle()
+    const expected = typeof status === 'number' && [400, 403, 404, 409, 413, 415].includes(status) ? '送信する本文' : ''
+    expect(drafts.get({ organizationId: 'o', channelId: 'A' })).toBe(expected)
+    expect(a.get().messages).toEqual([])
+    expect(a.get().pending).toEqual([])
+  },
+)
+
+it('a send ACK, refusal and late refusal after settlement preserve text typed after submit in the Account Session store', async () => {
+  for (const edit of ['untouched', 'typed then cleared', 'new text'] as const) {
+    for (const outcome of ['ACK', 'refusal', 'late refusal'] as const) {
+      const drafts = createDraftStore()
+      const net = fakeNetwork()
+      const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+      await sync.start()
+      await sync.watch('A')
+      const a = sync.getTimeline('A')
+      a.setDraft('送信する本文')
+      const sending = a.submit()
+      expect(a.get().draft).toBe('')
+      if (edit !== 'untouched') a.setDraft('送信後の新しい下書き')
+      if (edit === 'typed then cleared') a.setDraft('')
+      const message = sentBy('me', 1, net.sends[0].body.client_message_id, '送信する本文')
+      if (outcome === 'late refusal') await sync.settleHistory('A', [message])
+      net.sends[0].resolve(outcome === 'ACK' ? ok(message) : { ok: false, kind: 'http', status: 400 })
+      expect(await sending).toBe(true)
+      await settle()
+      const expected = edit === 'new text' ? '送信後の新しい下書き' : ''
+      expect(a.get().draft, outcome).toBe(expected)
+      expect(drafts.get({ organizationId: 'o', channelId: 'A' }), outcome).toBe(expected)
+      expect(drafts.hasDrafts(), outcome).toBe(expected !== '')
+      expect(a.get().pending, outcome).toHaveLength(outcome === 'refusal' ? 1 : 0)
+      await sync.close()
+    }
+  }
+})
+
+it.each(['untouched', 'typed then cleared', 'new text'] as const)(
+  'a refused submit restores only an unedited draft: %s', async edit => {
+    const drafts = createDraftStore()
+    const net = fakeNetwork()
+    const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts,
+      // Refuse admission between submit's availability check and user_send.
+      newId: () => { void sync.channelUnavailable('A'); return 'refused' },
+    })
+    await sync.start()
+    await sync.watch('A')
+    const a = sync.getTimeline('A')
+    a.setDraft('送信する本文')
+    const sending = a.submit()
+    if (edit !== 'untouched') a.setDraft('送信後の新しい下書き')
+    if (edit === 'typed then cleared') a.setDraft('')
+    expect(await sending).toBe(false)
+    const expected = edit === 'untouched' ? '送信する本文' : edit === 'new text' ? '送信後の新しい下書き' : ''
+    expect(a.get().draft).toBe(expected)
+    expect(drafts.get({ organizationId: 'o', channelId: 'A' })).toBe(expected)
+    expect(drafts.hasDrafts()).toBe(expected !== '')
+    expect(net.sends).toHaveLength(0)
+    await sync.close()
+  },
+)
+
+it('an admission refusal cannot restore a draft after the Account Session store was cleared', async () => {
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts: drafts.scope(),
+    newId: () => { void sync.channelUnavailable('A'); return 'refused' },
+  })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  const pending = a.submit()
+  drafts.clear()
+  expect(await pending).toBe(false)
+  expect(drafts.hasDrafts()).toBe(false)
+  expect(drafts.scope().get({ organizationId: 'o', channelId: 'A' })).toBe('')
+  await sync.close()
+})
+
 it('timeline delegates preserve pending across selection and settle history before retry', async () => {
   vi.useFakeTimers()
   const sendMessage = vi.fn().mockResolvedValue({ ok: false, kind: 'network' })

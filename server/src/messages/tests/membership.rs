@@ -210,7 +210,13 @@ async fn queued_send_rechecks_member_revision_and_private_grant_after_begin(pool
 
 #[sqlx::test]
 async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool) {
-    for denial in ["deactivate", "reactivate", "private_grant"] {
+    for denial in [
+        "deactivate",
+        "reactivate",
+        "private_grant",
+        "guest_grant",
+        "guest_role",
+    ] {
         let (_, organization, sender, channel, token) = fixture(&pool).await;
         sqlx::query("UPDATE channels SET visibility='private' WHERE organization_id=$1 AND id=$2")
             .bind(organization)
@@ -227,6 +233,26 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
         .execute(&pool)
         .await
         .unwrap();
+        if denial.starts_with("guest") {
+            sqlx::query(
+                "UPDATE channels SET visibility='public' WHERE organization_id=$1 AND id=$2",
+            )
+            .bind(organization)
+            .bind(channel)
+            .execute(&pool)
+            .await
+            .unwrap();
+            if denial == "guest_grant" {
+                sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
+                    .bind(organization)
+                    .bind(sender)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(organization).bind(channel).bind(sender).execute(&pool).await.unwrap();
+            }
+        }
         let first = Uuid::new_v4();
         sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) VALUES ($1,$2,$3,1,$4,$5,'before loss')")
             .bind(organization).bind(first).bind(channel).bind(sender).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
@@ -255,9 +281,11 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
         }
         // Loss must commit while the page is paused: ordinary history holds no row lock.
         tokio::time::timeout(Duration::from_secs(5), async {
-            if denial == "private_grant" {
+            if denial == "private_grant" || denial == "guest_grant" {
                 sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                     .bind(organization).bind(channel).bind(sender).execute(&pool).await.unwrap();
+            } else if denial=="guest_role" {
+                sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2").bind(organization).bind(sender).execute(&pool).await.unwrap();
             } else {
                 sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
                     .bind(organization).bind(sender).execute(&pool).await.unwrap();
@@ -293,7 +321,7 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             body(response).await,
-            json!({"error": if denial == "private_grant" { "channel not found" } else { "organization_unavailable" }})
+            json!({"error": if denial=="private_grant" || denial.starts_with("guest") { "channel not found" } else { "organization_unavailable" }})
         );
     }
 }

@@ -3,12 +3,14 @@
 
   let {
     name,
+    topicId,
     messageCount,
     latestBody,
     unreadCount = 0,
     onclick,
   }: {
     name: string
+    topicId?: string
     messageCount?: number
     latestBody?: string
     unreadCount?: number
@@ -16,7 +18,7 @@
   } = $props()
 </script>
 
-<button type="button" class="ui-topic-summary" {onclick}>
+<button type="button" data-topic-id={topicId} class="ui-topic-summary" {onclick}>
   <span class="ui-topic-summary__header">
     <span class="ui-topic-summary__title">トピック: {name}</span>
     {#if messageCount !== undefined}

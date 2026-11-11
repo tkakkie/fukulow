@@ -1,11 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test'
-import type { components, ServerEvent } from '../src/api-schema.d.ts'
+import type { ClientMessage, components, ServerEvent } from '../src/api-schema.d.ts'
 
+type AcceptInviteRequest = components['schemas']['AcceptInviteRequest']
 type AccountIdentity = components['schemas']['AccountIdentity']
+type AddChannelMemberRequest = components['schemas']['AddChannelMemberRequest']
 type Channel = components['schemas']['Channel']
 type CreateChannelRequest = components['schemas']['CreateChannelRequest']
+type CreateInviteRequest = components['schemas']['CreateInviteRequest']
 type ErrorBody = components['schemas']['ErrorBody']
+type Identity = components['schemas']['Identity']
+type InviteResponse = components['schemas']['InviteResponse']
 type Message = components['schemas']['Message']
 type SendMessageRequest = components['schemas']['SendMessageRequest']
 type SetupStatus = components['schemas']['SetupStatus']
@@ -419,79 +424,205 @@ test('shows Composer validation error and keeps the draft when body exceeds 4000
   await expect(composer).toHaveValue(oversized)
 })
 
-test('C9 renders no 再試行 and チャンネル一覧へ moves focus to the Channel list across desktop, tablet and phone widths', async ({
+test('single-Channel C9 チャンネル一覧へ focuses heading only when visible and reselecting recovers with one retry at 1280, 768 and 375px', async ({
   page,
+  browser,
 }) => {
-  let clientSocket: WebSocketRoute | undefined
-  await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
-    ws.connectToServer()
-    clientSocket = ws
-  })
+  const orgId = await signIn(page)
+  const base = `/api/v1/orgs/${orgId}`
 
-  await page.setViewportSize({ width: 1280, height: 800 })
-  await signIn(page)
-  const target = await createChannel(page, nextChannelName('c9-focus-target'))
-  const other = await createChannel(page, nextChannelName('c9-focus-other'))
+  const channelReq: CreateChannelRequest = { name: nextChannelName('c9-single'), visibility: 'private' }
+  const channelRes = await page.request.post(`${base}/channels`, { data: channelReq })
+  expect(channelRes.status()).toBe(201)
+  const singleChannel = (await channelRes.json()) as Channel
 
-  const nav = page.getByRole('navigation', { name: 'チャンネル' })
-  await nav.getByRole('button', { name: target.name }).click()
-  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+  const guestEmail = `c9-single-${randomUUID()}@example.invalid`
+  const guestPassword = 'correct horse guest c9'
+  const inviteReq: CreateInviteRequest = { email: guestEmail, role: 'guest' }
+  const inviteRes = await page.request.post(`${base}/invites`, { data: inviteReq })
+  expect(inviteRes.ok()).toBe(true)
+  const invite = (await inviteRes.json()) as InviteResponse
 
-  const timeline = page.getByRole('region', { name: 'タイムライン' })
-  const goToListButton = timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })
-  const targetChannelButton = nav.getByRole('button', { name: target.name })
-  const channelListHeading = nav.getByRole('heading', { name: 'チャンネル', exact: true })
+  const guestContext = await browser.newContext()
+  try {
+    const acceptReq: AcceptInviteRequest = {
+      token: invite.token,
+      email: guestEmail,
+      name: 'C9 Single Guest',
+      password: guestPassword,
+    }
+    const acceptRes = await guestContext.request.post(`${base}/invites/accept`, { data: acceptReq })
+    expect(acceptRes.ok()).toBe(true)
+    const guestIdentity = (await acceptRes.json()) as Identity
+    const guestMemberId = guestIdentity.member.id
 
-  const refusal: ServerEvent = { type: 'error', channel_id: target.id, code: 'channel_not_found' }
-  clientSocket!.send(JSON.stringify(refusal))
+    const grantGuest = async () => {
+      const addReq: AddChannelMemberRequest = { member_id: guestMemberId }
+      const addRes = await page.request.post(`${base}/channels/${singleChannel.id}/members`, { data: addReq })
+      expect(addRes.ok()).toBe(true)
+    }
+    const revokeGuest = async () => {
+      const delRes = await page.request.delete(`${base}/channels/${singleChannel.id}/members/${guestMemberId}`)
+      expect(delRes.ok()).toBe(true)
+    }
 
-  // 1. Desktop (1280px): C9 has no 再試行, and チャンネル一覧へ shows the Channel list and focuses the チャンネル heading
-  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
-  await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
-  await expect(goToListButton).toBeVisible()
+    await grantGuest()
+    const loginRes = await guestContext.request.post('/api/v1/session', {
+      data: { email: guestEmail, password: guestPassword },
+    })
+    expect(loginRes.ok()).toBe(true)
 
-  await goToListButton.click()
-  await expect(nav).toBeVisible()
-  await expect(channelListHeading).toBeVisible()
-  await expect(channelListHeading).toBeFocused()
-  await expect(goToListButton).not.toBeFocused()
+    const guestPage = await guestContext.newPage()
+    let subscribeAttempts = 0
+    await guestPage.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
+      const server = ws.connectToServer()
+      ws.onMessage(raw => {
+        const message = JSON.parse(String(raw)) as ClientMessage
+        if (message.type === 'subscribe' && message.channel_id === singleChannel.id) {
+          subscribeAttempts++
+        }
+        server.send(raw)
+      })
+    })
 
-  // Clicking the current Channel row directly triggers one retry and recovers from C9
-  await targetChannelButton.click()
-  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
-  await expect(timeline.getByRole('alert')).toHaveCount(0)
+    const nav = guestPage.getByRole('navigation', { name: 'チャンネル' })
+    const channelNavById = guestPage.locator('#channel-content')
+    const channelListHeading = guestPage.locator('#channel-list-heading')
+    const singleChannelButton = channelNavById.locator('.channel-list button')
+    const timeline = guestPage.getByRole('region', { name: 'タイムライン' })
+    const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
+    const goToListButton = timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })
+    const c9Alert = timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })
 
-  // 2. Tablet drawer (768px): Channel column starts hidden; チャンネル一覧へ opens the drawer and focuses the チャンネル heading
-  clientSocket!.send(JSON.stringify(refusal))
-  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
-  await page.setViewportSize({ width: 768, height: 800 })
-  await expect(nav).toBeHidden()
-  await expect(channelListHeading).toBeHidden()
-  await goToListButton.click()
-  await expect(nav).toBeVisible()
-  await expect(channelListHeading).toBeVisible()
-  await expect(channelListHeading).toBeFocused()
+    for (const width of [1280, 768, 375] as const) {
+      await guestPage.setViewportSize({ width, height: 800 })
+      await guestPage.goto(`/o/${orgId}/c/${singleChannel.id}`)
+      await expect(guestPage.getByText('リアルタイム接続済み')).toBeVisible()
+      await expect(composer).toBeEnabled()
 
-  // 3. Phone (375px): enter the Channel view level, trigger C9, and verify チャンネル一覧へ shows the Channel list and focuses the チャンネル heading
-  await page.setViewportSize({ width: 375, height: 800 })
-  await nav.getByRole('button', { name: other.name }).click()
-  await expect(page.getByRole('heading', { name: other.name })).toBeVisible()
-  await page.getByRole('button', { name: 'チャンネル一覧へ戻る' }).click()
-  await targetChannelButton.click()
-  await expect(page.getByRole('heading', { name: target.name })).toBeVisible()
-  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
-  await expect(nav).toBeHidden()
-  await expect(channelListHeading).toBeHidden()
+      expect(await channelNavById.getAttribute('aria-labelledby')).toBe('channel-list-heading')
+      expect(await channelNavById.getAttribute('aria-label')).toBeNull()
+      await expect(singleChannelButton).toHaveCount(1)
 
-  clientSocket!.send(JSON.stringify(refusal))
-  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
-  await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
+      if (width === 1280) {
+        await expect(nav).toBeVisible()
+        await expect(channelListHeading).toBeVisible()
+      } else {
+        await expect(nav).toBeHidden()
+        await expect(channelListHeading).toBeHidden()
+      }
 
-  await goToListButton.click()
-  await expect(nav).toBeVisible()
-  await expect(timeline).toBeHidden()
-  await expect(channelListHeading).toBeVisible()
-  await expect(channelListHeading).toBeFocused()
+      const initialHistoryLen = await guestPage.evaluate(() => history.length)
+
+      // Revoke Guest grant: real server sends channel_access_lost -> C9 terminal state
+      await revokeGuest()
+      await expect(c9Alert).toBeVisible()
+      await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
+      await expect(goToListButton).toBeVisible()
+      await expect(composer).toBeDisabled()
+
+      // Visibility guard: while the heading is hidden from assistive tech (aria-hidden), チャンネル一覧へ must never focus it
+      await channelListHeading.evaluate(el => {
+        el.setAttribute('aria-hidden', 'true')
+      })
+      await goToListButton.click()
+      await expect(channelListHeading).toHaveAttribute('aria-hidden', 'true')
+      await expect(channelListHeading).not.toBeFocused()
+      await channelListHeading.evaluate(el => {
+        el.removeAttribute('aria-hidden')
+      })
+      if (width === 768) {
+        await guestPage.keyboard.press('Escape')
+        await expect(nav).toBeHidden()
+      } else if (width === 375) {
+        await expect(guestPage).toHaveURL(`/o/${orgId}`)
+        expect(await guestPage.evaluate(() => history.length)).toBe(initialHistoryLen)
+        // Return to the C9 Channel view on phone to exercise the visible heading path
+        const beforeViewReturn = subscribeAttempts
+        await singleChannelButton.click()
+        await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+        await expect.poll(() => subscribeAttempts).toBe(beforeViewReturn + 1)
+        await expect(c9Alert).toBeVisible()
+        await expect(nav).toBeHidden()
+      }
+
+      const lenBeforeList = await guestPage.evaluate(() => history.length)
+      await goToListButton.click()
+      await expect(nav).toBeVisible()
+      await expect(nav.locator('.channel-list button')).toHaveCount(1)
+      await expect(channelListHeading).toBeVisible()
+      await expect(channelListHeading).toBeFocused()
+      expect(await guestPage.evaluate(() => history.length)).toBe(lenBeforeList)
+
+      if (width < 600) {
+        await expect(guestPage).toHaveURL(`/o/${orgId}`)
+        await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+        await expect(timeline).toBeHidden()
+      } else {
+        await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+        await expect(guestPage.locator('.workspace')).toHaveAttribute(
+          'data-drawer-open',
+          width < 960 ? 'true' : 'false',
+        )
+      }
+
+      // Reselecting while still denied tries once and does not loop
+      const beforeDeniedReselect = subscribeAttempts
+      await singleChannelButton.click()
+      await expect.poll(() => subscribeAttempts).toBe(beforeDeniedReselect + 1)
+      await guestPage.waitForTimeout(300)
+      expect(subscribeAttempts).toBe(beforeDeniedReselect + 1)
+      await expect(c9Alert).toBeVisible()
+
+      if (width === 768) {
+        await expect(guestPage.locator('.workspace')).toHaveAttribute('data-drawer-open', 'false')
+        await goToListButton.click()
+        await expect(channelListHeading).toBeFocused()
+      } else if (width === 375) {
+        await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+        await goToListButton.click()
+        await expect(guestPage).toHaveURL(`/o/${orgId}`)
+        await expect(channelListHeading).toBeFocused()
+      }
+
+      // Re-granting does not auto-retry C9; reselecting the same single Channel recovers with one retry
+      await grantGuest()
+      await guestPage.waitForTimeout(300)
+      expect(subscribeAttempts).toBe(beforeDeniedReselect + 1)
+      if (width >= 600) {
+        await expect(composer).toBeDisabled()
+      } else {
+        await expect(timeline).toBeHidden()
+      }
+
+      const lenBeforeRecover = await guestPage.evaluate(() => history.length)
+      await singleChannelButton.click()
+      await expect.poll(() => subscribeAttempts).toBe(beforeDeniedReselect + 2)
+      await expect(guestPage.getByText('リアルタイム接続済み')).toBeVisible()
+      await expect(c9Alert).toHaveCount(0)
+      await expect(composer).toBeEnabled()
+      await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+      expect(await guestPage.evaluate(() => history.length)).toBe(
+        width < 600 ? lenBeforeRecover + 1 : lenBeforeRecover,
+      )
+
+      // Reselecting while ready adds neither a retry nor a History entry
+      if (width === 768) {
+        await guestPage.getByRole('button', { name: 'チャンネル一覧', exact: true }).click()
+        await expect(nav).toBeVisible()
+      }
+      if (width >= 600) {
+        const readyLen = await guestPage.evaluate(() => history.length)
+        await singleChannelButton.click()
+        await guestPage.waitForTimeout(200)
+        expect(subscribeAttempts).toBe(beforeDeniedReselect + 2)
+        expect(await guestPage.evaluate(() => history.length)).toBe(readyLen)
+      }
+    }
+    await guestPage.goto('about:blank')
+  } finally {
+    await guestContext.close()
+  }
 })
 
 test('confirms before replacing a non-empty Composer draft on 編集して送り直す (置き換える / キャンセル)', async ({

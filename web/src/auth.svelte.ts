@@ -1,5 +1,9 @@
+import { navigationTargetsAdapter } from './navigation-targets.svelte'
+import { createDraftStore, type DraftStore } from './drafts'
+import { parseNavigation } from './navigation-url'
 import { errorMessage, restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
 import { getOrganizationMe, isOrganizationUnavailable, type Identity, type AcceptInviteRequest } from './api'
+import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createMembers } from './members'
@@ -7,7 +11,7 @@ import { membersAdapter, type inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { channels: ChannelsAdapter; sync: SyncAdapter; close(): void }
+export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -15,14 +19,14 @@ export type AuthDeps = {
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void) => ReturnType<typeof membersAdapter>
-  openSession(selfId: string, onEnded: () => void, organizationId: string): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe,
   openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
-  openSession(selfId, onEnded, organizationId) {
-    const session = createSession({ selfId, onEnded, organizationId })
-    return { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), close: session.close }
+  openSession(selfId, onEnded, organizationId, drafts) {
+    const session = createSession({ selfId, onEnded, organizationId, sync: { drafts } })
+    return { navigationTargets: navigationTargetsAdapter(session.navigationTargets), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), channelMembers: session.channelMembers, close: session.close }
   },
 }
 const sessionEndedNotice = 'セッションが終了しました。もう一度ログインしてください。'
@@ -38,6 +42,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   let session: SessionModel | null = null
   let members = $state<ReturnType<typeof membersAdapter> | null>(null)
   let changes = $state(0)
+  const drafts = createDraftStore()
   let accountGeneration = 0
   let selectionGeneration = 0
 
@@ -68,7 +73,7 @@ export function createAuth(deps: AuthDeps = defaults) {
       return
     }
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id)
+    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope())
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
@@ -80,13 +85,16 @@ export function createAuth(deps: AuthDeps = defaults) {
   }
   async function show(next: AuthState) {
     closeOrganization()
+    drafts.clear()
     accountGeneration++
     selectedOrganizationId = ''
     organizationStatus = 'loading'
     error = ''
     view = next
-    if (next.screen === 'app' && next.identity.organizations[0]) {
-      await selectOrganization(next.identity.organizations[0].organization_id)
+    if (next.screen === 'app') {
+      const requested = typeof window !== 'undefined' ? parseNavigation(window.location.href)?.organizationId : null
+      const id = requested ?? next.identity.organizations[0]?.organization_id
+      if (id) await selectOrganization(id)
     }
   }
 
@@ -98,6 +106,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     get organizationStatus() { return session?.sync.unavailable ? 'unavailable' : organizationStatus },
     get session() { void changes; return session },
     selectOrganization,
+    hasUnsavedChanges: () => drafts.hasDrafts() || (session?.sync.hasUnsavedChanges() ?? false),
     async acceptInvitation(model: ReturnType<typeof inviteAcceptanceAdapter>, input: Omit<AcceptInviteRequest, 'token'>) {
       const account = accountGeneration
       const identity = await model.accept(input, () => ended(account))

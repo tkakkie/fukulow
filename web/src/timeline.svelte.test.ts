@@ -3,6 +3,7 @@ import { parse, type AST } from 'svelte/compiler'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
+import { createNavigation, type NavigationBrowser } from './navigation'
 import { createSession } from './session'
 import { syncAdapter } from './sync.svelte'
 import Timeline from './Timeline.svelte'
@@ -1171,7 +1172,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
   it('moves focus to the Channel list on チャンネル一覧へ across desktop, tablet drawer and phone widths', async () => {
     const net = fakeNetwork()
-    const rawSession = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
     const sessionModel = {
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
@@ -1179,22 +1180,59 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     }
     net.socket.onReady()
     net.pages.c1 = ok({ messages: [], has_more: false })
-    net.pages.c2 = ok({ messages: [], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'random')] }))
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 0)
     await settle()
 
-    // Put c1 into C9 unavailable state
+    // Put single Channel c1 into C9 unavailable state
     net.event({ type: 'error', channel_id: 'c1', code: 'channel_not_found' })
     await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const historyCalls: string[] = []
+    let onPopState = () => {}
+    const navigation = createNavigation({
+      location: {
+        get href() {
+          return href
+        },
+      },
+      history: {
+        get state() {
+          return historyState
+        },
+        pushState(state: unknown, _title: string, url: string) {
+          historyCalls.push(`push:${url}`)
+          historyState = state
+          href = url
+        },
+        replaceState(state: unknown, _title: string, url: string) {
+          historyCalls.push(`replace:${url}`)
+          historyState = state
+          href = url
+        },
+      },
+      get innerWidth() {
+        return testWin.innerWidth
+      },
+      addEventListener(_type: string, fn: () => void) {
+        onPopState = fn
+      },
+      removeEventListener() {
+        onPopState = () => {}
+      },
+    } as unknown as NavigationBrowser)
 
     const host = testDoc.createElement('div')
     testDoc.body.appendChild(host)
     const instance = mount(Workspace, {
       target: host as unknown as Element,
       props: {
+        navigation,
         session: sessionModel,
+        selectedOrganizationId: 'org-1',
       },
     })
     flushSync()
@@ -1204,56 +1242,124 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const workspaceEl = host.querySelector('.workspace')!
     const channelNav = host.querySelector('#channel-content')!
     const channelListHeading = channelNav.querySelector('#channel-list-heading')!
-    const goToListBtn = buttonsByText(host, 'チャンネル一覧へ')[0]
+    const goToListBtn = () => buttonsByText(host, 'チャンネル一覧へ')[0]
+    expect(channelNav.getAttribute('aria-labelledby')).toBe('channel-list-heading')
+    expect(channelNav.hasAttribute('aria-label')).toBe(false)
     expect(channelListHeading.tagName).toBe('H2')
     expect(channelListHeading.textContent.trim()).toBe('チャンネル')
     expect(channelListHeading.getAttribute('tabindex')).toBe('-1')
 
-    // 1. Desktop (1280px): drawer stays false, focus moves from banner button to the visible Channel list heading
+    // 1. Desktop (1280px): drawer stays false, URL/History stay untouched, focus moves to visible Channel list heading
     testWin.innerWidth = 1280
-    goToListBtn.click()
+    goToListBtn().click()
     flushSync()
     await tick()
     expect(workspaceEl.getAttribute('data-drawer-open')).toBe('false')
+    expect(href).toBe('/o/org-1/c/c1')
+    expect(historyCalls).toEqual([])
     expect(channelListHeading.isRenderedVisible()).toBe(true)
     expect(testDoc.activeElement).toBe(channelListHeading)
 
-    // 2. Tablet (768px): Channel column starts hidden; clicking チャンネル一覧へ opens drawer and focuses the heading once visible
+    // 2. Tablet (768px): Channel column starts hidden; popstate `list` never focuses hidden heading, while チャンネル一覧へ opens drawer and focuses it
     testWin.innerWidth = 768
     expect(channelListHeading.isRenderedVisible()).toBe(false)
-    goToListBtn.focus()
-    expect(testDoc.activeElement).toBe(goToListBtn)
-    goToListBtn.click()
+    const railChannelBtn = queryAll(host, 'button').find((b) => b.getAttribute('aria-label') === 'チャンネル一覧')!
+    railChannelBtn.focus()
+    expect(testDoc.activeElement).toBe(railChannelBtn)
+    href = '/o/org-1'
+    onPopState()
+    flushSync()
+    await tick()
+    expect(channelListHeading.isRenderedVisible()).toBe(false)
+    expect(testDoc.activeElement).toBe(railChannelBtn)
+    href = '/o/org-1/c/c1'
+    onPopState()
+    flushSync()
+    await tick()
+
+    goToListBtn().focus()
+    expect(testDoc.activeElement).toBe(goToListBtn())
+    goToListBtn().click()
     flushSync()
     await tick()
     expect(workspaceEl.getAttribute('data-drawer-open')).toBe('true')
+    expect(href).toBe('/o/org-1/c/c1')
+    expect(historyCalls).toEqual([])
     expect(channelListHeading.isRenderedVisible()).toBe(true)
     expect(testDoc.activeElement).toBe(channelListHeading)
 
-    // 3. Phone (375px): switches mobileLevel to 'channels' and focuses the visible Channel list heading
+    // 3. Phone (375px): チャンネル一覧へ replaces URL to /o/org-1, switches mobileLevel to 'channels', and focuses the visible Channel list heading
     testWin.innerWidth = 375
-    goToListBtn.focus()
-    expect(testDoc.activeElement).toBe(goToListBtn)
-    goToListBtn.click()
+    goToListBtn().focus()
+    expect(testDoc.activeElement).toBe(goToListBtn())
+    goToListBtn().click()
     flushSync()
     await tick()
     expect(workspaceEl.getAttribute('data-drawer-open')).toBe('false')
     expect(workspaceEl.getAttribute('data-mobile-level')).toBe('channels')
+    expect(href).toBe('/o/org-1')
+    expect(historyCalls).toEqual(['replace:/o/org-1'])
     expect(channelListHeading.isRenderedVisible()).toBe(true)
     expect(testDoc.activeElement).toBe(channelListHeading)
 
-    // 4. Visibility guard: if the heading is hidden, goToChannelList never moves focus to the hidden element
-    testWin.innerWidth = 1280
+    // Reselecting the single C9 Channel on phone pushes /o/org-1/c/c1 and retries once to recover
+    const subscribesBefore = net.subscribeCount('c1')
+    const singleChannelBtn = queryAll(channelNav, 'button').find((b) => b.textContent.includes('general'))!
+    singleChannelBtn.click()
+    flushSync()
+    await settle()
+    expect(href).toBe('/o/org-1/c/c1')
+    expect(historyCalls).toEqual(['replace:/o/org-1', 'push:/o/org-1/c/c1'])
+    expect(net.subscribeCount('c1')).toBe(subscribesBefore + 1)
+    net.subscribed('c1', 0)
+    await settle()
+    flushSync()
+    expect(workspaceEl.getAttribute('data-mobile-level')).toBe('view')
+    expect(buttonsByText(host, 'チャンネル一覧へ')).toHaveLength(0)
+
+    // Phone `list` intent (チャンネル一覧へ戻る) replaces URL and focuses the visible Channel list heading
+    const mobileBackBtn = queryAll(host, 'button').find((b) => b.getAttribute('aria-label') === 'チャンネル一覧へ戻る')!
+    mobileBackBtn.click()
+    flushSync()
+    await tick()
+    expect(href).toBe('/o/org-1')
+    expect(historyCalls).toEqual(['replace:/o/org-1', 'push:/o/org-1/c/c1', 'replace:/o/org-1'])
+    expect(workspaceEl.getAttribute('data-mobile-level')).toBe('channels')
+    expect(testDoc.activeElement).toBe(channelListHeading)
+
+    // 4. Visibility guard: if the heading is hidden, neither C9 チャンネル一覧へ nor phone `list` moves focus to it
+    singleChannelBtn.click()
+    flushSync()
+    await settle()
+    net.event({ type: 'error', channel_id: 'c1', code: 'channel_not_found' })
+    await settle()
+    flushSync()
+
     channelListHeading.hidden = true
-    goToListBtn.focus()
-    expect(testDoc.activeElement).toBe(goToListBtn)
-    goToListBtn.click()
+    testWin.innerWidth = 375
+    goToListBtn().focus()
+    expect(testDoc.activeElement).toBe(goToListBtn())
+    goToListBtn().click()
     flushSync()
     await tick()
     expect(channelListHeading.isRenderedVisible()).toBe(false)
-    expect(testDoc.activeElement).toBe(goToListBtn)
+    expect(testDoc.activeElement).not.toBe(channelListHeading)
+
+    href = '/o/org-1/c/c1'
+    onPopState()
+    flushSync()
+    await tick()
+    testWin.innerWidth = 1280
+    goToListBtn().focus()
+    expect(testDoc.activeElement).toBe(goToListBtn())
+    goToListBtn().click()
+    flushSync()
+    await tick()
+    expect(channelListHeading.isRenderedVisible()).toBe(false)
+    expect(testDoc.activeElement).toBe(goToListBtn())
     channelListHeading.hidden = false
 
+    navigation.destroy()
     await unmount(instance)
     sessionModel.close()
   })

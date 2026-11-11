@@ -104,6 +104,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         case 'message': socket.onEvent({ type: 'message', message: message(i.message, channel) }); break
         case 'subscribed': (e?.socket as RealtimeHandlers ?? socket).onEvent({ type: 'subscribed', channel_id: channel,
           caught_up_seq: i.caught_up_seq as number }); break
+        case 'channel_access_lost': socket.onEvent({ type: 'channel_access_lost', channel_id: channel }); break
         case 'error_event': socket.onEvent({ type: 'error', channel_id: channel, code: i.code as string }); break
         case 'history_result': resolve({ ok: true, data: { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
         case 'ack': resolve({ ok: true, data: message(i.message, channel) }); break

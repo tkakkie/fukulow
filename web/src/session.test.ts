@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createSession } from './session'
+import * as api from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 
 function open() {
@@ -141,6 +142,7 @@ it('ordinary history channel_not_found stays terminal for the Channel under C9',
 it('explicitly reselecting the only Channel in C9 triggers one retry attempt, recovers when allowed, and never loops', async () => {
   vi.useFakeTimers()
   const { net, session, onEnded } = open()
+  const watch = vi.spyOn(session.sync, 'watch')
   try {
     // 1. Single Channel enters C9 on initial history 404: no automatic retry or reload side-effect.
     net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
@@ -155,20 +157,24 @@ it('explicitly reselecting the only Channel in C9 triggers one retry attempt, re
     net.lists[1].resolve(ok({ channels: [channel('A')] }))
     await settle()
     expect(net.history).toHaveLength(1)
+    expect(watch).toHaveBeenCalledTimes(1)
 
     // Still denied on explicit reselect: tries once and returns to terminal unavailable with no loop.
     session.channels.select('A')
     await settle()
+    expect(watch).toHaveBeenCalledTimes(2)
     expect(net.history).toHaveLength(2)
     expect(session.sync.get().channels.A.state).toBe('unavailable')
     await vi.advanceTimersByTimeAsync(60_000)
     expect(net.history).toHaveLength(2)
     expect(vi.getTimerCount()).toBe(0)
+    expect(watch).toHaveBeenCalledTimes(2)
 
     // Server now allows access: explicit reselect tries once and recovers to ready.
     net.pages.A = ok({ messages: [record(100)], has_more: false })
     session.channels.select('A')
     await settle()
+    expect(watch).toHaveBeenCalledTimes(3)
     expect(net.history).toHaveLength(3)
     expect(controls(net)).toEqual(['subscribe:A'])
     net.subscribed('A', 100)
@@ -179,6 +185,7 @@ it('explicitly reselecting the only Channel in C9 triggers one retry attempt, re
     // Reselecting while ready is not a new watch attempt.
     session.channels.select('A')
     await settle()
+    expect(watch).toHaveBeenCalledTimes(3)
     expect(net.history).toHaveLength(3)
     expect(controls(net)).toEqual(['subscribe:A'])
 
@@ -194,6 +201,7 @@ it('explicitly reselecting the only Channel in C9 triggers one retry attempt, re
 
     session.channels.select('A')
     await settle()
+    expect(watch).toHaveBeenCalledTimes(4)
     expect(controls(net)).toEqual(['subscribe:A', 'unsubscribe:A', 'subscribe:A'])
     expect(net.history).toHaveLength(3)
     net.subscribed('A', 100)
@@ -203,9 +211,162 @@ it('explicitly reselecting the only Channel in C9 triggers one retry attempt, re
 
     await vi.advanceTimersByTimeAsync(60_000)
     expect(controls(net)).toEqual(['subscribe:A', 'unsubscribe:A', 'subscribe:A'])
+    expect(watch).toHaveBeenCalledTimes(4)
+    expect(vi.getTimerCount()).toBe(0)
     expect(onEnded).not.toHaveBeenCalled()
   } finally {
     session.close()
+    vi.useRealTimers()
+  }
+})
+
+it('a URL re-render with the same Channel hint does not retry C9', async () => {
+  const { net, session } = open()
+  try {
+    net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    const watch = vi.spyOn(session.sync, 'watch')
+    session.channels.selectHint('A')
+    await settle()
+    expect(watch).not.toHaveBeenCalled()
+    expect(net.history).toHaveLength(1)
+    expect(controls(net)).toEqual([])
+  } finally { session.close() }
+})
+
+it.each(['C10', 'close', '4001', '401'] as const)('an explicit C9 reselect after %s does not watch or retry', async end => {
+  vi.useFakeTimers()
+  const { net, session, onEnded } = open()
+  try {
+    net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    if (end === 'close') session.close()
+    else if (end === 'C10') net.socket.onClose(4003)
+    else {
+      // The Account Session owner closes its Organization controllers on session end.
+      onEnded.mockImplementation(() => session.close())
+      if (end === '4001') net.socket.onClose(4001)
+      else {
+        void session.channels.load()
+        net.lists[1].resolve({ ok: false, kind: 'http', status: 401 })
+      }
+      await settle()
+      expect(onEnded).toHaveBeenCalledOnce()
+    }
+    await settle()
+    const watch = vi.spyOn(session.sync, 'watch')
+    const requests = [net.history.length, net.sends.length, net.lists.length, net.sockets.length]
+    const sent = controls(net)
+    session.channels.select('A')
+    await settle()
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(watch).not.toHaveBeenCalled()
+    expect([net.history.length, net.sends.length, net.lists.length, net.sockets.length]).toEqual(requests)
+    expect(controls(net)).toEqual(sent)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally { session.close(); vi.useRealTimers() }
+})
+
+it('explicitly selecting the current C9 Channel reattempts it while another Organization stays ready', async () => {
+  const a = open(), b = open()
+  for (const c of [a, b]) {
+    c.net.pages.A = ok({ messages: [record(100)], has_more: false })
+    c.net.lists[0].resolve(ok({ channels: [channel('A')] })); await settle(); c.net.subscribed('A', 100)
+  }
+  a.net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+  await settle(); expect(a.session.sync.get().channels.A.state).toBe('unavailable')
+  expect(b.session.sync.get().channels.A.state).toBe('ready')
+  a.session.channels.select('A'); await settle()
+  expect(controls(a.net).filter(c => c === 'subscribe:A')).toHaveLength(2)
+  a.net.subscribed('A', 100); await settle(); expect(a.session.sync.get().channels.A.state).toBe('ready')
+  a.session.close(); b.session.close()
+})
+
+it('a Member panel created during C9 recovers on explicit Channel re-selection', async () => {
+  const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({
+    members: [{ id: 'me', name: '本人', role: 'admin' }],
+  }))
+  const { net, session } = open()
+  try {
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+
+    const panel = session.channelMembers('A')
+    expect(panel.get()).toMatchObject({ unavailable: true, loading: false })
+    await panel.load()
+    expect(list).not.toHaveBeenCalled()
+
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('ready')
+    expect(panel.get()).toMatchObject({ unavailable: false, loading: false,
+      members: [{ id: 'me', name: '本人', role: 'admin' }] })
+    expect(list).toHaveBeenCalledExactlyOnceWith('', 'A')
+  } finally {
+    session.close()
+    list.mockRestore()
+  }
+})
+
+it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without another watch until explicit selection', async status => {
+  vi.useFakeTimers()
+  const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue({ ok: false, kind: 'http', status })
+  const { net, session } = open()
+  const watch = vi.spyOn(session.sync, 'watch')
+  try {
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    session.sync.getTimeline('A').setDraft('失わない下書き')
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    const panel = session.channelMembers('A')
+
+    session.channels.select('A')
+    await settle()
+    expect(watch).toHaveBeenCalledTimes(2)
+    expect(list).toHaveBeenCalledOnce()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    expect(panel.get().unavailable).toBe(true)
+    // The denied attempt's subscription handoff may arrive after the Member response.
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    session.channels.selectHint('A')
+    void session.channels.load()
+    net.lists[1].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(watch).toHaveBeenCalledTimes(2)
+    expect(list).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(session.sync.getTimeline('A').get().draft).toBe('失わない下書き')
+
+    list.mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin' }] }))
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(watch).toHaveBeenCalledTimes(3)
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(session.sync.get().channels.A.state).toBe('ready')
+    expect(panel.get().unavailable).toBe(false)
+    expect(session.sync.getTimeline('A').get().draft).toBe('失わない下書き')
+  } finally {
+    session.close()
+    list.mockRestore()
     vi.useRealTimers()
   }
 })

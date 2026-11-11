@@ -84,6 +84,11 @@ impl AppState {
 }
 
 pub fn app(state: AppState) -> Router {
+    state
+        .session_changes
+        .set_subscription_recheck(std::sync::Arc::new(
+            state.message_delivery.channel_access.clone(),
+        ));
     let cookie_secure = state.cookie_secure;
     Router::new()
         .route("/api/v1/health", get(health))
@@ -104,7 +109,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/api/v1/orgs/{org}/members/{id}/role",
-            axum::routing::patch(auth::members::change_role),
+            axum::routing::patch(auth::members::change_role::<channels::members::RoleChangeGuard>),
         )
         .route(
             "/api/v1/orgs/{org}/invites",
@@ -117,6 +122,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/orgs/{org}/channels",
             get(messages::list_channels).post(channels::create_channel),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/members",
+            get(channels::members::list).post(channels::members::add),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/members/{member_id}",
+            axum::routing::delete(channels::members::remove),
         )
         .route(
             "/api/v1/orgs/{org}/channels/{id}/messages",

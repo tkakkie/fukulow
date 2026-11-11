@@ -307,7 +307,7 @@ async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_contr
     let app = crate::app(AppState::for_test(pool.clone()));
     // A second Owner keeps the role-change positive control independent of last-Owner protection.
     account(&pool, org, Role::Owner).await;
-    for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+    for role in crate::auth::ALL_ROLES {
         let (_, _, _, token) = account(&pool, org, role).await;
         let me = body(
             req(
@@ -344,7 +344,7 @@ async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_contr
                 .iter()
                 .all(|m| m["id"] != foreign_member.to_string() && m.get("email").is_none())
         );
-        for target_role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+        for target_role in crate::auth::ALL_ROLES {
             let r = req(
                 &app,
                 "POST",
@@ -734,7 +734,7 @@ async fn every_role_rest_channel_denials_and_grants_have_positive_controls(pool:
             message["topic_id"].as_str().unwrap().to_owned(),
         ));
     }
-    for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+    for role in crate::auth::ALL_ROLES {
         let (_, member, _, token) = account(&pool, org, role).await;
         for (channel, visibility, topic) in &channels {
             for grant in [false, true] {
@@ -947,7 +947,7 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
         .await
         .unwrap_err();
         assert_eq!(error.into_response().status(), status);
-        let error = members::change_role(
+        let error = members::change_role::<ActorRecheckGuard>(
             State(state.clone()),
             role_auth,
             Ok(Path((org, target))),
@@ -965,6 +965,24 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
     .await
     .unwrap();
     assert_eq!(denied, 0);
+}
+
+// This direct-handler test isolates auth reauthorization. HTTP tests exercise
+// the production Channel guard supplied by the composition root.
+struct ActorRecheckGuard;
+impl members::RoleChangeGuard for ActorRecheckGuard {
+    async fn lock(_: &mut sqlx::PgConnection, _: Uuid, _: Uuid) -> Result<Self, ApiError> {
+        Ok(Self)
+    }
+    async fn check(
+        &self,
+        _: &mut sqlx::PgConnection,
+        _: Uuid,
+        _: Uuid,
+        _: Role,
+    ) -> Result<(), ApiError> {
+        panic!("unauthorized actor reached Role-change protection")
+    }
 }
 
 #[sqlx::test]

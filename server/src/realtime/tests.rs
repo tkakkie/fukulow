@@ -858,6 +858,7 @@ async fn live_delivery_rechecks_private_membership_after_subscription(pool: PgPo
         .bind(f.organization).bind(private).bind(recipient).execute(&pool).await.unwrap();
     let after = post(&f, private).await;
     assert_eq!(event(&mut owner).await["message"], after);
+    access_loss::access_lost(&mut recipient_socket, private).await;
     silent(&mut recipient_socket).await;
     subscribe(&mut recipient_socket, private, 0).await;
     denied(&mut recipient_socket, private).await;
@@ -1035,3 +1036,5 @@ mod topics;
 mod roles;
 
 mod replies;
+
+pub(super) mod access_loss;

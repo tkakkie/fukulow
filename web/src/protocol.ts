@@ -236,6 +236,10 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     if (c.subscription && state.connected) effects.push({ type: 'unsubscribe', channel: id })
     c.subscription = undefined
     c.state = 'unavailable'
+    c.pending = c.pending.map(p => ({ ...p, state: 'failed' }))
+    for (const [key, request] of Object.entries(state.requests)) {
+      if (request.channel === id && request.type === 'send') state.requests[Number(key)] = { ...request, stale: true }
+    }
   }
 
   if (input.type === 'session_start' || input.type === 'session_replaced') {
@@ -344,6 +348,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (e.type !== 'message' && input.subscription !== undefined && input.subscription !== c.subscription.id) break
       c = channel(id)
       if (e.type === 'message') { merge(id, [e.message], 'stream'); reconcile(id) }
+      else if (e.type === 'channel_access_lost') unavailable(id)
       else if (e.type === 'error') {
         if (e.code === 'channel_not_found' || e.code === 'subscription_limit') unavailable(id)
       } else if (e.type === 'subscribed') {

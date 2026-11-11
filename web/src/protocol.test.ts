@@ -50,6 +50,7 @@ it('channel_unavailable fences history, refuses sends and retries, and recovers 
   const history = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
   expect(d.feed({ type: 'channel_unavailable', channel: 'A' })).toContainEqual({ type: 'unsubscribe', channel: 'A' })
   expect(d.get().channels.A.state).toBe('unavailable')
+  expect(d.get().channels.A.pending[0].state).toBe('failed')
   d.feed({ type: 'history_result', request: history, page: { messages: [record(99)], has_more: false } })
   expect(d.get().channels.A.messages).toEqual([record(100)])
   expect(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c2', body: 'refused' })).toEqual([])
@@ -64,9 +65,7 @@ it('channel_unavailable fences history, refuses sends and retries, and recovers 
   expect(d.get().channels.A.state).toBe('loading')
   d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } })
   expect(d.get().channels.A.state).toBe('ready')
-  expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toContainEqual(
-    expect.objectContaining({ type: 'send', channel: 'A', client_message_id: 'c1' }),
-  )
+  expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toEqual([])
 })
 
 it('projection settlement matches Channel and sender without changing the window, cursor, evidence or effects', () => {
@@ -576,4 +575,25 @@ it('step reports only added, modified and removed Channel IDs in changedChannels
   expect(step(updated.state, { type: 'stop' }).changedChannels).toEqual(new Set(['A', 'B']))
   expect(step(updated.state, { type: 'session_replaced', selfId: 'other' }).changedChannels)
     .toEqual(new Set(['A', 'B']))
+})
+
+it('access loss fails sending unknown and refused sends only in that Channel and leaves only discard', () => {
+  const d = boot()
+  for (const key of ['sending', 'unknown', 'refused']) {
+    const request = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: key, body: key }), 'send')
+    if (key !== 'sending') d.feed({ type: 'send_failed', request, status: key === 'unknown' ? 'network' : 400 })
+  }
+  d.feed({ type: 'watch', channel: 'B' })
+  d.feed({ type: 'user_send', channel: 'B', clientMessageId: 'other', body: 'other' })
+  const other = d.get().channels.B
+  d.feed({ type: 'event', connection: d.connection, event: { type: 'channel_access_lost', channel_id: 'A' } })
+  expect(d.get().channels.A.pending.map(p => [p.body, p.state])).toEqual([
+    ['sending', 'failed'], ['unknown', 'failed'], ['refused', 'failed'],
+  ])
+  expect(d.get().channels.B).toBe(other)
+  for (const key of ['sending', 'unknown', 'refused']) {
+    expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: key })).toEqual([])
+    d.feed({ type: 'user_discard', channel: 'A', clientMessageId: key })
+  }
+  expect(d.get().channels.A.pending).toEqual([])
 })

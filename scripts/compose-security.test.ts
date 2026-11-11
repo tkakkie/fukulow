@@ -1,11 +1,48 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
 const args = (profile: string) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', '--profile', profile, 'config', '--format', 'json']
+
+function checkBaseImages(dockerfile: string) {
+  const bases = dockerfile.matchAll(/^FROM (\S+)/gm)
+  for (const [, image] of bases) assert.match(image, /^\w+:[\w.-]+@sha256:[a-f0-9]{64}$/, 'base image must pin tag and digest')
+}
+
+function checkImagesAndLogs(services: Record<string, { build?: unknown, image: string, logging: unknown }>) {
+  const builtImages = new Set(Object.values(services).filter(service => service.build).map(service => service.image))
+  for (const [name, service] of Object.entries(services)) {
+    if (!builtImages.has(service.image)) assert.match(service.image, /^[\w/.-]+:[\w.-]+@sha256:[a-f0-9]{64}$/, `${name} must pin tag and digest`)
+    assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } }, `${name} must rotate logs`)
+  }
+}
+
+test('all base images and external Compose images are pinned; every deployment/load service rotates logs', () => {
+  checkBaseImages(readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8'))
+  const loadEnv = { ...env, LOAD_PROJECT: 'config-test-only', LOAD_PORT: '18080',
+    LOAD_DB_PASSWORD: 'load-db-test-only', LOAD_APP_PASSWORD: 'load-app-test-only', LOAD_SETUP_TOKEN: 'load-setup-test-only' }
+  for (const file of ['compose.yml', 'load/compose.yml']) {
+    for (const profileArgs of file === 'compose.yml' ? [['--profile', 'caddy'], ['--profile', 'nginx']] : [[]]) {
+      const config = JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', '-f', file,
+        ...profileArgs, 'config', '--format', 'json'], { cwd, env: loadEnv, encoding: 'utf8' }))
+      checkImagesAndLogs(config.services)
+      for (const mutation of ['pin', 'rotation']) {
+        const broken = structuredClone(config.services)
+        if (mutation === 'pin') broken.db.image = broken.db.image.split('@')[0]
+        else delete broken.db.logging.options['max-file']
+        assert.throws(() => checkImagesAndLogs(broken), mutation === 'pin' ? /must pin/ : /must rotate/)
+      }
+    }
+  }
+})
+
+test('base image check rejects an unpinned Dockerfile base', () => {
+  assert.throws(() => checkBaseImages('FROM debian:bookworm-slim\n'), /base image must pin tag and digest/)
+})
 
 test('upgrade rehearsal pins both old images for the post-merge Compose shape', () => {
   // HEAD is available even in CI's shallow checkout and has the post-merge shape.

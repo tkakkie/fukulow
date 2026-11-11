@@ -1,4 +1,6 @@
+import { createNavigationTargets } from './navigation-targets'
 import * as api from './api'
+import { createChannelMembers } from './channel-members'
 import { createChannels, type ChannelsApi } from './channels'
 import { createSync, type SyncOptions } from './sync'
 
@@ -38,6 +40,11 @@ export function createSession(options: SessionOptions) {
     checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
     onSessionEnded: notifyEnded,
   })
+  const navigationTargets = createNavigationTargets({
+    topic: (channel, topic) => observe(api.getTopicSummary(organizationId, channel, topic)),
+    reply: (channel, message) => observe(api.listReplyChain(organizationId, channel, message, { limit: 1 })),
+    channelUnavailable: channel => { void sync.channelUnavailable(channel) },
+  })
   let watched: string | null = null
   const channels = createChannels(
     {
@@ -60,6 +67,16 @@ export function createSession(options: SessionOptions) {
   const stopSync = sync.subscribe(() => {
     if (sync.get().organization === 'unavailable') terminate()
   })
+  const memberControllers = new Map<string, ReturnType<typeof createChannelMembers>>()
+  const memberAvailability = new Map<string, boolean>()
+  const stopMemberAccess = sync.subscribe(() => {
+    for (const [id, controller] of memberControllers) {
+      const lost = sync.get().organization === 'unavailable' || sync.get().channels[id]?.state === 'unavailable'
+      if (lost) controller.unavailable()
+      else if (memberAvailability.get(id)) controller.reselect()
+      memberAvailability.set(id, lost)
+    }
+  })
   const stopFollowing = channels.subscribe(() => {
     const id = channels.get().selectedId
     if (id === watched) return
@@ -70,10 +87,25 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, channels,
+    sync, channels, navigationTargets,
+    channelMembers(channel: string) {
+      memberControllers.get(channel)?.close()
+      const controller = createChannelMembers(organizationId, channel, r => {
+        if (!r.ok && r.kind === 'http' && r.status === 401) notifyEnded()
+        else if (!closed && api.isOrganizationUnavailable(r)) terminate()
+      }, api, () => { void sync.channelUnavailable(channel) })
+      memberControllers.set(channel, controller)
+      const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
+      memberAvailability.set(channel, lost)
+      if (lost) controller.unavailable()
+      else void controller.load()
+      return controller
+    },
     close() {
       closed = true
-      stopFollowing(); stopSync()
+      navigationTargets.close()
+      stopFollowing(); stopSync(); stopMemberAccess()
+      memberControllers.forEach(c => c.close()); memberControllers.clear()
       channels.close()
       void sync.close()
     },

@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
-use rand::{TryRngCore, rngs::OsRng};
+use rand::{TryRng, rngs::SysRng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -25,7 +25,7 @@ use password::{check_password, hash_password};
 mod session;
 mod throttle;
 pub use cleanup::SessionCleanup;
-pub use session::SessionChanges;
+pub use session::{SessionChanges, SubscriptionRecheck, SubscriptionScope};
 pub use throttle::SignInThrottle;
 
 // Bound Argon2 memory/CPU work independently from Tokio blocking-thread capacity.
@@ -41,7 +41,11 @@ pub struct ErrorBody {
 }
 
 #[derive(Debug)]
-pub struct ApiError(StatusCode, &'static str, Option<std::time::Duration>);
+pub struct ApiError(
+    pub(crate) StatusCode,
+    pub(crate) &'static str,
+    pub(crate) Option<std::time::Duration>,
+);
 impl ApiError {
     pub(crate) fn organization_unavailable() -> Self {
         Self(StatusCode::NOT_FOUND, "organization_unavailable", None)
@@ -54,7 +58,7 @@ impl ApiError {
     fn unauthorized() -> Self {
         Self(StatusCode::UNAUTHORIZED, "invalid credentials", None)
     }
-    fn bad_request() -> Self {
+    pub(crate) fn bad_request() -> Self {
         Self(StatusCode::BAD_REQUEST, "invalid input", None)
     }
     fn throttled(retry: std::time::Duration) -> Self {
@@ -132,6 +136,8 @@ pub enum Role {
     Member,
     Guest,
 }
+
+pub(crate) const ALL_ROLES: [Role; 4] = [Role::Owner, Role::Admin, Role::Member, Role::Guest];
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Organization {
@@ -505,7 +511,7 @@ async fn sign_in_with_entropy(
 }
 
 fn fill_random(bytes: &mut [u8]) -> Result<(), ApiError> {
-    OsRng
+    SysRng
         .try_fill_bytes(bytes)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))
 }
@@ -701,12 +707,27 @@ pub async fn deactivate_member(
         let mut tx = state.pool.begin().await?;
         sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
             .bind(organization).fetch_optional(&mut *tx).await?;
-        let revision: Option<i64> = sqlx::query_scalar("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING membership_revision")
+        let revision: Option<(Uuid, i64)> = sqlx::query_as("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING id, membership_revision")
             .bind(organization).bind(account).fetch_optional(&mut *tx).await?;
         tx.commit().await?;
-        if let Some(revision) = revision { state.session_changes.membership_revoked(organization,account,revision); }
+        if let Some((member, revision)) = revision {
+            state.session_changes.membership_revoked(organization,account,revision);
+            state.session_changes.recheck_subscriptions(&state.pool, SubscriptionScope::Member(organization, member)).await;
+        }
         Ok(())
     }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
+}
+
+// Cross-module trigger tests mutate Membership through its owning module.
+#[cfg(test)]
+pub(crate) async fn set_member_active_for_test(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: Uuid,
+    active: bool,
+) {
+    sqlx::query("UPDATE users SET deactivated_at=CASE WHEN $3 THEN NULL ELSE now() END WHERE organization_id=$1 AND id=$2")
+        .bind(organization).bind(member).bind(active).execute(pool).await.unwrap();
 }
 
 fn credential_hash(headers: &HeaderMap, secure: bool) -> Result<Vec<u8>, ApiError> {

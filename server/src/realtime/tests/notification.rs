@@ -524,6 +524,7 @@ async fn notification_rechecks_public_visibility_after_http_response(pool: PgPoo
     .unwrap();
     gate.release.add_permits(1);
     f.state.message_delivery.flush().await;
+    access_loss::access_lost(&mut socket, f.channel).await;
     // An authorized public Channel supplies a FIFO silence barrier after fan-out finishes.
     let barrier = channel(&pool, f.organization, f.member, false).await;
     subscribe(&mut socket, barrier, 0).await;

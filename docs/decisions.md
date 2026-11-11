@@ -5,6 +5,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 ## Product, stack and delivery
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.
 - Reverse proxy is optional: the app speaks plain HTTP; Caddy (default) or nginx via compose profile. Reason: Caddy gave trouble in ribbitto and may limit performance.
+- #194 C: use UID/GID 10001 and root-owned runtime files; the app needs only network/DB access. Pin external images by tag + multi-platform digest for reproducibility; weekly Docker/Compose Dependabot updates retain reviewed upgrades. Bound local logs to 10m x 3 per container.
+- #194 C: no init wrapper or STOPSIGNAL override: the server spawns no child processes to reap, and #195 registers SIGTERM/SIGINT before serving and drains work. Exec-form CMD keeps the binary as PID 1; SIGTERM is already Docker's default.
 - OpenAPI generated from Rust, committed, diff-checked in CI. Reason: future native clients (Kotlin).
 - `organization_id` on every table from day one. Reason: multi-organization later without retrofit.
 - Public repo. Reason: free CI minutes.
@@ -83,7 +85,14 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
 
 ## Channels and Messages
-- Private Channel creation adds the creator atomically; composite FKs bind grants to the same Organization. Listing uses batched visibility/Unread queries in one snapshot, `no-store` (#22, #142).
+- #149 Owner/Admin with access add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
+- #231 rejects Role demotion with 409 last_channel_manager if any private Channel loses its last usable manager; all Channels change atomically and no Channel details leak. Reuse #149 locks/check via auth's injected guard to preserve module direction. Already unmanaged Channels stay allowed.
+- #149 grant_id is a durable UUID per grant lifetime; re-grant/renewal cannot revive an old subscription after a lost fast signal. Public non-Guests keep continuous access when a redundant grant is removed.
+- #149 fast subscription rechecks/failures target Organization+Channel for grants or Organization+Member for Role/activation; no-op grants skip them. Only the 30 s fallback scans all, avoiding cross-tenant work/failure propagation.
+- #149 subscriptions follow the current access path: public non-Guests ignore redundant grants; a Role change requiring a grant captures its lifetime. Reason: continuous access must survive promotion and redundant removal.
+- #149 API mutations lock Organization, Channels (ascending id), Members, grants, then #142 Unread serialization/shared #135. Sends lock Member/grant through COMMIT before exclusive #135; mark-read releases its watermark barrier before Member/grant/position locks.
+
+- Private Channel creation takes Organization NO KEY UPDATE before creator Member and new rows, so #231's Channel set stays stable; creator grants stay atomic and Organization-scoped. Listing batches visibility/Unread in one snapshot, `no-store` (#22, #142).
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
 - Channel names are unique per Organization across visibility, `lower(name COLLATE "C")` (ASCII folds, non-ASCII as-is); duplicates 409. Existing duplicates fail the migration for the operator to resolve; no auto-rename (#51).
 - Accepted (#51): a 409 on creation lets an Organization Member infer a private Channel name exists (names only, no members or messages).
@@ -150,6 +159,9 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
 
 ## Sessions and revocation
+- #149 channel_access_lost carries only channel_id, keeps the socket open and retires the subscription. The same fallback worker checks captured grant lifetimes under its 35 s bound; failed/overdue passes fail closed. No retained notification state.
+- #149 observed loss fences queued/replay frames and subscribed at first socket poll under the status read guard. Only an already handed-off frame may finish; REST authorization/data snapshots established before COMMIT may finish without later Messages.
+
 - Two independent revocations: ending an Account Session signals its token hash in all Organizations (4001); Membership loss signals (organization_id, account_id) with its new revision (4003), leaving other Organizations alone (#146).
 - Revocation boundary: history/replay deny once revocation commits; live delivery starts no new protected frame after the check sees loss, but frames already in flight may arrive. Commit never retracts an in-flight frame (#146, #149).
 - Fallback worker: one process-local worker checks all distinct session keys every 30 s in 1,000-key batches under one 5 s deadline; a lost signal is detected within 35 s. Only a fully successful pass revokes; any failure closes the snapshot with 1011 (#57 PR C, #157).
@@ -199,6 +211,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #200 layout A2 (rail, チャンネル column with トピック accordion, main card, closable right panel), picked by the maintainer from three mockups; surfaces split by tone and radius, not rules. Details in `docs/ui.md`.
 - #200 navigation uses the History API and the existing SPA fallback, with no router dependency: one entry per view or panel layer; in-app back/close controls replace instead of popping, so they never change main or leave the app. URLs are hints; the API decides access.
 - #200 drafts live in controller memory per target for the Account Session, never in web storage; theme and text size are the only planned `ui-settings.ts` keys (enum values, per device, #48).
+- #242 draft-store epochs fence ended Account Sessions; target revisions protect edits across Organization controllers. Observe detached sends only to restore definite refusals after a switch: the old failed Message UI is gone; ACKs and unknown outcomes never restore text.
 - #200 skips `@axe-core/playwright` and checks WCAG 2.2 AA token contrast, token-only component styles and single polite status-region structure in vitest (`ui-tokens.test.ts`), avoiding a new dependency while running in fast CI.
 - Sprint 1 web acceptance: `npm --prefix web run e2e:compose` against `docker compose --profile caddy up` from an empty database (#19).
 
