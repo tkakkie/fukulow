@@ -181,7 +181,7 @@
   })
 
   function handleSelectChannel(id: string) {
-    nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
+    if (nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id }) === false) channels.select(id)
     drawerOpen = false
   }
 

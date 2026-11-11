@@ -167,3 +167,127 @@ test('phone direct-link parent buttons replace without leaving; real Back can le
   await page.goBack()
   await expect(page).toHaveURL(/\/api\/v1\/health$/)
 })
+
+test('reselecting the current Channel leaves history unchanged and Back leaves for the preceding page', async ({ page }) => {
+  await page.goto('/api/v1/health')
+  await page.goto(`/o/${org}/c/${first}?panel=overview`)
+  await expect(composer(page)).toBeEnabled()
+  const length = await page.evaluate(() => history.length)
+  await page.locator('.channel-list button').filter({ hasText: firstName }).last().click()
+  await expect(composer(page)).toBeFocused()
+  await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=overview`)
+  expect(await page.evaluate(() => history.length)).toBe(length)
+  await page.goBack()
+  await expect(page).toHaveURL(/\/api\/v1\/health$/)
+})
+
+test('C9 reselect retries once per click without History writes or automatic retries', async ({ page }) => {
+  let subscriptions = 0
+  let allow = false
+  await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
+    ws.onMessage(raw => {
+      const message = JSON.parse(String(raw)) as import('../src/api-schema.d.ts').ClientMessage
+      if (message.type !== 'subscribe' || message.channel_id !== first) return
+      subscriptions++
+      const response: import('../src/api-schema.d.ts').ServerEvent = allow
+        ? { type: 'subscribed', channel_id: first, caught_up_seq: 0 }
+        : { type: 'error', channel_id: first, code: 'channel_not_found' }
+      ws.send(JSON.stringify(response))
+    })
+  })
+  await page.goto(`/o/${org}/c/${first}`)
+  const unavailable = page.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません。' })
+  await expect(unavailable).toBeVisible()
+  await expect(composer(page)).toBeDisabled()
+  const length = await page.evaluate(() => history.length)
+  const initial = subscriptions
+  const select = page.locator('.channel-list button').filter({ hasText: firstName }).last()
+  await select.click()
+  await expect.poll(() => subscriptions).toBe(initial + 1)
+  await expect(unavailable).toBeVisible()
+  await page.clock.install()
+  await page.clock.fastForward(60_000)
+  expect(subscriptions).toBe(initial + 1)
+  allow = true
+  await select.click()
+  await expect.poll(() => subscriptions).toBe(initial + 2)
+  await expect(unavailable).toHaveCount(0)
+  await expect(composer(page)).toBeEnabled()
+  await select.click()
+  await page.clock.fastForward(60_000)
+  expect(subscriptions).toBe(initial + 2)
+  expect(await page.evaluate(() => history.length)).toBe(length)
+})
+
+test('C9 Channel list action preserves desktop and tablet state and replaces the phone URL with list focus', async ({ page }) => {
+  await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
+    ws.onMessage(raw => {
+      const message = JSON.parse(String(raw)) as import('../src/api-schema.d.ts').ClientMessage
+      if (message.type === 'subscribe') {
+        const response: import('../src/api-schema.d.ts').ServerEvent = { type: 'error', channel_id: message.channel_id, code: 'channel_not_found' }
+        ws.send(JSON.stringify(response))
+      }
+    })
+  })
+  for (const width of [1280, 960, 800, 600, 375]) {
+    await page.setViewportSize({ width, height: 800 })
+    await page.goto(`/o/${org}/c/${first}`)
+    const action = page.getByRole('button', { name: 'チャンネル一覧へ', exact: true })
+    await expect(action).toBeVisible()
+    const length = await page.evaluate(() => history.length)
+    await action.click()
+    await expect(page.locator('#channel-content')).toBeVisible()
+    if (width < 600) {
+      await expect(page).toHaveURL(`/o/${org}`)
+      await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+      await expect(page.locator('#channel-content')).toBeFocused()
+      await expect(page.locator('#main-content')).toBeHidden()
+    } else {
+      await expect(page).toHaveURL(`/o/${org}/c/${first}`)
+      await expect(page.locator('#main-content')).toBeVisible()
+      if (width < 960) await expect(page.locator('.workspace')).toHaveAttribute('data-drawer-open', 'true')
+    }
+    expect(await page.evaluate(() => history.length)).toBe(length)
+  }
+})
+
+test('beforeunload warns for a draft in an Organization that is not selected, including while selection is unavailable', async ({ page }) => {
+  const identityResponse = await page.request.get('/api/v1/me')
+  const identity = await identityResponse.json() as import('../src/api-schema.d.ts').components['schemas']['AccountIdentity']
+  const memberResponse = await page.request.get(`/api/v1/orgs/${org}/me`)
+  const member = await memberResponse.json() as import('../src/api-schema.d.ts').components['schemas']['Identity']
+  const other = '00000000-0000-0000-0000-000000000003'
+  const otherOrganization = { ...identity.organizations[0]!, organization_id: other, name: 'Other Organization' }
+  await page.route('**/api/v1/me', route => route.fulfill({ json: { ...identity, organizations: [...identity.organizations, otherOrganization] } }))
+  let unavailable = false
+  await page.route(`**/api/v1/orgs/${other}/**`, route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/me')) return route.fulfill(unavailable
+      ? { status: 404, json: { error: 'organization_unavailable' } }
+      : { json: { ...member, organization: otherOrganization } })
+    if (path.endsWith('/channels')) return route.fulfill({ json: { channels: [] } })
+    if (path.endsWith('/members')) return route.fulfill({ json: { members: [] } })
+    return route.continue()
+  })
+  await page.routeWebSocket(`**/api/v1/orgs/${other}/ws`, () => {})
+  const warns = () => page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(event)
+    return event.defaultPrevented
+  })
+  await page.goto(`/o/${org}/c/${first}`)
+  await expect(composer(page)).toBeEnabled()
+  expect(await warns()).toBe(false)
+  await composer(page).fill('別の組織にも残る下書き')
+  await page.locator('.org-switcher__select').selectOption(other)
+  await expect(page).toHaveURL(`/o/${other}`)
+  await expect(page.getByText('チャンネルがありません。', { exact: true })).toBeVisible()
+  expect(await warns()).toBe(true)
+  await page.locator('.org-switcher__select').selectOption(org)
+  await page.locator('.channel-list button').filter({ hasText: firstName }).last().click()
+  await expect(composer(page)).toHaveValue('別の組織にも残る下書き')
+  unavailable = true
+  await page.locator('.org-switcher__select').selectOption(other)
+  await expect(page.getByRole('alert')).toContainText('この組織は利用できません。')
+  expect(await warns()).toBe(true)
+})

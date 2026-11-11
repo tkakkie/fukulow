@@ -137,3 +137,75 @@ it('ordinary history channel_not_found stays terminal for the Channel under C9',
   expect(onEnded).not.toHaveBeenCalled()
   session.close()
 })
+
+it('explicitly reselecting the only Channel in C9 triggers one retry attempt, recovers when allowed, and never loops', async () => {
+  vi.useFakeTimers()
+  const { net, session, onEnded } = open()
+  try {
+    // 1. Single Channel enters C9 on initial history 404: no automatic retry or reload side-effect.
+    net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    expect(session.sync.getTimeline('A').get().status).toBe('unavailable')
+    expect(net.history).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    void session.channels.load()
+    net.lists[1].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    expect(net.history).toHaveLength(1)
+
+    // Still denied on explicit reselect: tries once and returns to terminal unavailable with no loop.
+    session.channels.select('A')
+    await settle()
+    expect(net.history).toHaveLength(2)
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(net.history).toHaveLength(2)
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Server now allows access: explicit reselect tries once and recovers to ready.
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    session.channels.select('A')
+    await settle()
+    expect(net.history).toHaveLength(3)
+    expect(controls(net)).toEqual(['subscribe:A'])
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('ready')
+    expect(session.sync.getTimeline('A').get()).toMatchObject({ status: 'ready', messages: [record(100)] })
+
+    // Reselecting while ready is not a new watch attempt.
+    session.channels.select('A')
+    await settle()
+    expect(net.history).toHaveLength(3)
+    expect(controls(net)).toEqual(['subscribe:A'])
+
+    // 2. Single Channel enters C9 via subscription refusal after bootstrap: reselect subscribes once and recovers.
+    net.event({ type: 'error', channel_id: 'A', code: 'channel_not_found' })
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    expect(controls(net)).toEqual(['subscribe:A', 'unsubscribe:A'])
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(controls(net)).toEqual(['subscribe:A', 'unsubscribe:A'])
+    expect(net.history).toHaveLength(3)
+
+    session.channels.select('A')
+    await settle()
+    expect(controls(net)).toEqual(['subscribe:A', 'unsubscribe:A', 'subscribe:A'])
+    expect(net.history).toHaveLength(3)
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('ready')
+    expect(session.sync.getTimeline('A').get().status).toBe('ready')
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(controls(net)).toEqual(['subscribe:A', 'unsubscribe:A', 'subscribe:A'])
+    expect(onEnded).not.toHaveBeenCalled()
+  } finally {
+    session.close()
+    vi.useRealTimers()
+  }
+})

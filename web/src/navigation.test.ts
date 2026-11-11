@@ -40,7 +40,19 @@ describe('navigation URLs', () => {
 })
 
 describe('History navigation table', () => {
+  it('reselecting the same Channel target never writes History, including an open tab', () => {
+    for (const panel of [null, 'topics', 'overview', 'members'] as const) {
+      const { nav, calls } = harness({ ...base, panel })
+      expect(nav.navigate({ type: 'channel', organizationId: 'org', channelId: 'channel' })).toBe(false)
+      expect(nav.get().target).toEqual({ ...base, panel })
+      expect(calls).toEqual([])
+      nav.destroy()
+    }
+  })
   const rows: { name: string; panel?: NavigationTarget['panel']; topicId?: string; intent: NavigationIntent; history: string; focus: string; nextPanel: NavigationTarget['panel'] }[] = [
+    { name: 'same Channel leaves Topic with push', topicId: 'topic', panel: 'members', intent: { type: 'channel', organizationId: 'org', channelId: 'channel' }, history: 'push', focus: 'composer', nextPanel: 'members' },
+    { name: 'same Channel closes Reply with push', panel: 'reply:a', intent: { type: 'channel', organizationId: 'org', channelId: 'channel' }, history: 'push', focus: 'composer', nextPanel: null },
+    { name: 'same Channel id in another Organization pushes', intent: { type: 'channel', organizationId: 'other', channelId: 'channel' }, history: 'push', focus: 'composer', nextPanel: null },
     { name: 'Channel keeps tab', panel: 'members', intent: { type: 'channel', organizationId: 'org', channelId: 'next' }, history: 'push', focus: 'composer', nextPanel: 'members' },
     { name: 'Channel closes Reply', panel: 'reply:a', intent: { type: 'channel', organizationId: 'org', channelId: 'next' }, history: 'push', focus: 'composer', nextPanel: null },
     { name: 'Topic keeps panel', panel: 'overview', intent: { type: 'topic', topicId: 'topic' }, history: 'push', focus: 'composer', nextPanel: 'overview' },
@@ -59,6 +71,7 @@ describe('History navigation table', () => {
     expect(calls).toEqual([history])
     expect(nav.get().focus).toBe(focus)
     expect(nav.get().target?.panel).toBe(nextPanel)
+    if (intent.type === 'channel') expect(nav.get().target).toEqual({ organizationId: intent.organizationId, channelId: intent.channelId, topicId: null, panel: nextPanel })
     if (intent.type === 'topic-back') expect(nav.get().target?.topicId).toBeNull()
   })
   it('Reply back restores only the preceding tab and never pops', () => {

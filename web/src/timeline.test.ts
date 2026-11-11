@@ -1,9 +1,35 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createSync } from './sync'
+import { createDraftStore } from './drafts'
+import { fakeNetwork, ok, sentBy, settle } from './adapter-test-helpers.svelte'
 import type { Message, MessagePage, Result } from './api'
 import { record } from './protocol-test-helpers'
 
 afterEach(() => vi.useRealTimers())
+it('a send ACK, refusal and late refusal after settlement preserve text typed after submit in the Account Session store', async () => {
+  for (const outcome of ['ACK', 'refusal', 'late refusal'] as const) {
+    const drafts = createDraftStore()
+    const net = fakeNetwork()
+    const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+    await sync.start()
+    await sync.watch('A')
+    const a = sync.getTimeline('A')
+    a.setDraft('送信する本文')
+    const sending = a.submit()
+    expect(a.get().draft).toBe('')
+    a.setDraft('送信後の新しい下書き')
+    const message = sentBy('me', 1, net.sends[0].body.client_message_id, '送信する本文')
+    if (outcome === 'late refusal') await sync.settleHistory('A', [message])
+    net.sends[0].resolve(outcome === 'ACK' ? ok(message) : { ok: false, kind: 'http', status: 400 })
+    expect(await sending).toBe(true)
+    await settle()
+    expect(a.get().draft, outcome).toBe('送信後の新しい下書き')
+    expect(drafts.get({ organizationId: 'o', channelId: 'A' }), outcome).toBe('送信後の新しい下書き')
+    expect(a.get().pending, outcome).toHaveLength(outcome === 'refusal' ? 1 : 0)
+    await sync.close()
+  }
+})
+
 it('timeline delegates preserve pending across selection and settle history before retry', async () => {
   vi.useFakeTimers()
   const sendMessage = vi.fn().mockResolvedValue({ ok: false, kind: 'network' })

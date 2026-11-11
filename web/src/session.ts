@@ -44,8 +44,19 @@ export function createSession(options: SessionOptions) {
     reply: (channel, message) => observe(api.listReplyChain(organizationId, channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
-  const channels = createChannels({ listChannels: () => observe(source.listChannels()),
-    createChannel: body => observe(source.createChannel(body)) })
+  let watched: string | null = null
+  const channels = createChannels(
+    {
+      listChannels: () => observe(source.listChannels()),
+      createChannel: body => observe(source.createChannel(body)),
+    },
+    id => {
+      if (!closed && !unavailable && id === watched && sync.get().organization === 'available' &&
+        sync.get().channels[id]?.state === 'unavailable') {
+        void sync.watch(id)
+      }
+    },
+  )
   function terminate() {
     if (unavailable) return
     unavailable = true
@@ -55,7 +66,6 @@ export function createSession(options: SessionOptions) {
   const stopSync = sync.subscribe(() => {
     if (sync.get().organization === 'unavailable') terminate()
   })
-  let watched: string | null = null
   const stopFollowing = channels.subscribe(() => {
     const id = channels.get().selectedId
     if (id === watched) return
