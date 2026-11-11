@@ -165,7 +165,7 @@ describe('realtime fixtures: validation', () => {
     const propose = (f: any) => (f.client.scenarios[0].proposed = { owner: ['#138'] })
     expect(problemsOf(topicPage)).toContain('input.messages[0].topic is planned vocabulary; mark the scenario proposed')
     expect(problemsOf((f) => f.delivery.scenarios[0].steps.push({ do: 'main_timeline', as: 'alice', channel: 'general', query: { as_of_seq: 0 }, expect: { status: 200, as_of_seq: 0, items: [], has_more: false } }))).toBe('')
-    expect(problemsOf((f) => (f.delivery.scenarios[0].covers = ['P6']))).toContain('covers is planned vocabulary')
+    expect(problemsOf((f) => (f.delivery.scenarios[0].covers = ['P8']))).toContain('covers is planned vocabulary')
     expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P1']))).toContain('covers is planned vocabulary')
     // A planned key inside a forbidden or never pattern would silently match nothing; it must fail too.
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].effects = { forbidden: [{ type: 'fetch_history', before_position: 4 }] }))).toContain('before_position is planned vocabulary')
@@ -182,7 +182,7 @@ describe('realtime fixtures: validation', () => {
     expect(partitionScenarios(all)).toEqual({ running: [all[0]], proposed: [all[1]] })
   })
 
-  it('validates implemented delivery timeline vocabulary without enabling client projections', () => {
+  it('validates implemented delivery timeline vocabulary and keeps pure protocol projections gated', () => {
     const timeline = (f: any): any => {
       f.delivery.scenarios[0].covers = ['P2', 'P5']
       const step = {
@@ -204,6 +204,17 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => { f.delivery.scenarios[0].steps.push({ do: 'post', as: 'alice', channel: 'general', topic_name: 'T' }) })).toBe('')
     expect(problemsOf((f) => { f.delivery.scenarios[0].steps[0] = { do: 'post', as: 'alice', channel: 'general', topic_id: 'T' } })).toContain('topic_id: unknown property')
     expect(problemsOf((f) => { f.client.scenarios[0].steps[1].input = { type: 'main_timeline_result', respond_to: 'f0', as_of_seq: 10, items: [], has_more: false } })).toContain('planned vocabulary')
+  })
+
+  it('allows implemented Topic vocabulary only at the controller layer and keeps Reply rules proposed', () => {
+    const topic = (f: any) => {
+      f.client.scenarios[0].layer = 'controller'
+      f.client.scenarios[0].covers = ['P1', 'P2', 'P3', 'P4', 'P5']
+      f.client.scenarios[0].steps[1].input.messages = [{ seq: 1, topic: 'T' }]
+    }
+    expect(problemsOf(topic)).toBe('')
+    expect(problemsOf(f => { topic(f); delete f.client.scenarios[0].layer })).toContain('planned vocabulary')
+    expect(problemsOf(f => { topic(f); f.client.scenarios[0].covers = ['P6'] })).toContain('covers is planned vocabulary')
   })
 
   it('rejects dangling references in delivery scenarios', () => {
@@ -425,4 +436,21 @@ describe('realtime fixtures: runner semantics', () => {
     expect(runClientScenario(scenario(steps), client).join()).toContain('forbidden effect')
     expect(log).toEqual(['session_start', 'connection_ready', 'socket_closed'])
   })
+})
+
+it('validates running Reply delivery labels and pages without enabling client projections', () => {
+  const replies = (f: any) => {
+    f.delivery.scenarios[0].covers = ['P1', 'P6', 'P7']
+    f.delivery.scenarios[0].steps.push(
+      { do: 'post', as: 'alice', channel: 'general', label: 'root' },
+      { do: 'post', as: 'alice', channel: 'general', reply_to: 'root', label: 'child' },
+      { do: 'reply_chain', as: 'alice', channel: 'general', anchor: 'child', query: { after_seq: 0, limit: 2 }, expect: { status: 200, root: 'root', seqs: [3, 4], has_more: false } },
+    )
+    return f.delivery.scenarios[0].steps
+  }
+  expect(problemsOf(replies)).toBe('')
+  expect(problemsOf(f => { replies(f).at(-2).reply_to = 'missing' })).toContain('reply_to missing is not a label of an earlier post')
+  expect(problemsOf(f => { replies(f).at(-1).anchor = 'missing' })).toContain('anchor missing is not a label of an earlier post')
+  expect(problemsOf(f => { replies(f).at(-1).expect.root = 'missing' })).toContain('root missing is not a label of an earlier post')
+  expect(problemsOf(f => { replies(f).at(-1).expect.seqs.reverse() })).toContain('strictly ascending')
 })

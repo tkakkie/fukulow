@@ -112,3 +112,32 @@ export const createInvite = (organizationId: string, body: CreateInviteRequest, 
   call<InviteResponse>(f, `${orgPath(organizationId)}/invites`, json(body), true)
 export const acceptInvite = (organizationId: string, body: AcceptInviteRequest, f: typeof fetch = fetch) =>
   call<Identity>(f, `${orgPath(organizationId)}/invites/accept`, json(body), true)
+
+export type TimelineItem = components['schemas']['TimelineItem']
+export type TimelinePage = components['schemas']['TimelinePage']
+export type TopicPage = components['schemas']['TopicPage']
+export type TopicSummary = components['schemas']['TopicSummary']
+export type TopicSummaryResponse = components['schemas']['TopicSummaryResponse']
+export type ListTimelineQuery = NonNullable<import('./api-schema').operations['list_timeline']['parameters']['query']>
+export type ListTopicsQuery = NonNullable<import('./api-schema').operations['list_topics']['parameters']['query']>
+export type TopicHistoryQuery = NonNullable<import('./api-schema').operations['topic_history']['parameters']['query']>
+
+const channelPath = (organizationId: string, channelId: string) =>
+  `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}`
+const querySuffix = (query: object) => {
+  const qs = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) if (value !== undefined) qs.set(key, String(value))
+  return qs.size ? `?${qs}` : ''
+}
+
+export const listTimeline = (organizationId: string, channelId: string, query: ListTimelineQuery = {}, f: typeof fetch = fetch) =>
+  call<TimelinePage>(f, `${channelPath(organizationId, channelId)}/timeline${querySuffix(query)}`, { cache: 'no-store' }, true)
+
+export const listTopics = (organizationId: string, channelId: string, query: ListTopicsQuery = {}, f: typeof fetch = fetch) =>
+  call<TopicPage>(f, `${channelPath(organizationId, channelId)}/topics${querySuffix(query)}`, { cache: 'no-store' }, true)
+
+export const getTopicSummary = (organizationId: string, channelId: string, topicId: string, f: typeof fetch = fetch) =>
+  call<TopicSummaryResponse>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}`, { cache: 'no-store' }, true)
+
+export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch) =>
+  call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store' }, true)

@@ -80,3 +80,22 @@ it('preserves ErrorBody codes and only the exact 404 organization_unavailable me
     expect(isOrganizationUnavailable(result)).toBe(unavailable)
   }
 })
+
+import { getTopicSummary, listTimeline, listTopics, listTopicMessages } from './api'
+
+it('encodes Topic projection paths and generated query fields, preserving zero W and omitted cursors', async () => {
+  const f = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'))
+  await listTimeline('o /1', 'c/2', { as_of_seq: 0, before_position: 8, limit: undefined }, f)
+  await listTopics('o /1', 'c/2', { as_of_seq: 10, before_position: 7, limit: 3 }, f)
+  await getTopicSummary('o /1', 'c/2', 't /3', f)
+  await listTopicMessages('o /1', 'c/2', 't /3', { after_seq: 0, limit: 2 }, f)
+  await listTimeline('o', 'c', {}, f)
+  expect(f.mock.calls.map(([path]) => path)).toEqual([
+    '/api/v1/orgs/o%20%2F1/channels/c%2F2/timeline?as_of_seq=0&before_position=8',
+    '/api/v1/orgs/o%20%2F1/channels/c%2F2/topics?as_of_seq=10&before_position=7&limit=3',
+    '/api/v1/orgs/o%20%2F1/channels/c%2F2/topics/t%20%2F3',
+    '/api/v1/orgs/o%20%2F1/channels/c%2F2/topics/t%20%2F3/messages?after_seq=0&limit=2',
+    '/api/v1/orgs/o/channels/c/timeline',
+  ])
+  for (const [, init] of f.mock.calls) expect(init).toMatchObject({ credentials: 'same-origin', cache: 'no-store' })
+})
