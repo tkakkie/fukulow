@@ -454,7 +454,14 @@ test('C9 renders no 再試行 and チャンネル一覧へ moves focus to the Ch
   await expect(targetChannelButton).toBeFocused()
   await expect(goToListButton).not.toBeFocused()
 
+  // Clicking the focused current Channel row directly triggers one retry and recovers from C9
+  await targetChannelButton.click()
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+  await expect(timeline.getByRole('alert')).toHaveCount(0)
+
   // 2. Tablet drawer (768px): Channel column starts hidden; チャンネル一覧へ opens the drawer and focuses the Channel list
+  clientSocket!.send(JSON.stringify(refusal))
+  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
   await page.setViewportSize({ width: 768, height: 800 })
   await expect(nav).toBeHidden()
   await goToListButton.click()

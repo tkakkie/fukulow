@@ -117,6 +117,69 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     expect(fallbackComposer.focus).toHaveBeenCalledOnce()
   })
 
+  it('focusDialogOnOpen skips a disabled first control and falls back to the dialog when all controls are disabled', () => {
+    const disabledFirst = { focus: vi.fn(), isConnected: true, disabled: true }
+    const firstEnabled = { focus: vi.fn(), isConnected: true }
+    const secondEnabled = { focus: vi.fn(), isConnected: true }
+    const dialogEl = { focus: vi.fn(), isConnected: true }
+
+    expect(focusDialogOnOpen([disabledFirst, firstEnabled, secondEnabled], dialogEl)).toBe(firstEnabled)
+    expect(disabledFirst.focus).not.toHaveBeenCalled()
+    expect(firstEnabled.focus).toHaveBeenCalledOnce()
+    expect(secondEnabled.focus).not.toHaveBeenCalled()
+    expect(dialogEl.focus).not.toHaveBeenCalled()
+
+    const disabledSecond = { focus: vi.fn(), isConnected: true, disabled: true }
+    expect(focusDialogOnOpen([disabledFirst, disabledSecond], dialogEl)).toBe(dialogEl)
+    expect(disabledFirst.focus).not.toHaveBeenCalled()
+    expect(disabledSecond.focus).not.toHaveBeenCalled()
+    expect(dialogEl.focus).toHaveBeenCalledOnce()
+  })
+
+  it('stepDialogTab skips disabled controls, including when the active element is disabled', () => {
+    const disabledFirst = { focus: vi.fn(), isConnected: true, disabled: true }
+    const firstBtn = { focus: vi.fn(), isConnected: true }
+    const disabledMiddle = { focus: vi.fn(), isConnected: true, disabled: true }
+    const secondBtn = { focus: vi.fn(), isConnected: true }
+    const thirdBtn = { focus: vi.fn(), isConnected: true }
+    const disabledLast = { focus: vi.fn(), isConnected: true, disabled: true }
+    const dialogEl = { focus: vi.fn(), isConnected: true }
+    const controls = [disabledFirst, firstBtn, disabledMiddle, secondBtn, thirdBtn, disabledLast]
+
+    // Forward Tab skips disabledMiddle and wraps past disabledLast/disabledFirst
+    expect(stepDialogTab(controls, firstBtn, false, dialogEl)).toBe(secondBtn)
+    expect(secondBtn.focus).toHaveBeenCalledOnce()
+    expect(stepDialogTab(controls, thirdBtn, false, dialogEl)).toBe(firstBtn)
+    expect(firstBtn.focus).toHaveBeenCalledOnce()
+
+    // Shift+Tab skips disabledMiddle and wraps past disabledFirst/disabledLast
+    expect(stepDialogTab(controls, secondBtn, true, dialogEl)).toBe(firstBtn)
+    expect(firstBtn.focus).toHaveBeenCalledTimes(2)
+    expect(stepDialogTab(controls, firstBtn, true, dialogEl)).toBe(thirdBtn)
+    expect(thirdBtn.focus).toHaveBeenCalledOnce()
+
+    // Active element itself is disabled inside focusables: steps forward/backward to the nearest enabled control
+    expect(stepDialogTab(controls, disabledMiddle, false, dialogEl)).toBe(secondBtn)
+    expect(secondBtn.focus).toHaveBeenCalledTimes(2)
+    expect(stepDialogTab(controls, disabledMiddle, true, dialogEl)).toBe(firstBtn)
+    expect(firstBtn.focus).toHaveBeenCalledTimes(3)
+    expect(stepDialogTab(controls, disabledFirst, false, dialogEl)).toBe(firstBtn)
+    expect(stepDialogTab(controls, disabledFirst, true, dialogEl)).toBe(thirdBtn)
+
+    // Active element is disabled and already excluded from focusables (e.g. :not(:disabled) selector)
+    const excludedDisabledActive = { focus: vi.fn(), isConnected: true, disabled: true }
+    expect(stepDialogTab([firstBtn, secondBtn, thirdBtn], excludedDisabledActive, false, dialogEl)).toBe(firstBtn)
+    expect(stepDialogTab([firstBtn, secondBtn, thirdBtn], excludedDisabledActive, true, dialogEl)).toBe(thirdBtn)
+    expect(excludedDisabledActive.focus).not.toHaveBeenCalled()
+
+    // All controls disabled (including active): falls back to dialog container
+    expect(stepDialogTab([disabledFirst, disabledMiddle], disabledFirst, false, dialogEl)).toBe(dialogEl)
+    expect(dialogEl.focus).toHaveBeenCalledOnce()
+    expect(disabledFirst.focus).not.toHaveBeenCalled()
+    expect(disabledMiddle.focus).not.toHaveBeenCalled()
+    expect(disabledLast.focus).not.toHaveBeenCalled()
+  })
+
   it('resolves the skip link target ID to the visible primary region at every phone level and desktop/tablet breakpoint', () => {
     // Phone (< 600px): targets the active screen's region at each level
     expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'channels', panelOpen: false })).toBe(

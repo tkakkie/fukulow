@@ -168,21 +168,27 @@ export function stepDialogTab(
   shiftKey: boolean,
   dialogFallback?: FocusableTarget | null,
 ): FocusableTarget | null {
-  const connected = focusables.filter((el) => el.isConnected !== false && el.disabled !== true)
+  const isEnabled = (el: FocusableTarget) => el.isConnected !== false && el.disabled !== true
+  const connected = focusables.filter(isEnabled)
   if (connected.length === 0) {
     if (focusTarget(dialogFallback)) return dialogFallback ?? null
     return null
   }
-  const idx = active ? connected.indexOf(active) : -1
-  let nextIdx: number
-  if (shiftKey) {
-    nextIdx = idx <= 0 ? connected.length - 1 : idx - 1
-  } else {
-    nextIdx = idx === -1 || idx >= connected.length - 1 ? 0 : idx + 1
+  const rawIdx = active ? focusables.indexOf(active) : -1
+  if (rawIdx === -1) {
+    const target = connected[shiftKey ? connected.length - 1 : 0]
+    focusTarget(target)
+    return target
   }
-  const target = connected[nextIdx]
-  focusTarget(target)
-  return target
+  const step = shiftKey ? -1 : 1
+  for (let offset = 1; offset <= focusables.length; offset++) {
+    const candidate = focusables[(rawIdx + step * offset + focusables.length) % focusables.length]
+    if (isEnabled(candidate)) {
+      focusTarget(candidate)
+      return candidate
+    }
+  }
+  return null
 }
 
 /**
