@@ -66,6 +66,48 @@ it('ACK page and echo overlap settle only matching own sends and keep canonical 
   await c.sync.close()
 })
 
+it('same-Channel non-chain records cannot settle a pending Reply', async () => {
+  const c = replyClient(); await c.boot(); await c.replies.open('A', root())
+  c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  await c.replies.send('A', 'hello')
+  const settle = vi.spyOn(c.source, 'settleHistory')
+  const unrelated = { ...recordOther(5), sender: 'me', client_message_id: 'send1' }
+  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(4), unrelated], has_more: true }))
+  await c.replies.loadMore('A')
+  expect(c.sync.get().channels.A.pending).toMatchObject([{ clientMessageId: 'send1', state: 'unknown' }])
+  expect(c.replies.get('A').pending).toHaveLength(1)
+  expect(settle).toHaveBeenLastCalledWith('A', [reply(4)])
+  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual([1, 3, 4])
+  await c.sync.close()
+})
+
+it('foreign and non-chain high-seq records cannot skip real chain Messages in continuation', async () => {
+  for (const unrelated of [{ ...reply(999), channel_id: 'B' }, recordOther(999),
+    { ...reply(999), reply_root_id: 'another-root' }]) {
+    const c = replyClient(); await c.boot(); await c.replies.open('A', root())
+    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(4), unrelated], has_more: true }))
+    await c.replies.loadMore('A')
+    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(5)], has_more: false }))
+    await c.replies.loadMore('A')
+    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', { after_seq: 4 })
+    expect(c.replies.get('A').messages.map(m => m.seq)).toEqual([1, 3, 4, 5])
+    expect(c.replies.get('A').hasMore).toBe(false)
+    await c.sync.close()
+  }
+})
+
+it('chain pages without filtered forward progress stop continuation even with has_more', async () => {
+  for (const messages of [[], [recordOther(999)], [{ ...reply(999), channel_id: 'B' }], [reply(3)]]) {
+    const c = replyClient(); await c.boot(); await c.replies.open('A', root())
+    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages, has_more: true }))
+    await c.replies.loadMore('A')
+    expect(c.replies.get('A')).toMatchObject({ loading: false, hasMore: false, messages: [root(), reply(3)] })
+    await c.replies.loadMore('A')
+    expect(c.listReplyChain).toHaveBeenCalledTimes(2)
+    await c.sync.close()
+  }
+})
+
 it('retry preserves client id body and reply target after timeout from another anchor of the same chain', async () => {
   const c = replyClient(10); await c.boot(); await c.replies.open('A', reply(3, 'id2', 'T'))
   const send = deferred<Result<Message>>()

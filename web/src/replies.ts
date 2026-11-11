@@ -97,11 +97,14 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       } else if (result.data.root_id !== w.rootId) {
         w.error = true
       } else {
-        for (const m of result.data.messages) if (m.channel_id === channel && belongs(w, m)) w.messages.set(m.id, m)
+        const messages = result.data.messages.filter(m => m.channel_id === channel && belongs(w, m))
+        for (const m of messages) w.messages.set(m.id, m)
         // Only the returned page advances continuation: a live append may be far beyond an unpaged sibling.
-        w.after = result.data.messages.at(-1)?.seq ?? w.after
-        w.hasMore = result.data.has_more
-        void sync.settleHistory(channel, result.data.messages)
+        const after = messages.at(-1)?.seq ?? w.after
+        // An empty or non-advancing filtered page cannot safely continue, even if has_more is set.
+        w.hasMore = result.data.has_more && after > w.after
+        w.after = Math.max(w.after, after)
+        void sync.settleHistory(channel, messages)
         mergeStream(channel, w)
       }
       notify()
