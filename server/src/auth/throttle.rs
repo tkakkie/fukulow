@@ -60,7 +60,9 @@ impl ProxyNetwork {
                 (u32::from(address) as u128, u32::from(peer) as u128, 32)
             }
             (IpAddr::V6(address), IpAddr::V6(peer)) => (u128::from(address), u128::from(peer), 128),
-            (IpAddr::V6(address), IpAddr::V4(peer)) => {
+            (IpAddr::V6(address), IpAddr::V4(peer))
+                if self.prefix >= 96 && address.to_ipv4_mapped().is_some() =>
+            {
                 (u128::from(address), u128::from(peer.to_ipv6_mapped()), 128)
             }
             _ => return false,
@@ -538,9 +540,13 @@ mod tests {
             ("0.0.0.0/0", "203.0.113.1", "2001:db8::1"),
             ("2001:db8:1::1/48", "2001:db8:1:ffff::1", "2001:db8:2::1"),
             ("2001:db8::1/128", "2001:db8::1", "2001:db8::2"),
-            ("::/0", "2001:db8::1", ""),
+            ("::/0", "2001:db8::1", "192.0.2.99"),
+            ("::/64", "::1", "192.0.2.99"),
             ("::ffff:192.0.2.0/120", "::ffff:192.0.2.99", "192.0.3.1"),
-            ("::ffff:192.0.2.0/80", "192.0.2.99", "2001:db8::1"),
+            ("::ffff:192.0.2.0/80", "::1", "192.0.2.99"),
+            ("::ffff:10.0.0.0/104", "10.2.3.4", "11.2.3.4"),
+            ("::ffff:0:0/96", "10.2.3.4", "2001:db8::1"),
+            ("10.0.0.0/8", "::ffff:10.2.3.4", "11.2.3.4"),
             ("::ffff:192.0.2.1", "192.0.2.1", "192.0.2.2"),
             ("172.30.94.2", "172.30.94.2", "172.30.94.1"),
         ] {
@@ -562,6 +568,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ipv6_proxy_ranges_do_not_trust_ipv4_peers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.99".parse().unwrap());
+        let mut incorrectly_trusted = Vec::new();
+        for network in ["::/0", "::/64", "::ffff:10.0.0.0/80", "::ffff:10.0.0.0/95"] {
+            let throttle =
+                SignInThrottle::with_proxy_config(Some(network), Some("x-forwarded-for")).unwrap();
+            for address in ["10.2.3.4", "::ffff:10.2.3.4"] {
+                let peer = ConnectInfo(SocketAddr::new(address.parse().unwrap(), 1234));
+                if throttle.client_ip(peer, &headers) != peer.0.ip().to_canonical() {
+                    incorrectly_trusted.push((network, address));
+                }
+            }
+        }
+        assert!(incorrectly_trusted.is_empty(), "{incorrectly_trusted:?}");
     }
 
     #[test]

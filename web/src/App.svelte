@@ -23,7 +23,7 @@
       name,
       email,
       password,
-      setup_token: setupToken || null,
+      setup_token: setupToken,
     })
     if (moved) clearSecrets()
   }

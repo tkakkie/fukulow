@@ -28,6 +28,22 @@ const HTTP_METHODS: [&str; 8] = [
 const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 110;
 
 #[test]
+fn setup_token_contract_is_required_and_non_nullable() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        let schema = &document["components"]["schemas"]["SetupRequest"];
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("setup_token"))
+        );
+        assert_eq!(schema["properties"]["setup_token"]["type"], json!("string"));
+    }
+}
+
+#[test]
 fn every_api_operation_documents_shutdown_retry_contract() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();

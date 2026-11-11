@@ -504,7 +504,7 @@ export interface components {
              * Format: password
              * @description Must match the server's required FUKULOW_SETUP_TOKEN.
              */
-            setup_token?: string | null;
+            setup_token: string;
         };
         SetupStatus: {
             setup_required: boolean;

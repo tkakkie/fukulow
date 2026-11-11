@@ -160,7 +160,8 @@ pub struct AccountIdentity {
 #[serde(deny_unknown_fields)]
 pub struct SetupRequest {
     /// Must match the server's required FUKULOW_SETUP_TOKEN.
-    #[schema(format = Password)]
+    // Preserve generic 401 responses for absent/null tokens after body extraction.
+    #[schema(format = Password, required = true, nullable = false)]
     pub setup_token: Option<String>,
     #[schema(min_length = 1, max_length = 200)]
     pub organization_name: String,
