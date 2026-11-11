@@ -52,7 +52,7 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
   H1 auth, permissions, Organization separation, sessions. H2 DB integrity, migrations, transactions, locks. H3 real-time reconnect, event order, dedup, delivery.
   H4 a security, correctness or CI verification gate is added, removed or loosened. H5 behaviour-preserving conversion without an old/new comparison test.
   H6 concurrent paths sharing state or caches, or whether a background job runs, retries or stops. The PR body lists the H numbers applied (or "none").
-- Effort is fixed at launch. If an H condition first appears mid-work: the implementer stops and reports; the orchestrator restarts at `high`.
+- Effort is fixed at launch. If an H condition or security relevance first appears mid-work: the implementer stops and reports; the orchestrator restarts at `high`.
 - Codex reviews and checks use `gpt-6-astra`: `high` only for round 1 of `risk:needs-review`, `medium` for every other review, round 2 and delta checks.
 - Astra implements only after two substantive sol attempts at `high` both failed the Issue's acceptance criteria (one failing test or CI run is not an attempt); record why in the Issue. Same independent-review rules apply.
 - Antigravity: `agy` (`/usr/local/argon-agy/agy`) with the Argon model (Gemini 4 Argon; list with `agy models`; not Carbon, #260); effort is the `--model` suffix `gemini-4-argon-low|medium|high`, fixed at launch. `<agy-home>` is the maintainer-provisioned directory that holds the Antigravity login, shared by all worktrees (an empty `HOME` triggers a login prompt):
