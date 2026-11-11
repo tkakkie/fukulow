@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "fukulow/contract/realtime/schema.json",
   "title": "Real-time sync contract fixtures",
-  "description": "Language-neutral fixtures for the real-time sync contract in docs/spec.md (S1-S5 server, C1-C10 client; design: #91, scope: #95). A fixture file is {kind, scenarios[]} and lives in delivery/ (kind=delivery, satisfied by the Rust server) or client/ (kind=client, satisfied by the TypeScript client and a future Kotlin client). Fixtures name behaviour only: no implementation state, function names, timer values or algorithms. Names such as Channel ids, Members and message ids are fixture-local labels; a runner maps them to real ids. Validation uses only the JSON Schema keywords type, enum, const, required, properties, additionalProperties, items, minItems, minimum, maxItems, pattern, oneOf and $ref (to #/$defs); web/scripts/realtime-fixtures.ts adds the cross-reference checks listed in each $comment marked 'semantic'. A scenario with 'proposed' is a contract example for behaviour not implemented yet (P rules, docs/spec.md 'Planned'): it is validated, and runners skip it and report it as skipped until its owning Issue makes it pass and removes the marker. Vocabulary marked 'Planned' in a $comment is allowed only in proposed scenarios (semantic).",
+  "description": "Language-neutral fixtures for the real-time sync contract in docs/spec/realtime.md (S1-S5 server, C1-C10 client; design: #91, scope: #95). A fixture file is {kind, scenarios[]} and lives in delivery/ (kind=delivery, satisfied by the Rust server) or client/ (kind=client, satisfied by the TypeScript client and a future Kotlin client). Fixtures name behaviour only: no implementation state, function names, timer values or algorithms. Names such as Channel ids, Members and message ids are fixture-local labels; a runner maps them to real ids. Validation uses only the JSON Schema keywords type, enum, const, required, properties, additionalProperties, items, minItems, minimum, maxItems, pattern, oneOf and $ref (to #/$defs); web/scripts/realtime-fixtures.ts adds the cross-reference checks listed in each $comment marked 'semantic'. A scenario with 'proposed' is a contract example for behaviour not implemented yet (P rules, docs/spec/realtime.md 'Planned'): it is validated, and runners skip it and report it as skipped until its owning Issue makes it pass and removes the marker. Vocabulary marked 'Planned' in a $comment is allowed only in proposed scenarios (semantic).",
   "type": "object",
   "required": ["kind", "scenarios"],
   "properties": {
@@ -20,7 +20,7 @@
     "Seq": { "type": "integer", "minimum": 1 },
     "Cursor": { "type": "integer", "minimum": 0 },
     "Rule": {
-      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P1/P2/P5/P6/P7/P8 and controller-layer client P1-P7 run; other P rules remain proposed (semantic).",
+      "$comment": "A rule of docs/spec/realtime.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P1/P2/P5/P6/P7/P8 and controller-layer client P1-P7 run; other P rules remain proposed (semantic).",
       "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
     },
     "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
