@@ -11,11 +11,13 @@
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import CreateChannelForm from './CreateChannelForm.svelte'
   import {
+    createTopicSummaryFocusController,
     focusAfterPanelClose,
     focusIfVisible,
     focusTarget,
     MOBILE_BREAKPOINT_PX,
     resolveChannelListNavigation,
+    resolveMainTimelineFocusStatus,
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
@@ -128,6 +130,7 @@
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
   let focusTopicInputNext = false
+  const topicSummaryFocus = createTopicSummaryFocusController()
 
   const channelMemberController = $derived(panelOpen && activePanelTab === 'members' && selected ? session.channelMembers?.(selected.id) : undefined)
   const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
@@ -170,7 +173,22 @@
   })
 
   $effect(() => {
+    topicSummaryFocus.syncNavigation(navigation.get(), navigation.getReturningTopicId())
+    const unsubscribe = navigation.subscribe(() => {
+      topicSummaryFocus.syncNavigation(navigation.get(), navigation.getReturningTopicId())
+    })
+    return () => {
+      unsubscribe()
+      topicSummaryFocus.destroy()
+    }
+  })
+
+  $effect(() => {
     const state = nav.state
+    if (state.focus === 'topic-summary') {
+      focusTopicInputNext = false
+      return
+    }
     // Wait for API-owned Channel selection and the rendered destination before focusing.
     if (!state.target || state.target.organizationId !== currentOrganizationId) return
     const revision = state.revision
@@ -183,11 +201,6 @@
       }
       else if (state.focus === 'tab') focusTarget(document.getElementById(`panel-tab-${activePanelTab}`))
       else if (state.focus === 'opener') focusAfterPanelClose(navigation.getOpener(), mainComposerRef)
-      else if (state.focus === 'topic-summary') {
-        const topic = navigation.getReturningTopicId()
-        const summary = topic ? document.querySelector<HTMLElement>(`#main-content [data-topic-id="${CSS.escape(topic)}"]`) : null
-        if (!focusTarget(summary)) focusTarget(mainComposerRef)
-      }
       else {
         const preferTopicInput = focusTopicInputNext
         focusTopicInputNext = false
@@ -196,6 +209,51 @@
         }
       }
     })
+  })
+
+  $effect(() => {
+    const state = nav.state
+    const returningTopicId = navigation.getReturningTopicId()
+    topicSummaryFocus.syncNavigation(state, returningTopicId)
+    if (
+      state.focus !== 'topic-summary' ||
+      !state.target ||
+      state.target.organizationId !== currentOrganizationId ||
+      !topicSummaryFocus.isPending(state.revision)
+    ) {
+      return
+    }
+    const revision = state.revision
+    void currentTimeline?.messages.length
+    void currentTopicsState?.lines.length
+    const status = resolveMainTimelineFocusStatus({
+      channelListStatus,
+      hasSelectedTimeline: Boolean(selected && currentChannel && route?.channelId === selected.id && !route?.topicId),
+      organizationUnavailable,
+      timelineStatus: currentTimeline?.status ?? null,
+      hasTopics: Boolean(currentTopics),
+      topicsMain: currentTopicsState?.main ?? null,
+      topicsUnavailable: Boolean(currentTopicsState?.unavailable),
+      topicPendingSend: Boolean(
+        returningTopicId &&
+          currentTimeline?.pending.some((p) => p.status === 'sending' && !p.replyTo && p.topicId === returningTopicId),
+      ),
+    })
+    const composer = mainComposerRef
+    let cancelled = false
+    void tick().then(() => {
+      if (cancelled || nav.state.revision !== revision) return
+      topicSummaryFocus.step({
+        revision,
+        status,
+        findSummary: (topic) =>
+          document.querySelector<HTMLElement>(`#main-content [data-topic-id="${CSS.escape(topic)}"]`),
+        composer: mainComposerRef ?? composer,
+      })
+    })
+    return () => {
+      cancelled = true
+    }
   })
 
   $effect(() => {

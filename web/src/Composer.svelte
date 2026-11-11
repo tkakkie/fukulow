@@ -1,6 +1,6 @@
 <script lang="ts">
   import { shouldSubmitOnEnter } from './composer-keys'
-  import { focusTarget } from './focus-management'
+  import { focusTarget, submitAndFocusComposer } from './focus-management'
   import Button from './ui/Button.svelte'
   import Input from './ui/Input.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
@@ -36,9 +36,7 @@
   function submit(e: Event) {
     e.preventDefault()
     if (disabled || submitDisabled) return
-    void onsubmit().finally(() => {
-      focusTarget(textareaRef)
-    })
+    submitAndFocusComposer(onsubmit, textareaRef)
   }
 
   function keydown(e: KeyboardEvent) {
