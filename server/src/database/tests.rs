@@ -6,6 +6,8 @@ use sqlx::{
 };
 use std::time::{Duration, Instant};
 
+mod read_only;
+
 async fn startup_pool(pool: &PgPool) -> PgPool {
     PgPoolOptions::new()
         .max_connections(1)

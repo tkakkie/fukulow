@@ -83,61 +83,59 @@ pub async fn list_channels(
     State(state): State<AppState>,
     auth: Auth,
 ) -> Result<Response, ApiError> {
-    let mut tx = state
-        .pool
-        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .await?;
-    let channels = channels::visible_list(&mut *tx, &auth).await?;
-    #[cfg(test)]
-    tests::unread::baseline::pause_list(auth.identity.member.id).await;
-    let ids = channels.iter().map(|c| c.id).collect::<Vec<_>>();
-    // Two batched queries in one authorization/data snapshot, independent of the
-    // number of Channels or Topics. No Message or position outside ids is read.
-    let rows = sqlx::query(LIST_COUNTS_SQL)
-        .bind(auth.identity.organization.organization_id)
-        .bind(auth.identity.member.id)
-        .bind(auth.membership_revision)
-        .bind(&ids)
-        .fetch_all(&mut *tx)
-        .await?;
-    let mut counts = std::collections::HashMap::new();
-    for row in rows {
-        if row.try_get::<bool, _>("missing_position")? {
-            eprintln!(
-                "Visible Channel has no Unread position; suppressing its Unread: organization={} member={} channel={}",
-                auth.identity.organization.organization_id,
-                auth.identity.member.id,
-                row.try_get::<Uuid, _>("channel_id")?
+    crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
+        let channels = channels::visible_list(&mut *tx, &auth).await?;
+        #[cfg(test)]
+        tests::unread::baseline::pause_list(auth.identity.member.id).await;
+        let ids = channels.iter().map(|c| c.id).collect::<Vec<_>>();
+        // Two batched queries in one authorization/data snapshot, independent of the
+        // number of Channels or Topics. No Message or position outside ids is read.
+        let rows = sqlx::query(LIST_COUNTS_SQL)
+            .bind(auth.identity.organization.organization_id)
+            .bind(auth.identity.member.id)
+            .bind(auth.membership_revision)
+            .bind(&ids)
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut counts = std::collections::HashMap::new();
+        for row in rows {
+            if row.try_get::<bool, _>("missing_position")? {
+                eprintln!(
+                    "Visible Channel has no Unread position; suppressing its Unread: organization={} member={} channel={}",
+                    auth.identity.organization.organization_id,
+                    auth.identity.member.id,
+                    row.try_get::<Uuid, _>("channel_id")?
+                );
+            }
+            counts.insert(
+                row.try_get::<Uuid, _>("channel_id")?,
+                (
+                    row.try_get::<i64, _>("as_of_seq")?,
+                    row.try_get::<i64, _>("read_seq")?,
+                    row.try_get::<i64, _>("main_unread_count")?,
+                    row.try_get::<i64, _>("unread_count")?,
+                ),
             );
         }
-        counts.insert(
-            row.try_get::<Uuid, _>("channel_id")?,
-            (
-                row.try_get::<i64, _>("as_of_seq")?,
-                row.try_get::<i64, _>("read_seq")?,
-                row.try_get::<i64, _>("main_unread_count")?,
-                row.try_get::<i64, _>("unread_count")?,
-            ),
-        );
-    }
-    let mut result = Vec::with_capacity(channels.len());
-    for channel in channels {
-        let (as_of_seq, read_seq, main_unread_count, unread_count) =
-            counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
-        result.push(UnreadChannel {
-            channel,
-            as_of_seq,
-            read_seq,
-            main_unread_count,
-            unread_count,
-        });
-    }
-    tx.commit().await?;
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(ChannelList { channels: result }),
-    )
-        .into_response())
+        let mut result = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let (as_of_seq, read_seq, main_unread_count, unread_count) =
+                counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
+            result.push(UnreadChannel {
+                channel,
+                as_of_seq,
+                read_seq,
+                main_unread_count,
+                unread_count,
+            });
+        }
+        Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(ChannelList { channels: result }),
+        )
+            .into_response())
+    })
+    .await
 }
 
 #[utoipa::path(put, path = "/api/v1/orgs/{org}/channels/{id}/read", request_body = MarkReadRequest,
