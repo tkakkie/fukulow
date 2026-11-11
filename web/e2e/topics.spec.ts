@@ -1,35 +1,43 @@
 import { expect, test, type Page } from '@playwright/test'
+import { secretSafe } from './helpers.ts'
 
 let orgId: string
 let channelId: string
 let channelName: string
 
 test.beforeEach(async ({ page }) => {
-  const setup = await page.request.get('/api/v1/setup')
-  if ((await setup.json()).setup_required) {
-    const response = await page.request.post('/api/v1/setup', {
-      data: {
-        organization_name: 'Acme',
-        name: 'Alice',
-        email: 'owner@example.com',
-        password: 'correct horse battery',
-        setup_token: process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only',
-      },
-    })
+  const setup = await secretSafe(() => page.request.get('/api/v1/setup'))
+  expect(setup.ok()).toBe(true)
+  if ((await secretSafe(() => setup.json())).setup_required) {
+    const response = await secretSafe(() =>
+      page.request.post('/api/v1/setup', {
+        data: {
+          organization_name: 'Acme',
+          name: 'Alice',
+          email: 'owner@example.com',
+          password: 'correct horse battery',
+          setup_token: process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only',
+        },
+      }),
+    )
     expect(response.ok()).toBe(true)
   }
-  const login = await page.request.post('/api/v1/session', {
-    data: { email: 'owner@example.com', password: 'correct horse battery' },
-  })
+  const login = await secretSafe(() =>
+    page.request.post('/api/v1/session', {
+      data: { email: 'owner@example.com', password: 'correct horse battery' },
+    }),
+  )
   expect(login.ok()).toBe(true)
-  orgId = (await login.json()).identity.organizations[0].organization_id
+  orgId = (await secretSafe(() => login.json())).identity.organizations[0].organization_id
 
   channelName = `topics-${crypto.randomUUID().slice(0, 8)}`
-  const created = await page.request.post(`/api/v1/orgs/${orgId}/channels`, {
-    data: { name: channelName, visibility: 'public' },
-  })
+  const created = await secretSafe(() =>
+    page.request.post(`/api/v1/orgs/${orgId}/channels`, {
+      data: { name: channelName, visibility: 'public' },
+    }),
+  )
   expect(created.ok()).toBe(true)
-  channelId = (await created.json()).id
+  channelId = (await secretSafe(() => created.json())).id
 })
 
 const messageComposer = (page: Page) =>
