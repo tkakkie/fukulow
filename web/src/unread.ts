@@ -153,7 +153,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         prune(c)
       }
       const unresolved = new Map([...channels].filter(([id, c]) => tokens.get(id) === c.token && !c.stopped &&
-        (needsRecovery(c, c.main) || (c.aggregate !== undefined && c.aggregate.as_of_seq < c.requiredBase))))
+        listNeedsRecovery(c)))
       if (unresolved.size > 0) {
         const affected = new Map([...unresolved].map(([id, c]) => [id, c.token]))
         listTimer = setTimeout(() => { listTimer = undefined; void refresh(affected) }, retryDelay(listAttempt++, r))
@@ -172,6 +172,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   const needsRecovery = (c: Channel, s: Scope) => s.error || (s.baseline !== undefined &&
     (s.baseline.asOfSeq < c.requiredBase || s.baseline.readSeq < s.requiredPosition))
+  const listNeedsRecovery = (c: Channel) => needsRecovery(c, c.main) || (c.aggregate !== undefined && c.aggregate.as_of_seq < c.requiredBase)
   function count(id: string, c: Channel, topic: string | null, records: Iterable<Message> = c.records.values()): number | null {
     const s = getScope(c, topic)
     if (!s.baseline || needsRecovery(c, s) || s.stopped || c.stopped || c.error) return null
@@ -398,7 +399,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const channel = visit.scope.channel, c = getChannel(channel)
     fence(channel, c); prune(c); notify()
     if (!c.stopped) {
-      if (c.requiredAfter > 0 || c.main.error) void refresh()
+      // fence() drops in-flight and scheduled list retries for this Channel; restart any recovery they owned.
+      if (c.requiredAfter > 0 || !c.main.baseline || listNeedsRecovery(c)) void refresh()
       for (const [topic, s] of c.topics) if (!s.stopped && needsRecovery(c, s) &&
         !c.summaryReads.has(topic) && !c.summaryTimers.has(topic)) void refreshTopic(channel, topic)
     }

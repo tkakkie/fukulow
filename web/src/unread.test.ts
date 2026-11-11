@@ -89,6 +89,24 @@ it.each([3, 4])('retries a Channel list below the bootstrap baseline until as_of
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
   await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
+it.each(['in flight', 'scheduled'])('recovers a Channel list below the bootstrap baseline after leaving fences a %s retry', async when => {
+  const c = unreadClient()
+  c.rows[0] = row({ as_of_seq: 2 })
+  await c.boot()
+  const stale = deferred<Result<ChannelList>>()
+  if (when === 'in flight') c.unreadApi.listChannels.mockReturnValueOnce(stale.promise)
+  const id = await c.enter()
+  const n = c.unreadApi.listChannels.mock.calls.length
+  expect(c.unread.get('A')).toMatchObject({ unreadCount: null, main: { unreadCount: null, error: false } })
+  c.rows[0] = row({ as_of_seq: 4 })
+  c.unread.leave(id); await flush()
+  stale.resolve(ok({ channels: [row({ as_of_seq: 2, unread_count: 9, main_unread_count: 9 })] })); await flush()
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  expect(c.unread.get('A')).toMatchObject({ asOfSeq: 4, unreadCount: 3, main: { unreadCount: 1, error: false } })
+  await vi.advanceTimersByTimeAsync(30_000)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
 it.each([
   { rule: 'larger as_of_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }),
     stale: row({ as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 }) },
