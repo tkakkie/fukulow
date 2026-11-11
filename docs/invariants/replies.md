@@ -39,6 +39,6 @@ Reply chains, server and web, incl. their real-time delivery tests. Writing rule
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [web](web.md): `reselecting the same Channel target never writes History, including an open tab`, `close settles every stalled Topic and Reply load without publishing or Channel denial`

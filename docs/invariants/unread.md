@@ -32,7 +32,7 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [channels](channels.md): `management_rechecks_demoted_deactivated_stale_and_removed_actors`
 - [messages](messages.md): `unread_mark_and_removal_serialize_without_recreating_revoked_positions`

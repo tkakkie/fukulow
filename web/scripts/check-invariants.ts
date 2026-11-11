@@ -1,5 +1,7 @@
 // Checks the docs/invariants.md index and every docs/invariants/*.md part.
 // Verifies that every named test is a real test that CI actually runs.
+// Cross-part bullets resolve each token to one distinct row by a unique test name or #id.
+// Optional {#id} Rule prefixes are globally unique, must be referenced, and do not count as Rule text.
 // Also checks that every docs/decisions.md entry stays within MAX_DECISION_LENGTH (docs/decisions.md header).
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
 //
@@ -209,12 +211,12 @@ export function tsTests(src: string, fileName = 'x.ts'): TsTest[] {
   return out
 }
 
-export type Row = { line: number; rule: string; names: string[]; todo: boolean }
+export type Row = { line: number; rule: string; id?: string; names: string[]; todo: boolean }
 
-/** Maximum Rule cell length in Unicode code points, markup included (docs/invariants.md index and part headers). */
+/** Maximum Rule text length in Unicode code points, markup included except the optional {#id} prefix. */
 export const MAX_RULE_LENGTH = 160
 
-/** Parses a docs/invariants/*.md part table (docs/invariants.md is the index). Returns rows, or errors for malformed ones. */
+/** Parses a part table, separating a valid {#id} prefix from Rule text before measuring it. Reports malformed tags and rows. */
 export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
   const rows: Row[] = []
   const errors: string[] = []
@@ -223,16 +225,20 @@ export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
     if (!text.startsWith('|')) return
     const cells = text.replace(/^\||\|\s*$/g, '').split('|').map((c) => c.trim())
     if (cells[0] === 'Rule' || /^-+$/.test(cells[0])) return
+    let rule = cells[0]
+    const tag = /^\{#([a-z0-9]+(?:-[a-z0-9]+)*)\} (?=\S)/.exec(rule) // exactly one space, so the Rule text is canonical
+    if (rule.startsWith('{#') && !tag) errors.push(`line ${line}: malformed rule ID tag: ${rule}`)
+    if (tag) rule = rule.slice(tag[0].length)
     const cell = cells[1] ?? ''
     const names = [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1])
     const todo = /\(todo\)/.test(cell)
-    const ruleLength = [...cells[0]].length
+    const ruleLength = [...rule].length
     if (cells.length === 2 && ruleLength > MAX_RULE_LENGTH)
-      errors.push(`line ${line}: Rule cell is ${ruleLength} characters (max ${MAX_RULE_LENGTH}): ${[...cells[0]].slice(0, 40).join('')}`)
+      errors.push(`line ${line}: Rule cell is ${ruleLength} characters (max ${MAX_RULE_LENGTH}): ${[...rule].slice(0, 40).join('')}`)
     if (cells.length !== 2) errors.push(`line ${line}: expected 2 columns (Rule | Test): ${cells[0]}`)
     else if (names.length === 0 && !todo) errors.push(`line ${line}: Test column names no test and is not (todo): ${cells[0]}`)
     else if (todo && cell !== '(todo)') errors.push(`line ${line}: (todo) must stand alone in the Test column, not mixed with references: ${cells[0]}`)
-    else rows.push({ line, rule: cells[0], names, todo })
+    else rows.push({ line, rule, ...(tag ? { id: tag[1] } : {}), names, todo })
   })
   return { rows, errors }
 }
@@ -459,7 +465,35 @@ export function checkDecisions(md: string): string[] {
   return errors
 }
 
-/** Static scan only, or reconciled with the real cargo list when `listed` is given. Also checks docs/decisions.md when present. */
+/** Resolve bullet tokens within the linked part; count rows, not matching test references within a row. */
+function checkCrossReferences(tokens: string, target: string, rows: Row[], referencedIds: Set<string>): string[] {
+  const errors: string[] = []
+  const seen = new Set<Row>()
+  for (const m of tokens.matchAll(/`([^`]+)`/g)) {
+    const token = m[1]
+    const isId = token.startsWith('#')
+    const matches = rows.filter((row) => isId
+      ? row.id === token.slice(1)
+      : row.names.some((ref) => ref.slice(ref.lastIndexOf('::') + 2) === token))
+    if (matches.length === 0) {
+      errors.push((isId ? 'rule ID not found in ' : 'test name not found in ') + target + ': ' + token)
+      continue
+    }
+    if (!isId && matches.length > 1) {
+      errors.push(`test name matches ${matches.length} rows in ${target}; reference the row by its #id instead: ${token}`)
+      continue
+    }
+    const row = matches[0]
+    if (isId) referencedIds.add(token.slice(1))
+    if (seen.has(row)) errors.push(`same row referenced twice in ${target}: ${token}`)
+    seen.add(row)
+  }
+  return errors
+}
+
+/** Checks parts, Rule text/IDs and unambiguous cross-references, plus decisions when present.
+ * Test definitions use a static scan, reconciled with the real cargo list when `listed` is given.
+ */
 export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
   const errors: string[] = []
   const index = readFileSync(join(root, 'docs/invariants.md'), 'utf8')
@@ -493,6 +527,8 @@ export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
   const collected = collectKnownTests(root)
   const known = listed ? reconcileWithCargoList(collected, listed) : collected
   const rules = new Map<string, string>()
+  const ids = new Map<string, string>()
+  const referencedIds = new Set<string>()
   for (const [name, { md, rows }] of parts) {
     const file = 'docs/invariants/' + name
     if (!linked.has(name)) errors.push(file + ': line 1: part is not linked from docs/invariants.md')
@@ -502,6 +538,15 @@ export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
       const previous = rules.get(row.rule)
       if (previous) errors.push(at + ': duplicate Rule text (first at ' + previous + '): ' + row.rule)
       else rules.set(row.rule, at)
+      if (row.id) {
+        // An ID is only for a row that no test name identifies within its part.
+        const suffix = (ref: string) => ref.slice(ref.lastIndexOf('::') + 2)
+        const unique = row.names.map(suffix).find((n) => rows.filter((r) => r.names.some((ref) => suffix(ref) === n)).length === 1)
+        if (unique) errors.push(at + ': rule ID is unnecessary; reference the row by its unique test name ' + unique + ': #' + row.id)
+        const previousId = ids.get(row.id)
+        if (previousId) errors.push(at + ': duplicate rule ID (first at ' + previousId + '): #' + row.id)
+        else ids.set(row.id, at)
+      }
     }
     let inOtherParts = false
     let proseSeen = false
@@ -511,7 +556,7 @@ export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
         return
       }
       if (!inOtherParts || text.trim() === '') return
-      if (!proseSeen && text === 'Rows that also govern this area, listed by a test name from the row in that part.') {
+      if (!proseSeen && text === 'Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.') {
         proseSeen = true
         return
       }
@@ -523,12 +568,12 @@ export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
       if (!part) errors.push(at + 'unknown part: ' + target)
       else if (target === name) errors.push(at + 'cross-reference must link to another part')
       else {
-        const names = new Set(part.rows.flatMap((r) => r.names.map((ref) => ref.slice(ref.lastIndexOf('::') + 2))))
-        for (const m of bullet[2].matchAll(/`([^`]+)`/g))
-          if (!names.has(m[1])) errors.push(at + 'test name not found in ' + target + ': ' + m[1])
+        errors.push(...checkCrossReferences(bullet[2], target, part.rows, referencedIds).map((e) => at + e))
       }
     })
   }
+  for (const [id, at] of ids)
+    if (!referencedIds.has(id)) errors.push(at + ': rule ID is never referenced: #' + id)
   const decisions = join(root, 'docs/decisions.md')
   const decisionErrors = existsSync(decisions) ? checkDecisions(readFileSync(decisions, 'utf8')).map((e) => `docs/decisions.md: ${e}`) : []
   return [...errors, ...decisionErrors]

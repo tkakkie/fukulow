@@ -4,7 +4,7 @@ Writing: a Rule cell states what must hold, scope and exceptions included, in at
 
 Rules that must always hold. Each one lists the test that guards it as `path::test_name`; the test must run in CI. Add the test with the code.
 
-Rows live in parts under `docs/invariants/`, one part per area; each row is in exactly one part, and every other part it touches lists it under "Rows in other parts". Read the parts your change touches (a cross-area change: every related part). A new row goes in the part of its main area; each other area it governs lists one of its test names there.
+Rows live in parts under `docs/invariants/`, one part per area; each row is in exactly one part, and every other part it touches lists it under "Rows in other parts". Read the parts your change touches (a cross-area change: every related part). A new row goes in the part of its main area; each other area it governs lists it there by a test name that matches only that row, or, when none does, by a `{#id}` (lowercase words and hyphens) added at the start of its Rule cell; an ID is not counted in the Rule limit and is used only where needed.
 
 - [auth](invariants/auth.md): Accounts, sign-in, sessions, roles, permissions, Organization scoping (server)
 - [channels](invariants/channels.md): Channels, membership, Capabilities (server and member UI)

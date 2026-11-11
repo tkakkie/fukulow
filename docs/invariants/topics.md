@@ -37,7 +37,7 @@ Topics, server and web, incl. their real-time delivery tests. Writing rules and 
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [messages](messages.md): `send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_first`, `unread_mark_and_removal_serialize_without_recreating_revoked_positions`, `matches openapi.json SendMessageRequest.topic_name rules`
 - [replies](replies.md): `reply_inherits_root_and_topic_and_retry_compares_parent_before_lookup`, `reply_admission_and_commit_rollback_preserve_seq_topic_count_and_publication`, `reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_match`, `a Topic Message opens through the same controller and sends without Topic intent`, `rejects wrong roots Topics order omissions duplicates paging and missing Reply projections`

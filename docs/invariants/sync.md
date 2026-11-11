@@ -26,7 +26,7 @@ Web real-time client: protocol, sync controller, Organization sync, shared contr
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [messages](messages.md): `treats admission 503 as retryable and preserves the send key`
 - [topics](topics.md): `forwards Topic Messages without losing their generated topic_id`, `initial timeline history below W settles an unknown own send without duplicate display`, `a main read superseded by bootstrap cannot cause a late C9 denial`

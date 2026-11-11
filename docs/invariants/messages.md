@@ -28,7 +28,7 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 | Message pages are bounded, ascending and exclusive with has_more in the queried direction | `server/src/messages/tests.rs::message_pages_are_bounded_exclusive_ascending_and_directional`, `server/src/messages/tests.rs::message_query_validation_matches_contract` |
 | History authorization and its page share one non-locking snapshot: Member/private-grant loss may commit, no later Message enters the page, the next page denies | `server/src/messages/tests/membership.rs::history_authorization_and_page_share_a_nonlocking_snapshot` |
 | Queued sends re-check captured Member/revision and private grant after BEGIN; deactivation after Auth: organization_unavailable for history/send, none persisted | `server/src/messages/tests/membership.rs::queued_send_rechecks_member_revision_and_private_grant_after_begin`, `server/src/messages/tests/membership.rs::deactivation_after_auth_is_organization_unavailable_for_history_and_send` |
-| Shared recovery pages keep private non-Member, cross-Organization, deactivated/stale Member and removed private-grant denials, and dedupe late publication | `server/src/messages/tests/fanout.rs::shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish` |
+| {#shared-recovery-denials} Shared recovery pages keep private non-Member, cross-Organization, deactivated/stale Member and removed private-grant denials, and dedupe late publication | `server/src/messages/tests/fanout.rs::shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish` |
 | A Channel recipient lock holds no registry or other Channel lock; leases keep the cursor past the last unsubscribe; concurrent last exits remove the entry | `server/src/messages/delivery.rs::holding_one_channels_recipients_does_not_lock_the_registry_or_another_channel`, `server/src/messages/delivery.rs::channel_registry_retains_notifications_and_cleans_concurrent_last_exits` |
 | Shared recovery fills <=1 50-Message gap page within LIVE_QUEUE_CAPACITY; bigger gaps latch 1011, skip fan-out, advance cursor; all recover in order, no 4008 | `server/src/messages/tests/fanout.rs::shared_gap_recovery_accepts_one_page_and_latches_above_the_bound`, `server/src/realtime/tests/notification.rs::dropped_notification_large_gap_never_overflows_undrained_subscribers_and_replays_in_order` |
 | Shared recovery pages re-check visibility (deactivation/grant removal between pages); auth-query failure: 4008 overflow, cursor advances; page-read failure 1011 | `server/src/messages/tests/fanout.rs::shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish`, `server/src/messages/tests/fanout.rs::shared_gap_authorization_failure_sets_overflow_and_advances_cursor`, `server/src/messages/tests/fanout.rs::shared_gap_query_failure_latches_only_affected_channel_for_replay` |
@@ -41,7 +41,7 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [channels](channels.md): `session_cannot_access_another_organization`
 - [topics](topics.md): `shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish`
