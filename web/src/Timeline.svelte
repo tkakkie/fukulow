@@ -15,38 +15,66 @@
     type ItemRect,
     type ScrollAnchor,
   } from './timeline-scroll'
+  import { linePosition, type MainTimelineLine } from './topic-selectors'
+  import type { TopicsAdapter } from './topics.svelte'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
+  import TopicSummaryLine from './ui/TopicSummaryLine.svelte'
 
   // The session owns the sync controller and outlives this component; this only displays its state.
   let {
     channel,
+    topics = null,
     channelId = '',
     selfId = '',
     organizationUnavailable = false,
     reconnecting = false,
     composerRef = $bindable(null),
+    topicInputRef = $bindable(null),
+    onopentopic,
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
   }: {
     channel: ChannelSync
+    topics?: TopicsAdapter | null
     channelId?: string
     selfId?: string
     organizationUnavailable?: boolean
     reconnecting?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
+    topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
+    onopentopic?: (topicId: string) => void
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
   } = $props()
 
   const s = $derived(channel.timeline)
-  const targetUnavailable = $derived(s.status === 'unavailable' || organizationUnavailable)
+  const tState = $derived(topics ? topics.state : null)
+  const targetUnavailable = $derived(
+    s.status === 'unavailable' || Boolean(tState?.unavailable) || organizationUnavailable,
+  )
+  const lines = $derived<MainTimelineLine[]>(
+    tState ? tState.lines : s.messages.map((message) => ({ kind: 'message', message })),
+  )
+  const mainPending = $derived(s.pending.filter((p) => !p.replyTo && !p.topicId))
+  const effectiveStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
+    targetUnavailable
+      ? 'unavailable'
+      : s.status === 'error' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.error)
+        ? 'error'
+        : s.status === 'loading' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.loading)
+          ? 'loading'
+          : 'ready',
+  )
+  const hasOlder = $derived(tState ? tState.main.asOfSeq !== undefined && tState.main.hasMore : s.hasOlder)
+  const loadingOlder = $derived(tState ? tState.main.asOfSeq !== undefined && tState.main.loading : s.loadingOlder)
+  const olderError = $derived(tState ? tState.main.asOfSeq !== undefined && tState.main.error : s.olderError)
 
   const scrollController = createTimelineScrollController()
   const subscribeScroll = createSubscriber((update) => scrollController.subscribe(update))
@@ -113,20 +141,63 @@
 
   function loadOlderWithAnchor() {
     captureCurrentAnchor()
-    void channel.loadOlder()
+    if (topics) void topics.loadMain()
+    else void channel.loadOlder()
   }
+
+  function retryInitialLoad() {
+    scrollController.resetLoadingTimeout()
+    if (topics && s.status === 'ready') void topics.loadMain()
+    else void channel.loadLatest()
+  }
+
+  let lastSummaryChannel = ''
+  const requestedSummaries = new Set<string>()
+  let requestedMainFor = ''
 
   $effect(() => () => scrollController.destroy())
 
+  $effect(() => {
+    if (channelId !== lastSummaryChannel) {
+      lastSummaryChannel = channelId
+      requestedSummaries.clear()
+      requestedMainFor = ''
+    }
+    if (!topics || !tState || targetUnavailable || s.status !== 'ready') return
+    if (
+      tState.main.asOfSeq === undefined &&
+      !tState.main.loading &&
+      !tState.main.error &&
+      requestedMainFor !== channelId
+    ) {
+      requestedMainFor = channelId
+      void topics.loadMain()
+    }
+    for (const topic of tState.topics) {
+      if (topic.baseline === null && !requestedSummaries.has(topic.topicId)) {
+        requestedSummaries.add(topic.topicId)
+        void topics.loadSummary(topic.topicId)
+      }
+    }
+  })
+
   // Keep scroll state, anchor preservation and 10 s loading timeout synchronized with timeline changes (docs/ui.md §5, §8)
   $effect(() => {
-    const messages = s.messages
-    const pendingIds = s.pending.map((p) => p.clientMessageId)
-    const status = s.status
+    const syncMessages = lines.map((line) =>
+      line.kind === 'message'
+        ? { id: line.message.id, seq: line.message.seq, sender: line.message.sender }
+        : {
+            id: `topic:${line.topicId}:${line.position}`,
+            seq: linePosition(line),
+            sender: line.latestMessage.sender,
+          },
+    )
+    const pendingIds = mainPending.map((p) => p.clientMessageId)
+    const status = effectiveStatus
     const { action, anchor } = scrollController.sync({
       channelId,
       status,
-      messages,
+      messages: syncMessages,
       pendingIds,
       selfId,
     })
@@ -160,7 +231,9 @@
     const id = confirmReplaceId
     confirmReplaceId = null
     if (!id) return
-    const canRestore = !targetUnavailable && s.pending.some((p) => p.clientMessageId === id && p.status === 'failed')
+    const target = mainPending.find((p) => p.clientMessageId === id && p.status === 'failed')
+    const canRestore = !targetUnavailable && Boolean(target)
+    if (canRestore && target?.topicName) channel.setTopicDraft('')
     confirmReplaceDraftWithFailedSend(
       id,
       s.draft,
@@ -187,7 +260,7 @@
 </script>
 
 <section class="timeline-section" aria-label="タイムライン">
-  {#if reconnecting && !organizationUnavailable && s.status === 'ready'}
+  {#if reconnecting && !organizationUnavailable && effectiveStatus === 'ready'}
     <div class="timeline-section__banner">
       <StatusBanner tone="info" role={null} message="再接続しています…" />
     </div>
@@ -217,32 +290,29 @@
         onaction={ongoToChannelList}
       />
     </div>
-  {:else if s.status === 'error' || (s.status === 'loading' && scrollView.loadingTimedOut)}
+  {:else if effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut)}
     <div class="timeline-section__banner">
       <StatusBanner
         tone="danger"
         role="alert"
         message="メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
         actionLabel="再試行"
-        onaction={() => {
-          scrollController.resetLoadingTimeout()
-          void channel.loadLatest()
-        }}
+        onaction={retryInitialLoad}
       />
     </div>
   {/if}
 
   <div class="timeline-scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if !organizationUnavailable && s.status === 'loading' && !scrollView.loadingTimedOut && s.messages.length === 0 && s.pending.length === 0}
+    {#if !organizationUnavailable && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && lines.length === 0 && mainPending.length === 0}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
 
-    {#if s.hasOlder && !targetUnavailable}
+    {#if hasOlder && !targetUnavailable}
       <div class="timeline-older">
-        <Button variant="secondary" disabled={s.loadingOlder} onclick={loadOlderWithAnchor}>
+        <Button variant="secondary" disabled={loadingOlder} onclick={loadOlderWithAnchor}>
           以前のメッセージを読み込む
         </Button>
-        {#if s.olderError}
+        {#if olderError}
           <StatusBanner
             tone="danger"
             role="alert"
@@ -254,15 +324,30 @@
       </div>
     {/if}
 
-    {#if s.messages.length > 0 || s.pending.length > 0}
+    {#if lines.length > 0 || mainPending.length > 0}
       <ul class="timeline-list" aria-label="メッセージ一覧">
-        {#each s.messages as m (m.id)}
-          <li class="timeline-list__item" data-message-id={m.id}>
-            <MessageRow createdAt={m.created_at} body={m.body} />
-          </li>
+        {#each lines as line (line.kind === 'message' ? line.message.id : `topic:${line.topicId}`)}
+          {#if line.kind === 'message'}
+            <li class="timeline-list__item" data-message-id={line.message.id}>
+              <MessageRow createdAt={line.message.created_at} body={line.message.body} />
+            </li>
+          {:else}
+            <li class="timeline-list__item" data-message-id={`topic:${line.topicId}:${line.position}`}>
+              <TopicSummaryLine
+                topicId={line.topicId}
+                name={line.baseline?.summary.name ?? 'トピック'}
+                messageCount={line.messageCount ?? undefined}
+                latestBody={line.latestMessage.body}
+                onclick={() => onopentopic?.(line.topicId)}
+              />
+            </li>
+          {/if}
         {/each}
-        {#each s.pending as p (p.clientMessageId)}
+        {#each mainPending as p (p.clientMessageId)}
           <li class="timeline-list__item" data-status={p.status}>
+            {#if p.topicName}
+              <p class="timeline-list__pending-topic">トピック: {p.topicName}</p>
+            {/if}
             <MessageRow
               body={p.body}
               pendingStatus={p.status}
@@ -275,7 +360,7 @@
           </li>
         {/each}
       </ul>
-    {:else if s.status === 'ready' && !organizationUnavailable}
+    {:else if effectiveStatus === 'ready' && !organizationUnavailable}
       <EmptyState
         title="まだメッセージがありません。"
         description="下の入力欄から最初のメッセージを送信できます。"
@@ -294,10 +379,14 @@
   <div class="timeline-composer">
     <Composer
       bind:textareaRef={composerRef}
+      bind:topicInputRef
+      allowTopicName={Boolean(topics)}
       value={s.draft}
+      topicValue={s.topicDraft}
       error={s.composerError}
       disabled={targetUnavailable}
       oninput={(b) => channel.setDraft(b)}
+      ontopicinput={(t) => channel.setTopicDraft(t)}
       onsubmit={handleSubmit}
     />
   </div>
@@ -359,6 +448,14 @@
 
   .timeline-list__item {
     min-width: 0;
+  }
+
+  .timeline-list__pending-topic {
+    margin: 0;
+    padding: var(--space-4) var(--space-8) 0;
+    font-size: var(--font-size-12);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text2);
   }
 
   .timeline-new-below {

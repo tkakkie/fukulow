@@ -7,23 +7,35 @@
 
   let {
     value,
+    topicValue = '',
+    allowTopicName = false,
+    placeholder = 'メッセージを入力',
+    submitDisabled = false,
     error = null,
     disabled = false,
     textareaRef = $bindable(null),
+    topicInputRef = $bindable(null),
     oninput,
+    ontopicinput,
     onsubmit,
   }: {
     value: string
+    topicValue?: string
+    allowTopicName?: boolean
+    placeholder?: string
+    submitDisabled?: boolean
     error?: string | null
     disabled?: boolean
     textareaRef?: HTMLInputElement | HTMLTextAreaElement | null
+    topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
     oninput: (body: string) => void
+    ontopicinput?: (topicName: string) => void
     onsubmit: () => Promise<boolean>
   } = $props()
 
   function submit(e: Event) {
     e.preventDefault()
-    if (disabled) return
+    if (disabled || submitDisabled) return
     void onsubmit().finally(() => {
       focusTarget(textareaRef)
     })
@@ -34,16 +46,39 @@
       submit(e)
     }
   }
+
+  function topicKeydown(e: KeyboardEvent) {
+    if (!shouldSubmitOnEnter(e)) return
+    e.preventDefault()
+    if (disabled || submitDisabled) return
+    if (value.trim()) {
+      submit(e)
+    } else {
+      focusTarget(textareaRef)
+    }
+  }
 </script>
 
 <form class="composer" onsubmit={submit}>
+  {#if allowTopicName}
+    <Input
+      bind:inputRef={topicInputRef}
+      name="topic"
+      ariaLabel="トピック名"
+      placeholder="トピック名（任意）"
+      {disabled}
+      value={topicValue}
+      oninput={(v) => ontopicinput?.(v)}
+      onkeydown={topicKeydown}
+    />
+  {/if}
   <Input
     bind:inputRef={textareaRef}
     multiline
     rows={2}
     name="body"
     ariaLabel="メッセージ"
-    placeholder="メッセージを入力"
+    {placeholder}
     {disabled}
     {value}
     oninput={(v) => oninput(v)}
@@ -53,7 +88,7 @@
     <StatusBanner tone="danger" role="alert" message={error} />
   {/if}
   <div class="composer__actions">
-    <Button variant="primary" type="submit" disabled={disabled || !value.trim()}>送信</Button>
+    <Button variant="primary" type="submit" disabled={disabled || submitDisabled || !value.trim()}>送信</Button>
   </div>
 </form>
 

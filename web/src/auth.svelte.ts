@@ -9,9 +9,10 @@ import { createSession } from './session'
 import { createMembers } from './members'
 import { membersAdapter, type inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
+import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
+export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics?(id: string): TopicsAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -26,7 +27,19 @@ const defaults: AuthDeps = {
   openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
   openSession(selfId, onEnded, organizationId, drafts) {
     const session = createSession({ selfId, onEnded, organizationId, sync: { drafts } })
-    return { navigationTargets: navigationTargetsAdapter(session.navigationTargets), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), channelMembers: session.channelMembers, close: session.close }
+    const topicAdapters = new Map<string, TopicsAdapter>()
+    return {
+      navigationTargets: navigationTargetsAdapter(session.navigationTargets),
+      channels: channelsAdapter(session.channels),
+      sync: syncAdapter(session.sync),
+      topics(id: string) {
+        let adapter = topicAdapters.get(id)
+        if (!adapter) topicAdapters.set(id, (adapter = topicsAdapter(session.topics, id)))
+        return adapter
+      },
+      channelMembers: session.channelMembers,
+      close: session.close,
+    }
   },
 }
 const sessionEndedNotice = 'セッションが終了しました。もう一度ログインしてください。'

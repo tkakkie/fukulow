@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Result, TimelinePage, TopicSummaryResponse } from './api'
 import { flush } from './sync-test-helpers'
@@ -535,5 +536,101 @@ it('posting during an older timeline request merges ack, page and echo once with
   expect(c.sync.get().channels.A.cursor).toBe(11)
   expect(c.topics.get('A').lines.flatMap(l => l.kind === 'message' ? [l.message.seq] : [])).toEqual([4, 8, 11])
   expect(c.topics.get('A').topics).toHaveLength(1)
+  await c.sync.close()
+})
+
+it('createTopicSync fences topics.replaceSession before sync.replaceSession and topics.close before sync.close', async () => {
+  const topicsSrc = readFileSync(new URL('./topics.ts', import.meta.url), 'utf8')
+  expect(topicsSrc).toMatch(/Compose only via createTopicSync[\s\S]*?\nexport function createTopics\(/)
+
+  const c = topicClient()
+  await c.boot()
+  const order: string[] = []
+  const origReplace = c.topics.replaceSession
+  const origClose = c.topics.close
+  vi.spyOn(c.topics, 'replaceSession').mockImplementation(() => {
+    order.push('topics.replaceSession')
+    origReplace()
+  })
+  vi.spyOn(c.topics, 'close').mockImplementation(() => {
+    order.push('topics.close')
+    origClose()
+  })
+  c.sync.subscribe(() => {
+    const cur = c.sync.get()
+    if (cur.selfId === 'next' && !order.includes('sync.replaceSession')) order.push('sync.replaceSession')
+    if (!cur.running && !order.includes('sync.close')) order.push('sync.close')
+  })
+
+  await c.sync.replaceSession('next')
+  await c.sync.close()
+  expect(order).toEqual(['topics.replaceSession', 'sync.replaceSession', 'topics.close', 'sync.close'])
+})
+
+it('loadMain returns boolean outcome and keeps cached snapshots reconciled across sync listener ordering', async () => {
+  const c = topicClient()
+  const seenInEarlySyncListener: number[][] = []
+  let secondaryTopics!: ReturnType<typeof createTopics>
+  // Subscribe BEFORE secondaryTopics is created so this listener runs before secondaryTopics' sync listener
+  c.sync.subscribe(() => {
+    if (!secondaryTopics) return
+    seenInEarlySyncListener.push(
+      secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position)),
+    )
+  })
+  secondaryTopics = createTopics(c.sync, { api: c.topicsApi })
+  await c.boot()
+  await secondaryTopics.loadMain('A')
+  // Prime snapshot cache on secondaryTopics before the next sync event
+  expect(secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position))).toEqual([8, 10])
+  seenInEarlySyncListener.length = 0
+
+  c.event(11, 'T')
+  expect(seenInEarlySyncListener.at(-1)).toEqual([8, 11])
+  secondaryTopics.close()
+
+  // Older page success returns true and emits one consistent notification even when settling an own send
+  c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  await c.sync.getTimeline('A').send('unknown own')
+  const pending = c.sync.get().channels.A.pending[0]!
+  const own = { ...msg(4), sender: 'me', client_message_id: pending.clientMessageId }
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 10, items: [{ kind: 'message', message: own }], has_more: true }))
+  let topicNotifications = 0
+  const unsub = c.topics.subscribe(() => {
+    topicNotifications++
+  })
+  expect(await c.topics.loadMain('A')).toBe(true)
+  // 1 notification for loading=true, 1 notification for settled page + settleHistory
+  expect(topicNotifications).toBe(2)
+
+  // HTTP 503 returns false
+  c.topicsApi.listTimeline.mockResolvedValueOnce({ ok: false, kind: 'http', status: 503 })
+  expect(await c.topics.loadMain('A')).toBe(false)
+
+  // C9 404 returns false and marks unavailable in a single completion notification
+  topicNotifications = 0
+  c.topicsApi.listTimeline.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'channel_not_found' })
+  expect(await c.topics.loadMain('A')).toBe(false)
+  expect(topicNotifications).toBe(2)
+  expect(c.topics.get('A').unavailable).toBe(true)
+  expect(await c.topics.loadMain('A')).toBe(false)
+  unsub()
+  await c.sync.close()
+})
+
+it('records notFound per Topic on 404 topic_not_found for summary and Topic history reads', async () => {
+  const c = topicClient()
+  await c.boot()
+  expect(c.topics.get('A').topic('missing').notFound).toBe(false)
+
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+  await c.topics.loadSummary('A', 'missing')
+  expect(c.topics.get('A').topic('missing')).toMatchObject({ notFound: true, error: false })
+  expect(c.topics.get('A').topic('T').notFound).toBe(false)
+  expect(c.topics.get('A').unavailable).toBe(false)
+
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+  await c.topics.loadTopic('A', 'missing-history')
+  expect(c.topics.get('A').topic('missing-history')).toMatchObject({ notFound: true, loading: false, error: false })
   await c.sync.close()
 })

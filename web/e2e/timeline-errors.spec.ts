@@ -143,9 +143,9 @@ test('keeps loaded Messages and the unsent draft visible in error and unavailabl
   // 2. Drive retryable 503 (`error`) and 404 (`unavailable`) history states without retrying from `unavailable`.
   const existingIds = new Set([target.id, other.id])
   let latestOutcome: 'server_error' | 'not_found' | 'pass' = 'server_error'
-  await page.route('**/api/v1/orgs/*/channels/*/messages*', async route => {
+  await page.route('**/api/v1/orgs/*/channels/*/*', async route => {
     if (route.request().method() !== 'GET') return route.continue()
-    const channelId = /\/channels\/([^/]+)\/messages/.exec(new URL(route.request().url()).pathname)?.[1]
+    const channelId = /\/channels\/([^/]+)\/(?:messages|timeline)$/.exec(new URL(route.request().url()).pathname)?.[1]
     if (!channelId || existingIds.has(channelId)) return route.continue()
     if (latestOutcome === 'server_error') {
       return route.fulfill({ status: 503, ...errorJson('internal_error') })
@@ -230,8 +230,8 @@ test('disables the Composer when the Channel is unavailable', async ({ page }) =
   // Retryable `error` keeps the Composer enabled, and `再試行` from `error` clears it.
   const existingIds = new Set([target.id, other.id])
   let failOnce = true
-  await page.route('**/api/v1/orgs/*/channels/*/messages*', async route => {
-    const channelId = /\/channels\/([^/]+)\/messages/.exec(new URL(route.request().url()).pathname)?.[1]
+  await page.route('**/api/v1/orgs/*/channels/*/*', async route => {
+    const channelId = /\/channels\/([^/]+)\/(?:messages|timeline)$/.exec(new URL(route.request().url()).pathname)?.[1]
     if (route.request().method() === 'GET' && channelId && !existingIds.has(channelId) && failOnce) {
       failOnce = false
       return route.fulfill({ status: 503, ...errorJson('internal_error') })
@@ -388,9 +388,13 @@ test('shows the loadOlder error on failure and clears it on a successful retry',
   await expect(olderErrorAlert).toHaveCount(0)
 
   let failBeforeOnce = true
-  await page.route(`**/api/v1/orgs/*/channels/${target.id}/messages*`, async route => {
+  await page.route(`**/api/v1/orgs/*/channels/${target.id}/*`, async route => {
     const url = new URL(route.request().url())
-    if (route.request().method() === 'GET' && url.searchParams.has('before_seq') && failBeforeOnce) {
+    if (
+      route.request().method() === 'GET' &&
+      (url.searchParams.has('before_seq') || url.searchParams.has('before_position')) &&
+      failBeforeOnce
+    ) {
       failBeforeOnce = false
       return route.fulfill({ status: 503, ...errorJson('internal_error') })
     }

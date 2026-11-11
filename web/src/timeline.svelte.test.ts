@@ -4,9 +4,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
+import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { createSession } from './session'
 import { syncAdapter } from './sync.svelte'
 import Timeline from './Timeline.svelte'
+import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import MessageRow from './ui/MessageRow.svelte'
 import Workspace from './Workspace.svelte'
 
@@ -1358,6 +1360,343 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(channelListHeading.isRenderedVisible()).toBe(false)
     expect(testDoc.activeElement).toBe(goToListBtn())
     channelListHeading.hidden = false
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('renders Topic summary lines at latest activity, creates Topics from Composer, expands sidebar/panel Topic lists, and operates Topic view with isolated drafts and return focus', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...net.options('me'),
+    })
+    const topicAdapters = new Map<string, TopicsAdapter>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics(channelId: string) {
+        let a = topicAdapters.get(channelId)
+        if (!a) {
+          a = topicsAdapter(rawSession.topics, channelId)
+          topicAdapters.set(channelId, a)
+        }
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: () => rawSession.close(),
+    }
+
+    const chMsg1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'チャンネル本文1', topic_id: null }
+    const topicMsg2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '仕様の初回相談', topic_id: 't-1' }
+    const chMsg3 = { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: 'チャンネル本文3', topic_id: null }
+    net.timelines.c1 = ok({
+      as_of_seq: 3,
+      has_more: false,
+      items: [
+        { kind: 'message', message: chMsg1 },
+        {
+          kind: 'topic',
+          topic: {
+            id: 't-1',
+            name: '仕様相談',
+            first_seq: 2,
+            last_seq: 2,
+            message_count: 1,
+            latest_message: topicMsg2,
+            read_seq: 0,
+            unread_count: 0,
+          },
+        },
+        { kind: 'message', message: chMsg3 },
+      ],
+    })
+    net.topicMessages['c1:t-1'] = ok({ messages: [topicMsg2], has_more: false })
+    net.topicSummaries['c1:t-1'] = ok({
+      as_of_seq: 3,
+      topic: {
+        id: 't-1',
+        name: '仕様相談',
+        first_seq: 2,
+        last_seq: 2,
+        message_count: 1,
+        latest_message: topicMsg2,
+        read_seq: 0,
+        unread_count: 0,
+      },
+    })
+
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'empty')] }))
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const announcements: string[] = []
+    const navigation = createNavigation({
+      location: {
+        get href() {
+          return href
+        },
+      },
+      history: {
+        get state() {
+          return historyState
+        },
+        pushState(state: unknown, _title: string, url: string) {
+          historyState = state
+          href = url
+        },
+        replaceState(state: unknown, _title: string, url: string) {
+          historyState = state
+          href = url
+        },
+      },
+      get innerWidth() {
+        return testWin.innerWidth
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        navigation,
+        session: sessionModel,
+        organization: {
+          member: { id: 'me', name: '自分', role: 'owner' },
+          organization: {
+            organization_id: 'org-1',
+            name: 'Acme',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+        },
+        selectedOrganizationId: 'org-1',
+        resolveSenderName: (id: string) => (id === 'other' ? '田中' : '自分'),
+        onannounce: (msg: string) => announcements.push(msg),
+      },
+    })
+    flushSync()
+    await settle()
+    net.subscribed('c1', 3)
+    await settle()
+    flushSync()
+
+    // 1. Main timeline shows MessageRows + TopicSummaryLine in position order [1, 2, 3]; no inline Topic MessageRow
+    const mainItems = queryAll(host, '#main-content .timeline-list__item')
+    expect(mainItems).toHaveLength(3)
+    expect(mainItems[0].textContent).toContain('チャンネル本文1')
+    expect(mainItems[1].textContent).toContain('トピック: 仕様相談')
+    expect(mainItems[1].textContent).toContain('1件›')
+    expect(mainItems[1].textContent).toContain('仕様の初回相談')
+    expect(mainItems[2].textContent).toContain('チャンネル本文3')
+    expect(queryAll(host, '#main-content .ui-message-row').map((el) => el.textContent)).toHaveLength(2)
+
+    // Sidebar accordion expands for selected c1 showing recent Topic + すべてのトピック(1)›, while c2 has no child Topic rows
+    const sidebarButtons = queryAll(host, '#channel-content .channel-list button')
+    expect(sidebarButtons.map((b) => b.textContent.trim())).toEqual([
+      '# general',
+      '💬 仕様相談',
+      'すべてのトピック(1)›',
+      '# empty',
+    ])
+
+    // 2. Create a new Topic from the main Channel Composer (トピック名 + メッセージ + Enter)
+    const topicInput = queryAll(host, '#main-content input').find((el) => el.getAttribute('aria-label') === 'トピック名')!
+    const bodyTextarea = queryAll(host, '#main-content textarea').find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+    topicInput.value = 'リリース計画'
+    topicInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    bodyTextarea.value = '初回のトピック投稿'
+    bodyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    const createdTopicMsg = {
+      ...record(4, 'c1'),
+      id: 'm-4',
+      sender: 'me',
+      client_message_id: 'me-c1',
+      body: '初回のトピック投稿',
+      topic_id: 't-2',
+    }
+    net.topicSummaries['c1:t-2'] = ok({
+      as_of_seq: 4,
+      topic: {
+        id: 't-2',
+        name: 'リリース計画',
+        first_seq: 4,
+        last_seq: 4,
+        message_count: 1,
+        latest_message: createdTopicMsg,
+        read_seq: 0,
+        unread_count: 0,
+      },
+    })
+
+    const enterEvt = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    enterEvt.key = 'Enter'
+    bodyTextarea.dispatchEvent(enterEvt)
+    await settle()
+    expect(net.sends).toHaveLength(1)
+    expect(net.sends[0].body).toEqual({
+      client_message_id: 'me-c1',
+      body: '初回のトピック投稿',
+      topic_name: 'リリース計画',
+    })
+    net.sends[0].resolve(ok(createdTopicMsg))
+    net.event({ type: 'message', message: createdTopicMsg })
+    await settle()
+    await settle()
+    flushSync()
+
+    expect(topicInput.value).toBe('')
+    expect(bodyTextarea.value).toBe('')
+    expect(queryAll(host, '#main-content .timeline-list__item').at(-1)!.textContent).toContain('トピック: リリース計画')
+
+    // 3. Live message in t-1 moves its summary line to the tail (after t-2) WITHOUT triggering a live status announcement
+    announcements.length = 0
+    const liveTopicMsg = { ...record(5, 'c1'), id: 'm-5', sender: 'other', body: '仕様の追記です', topic_id: 't-1' }
+    net.event({ type: 'message', message: liveTopicMsg })
+    await settle()
+    flushSync()
+    const afterMoveItems = queryAll(host, '#main-content .timeline-list__item')
+    expect(afterMoveItems.at(-1)!.textContent).toContain('トピック: 仕様相談')
+    expect(afterMoveItems.at(-1)!.textContent).toContain('2件›')
+    expect(afterMoveItems.at(-1)!.textContent).toContain('仕様の追記です')
+    expect(announcements).toEqual([])
+
+    // 4. Open すべてのトピック(2)› -> right panel TopicList shows both Topics and ＋ 新しいトピック focuses トピック名
+    bodyTextarea.value = 'チャンネルに残す下書き'
+    bodyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    net.topicLists.c1 = ok({
+      as_of_seq: 5,
+      has_more: false,
+      topics: [
+        {
+          id: 't-2',
+          name: 'リリース計画',
+          first_seq: 4,
+          last_seq: 4,
+          message_count: 1,
+          latest_message: createdTopicMsg,
+          read_seq: 0,
+          unread_count: 0,
+        },
+        {
+          id: 't-1',
+          name: '仕様相談',
+          first_seq: 2,
+          last_seq: 5,
+          message_count: 2,
+          latest_message: liveTopicMsg,
+          read_seq: 0,
+          unread_count: 0,
+        },
+      ],
+    })
+
+    buttonsByText(host, 'すべてのトピック(2)›')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(href).toBe('/o/org-1/c/c1?panel=topics')
+    const panelTopicItems = queryAll(host, '#panel-content .topic-list-panel__item')
+    expect(panelTopicItems).toHaveLength(2)
+    expect(panelTopicItems[0].textContent).toContain('トピック: 仕様相談')
+    expect(panelTopicItems[1].textContent).toContain('トピック: リリース計画')
+
+    buttonsByText(host, '＋ 新しいトピック')[0].click()
+    flushSync()
+    await tick()
+    expect(testDoc.activeElement).toBe(topicInput)
+
+    // 5. Open Topic t-1 -> isolated Composer draft, filtered Topic messages, send in Topic, live announcement in Topic view, and return focus on チャンネルへ戻る
+    const summaryBtn = host.querySelector('#main-content [data-topic-id="t-1"]')!
+    summaryBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(href).toBe('/o/org-1/c/c1/t/t-1?panel=topics')
+    expect(host.querySelector('#main-content h1')?.textContent.trim()).toBe('仕様相談')
+    expect(announcements.at(-1)).toBe('仕様相談')
+
+    const topicComposer = queryAll(host, '#main-content textarea').find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+    expect(topicComposer.value).toBe('')
+    expect(queryAll(host, '#main-content .topic-view__item').map((el) => el.textContent)).toHaveLength(2)
+
+    topicComposer.value = 'トピックからの返信'
+    topicComposer.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    const topicForm = host.querySelector('#main-content form')!
+    topicForm.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    await settle()
+    expect(net.sends.at(-1)?.body).toEqual({
+      client_message_id: 'me-c2',
+      body: 'トピックからの返信',
+      topic_name: '仕様相談',
+    })
+    const sentInTopic = {
+      ...record(6, 'c1'),
+      id: 'm-6',
+      sender: 'me',
+      client_message_id: 'me-c2',
+      body: 'トピックからの返信',
+      topic_id: 't-1',
+    }
+    net.sends.at(-1)!.resolve(ok(sentInTopic))
+    net.event({ type: 'message', message: sentInTopic })
+    await settle()
+    flushSync()
+    expect(queryAll(host, '#main-content .topic-view__item')).toHaveLength(3)
+
+    // Live arrival in open Topic view IS announced
+    announcements.length = 0
+    net.event({
+      type: 'message',
+      message: { ...record(7, 'c1'), id: 'm-7', sender: 'other', body: 'トピックへの新着通知', topic_id: 't-1' },
+    })
+    await settle()
+    flushSync()
+    expect(announcements).toEqual(['田中: トピックへの新着通知'])
+
+    // Return to Channel -> focuses the Topic's summary line and preserves the Channel draft
+    const backToChannelBtn = queryAll(host, '#main-content button').find(
+      (b) => b.getAttribute('aria-label') === 'チャンネルへ戻る',
+    )!
+    backToChannelBtn.click()
+    flushSync()
+    await tick()
+    flushSync()
+
+    expect(href).toBe('/o/org-1/c/c1?panel=topics')
+    const returnedSummary = host.querySelector('#main-content [data-topic-id="t-1"]')!
+    expect(testDoc.activeElement).toBe(returnedSummary)
+    const restoredMainComposer = queryAll(host, '#main-content textarea').find(
+      (el) => el.getAttribute('aria-label') === 'メッセージ',
+    )!
+    expect(restoredMainComposer.value).toBe('チャンネルに残す下書き')
+
+    // 6. Unknown Topic (404 topic_not_found) shows unavailable EmptyState and disables Topic Composer while Channel stays usable
+    navigation.navigate({ type: 'topic', topicId: 'missing-topic', phone: false })
+    flushSync()
+    await settle()
+    flushSync()
+    expect(host.querySelector('#main-content')?.textContent).toContain('このトピックは利用できません。')
+    const disabledComposer = queryAll(host, '#main-content textarea').find(
+      (el) => el.getAttribute('aria-label') === 'メッセージ',
+    )!
+    expect(disabledComposer.disabled).toBe(true)
 
     navigation.destroy()
     await unmount(instance)

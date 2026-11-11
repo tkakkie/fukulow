@@ -67,7 +67,7 @@ export function createNavigation(browser: NavigationBrowser = window) {
         case 'close': target.panel = null; previousTab = null; focus = 'opener'; break
         case 'list': target.channelId = null; target.topicId = null; target.panel = null; previousTab = null; focus = 'list'; break
       }
-      if (intent.type === 'channel' && old?.organizationId === target.organizationId &&
+      if ((intent.type === 'channel' || intent.type === 'topic') && old?.organizationId === target.organizationId &&
         old.channelId === target.channelId && old.topicId === target.topicId && old.panel === target.panel) {
         publish(target, focus, previousTab)
         return false

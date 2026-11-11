@@ -12,3 +12,4 @@ export function topicsAdapter(topics: Topics, channel: string) {
     loadSummary: (id: string) => topics.loadSummary(channel, id),
   }
 }
+export type TopicsAdapter = ReturnType<typeof topicsAdapter>

@@ -18,8 +18,9 @@ export const topicsApi = (organizationId: string): TopicsApi => ({
   listTopicMessages: (c, t, q) => api.listTopicMessages(organizationId, c, t, q),
 })
 type Paging = { asOfSeq?: number; before?: number; hasMore: boolean; loading: boolean; error: boolean }
-type TopicWindow = { messages: Map<number, Message>; before?: number; hasMore: boolean; loading: boolean; error: boolean }
+type TopicWindow = { messages: Map<number, Message>; before?: number; initialized: boolean; hasMore: boolean; loading: boolean; error: boolean; notFound: boolean }
 const paging = (): Paging => ({ hasMore: true, loading: false, error: false })
+const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, loading: false, error: false, notFound: false })
 const window = () => ({ main: paging(), list: paging(), messages: new Map<number, Message>(),
   mainTopics: new Set<string>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
   summaries: new Set<string>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
@@ -27,12 +28,14 @@ type Window = ReturnType<typeof window>
 type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
 
 /** Session-owned projection windows around the existing unfiltered sync controller. No protocol state is copied. */
+// Compose only via createTopicSync, or call replaceSession/close on topics before sync with a test.
 export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
   const windows = new Map<string, Window>()
   const listeners = new Set<() => void>()
   const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   let closed = false
+  let batching = false
   let sessionToken = 0
   const cancelReads = () => {
     deadlines.forEach((resolve, timer) => { clearTimeout(timer); resolve() })
@@ -40,13 +43,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   let previous = sync.get()
   const notify = () => { snapshots.clear(); listeners.forEach(l => l()) }
-  const getWindow = (channel: string) => {
-    let w = windows.get(channel)
-    if (!w) windows.set(channel, w = window())
-    return w
-  }
-  const unsubscribe = sync.subscribe(() => {
+  const reconcileSync = () => {
     const next = sync.get()
+    if (next === previous) return false
     for (const [id] of windows) {
       const before = previous.channels[id], after = next.channels[id]
       if (!next.running || !after || after.state === 'unavailable' ||
@@ -56,11 +55,29 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     }
     if (!next.running) cancelReads()
     previous = next
-    notify()
+    snapshots.clear()
+    return true
+  }
+  const withSync = (fn: () => void) => {
+    snapshots.clear()
+    batching = true
+    try { fn() } finally { batching = false }
+  }
+  const getWindow = (channel: string) => {
+    let w = windows.get(channel)
+    if (!w) windows.set(channel, w = window())
+    return w
+  }
+  const unsubscribe = sync.subscribe(() => {
+    reconcileSync()
+    if (!batching) notify()
   })
-  const current = (channel: string, w: Window) => !closed && sync.get().running &&
-    sync.get().organization === 'available' && windows.get(channel) === w && !w.unavailable &&
-    sync.get().channels[channel]?.watched === true
+  const current = (channel: string, w: Window) => {
+    if (!closed) reconcileSync()
+    return !closed && sync.get().running &&
+      sync.get().organization === 'available' && windows.get(channel) === w && !w.unavailable &&
+      sync.get().channels[channel]?.watched === true
+  }
 
   async function read<T>(channel: string, w: Window, slot: ReadSlot, run: () => Promise<Result<T>>, bootstrap = false) {
     const token = Symbol(slot)
@@ -84,10 +101,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() && !result.ok && result.kind === 'http' &&
         [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
         // C9: refuse sends and resubscription until explicit user selection.
-        void sync.channelUnavailable(channel)
         w.unavailable = true
-        windows.set(channel, w)
         w.main.loading = w.list.loading = false
+        withSync(() => { void sync.channelUnavailable(channel) })
+        windows.set(channel, w)
         notify()
       }
       return { result, isCurrent }
@@ -128,7 +145,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         applyMain(w, result.data)
-        void sync.settleHistory(channel, result.data.items.map(i => i.kind === 'message' ? i.message : i.topic.latest_message))
+        withSync(() => { void sync.settleHistory(channel, result.data.items.map(i => i.kind === 'message' ? i.message : i.topic.latest_message)) })
       }
       notify()
     }
@@ -146,7 +163,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     function topic(topicId: string) {
       const t = w.topics.get(topicId)
       return { messages: selectTopicMessages(topicId, messages, t?.messages.values() ?? []),
-        loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false }
+        initialized: t?.initialized ?? false,
+        loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false, notFound: t?.notFound ?? false }
     }
     return { lines, topics: merged.filter(l => l.kind === 'topic'),
       main: { ...w.main }, list: { ...w.list }, unavailable: w.unavailable || c?.state === 'unavailable',
@@ -159,13 +177,17 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   return {
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     get(channel: string) {
+      if (!closed) reconcileSync()
       let value = snapshots.get(channel)
       if (!value) snapshots.set(channel, value = snapshot(channel))
       return value
     },
-    async loadMain(channel: string) {
-      if (sync.get().channels[channel]?.cursor === null) await sync.getTimeline(channel).loadLatest()
-      else await loadMainPage(channel)
+    async loadMain(channel: string): Promise<boolean> {
+      if (sync.get().channels[channel]?.cursor === null) {
+        await sync.getTimeline(channel).loadLatest()
+        return sync.get().channels[channel]?.cursor !== null
+      }
+      return (await loadMainPage(channel)).ok
     },
     async bootstrap(channel: string): Promise<Result<MessagePage>> {
       const request = sync.get().channels[channel]?.latest
@@ -190,8 +212,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         mergeBaselines(w, result.data)
-        void sync.settleHistory(channel, result.data.topics.map(t => t.latest_message))
         p.asOfSeq = result.data.as_of_seq; p.before = result.data.topics[0]?.last_seq; p.hasMore = result.data.has_more
+        withSync(() => { void sync.settleHistory(channel, result.data.topics.map(t => t.latest_message)) })
       }
       notify()
     },
@@ -203,26 +225,39 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (!isCurrent()) return
       w.summaries.delete(topicId)
       if (result.ok) {
+        const existing = w.topics.get(topicId)
+        if (existing) existing.notFound = false
         mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
-        void sync.settleHistory(channel, [result.data.topic.latest_message])
+        withSync(() => { void sync.settleHistory(channel, [result.data.topic.latest_message]) })
+        notify()
+      } else if (result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found') {
+        let t = w.topics.get(topicId)
+        if (!t) w.topics.set(topicId, t = topicWindow())
+        if (!t.notFound) {
+          t.notFound = true
+          notify()
+        }
       }
-      notify()
       return result
     },
     async loadTopic(channel: string, topicId: string) {
       const w = getWindow(channel)
       let t = w.topics.get(topicId)
-      if (!t) w.topics.set(topicId, t = { messages: new Map(), hasMore: true, loading: false, error: false })
+      if (!t) w.topics.set(topicId, t = topicWindow())
       if (!current(channel, w) || t.loading || !t.hasMore) return
-      t.loading = true; t.error = false; notify()
+      t.loading = true; t.error = false; t.notFound = false; notify()
       const { result, isCurrent } = await read(channel, w, `topic:${topicId}`, () => options.api.listTopicMessages(channel, topicId,
         t.before === undefined ? {} : { before_seq: t.before }))
       if (!isCurrent()) return
-      t.loading = false; t.error = !result.ok
+      t.loading = false
+      const missing = !result.ok && result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found'
+      t.notFound = missing
+      t.error = !result.ok && !missing
       if (result.ok) {
+        t.initialized = true
         for (const m of result.data.messages) t.messages.set(m.seq, m)
-        void sync.settleHistory(channel, result.data.messages)
         t.before = result.data.messages[0]?.seq; t.hasMore = result.data.has_more
+        withSync(() => { void sync.settleHistory(channel, result.data.messages) })
       }
       notify()
     },

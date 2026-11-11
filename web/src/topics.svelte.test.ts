@@ -1,4 +1,7 @@
+import topicProjectionFixtures from '../../contract/realtime/client/topic-projections.json'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { partitionScenarios, runClientScenarioAsync, type ClientScenario } from '../scripts/realtime-fixtures'
+import { controllerClient } from './sync-test-helpers'
 import { topicsAdapter } from './topics.svelte'
 import { topicClient } from './topic-test-helpers'
 import { mount, settle } from './adapter-test-helpers.svelte'
@@ -75,4 +78,48 @@ it('reuses merged adapter and Topic snapshots until notify, including reads whil
   expect(adapter.state).not.toBe(before)
   expect(adapter.state.topics[0].position).toBe(12)
   await c.sync.close()
+})
+
+const { running: topicScenarios, proposed: proposedTopicScenarios } = partitionScenarios(
+  topicProjectionFixtures.scenarios as unknown as ClientScenario[],
+)
+it.skip.each(proposedTopicScenarios)('proposed adapter fixture: $id', () => {})
+
+it('runs all contract/realtime/client/topic-projections.json scenarios through topicsAdapter', async () => {
+  expect(proposedTopicScenarios).toHaveLength(0)
+  expect(topicScenarios).toHaveLength(4)
+  for (const scenario of topicScenarios) {
+    const client = controllerClient({}, true)
+    const adapter = topicsAdapter(client.topics, 'A')
+    const view = await mount(() => ({
+      lines: adapter.state.lines,
+      topicT: adapter.state.topic('T').messages,
+    }))
+    const rawObserve = client.observe
+    const rawFeed = client.feed
+    client.feed = async input => {
+      const emitted = await rawFeed(input)
+      await settle()
+      return emitted
+    }
+    client.observe = () => {
+      const observation = rawObserve()
+      const ch = observation.channels.A
+      if (ch) {
+        ch.main_timeline = view.last.lines.map(l =>
+          l.kind === 'message'
+            ? { seq: l.message.seq }
+            : { topic: l.topicId, position: l.position, message_count: l.messageCount },
+        )
+        if (ch.topics?.T) {
+          ch.topics.T = { visible: view.last.topicT.map(m => m.seq) }
+        }
+      }
+      return observation
+    }
+    expect(await runClientScenarioAsync(scenario, client), scenario.id).toEqual([])
+    await view.unmount()
+    await client.sync.close()
+    expect(vi.getTimerCount()).toBe(0)
+  }
 })

@@ -26,19 +26,39 @@ export type SyncOptions = {
   schedule?: (fn: () => void, ms: number, effect: Wait) => unknown
   cancel?: (handle: unknown) => void
 }
+export type PendingMessageState = {
+  clientMessageId: string
+  body: string
+  topicName?: string
+  topicId?: string
+  replyTo?: string
+  status: 'sending' | 'failed'
+  retryable: boolean
+}
+export type TopicComposerState = {
+  draft: string
+  composerError: string | null
+}
 export type TimelineState = {
   status: 'loading' | 'ready' | 'unavailable' | 'error'
   messages: Message[]
-  pending: { clientMessageId: string; body: string; status: 'sending' | 'failed'; retryable: boolean }[]
+  pending: PendingMessageState[]
   hasOlder: boolean
   loadingOlder: boolean
   olderError: boolean
   draft: string
+  topicDraft: string
   composerError: string | null
 }
 
 /** Max Message body length in Unicode scalar values (API rule; a test compares it to openapi.json). */
 export const MESSAGE_BODY_MAX = 4000
+
+/** Max Topic name length in Unicode scalar values (API rule; a test compares it to openapi.json). */
+export const TOPIC_NAME_MAX = 60
+
+/** Channel-scoped ASCII case fold matching the server's `to_ascii_lowercase()` Topic identity. */
+export const foldTopicName = (name: string): string => name.replace(/[A-Z]/g, ch => ch.toLowerCase())
 
 /** Japanese message when the Message body violates API scalar/NUL rules, else null. */
 export function messageBodyError(body: string): string | null {
@@ -52,8 +72,24 @@ export function messageBodyError(body: string): string | null {
   return null
 }
 
-type ChannelExtra = { olderError: boolean; draft: string; composerError: string | null }
-const emptyExtra: ChannelExtra = { olderError: false, draft: '', composerError: null }
+/** Japanese message when a Topic name violates API scalar/NUL/whitespace rules, else null. */
+export function topicNameError(name: string): string | null {
+  if (name.includes('\0')) return 'トピック名にNUL文字は含められません。'
+  if (name.length === 0 || /^\p{White_Space}|\p{White_Space}$/u.test(name)) {
+    return `トピック名の前後に空白を入れず、1〜${TOPIC_NAME_MAX}文字にしてください。`
+  }
+  let count = 0
+  for (const ch of name) {
+    const cp = ch.codePointAt(0)!
+    if (cp >= 0xd800 && cp <= 0xdfff) return 'トピック名に使用できない文字が含まれています。'
+    if (++count > TOPIC_NAME_MAX) return `トピック名は${TOPIC_NAME_MAX}文字以内にしてください。`
+  }
+  return null
+}
+
+type ChannelExtra = { olderError: boolean; draft: string; topicDraft: string; composerError: string | null }
+const emptyExtra: ChannelExtra = { olderError: false, draft: '', topicDraft: '', composerError: null }
+const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
@@ -75,9 +111,16 @@ export function createSync(options: SyncOptions) {
   const channelListeners = new Map<string, Set<() => void>>()
   const timelines = new Map<string, ReturnType<typeof timeline>>()
   const extras = new Map<string, ChannelExtra>()
+  const topicExtras = new Map<string, TopicComposerState>()
+  const pendingTopics = new Map<string, string>()
   const submitted = new Map<string, { channel: string; detached: boolean; restore: () => void }>()
 
-  const draftTarget = (channel: string) => ({ organizationId: options.organizationId ?? '', channelId: channel })
+  const draftTarget = (channel: string, topicId: string | null = null) => ({
+    organizationId: options.organizationId ?? '',
+    channelId: channel,
+    topicId,
+  })
+  const topicKey = (channel: string, topicId: string) => JSON.stringify([channel, topicId])
   const getExtra = (channel: string): ChannelExtra => {
     const existing = extras.get(channel)
     if (existing) return existing
@@ -92,20 +135,51 @@ export function createSync(options: SyncOptions) {
     if (
       (patch.olderError === undefined || patch.olderError === prev.olderError) &&
       (patch.draft === undefined || patch.draft === prev.draft) &&
+      (patch.topicDraft === undefined || patch.topicDraft === prev.topicDraft) &&
       (patch.composerError === undefined || patch.composerError === prev.composerError)
     ) {
       return false
     }
     const olderError = patch.olderError ?? prev.olderError
     const draft = patch.draft ?? prev.draft
+    const topicDraft = patch.topicDraft ?? prev.topicDraft
     if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel), draft)
     const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
-    if (!olderError && draft === '' && composerError === null) extras.delete(channel)
-    else extras.set(channel, { olderError, draft, composerError })
+    if (!olderError && draft === '' && topicDraft === '' && composerError === null) extras.delete(channel)
+    else extras.set(channel, { olderError, draft, topicDraft, composerError })
     return true
   }
   function setExtra(channel: string, patch: Partial<ChannelExtra>) {
     if (putExtra(channel, patch)) channelListeners.get(channel)?.forEach(l => l())
+  }
+  const getTopicExtra = (channel: string, topicId: string): TopicComposerState => {
+    const key = topicKey(channel, topicId)
+    const existing = topicExtras.get(key)
+    if (existing) return existing
+    const draft = options.drafts?.get(draftTarget(channel, topicId)) ?? ''
+    if (!draft) return emptyTopicExtra
+    const extra = { ...emptyTopicExtra, draft }
+    topicExtras.set(key, extra)
+    return extra
+  }
+  function putTopicExtra(channel: string, topicId: string, patch: Partial<TopicComposerState>): boolean {
+    const key = topicKey(channel, topicId)
+    const prev = getTopicExtra(channel, topicId)
+    if (
+      (patch.draft === undefined || patch.draft === prev.draft) &&
+      (patch.composerError === undefined || patch.composerError === prev.composerError)
+    ) {
+      return false
+    }
+    const draft = patch.draft ?? prev.draft
+    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel, topicId), draft)
+    const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
+    if (draft === '' && composerError === null) topicExtras.delete(key)
+    else topicExtras.set(key, { draft, composerError })
+    return true
+  }
+  function setTopicExtra(channel: string, topicId: string, patch: Partial<TopicComposerState>) {
+    if (putTopicExtra(channel, topicId, patch)) channelListeners.get(channel)?.forEach(l => l())
   }
   function clearOlderError(channel: string, prev: ChannelState | undefined, next: ChannelState | undefined): boolean {
     return ((prev?.older === undefined && next?.older !== undefined) ||
@@ -128,7 +202,13 @@ export function createSync(options: SyncOptions) {
     const extraChanged = new Set<string>()
     if (input.type === 'session_start' || input.type === 'session_replaced' || input.type === 'stop') {
       for (const channel of extras.keys()) extraChanged.add(channel)
+      for (const key of topicExtras.keys()) {
+        const [channel] = JSON.parse(key) as [string, string]
+        extraChanged.add(channel)
+      }
       extras.clear()
+      topicExtras.clear()
+      pendingTopics.clear()
     } else {
       if (input.type === 'history_failed') {
         const req = previous.requests[input.request]
@@ -140,6 +220,10 @@ export function createSync(options: SyncOptions) {
         }
       }
       for (const channel of result.changedChannels) {
+        const activeIds = new Set(state.channels[channel]?.pending.map(p => p.clientMessageId) ?? [])
+        for (const p of previous.channels[channel]?.pending ?? []) {
+          if (!activeIds.has(p.clientMessageId)) pendingTopics.delete(p.clientMessageId)
+        }
         if (clearOlderError(channel, previous.channels[channel], state.channels[channel])) {
           extraChanged.add(channel)
         }
@@ -261,7 +345,8 @@ export function createSync(options: SyncOptions) {
       case 'send': {
         const result = await request(effect.id, () => transport.sendMessage(effect.channel,
           { client_message_id: effect.client_message_id, body: effect.body,
-            ...(effect.reply_to ? { reply_to: effect.reply_to } : {}) }).then(result => {
+            ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
+            ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
           const draft = submitted.get(effect.client_message_id)
           submitted.delete(effect.client_message_id)
           // A closed Organization has no failed Message UI; retain a definite refusal's unedited text.
@@ -296,20 +381,87 @@ export function createSync(options: SyncOptions) {
     let snapshot: TimelineState
     let last: ChannelState | undefined | null = null
     let lastExtra: ChannelExtra | null = null
+    const topicComposers = new Map<string, ReturnType<typeof createTopicComposer>>()
     const listeners = new Set<() => void>()
     channelListeners.set(channel, listeners)
-    async function send(body: string, target: Pick<SendMessageRequest, 'reply_to'> = {}, restore?: () => void) {
+    async function send(
+      body: string,
+      target: Pick<SendMessageRequest, 'reply_to' | 'topic_name'> = {},
+      restore?: () => void,
+      originTopicId?: string,
+    ) {
       if (!body.trim() || messageBodyError(body) !== null || !state.running || state.organization === 'unavailable') {
+        return false
+      }
+      if (target.topic_name !== undefined && target.topic_name !== null && topicNameError(target.topic_name) !== null) {
         return false
       }
       const clientMessageId = newId()
       if (restore) submitted.set(clientMessageId, { channel, detached: false, restore })
+      if (originTopicId) pendingTopics.set(clientMessageId, originTopicId)
       const before = state.channels[channel]?.pending
       const completion = dispatch({ type: 'user_send', channel, clientMessageId, body, ...target })
       const accepted = state.channels[channel]?.pending !== before
-      if (!accepted) submitted.delete(clientMessageId)
+      if (!accepted) {
+        submitted.delete(clientMessageId)
+        pendingTopics.delete(clientMessageId)
+      }
       await completion
       return accepted
+    }
+    function createTopicComposer(topicId: string) {
+      let topicDraftRevision = 0
+      const target = draftTarget(channel, topicId)
+      return {
+        get: (): TopicComposerState => getTopicExtra(channel, topicId),
+        setDraft(draft: string) {
+          if (draft === getTopicExtra(channel, topicId).draft) return
+          topicDraftRevision++
+          setTopicExtra(channel, topicId, { draft, composerError: null })
+        },
+        async submit(topicName: string) {
+          const text = getTopicExtra(channel, topicId).draft
+          if (!text.trim()) return false
+          const nameError = topicNameError(topicName)
+          if (nameError !== null) {
+            setTopicExtra(channel, topicId, { composerError: nameError })
+            return false
+          }
+          const bodyError = messageBodyError(text)
+          if (bodyError !== null) {
+            setTopicExtra(channel, topicId, { composerError: bodyError })
+            return false
+          }
+          if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
+            return false
+          }
+          const revision = topicDraftRevision
+          putTopicExtra(channel, topicId, { draft: '', composerError: null })
+          const storeRevision = options.drafts?.revision(target)
+          const restore = () => {
+            if (
+              topicDraftRevision === revision &&
+              options.drafts?.revision(target) === storeRevision &&
+              getTopicExtra(channel, topicId).draft === ''
+            ) {
+              setTopicExtra(channel, topicId, { draft: text })
+            }
+          }
+          const accepted = await send(text, { topic_name: topicName }, restore, topicId)
+          if (!accepted) restore()
+          return accepted
+        },
+        restore(clientMessageId: string): boolean {
+          if (!state.running) return false
+          const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
+          if (p?.state !== 'failed') return false
+          const current = getTopicExtra(channel, topicId).draft
+          topicDraftRevision++
+          putTopicExtra(channel, topicId, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
+          void dispatch({ type: 'user_discard', channel, clientMessageId })
+          return true
+        },
+      }
     }
     return {
       get(): TimelineState {
@@ -322,11 +474,19 @@ export function createSync(options: SyncOptions) {
           // Content visibility depends on the base; subscription confirmation drives the separate live indicator.
           status: c?.state === 'unavailable' ? 'unavailable' : c?.historyError ? 'error' : c && c.cursor !== null ? 'ready' : 'loading',
           messages: c?.messages ?? [],
-          pending: (c?.pending ?? []).map(p => ({ clientMessageId: p.clientMessageId, body: p.body,
-            status: p.state === 'sending' ? 'sending' : 'failed', retryable: p.state !== 'failed' })),
+          pending: (c?.pending ?? []).map(p => ({
+            clientMessageId: p.clientMessageId,
+            body: p.body,
+            ...(p.topic_name ? { topicName: p.topic_name } : {}),
+            ...(pendingTopics.get(p.clientMessageId) ? { topicId: pendingTopics.get(p.clientMessageId) } : {}),
+            ...(p.reply_to ? { replyTo: p.reply_to } : {}),
+            status: p.state === 'sending' ? 'sending' : 'failed',
+            retryable: p.state !== 'failed',
+          })),
           hasOlder: c?.hasOlder ?? false, loadingOlder: c?.older !== undefined,
           olderError: extra.olderError,
           draft: extra.draft,
+          topicDraft: extra.topicDraft,
           composerError: extra.composerError,
         }
         return snapshot
@@ -339,9 +499,23 @@ export function createSync(options: SyncOptions) {
         draftRevision++
         setExtra(channel, { draft, composerError: null })
       },
+      setTopicDraft(topicDraft: string) {
+        if (topicDraft === getExtra(channel).topicDraft) return
+        draftRevision++
+        setExtra(channel, { topicDraft, composerError: null })
+      },
       async submit() {
-        const text = getExtra(channel).draft
+        const current = getExtra(channel)
+        const text = current.draft
+        const topicName = current.topicDraft
         if (!text.trim()) return false
+        if (topicName.length > 0) {
+          const nameError = topicNameError(topicName)
+          if (nameError !== null) {
+            setExtra(channel, { composerError: nameError })
+            return false
+          }
+        }
         const error = messageBodyError(text)
         if (error !== null) {
           setExtra(channel, { composerError: error })
@@ -351,12 +525,19 @@ export function createSync(options: SyncOptions) {
           return false
         }
         const revision = draftRevision
-        putExtra(channel, { draft: '', composerError: null })
+        putExtra(channel, { draft: '', topicDraft: '', composerError: null })
         const storeRevision = options.drafts?.revision(draftTarget(channel))
         const restore = () => {
-          if (draftRevision === revision && options.drafts?.revision(draftTarget(channel)) === storeRevision && getExtra(channel).draft === '') setExtra(channel, { draft: text })
+          if (
+            draftRevision === revision &&
+            options.drafts?.revision(draftTarget(channel)) === storeRevision &&
+            getExtra(channel).draft === '' &&
+            getExtra(channel).topicDraft === ''
+          ) {
+            setExtra(channel, { draft: text, topicDraft: topicName })
+          }
         }
-        const accepted = await send(text, {}, restore)
+        const accepted = await send(text, topicName ? { topic_name: topicName } : {}, restore)
         if (!accepted) restore()
         return accepted
       },
@@ -366,13 +547,22 @@ export function createSync(options: SyncOptions) {
         if (!state.running) return false
         const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
         if (p?.state !== 'failed') return false
-        const current = getExtra(channel).draft
+        const current = getExtra(channel)
         draftRevision++
-        putExtra(channel, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
+        putExtra(channel, {
+          draft: current.draft ? `${current.draft}\n${p.body}` : p.body,
+          ...(p.topic_name && !current.topicDraft ? { topicDraft: p.topic_name } : {}),
+          composerError: null,
+        })
         void dispatch({ type: 'user_discard', channel, clientMessageId })
         return true
       },
       discard: (clientMessageId: string) => { void dispatch({ type: 'user_discard', channel, clientMessageId }) },
+      topic(topicId: string) {
+        let tc = topicComposers.get(topicId)
+        if (!tc) { tc = createTopicComposer(topicId); topicComposers.set(topicId, tc) }
+        return tc
+      },
     }
   }
 
@@ -390,6 +580,9 @@ export function createSync(options: SyncOptions) {
     hasUnsavedChanges(): boolean {
       if (options.drafts?.hasDrafts()) return true
       for (const extra of extras.values()) {
+        if (extra.draft.length > 0 || extra.topicDraft.length > 0) return true
+      }
+      for (const extra of topicExtras.values()) {
         if (extra.draft.length > 0) return true
       }
       for (const c of Object.values(state.channels)) {

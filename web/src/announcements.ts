@@ -15,6 +15,8 @@ export type AnnounceableMessage = {
   seq: number
   sender: string
   body: string
+  topic_id?: string | null
+  reply_to?: string | null
 }
 
 export type AnnouncementState = {
@@ -43,6 +45,7 @@ export type AnnouncementInput =
   | {
       type: 'timeline_updated'
       viewId: string
+      topicId?: string | null
       status: 'loading' | 'ready' | 'unavailable' | 'error'
       live: boolean
       messages: readonly AnnounceableMessage[]
@@ -289,7 +292,15 @@ export function stepAnnouncements(
         isContiguousTail
 
       const liveFromOthers = isLiveTailDelivery
-        ? addedAtTail.filter((m) => m.sender !== input.selfId && !prev.announcedSeqs.has(m.seq))
+        ? addedAtTail.filter(
+            (m) =>
+              m.sender !== input.selfId &&
+              !prev.announcedSeqs.has(m.seq) &&
+              (input.topicId === undefined ||
+                (input.topicId === null
+                  ? (m.topic_id ?? null) === null && (m.reply_to ?? null) === null
+                  : m.topic_id === input.topicId)),
+          )
         : []
 
       let announcedSeqs = prev.announcedSeqs
@@ -461,6 +472,7 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
     },
     onTimelineUpdated(input: {
       viewId: string
+      topicId?: string | null
       status: 'loading' | 'ready' | 'unavailable' | 'error'
       live: boolean
       messages: readonly AnnounceableMessage[]

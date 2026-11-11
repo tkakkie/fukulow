@@ -38,22 +38,28 @@ async function fixture(
           : [],
       })
     }
+    const retainedMessage = {
+      id: 'm1',
+      channel_id: 'c1',
+      seq: 1,
+      sender: 'm',
+      client_message_id: 'cm1',
+      body: '保持されるメッセージ',
+      created_at: '2026-01-01T00:00:00Z',
+      topic_id: null,
+      reply_to: null,
+      reply_root_id: null,
+    }
     if (path === '/api/v1/orgs/o/channels/c1/messages') {
       return json({
-        messages: [
-          {
-            id: 'm1',
-            channel_id: 'c1',
-            seq: 1,
-            sender: 'm',
-            client_message_id: 'cm1',
-            body: '保持されるメッセージ',
-            created_at: '2026-01-01T00:00:00Z',
-            topic_id: null,
-            reply_to: null,
-            reply_root_id: null,
-          },
-        ],
+        messages: [retainedMessage],
+        has_more: false,
+      })
+    }
+    if (path === '/api/v1/orgs/o/channels/c1/timeline') {
+      return json({
+        as_of_seq: 1,
+        items: [{ kind: 'message', message: retainedMessage }],
         has_more: false,
       })
     }
