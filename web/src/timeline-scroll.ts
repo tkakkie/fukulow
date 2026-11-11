@@ -20,7 +20,7 @@ export type ScrollAnchor = {
   offsetTop: number
 }
 
-export type ScrollAction = 'none' | 'scroll_bottom' | 'preserve_anchor'
+export type ScrollAction = 'none' | 'scroll_bottom' | 'preserve_anchor' | 'scroll_first_unread'
 
 export type TimelineScrollState = {
   channelId: string
@@ -31,6 +31,7 @@ export type TimelineScrollState = {
   maxSeq: number | null
   seenSeqs: ReadonlySet<number>
   pendingIds: ReadonlySet<string>
+  firstUnreadScrolledId?: string | null
 }
 
 export type TimelineScrollInput =
@@ -44,6 +45,8 @@ export type TimelineScrollInput =
       messages: readonly { id: string; seq: number; sender: string }[]
       pendingIds: readonly string[]
       selfId: string
+      firstUnreadMessageId?: string | null
+      awaitingFirstUnread?: boolean
     }
 
 export type TimelineScrollView = {
@@ -142,18 +145,56 @@ export function stepTimelineScroll(
       const maxSeq = input.messages.at(-1)?.seq ?? null
       const messageSeqs = input.messages.map((m) => m.seq)
       const hasContent = input.messages.length > 0 || input.pendingIds.length > 0
+      const targetUnreadId = input.firstUnreadMessageId ?? null
+      const hasTargetUnread =
+        targetUnreadId !== null && input.messages.some((m) => m.id === targetUnreadId)
+      const awaitingUnread =
+        Boolean(input.awaitingFirstUnread) || (targetUnreadId !== null && !hasTargetUnread)
+      const channelChanged = input.channelId !== prev.channelId
+      const prevScrolledUnreadId = channelChanged ? null : (prev.firstUnreadScrolledId ?? null)
 
-      if (input.channelId !== prev.channelId || !prev.initialized) {
+      if (channelChanged || !prev.initialized) {
+        if (awaitingUnread) {
+          if (
+            !channelChanged &&
+            !prev.initialized &&
+            prev.pinned &&
+            prev.belowCount === 0 &&
+            minSeq === prev.minSeq &&
+            maxSeq === prev.maxSeq &&
+            sameItems(prev.seenSeqs, messageSeqs) &&
+            sameItems(prev.pendingIds, input.pendingIds) &&
+            prevScrolledUnreadId === null
+          ) {
+            return { state: prev, action: 'none' }
+          }
+          return {
+            state: {
+              channelId: input.channelId,
+              initialized: false,
+              pinned: true,
+              belowCount: 0,
+              minSeq,
+              maxSeq,
+              seenSeqs: new Set(messageSeqs),
+              pendingIds: new Set(input.pendingIds),
+              ...(prevScrolledUnreadId !== null ? { firstUnreadScrolledId: null } : {}),
+            },
+            action: 'none',
+          }
+        }
         const initialized = hasContent || input.status === 'ready'
+        const nextScrolledUnreadId = hasTargetUnread ? targetUnreadId : prevScrolledUnreadId
         if (
-          input.channelId === prev.channelId &&
+          !channelChanged &&
           initialized === prev.initialized &&
           prev.pinned &&
           prev.belowCount === 0 &&
           minSeq === prev.minSeq &&
           maxSeq === prev.maxSeq &&
           sameItems(prev.seenSeqs, messageSeqs) &&
-          sameItems(prev.pendingIds, input.pendingIds)
+          sameItems(prev.pendingIds, input.pendingIds) &&
+          nextScrolledUnreadId === prevScrolledUnreadId
         ) {
           return { state: prev, action: 'none' }
         }
@@ -167,8 +208,23 @@ export function stepTimelineScroll(
             maxSeq,
             seenSeqs: new Set(messageSeqs),
             pendingIds: new Set(input.pendingIds),
+            ...(nextScrolledUnreadId !== null ? { firstUnreadScrolledId: nextScrolledUnreadId } : {}),
           },
-          action: hasContent ? 'scroll_bottom' : 'none',
+          action: hasContent ? (hasTargetUnread ? 'scroll_first_unread' : 'scroll_bottom') : 'none',
+        }
+      }
+
+      if (hasTargetUnread && targetUnreadId !== prevScrolledUnreadId) {
+        return {
+          state: {
+            ...prev,
+            minSeq,
+            maxSeq,
+            seenSeqs: new Set(messageSeqs),
+            pendingIds: new Set(input.pendingIds),
+            firstUnreadScrolledId: targetUnreadId,
+          },
+          action: 'scroll_first_unread',
         }
       }
 
@@ -398,6 +454,31 @@ export function measureTimelineItems(container: HTMLElement): ItemRect[] {
   return items
 }
 
+/**
+ * Measures confirmed Message rows (`[data-confirmed-seq]`) whose bounding rect intersects the
+ * timeline scroll container's viewport (`docs/ui.md` §8).
+ */
+export function measureVisibleConfirmedSeqs(container: HTMLElement): number[] {
+  const cRect = container.getBoundingClientRect()
+  if (cRect.height <= 0 || cRect.width <= 0) return []
+  const viewTop = cRect.top
+  const viewBottom = cRect.bottom
+  const nodes = container.querySelectorAll<HTMLElement>('[data-confirmed-seq]')
+  const seqs: number[] = []
+  for (const node of nodes) {
+    const raw = node.getAttribute('data-confirmed-seq')
+    if (!raw) continue
+    const seq = Number(raw)
+    if (!Number.isInteger(seq) || seq <= 0) continue
+    const r = node.getBoundingClientRect()
+    if (r.height <= 0 || r.width <= 0) continue
+    if (r.bottom > viewTop && r.top < viewBottom) {
+      seqs.push(seq)
+    }
+  }
+  return seqs
+}
+
 /** Reports scroll container metrics and visible item rects to the timeline scroll controller (`docs/ui.md` §8). */
 export function handleTimelineContainerScroll(
   container: HTMLElement | null,
@@ -414,17 +495,42 @@ export function handleTimelineContainerScroll(
   )
 }
 
-/** Applies a `ScrollAction` (`scroll_bottom` or `preserve_anchor`) to a timeline scroll container (`docs/ui.md` §8). */
+/** Applies a `ScrollAction` (`scroll_bottom`, `scroll_first_unread` or `preserve_anchor`) to a timeline scroll container (`docs/ui.md` §8). */
 export function applyTimelineScrollAction(
   container: HTMLElement | null,
-  controller: Pick<TimelineScrollController, 'captureAnchor'>,
+  controller: Pick<TimelineScrollController, 'captureAnchor'> & Partial<Pick<TimelineScrollController, 'onScroll'>>,
   action: ScrollAction,
   anchor: ScrollAnchor | null,
+  firstUnreadMessageId?: string | null,
 ): void {
   if (!container || action === 'none') return
   if (action === 'scroll_bottom') {
     container.scrollTop = container.scrollHeight
     controller.captureAnchor(measureTimelineItems(container))
+    return
+  }
+  if (action === 'scroll_first_unread') {
+    const marker = container.querySelector<HTMLElement>('[data-read-marker="true"]')
+    const targetEl =
+      marker ??
+      (firstUnreadMessageId
+        ? container.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(firstUnreadMessageId)}"]`)
+        : null)
+    if (targetEl) {
+      const cRect = container.getBoundingClientRect()
+      const r = targetEl.getBoundingClientRect()
+      container.scrollTop = Math.max(0, container.scrollTop + (r.top - cRect.top))
+    }
+    const items = measureTimelineItems(container)
+    controller.captureAnchor(items)
+    controller.onScroll?.(
+      {
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight,
+        clientHeight: container.clientHeight,
+      },
+      items,
+    )
     return
   }
   if (action === 'preserve_anchor' && anchor) {

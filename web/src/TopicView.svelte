@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
   import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
@@ -17,13 +17,17 @@
     createTimelineScrollController,
     handleTimelineContainerScroll,
     measureTimelineItems,
+    measureVisibleConfirmedSeqs,
+    type ScrollAction,
     type ScrollAnchor,
   } from './timeline-scroll'
   import type { TopicsAdapter } from './topics.svelte'
+  import type { UnreadAdapter } from './unread.svelte'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
+  import ReadMarker from './ui/ReadMarker.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
@@ -33,11 +37,13 @@
     channel,
     topics,
     replies = null,
+    unread = null,
     channelId,
     topicId,
     topicName,
     topicStatus = 'idle',
     selfId = '',
+    viewSelected = true,
     organizationUnavailable = false,
     reconnecting = false,
     resolveSenderName,
@@ -51,11 +57,13 @@
     channel: ChannelSync
     topics: TopicsAdapter
     replies?: RepliesAdapter | null
+    unread?: UnreadAdapter | null
     channelId: string
     topicId: string
     topicName: string
     topicStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
     selfId?: string
+    viewSelected?: boolean
     organizationUnavailable?: boolean
     reconnecting?: boolean
     resolveSenderName?: (senderId: string) => string
@@ -72,7 +80,30 @@
   const composerState = $derived(tc.composer)
   const tState = $derived(topics.state)
   const rState = $derived(replies ? replies.state : null)
+  const uState = $derived(unread ? unread.state : null)
   const view = $derived(tState.topic(topicId))
+  const entry = $derived(uState?.entry?.scope.topicId === topicId ? uState.entry : null)
+  const uGeneration = $derived(uState?.generation ?? null)
+  const entryId = $derived(entry?.id ?? null)
+  const hasFirstUnreadInView = $derived(
+    Boolean(entry?.firstUnread && view.messages.some((m) => m.id === entry.firstUnread!.id)),
+  )
+  const needsOlderUnreadPage = $derived(
+    Boolean(
+      entry &&
+        (entry.unreadAtEntry ?? 0) > 0 &&
+        (entry.needsOlder || (entry.firstUnread !== null && !hasFirstUnreadInView)),
+    ),
+  )
+  const firstUnreadMessageId = $derived(
+    entry &&
+      entry.boundary !== null &&
+      (entry.unreadAtEntry ?? 0) > 0 &&
+      !needsOlderUnreadPage &&
+      entry.firstUnread
+      ? entry.firstUnread.id
+      : null,
+  )
   const replyCounts = $derived(
     countRepliesByMessageId([s.messages, view.messages, rState?.messages ?? []]),
   )
@@ -82,6 +113,18 @@
   )
   const targetUnavailable = $derived(
     organizationUnavailable || channelUnavailable || topicUnavailable,
+  )
+  const topicScope = $derived(uState?.topics[topicId] ?? null)
+  const awaitingEntryBoundary = $derived(
+    Boolean(
+      unread &&
+        !targetUnavailable &&
+        !uState?.stopped &&
+        !uState?.error &&
+        !topicScope?.stopped &&
+        !topicScope?.error &&
+        (entry === null || entry.boundary === null),
+    ),
   )
   const pending = $derived(
     s.pending.filter(
@@ -106,8 +149,34 @@
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
   let requestedHistoryFor = ''
+  let initialScrollApplied = false
+  let scrolledFirstUnreadId: string | null = null
+  let lastScrollScopeKey = ''
+  let currentVisitId: symbol | undefined
   const focusableMessageIds = $derived(view.messages.map((m) => m.id))
   const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds, activeRowId))
+
+  function isDocumentVisible(): boolean {
+    if (typeof document === 'undefined') return true
+    return (document.visibilityState ?? 'visible') === 'visible'
+  }
+
+  function reportPresented() {
+    if (!unread || !scrollEl || !viewSelected || targetUnavailable) return
+    if (!isDocumentVisible()) return
+    const currentEntry = uState?.entry
+    if (!currentEntry || currentEntry.scope.topicId !== topicId) return
+    if (currentEntry.boundary === null || needsOlderUnreadPage) return
+    if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+      if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
+    } else if (!initialScrollApplied) {
+      return
+    }
+    const seqs = measureVisibleConfirmedSeqs(scrollEl)
+    if (seqs.length > 0) {
+      unread.presented(currentEntry.id, seqs)
+    }
+  }
 
   function captureCurrentAnchor() {
     if (!scrollEl) return
@@ -116,15 +185,21 @@
 
   function handleScroll() {
     handleTimelineContainerScroll(scrollEl, scrollController)
+    reportPresented()
   }
 
-  function applyScrollAction(action: 'none' | 'scroll_bottom' | 'preserve_anchor', anchor: ScrollAnchor | null) {
-    applyTimelineScrollAction(scrollEl, scrollController, action, anchor)
+  function applyScrollAction(
+    action: ScrollAction,
+    anchor: ScrollAnchor | null,
+    firstUnreadId?: string | null,
+  ) {
+    applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
   }
 
   function jumpToBottom() {
     const action = scrollController.jumpToBottom()
     applyScrollAction(action, null)
+    reportPresented()
   }
 
   function loadOlderWithAnchor() {
@@ -143,6 +218,58 @@
   $effect(() => () => scrollController.destroy())
 
   $effect(() => {
+    const u = unread
+    const id = channelId
+    const tId = topicId
+    const active = !targetUnavailable
+    if (!u || !id || !tId || !active) return
+    return () => {
+      const vid =
+        currentVisitId ??
+        untrack(() => (u.state.entry?.scope.topicId === tId ? u.state.entry.id : undefined))
+      currentVisitId = undefined
+      if (vid) u.leave(vid)
+    }
+  })
+
+  $effect(() => {
+    const u = unread
+    const id = channelId
+    const tId = topicId
+    const active = !targetUnavailable
+    const generation = uGeneration
+    const currentEntryId = entryId
+    if (!u || !id || !tId || !active || !generation) return
+    if (currentEntryId) {
+      currentVisitId = currentEntryId
+      return
+    }
+    let cancelled = false
+    u.visibility(isDocumentVisible())
+    void u.enter(tId).then((vid) => {
+      if (cancelled) return
+      if (vid) currentVisitId = vid
+    })
+    return () => {
+      cancelled = true
+    }
+  })
+
+  $effect(() => {
+    const u = unread
+    const doc = typeof document !== 'undefined' ? document : null
+    if (!u || !doc) return
+    const syncVisibility = () => {
+      const vis = (doc.visibilityState ?? 'visible') === 'visible'
+      u.visibility(vis)
+      if (vis) reportPresented()
+    }
+    syncVisibility()
+    doc.addEventListener('visibilitychange', syncVisibility)
+    return () => doc.removeEventListener('visibilitychange', syncVisibility)
+  })
+
+  $effect(() => {
     const key = `${channelId}:${topicId}:${tState.generation}`
     if (targetUnavailable || s.status === 'loading') return
     const hasBaseline = tState.topics.some((t) => t.topicId === topicId && t.baseline !== null)
@@ -153,6 +280,14 @@
       requestedHistoryFor = key
       void topics.loadTopic(topicId)
     }
+  })
+
+  $effect(() => {
+    if (!needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
+      return
+    }
+    if (effectiveStatus !== 'ready') return
+    loadOlderWithAnchor()
   })
 
   const effectiveStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
@@ -166,24 +301,74 @@
   )
 
   $effect(() => {
+    const scopeKey = `${channelId}/${topicId}`
+    if (scopeKey !== lastScrollScopeKey) {
+      lastScrollScopeKey = scopeKey
+      initialScrollApplied = false
+      scrolledFirstUnreadId = null
+    }
     const messages = view.messages
     const pendingIds = pending.map((p) => p.clientMessageId)
+    const status = effectiveStatus
+    const targetFirstUnreadId = firstUnreadMessageId
+    const awaitingFirstUnread =
+      awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error)
     const { action, anchor } = scrollController.sync({
-      channelId: `${channelId}/${topicId}`,
-      status: effectiveStatus,
+      channelId: scopeKey,
+      status,
       messages,
       pendingIds,
       selfId,
+      firstUnreadMessageId: targetFirstUnreadId,
+      awaitingFirstUnread,
     })
     if (action !== 'none') {
       void tick().then(() => {
-        applyScrollAction(action, anchor)
+        applyScrollAction(action, anchor, targetFirstUnreadId)
+        if (action === 'scroll_first_unread' && targetFirstUnreadId) {
+          scrolledFirstUnreadId = targetFirstUnreadId
+        }
+        if (action === 'scroll_bottom' || action === 'scroll_first_unread') {
+          initialScrollApplied = true
+        }
+        reportPresented()
       })
     } else {
       void tick().then(() => {
         captureCurrentAnchor()
+        if (status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
+          initialScrollApplied = true
+        }
+        reportPresented()
       })
     }
+  })
+
+  $effect(() => {
+    if (!unread || !viewSelected || targetUnavailable) return
+    if (entry?.boundary === null || needsOlderUnreadPage) return
+    void tick().then(() => {
+      reportPresented()
+    })
+  })
+
+  $effect(() => {
+    const container = scrollEl
+    const u = unread
+    if (!container || !u || typeof IntersectionObserver === 'undefined') return
+    void view.messages
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          reportPresented()
+        }
+      },
+      { root: container, threshold: 0 },
+    )
+    for (const node of container.querySelectorAll<HTMLElement>('[data-confirmed-seq]')) {
+      observer.observe(node)
+    }
+    return () => observer.disconnect()
   })
 
   function handleDiscard(clientMessageId: string) {
@@ -310,7 +495,14 @@
       {#if view.messages.length > 0 || pending.length > 0}
         <ul class="topic-view__list" aria-label="メッセージ一覧">
           {#each view.messages as m (m.id)}
-            <li class="topic-view__item" data-message-id={m.id}>
+            <li
+              class="topic-view__item"
+              data-message-id={m.id}
+              data-confirmed-seq={m.seq}
+            >
+              {#if firstUnreadMessageId === m.id}
+                <ReadMarker />
+              {/if}
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}

@@ -17,6 +17,7 @@
     createTimelineScrollController,
     handleTimelineContainerScroll,
     measureTimelineItems,
+    type ScrollAction,
     type ScrollAnchor,
   } from './timeline-scroll'
   import Button from './ui/Button.svelte'
@@ -207,7 +208,7 @@
     handleTimelineContainerScroll(scrollEl, scrollController)
   }
 
-  function applyScrollAction(action: 'none' | 'scroll_bottom' | 'preserve_anchor', anchor: ScrollAnchor | null) {
+  function applyScrollAction(action: ScrollAction, anchor: ScrollAnchor | null) {
     applyTimelineScrollAction(scrollEl, scrollController, action, anchor)
   }
 

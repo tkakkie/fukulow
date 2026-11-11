@@ -11,9 +11,10 @@ import { membersAdapter, type inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
+import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
+export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -30,6 +31,7 @@ const defaults: AuthDeps = {
     const session = createSession({ selfId, onEnded, organizationId, sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
+    const unreadAdapters = new Map<string, UnreadAdapter>()
     return {
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       channels: channelsAdapter(session.channels),
@@ -42,6 +44,11 @@ const defaults: AuthDeps = {
       replies(id: string) {
         let adapter = replyAdapters.get(id)
         if (!adapter) replyAdapters.set(id, (adapter = repliesAdapter(session.replies, id)))
+        return adapter
+      },
+      unread(id: string) {
+        let adapter = unreadAdapters.get(id)
+        if (!adapter) unreadAdapters.set(id, (adapter = unreadAdapter(session.unread, id)))
         return adapter
       },
       channelMembers: session.channelMembers,

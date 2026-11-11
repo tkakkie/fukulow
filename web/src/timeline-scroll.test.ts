@@ -305,4 +305,67 @@ describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.m
     expect(moved.state.pinned).toBe(false)
     expect(moved.state.belowCount).toBe(1)
   })
+
+  it('positions at the first Unread Message after loading needed older pages, then preserves anchor on further older loads', () => {
+    let s = initialTimelineScrollState('c1')
+
+    // 1. Initial page (seq 3, 4) arrives while older pages are still loading to reach first Unread (m-2)
+    let step = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: null,
+      awaitingFirstUnread: true,
+    })
+    s = step.state
+    expect(step.action).toBe('none')
+    expect(s.initialized).toBe(false)
+
+    // 2. Older page (seq 1, 2) arrives and resolves firstUnreadMessageId = 'm-2'
+    step = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2), msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-2',
+      awaitingFirstUnread: false,
+    })
+    s = step.state
+    expect(step.action).toBe('scroll_first_unread')
+    expect(s.initialized).toBe(true)
+    expect(s.firstUnreadScrolledId).toBe('m-2')
+
+    // 3. Repeating sync with the same firstUnreadMessageId does not re-scroll
+    const repeat = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2), msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-2',
+      awaitingFirstUnread: false,
+    })
+    expect(repeat.action).toBe('none')
+    expect(repeat.state).toBe(s)
+
+    // 4. User loads an even older page above m-1 -> preserves anchor rather than re-jumping to m-2
+    const older = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(0), msg(1), msg(2), msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-2',
+      awaitingFirstUnread: false,
+    })
+    expect(older.action).toBe('preserve_anchor')
+    expect(older.state.firstUnreadScrolledId).toBe('m-2')
+  })
 })
