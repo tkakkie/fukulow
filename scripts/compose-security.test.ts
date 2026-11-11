@@ -8,6 +8,11 @@ const cwd = fileURLToPath(new URL('..', import.meta.url))
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
 const args = (profile: string) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', '--profile', profile, 'config', '--format', 'json']
 
+function checkBaseImages(dockerfile: string) {
+  const bases = dockerfile.matchAll(/^FROM (\S+)/gm)
+  for (const [, image] of bases) assert.match(image, /^\w+:[\w.-]+@sha256:[a-f0-9]{64}$/, 'base image must pin tag and digest')
+}
+
 function checkImagesAndLogs(services: Record<string, { build?: unknown, image: string, logging: unknown }>) {
   const builtImages = new Set(Object.values(services).filter(service => service.build).map(service => service.image))
   for (const [name, service] of Object.entries(services)) {
@@ -17,14 +22,13 @@ function checkImagesAndLogs(services: Record<string, { build?: unknown, image: s
 }
 
 test('all base images and external Compose images are pinned; every deployment/load service rotates logs', () => {
-  const bases = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8').matchAll(/^FROM (\S+)/gm)
-  for (const [, image] of bases) assert.match(image, /^\w+:[\w.-]+@sha256:[a-f0-9]{64}$/)
+  checkBaseImages(readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8'))
   const loadEnv = { ...env, LOAD_PROJECT: 'config-test-only', LOAD_PORT: '18080',
     LOAD_DB_PASSWORD: 'load-db-test-only', LOAD_SETUP_TOKEN: 'load-setup-test-only' }
   for (const file of ['compose.yml', 'load/compose.yml']) {
-    for (const profile of ['caddy', 'nginx']) {
+    for (const profileArgs of file === 'compose.yml' ? [['--profile', 'caddy'], ['--profile', 'nginx']] : [[]]) {
       const config = JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', '-f', file,
-        '--profile', profile, 'config', '--format', 'json'], { cwd, env: loadEnv, encoding: 'utf8' }))
+        ...profileArgs, 'config', '--format', 'json'], { cwd, env: loadEnv, encoding: 'utf8' }))
       checkImagesAndLogs(config.services)
       for (const mutation of ['pin', 'rotation']) {
         const broken = structuredClone(config.services)
@@ -34,6 +38,10 @@ test('all base images and external Compose images are pinned; every deployment/l
       }
     }
   }
+})
+
+test('base image check rejects an unpinned Dockerfile base', () => {
+  assert.throws(() => checkBaseImages('FROM debian:bookworm-slim\n'), /base image must pin tag and digest/)
 })
 
 test('both profiles require a nonempty setup token before starting containers', () => {
