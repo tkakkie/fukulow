@@ -117,7 +117,10 @@ export function createSync(options: SyncOptions) {
     const previous = state
     if (input.type === 'stop') {
       for (const [id, draft] of submitted) {
-        draft.detached = previous.channels[draft.channel]?.pending.some(p => p.clientMessageId === id && !previous.requests[p.request]?.stale) ?? false
+        draft.detached = previous.channels[draft.channel]?.pending.some(p => {
+          const request = previous.requests[p.request]
+          return p.clientMessageId === id && p.state !== 'unknown' && request !== undefined && !request.stale
+        }) ?? false
       }
     }
     const result = step(state, input)
@@ -154,11 +157,11 @@ export function createSync(options: SyncOptions) {
 
   // A transport that never answers is an unknown outcome, rather than a permanently sending entry.
   // Deadlines/cancellation fence results but do not abort HTTP; a retry may overlap the underlying request.
-  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T>> {
+  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T> & { cancelled?: true }> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      const cancelled = new Promise<Result<T>>(resolve => {
-        requests.set(id, () => resolve({ ok: false, kind: 'network' }))
+      const cancelled = new Promise<Result<T> & { cancelled?: true }>(resolve => {
+        requests.set(id, () => resolve({ ok: false, kind: 'network', cancelled: true }))
         timeout = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
       })
       return await Promise.race([run(), cancelled])
@@ -265,6 +268,8 @@ export function createSync(options: SyncOptions) {
           if (draft?.detached && !result.ok && result.kind === 'http' && [400, 403, 404, 409, 413, 415].includes(result.status)) draft.restore()
           return result
         }))
+        // Close cancels the wait while detached sends still observe definite refusals.
+        if (!result.ok && result.kind === 'network' && !result.cancelled) submitted.delete(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
           : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
         break

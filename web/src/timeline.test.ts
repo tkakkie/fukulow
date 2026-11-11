@@ -6,6 +6,86 @@ import type { Message, MessagePage, Result } from './api'
 import { record } from './protocol-test-helpers'
 
 afterEach(() => vi.useRealTimers())
+it('a timed-out send cannot restore its draft after stop and a late 409', async () => {
+  vi.useFakeTimers()
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts, requestTimeoutMs: 1000 })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  const sending = a.submit()
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(await sending).toBe(true)
+  const pending = sync.get().channels.A.pending[0]
+  expect(pending.state).toBe('unknown')
+  expect(sync.get().requests[pending.request]).toBeUndefined()
+  await sync.close()
+  net.sends[0].resolve({ ok: false, kind: 'http', status: 409 })
+  await settle()
+  expect(a.get().draft).toBe('')
+  expect(drafts.hasDrafts()).toBe(false)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('a stalled transport drops its submitted draft entry at the deadline and cannot restore later', async () => {
+  vi.useFakeTimers()
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts, requestTimeoutMs: 1000 })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  const sending = a.submit()
+  const id = net.sends[0].body.client_message_id
+  // Observe release before the underlying transport settles, without exposing controller internals.
+  const deletion = vi.spyOn(Map.prototype, 'delete')
+  let removed: boolean
+  try {
+    await vi.advanceTimersByTimeAsync(1000)
+    removed = deletion.mock.calls.some(([key], index) => key === id && deletion.mock.results[index]?.value === true)
+  } finally {
+    deletion.mockRestore()
+  }
+  expect(removed).toBe(true)
+  expect(await sending).toBe(true)
+  expect(a.get().pending).toMatchObject([{ clientMessageId: id, status: 'failed', retryable: true }])
+  await sync.close()
+  net.sends[0].resolve({ ok: false, kind: 'http', status: 409 })
+  await settle()
+  expect(a.get().draft).toBe('')
+  expect(drafts.hasDrafts()).toBe(false)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each([400, 403, 404, 409, 413, 415, 200, 'network', 503] as const)(
+  'Organization close cancels submit and restores only a late definite refusal: %s', async status => {
+    vi.useFakeTimers()
+    const drafts = createDraftStore()
+    const net = fakeNetwork()
+    const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+    await sync.start()
+    await sync.watch('A')
+    const a = sync.getTimeline('A')
+    a.setDraft('送信する本文')
+    const sending = a.submit()
+    await sync.close()
+    expect(await sending).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(drafts.hasDrafts()).toBe(false)
+    const send = net.sends[0]
+    send.resolve(status === 200 ? ok(sentBy('me', 1, send.body.client_message_id, send.body.body))
+      : status === 'network' ? { ok: false, kind: 'network' } : { ok: false, kind: 'http', status })
+    await settle()
+    const expected = typeof status === 'number' && [400, 403, 404, 409, 413, 415].includes(status) ? '送信する本文' : ''
+    expect(drafts.get({ organizationId: 'o', channelId: 'A' })).toBe(expected)
+    expect(a.get().messages).toEqual([])
+    expect(a.get().pending).toEqual([])
+  },
+)
+
 it('a send ACK, refusal and late refusal after settlement preserve text typed after submit in the Account Session store', async () => {
   for (const edit of ['untouched', 'typed then cleared', 'new text'] as const) {
     for (const outcome of ['ACK', 'refusal', 'late refusal'] as const) {
