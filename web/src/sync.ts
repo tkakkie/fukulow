@@ -114,6 +114,7 @@ export function createSync(options: SyncOptions) {
   const topicExtras = new Map<string, TopicComposerState>()
   const pendingTopics = new Map<string, string>()
   const submitted = new Map<string, { channel: string; detached: boolean; restore: () => void }>()
+  let unsubscribeDrafts: (() => void) | undefined
 
   const draftTarget = (channel: string, topicId: string | null = null) => ({
     organizationId: options.organizationId ?? '',
@@ -125,8 +126,9 @@ export function createSync(options: SyncOptions) {
     const existing = extras.get(channel)
     if (existing) return existing
     const draft = options.drafts?.get(draftTarget(channel)) ?? ''
-    if (!draft) return emptyExtra
-    const extra = { ...emptyExtra, draft }
+    const topicDraft = options.drafts?.getTopicDraft(draftTarget(channel)) ?? ''
+    if (!draft && !topicDraft) return emptyExtra
+    const extra = { ...emptyExtra, draft, topicDraft }
     extras.set(channel, extra)
     return extra
   }
@@ -143,10 +145,10 @@ export function createSync(options: SyncOptions) {
     const olderError = patch.olderError ?? prev.olderError
     const draft = patch.draft ?? prev.draft
     const topicDraft = patch.topicDraft ?? prev.topicDraft
-    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel), draft)
     const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
     if (!olderError && draft === '' && topicDraft === '' && composerError === null) extras.delete(channel)
     else extras.set(channel, { olderError, draft, topicDraft, composerError })
+    if (patch.draft !== undefined || patch.topicDraft !== undefined) options.drafts?.set(draftTarget(channel), draft, topicDraft)
     return true
   }
   function setExtra(channel: string, patch: Partial<ChannelExtra>) {
@@ -172,10 +174,10 @@ export function createSync(options: SyncOptions) {
       return false
     }
     const draft = patch.draft ?? prev.draft
-    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel, topicId), draft)
     const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
     if (draft === '' && composerError === null) topicExtras.delete(key)
     else topicExtras.set(key, { draft, composerError })
+    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel, topicId), draft)
     return true
   }
   function setTopicExtra(channel: string, topicId: string, patch: Partial<TopicComposerState>) {
@@ -209,6 +211,28 @@ export function createSync(options: SyncOptions) {
       extras.clear()
       topicExtras.clear()
       pendingTopics.clear()
+      if (input.type === 'stop') {
+        unsubscribeDrafts?.()
+        unsubscribeDrafts = undefined
+      } else {
+        unsubscribeDrafts ??= options.drafts?.subscribe(target => {
+          if (target.organizationId !== (options.organizationId ?? '') || target.replyRootId != null) return
+          const draft = options.drafts?.get(target) ?? ''
+          // Detached restores write the Account Session store, outside this controller's lifetime.
+          if (target.topicId != null) {
+            const key = topicKey(target.channelId, target.topicId)
+            const extra = topicExtras.get(key) ?? emptyTopicExtra
+            if (extra.draft === draft) return
+            topicExtras.set(key, { ...extra, draft })
+          } else {
+            const extra = extras.get(target.channelId) ?? emptyExtra
+            const topicDraft = options.drafts?.getTopicDraft(target) ?? ''
+            if (extra.draft === draft && extra.topicDraft === topicDraft) return
+            extras.set(target.channelId, { ...extra, draft, topicDraft })
+          }
+          channelListeners.get(target.channelId)?.forEach(listener => listener())
+        })
+      }
     } else {
       if (input.type === 'history_failed') {
         const req = previous.requests[input.request]

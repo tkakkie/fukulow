@@ -375,7 +375,7 @@ export function stepAnnouncements(
 }
 
 /**
- * Layer-3 controller owning announcement stepping, the 2 s offline-reconnect timer and the 10 s
+ * Layer-3 controller owning announcement stepping, the 2 s Message coalescing/offline timers and the 10 s
  * Channel-list loading timeout (`docs/ui.md` §2, §5, §6). Holds no `$state`; notifies subscribers
  * only when `reconnecting` or `channelListTimedOut` changes.
  */
@@ -387,6 +387,8 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
   const cancel = options.cancel ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>))
 
   let state = initialAnnouncementState()
+  let messageTimer: unknown = null
+  let pendingMessageAnnouncement: string | null = null
   let offlineTimer: unknown = null
   let offlineScheduledFor: number | null = null
   let channelListTimedOut = false
@@ -415,6 +417,26 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
       offlineTimer = null
       offlineScheduledFor = null
     }
+  }
+
+  function clearMessageTimer() {
+    if (messageTimer !== null) cancel(messageTimer)
+    messageTimer = null
+    pendingMessageAnnouncement = null
+  }
+
+  function flushMessageAnnouncement() {
+    const message = pendingMessageAnnouncement
+    clearMessageTimer()
+    state = { ...state, burstStartMs: null, burstCount: 0 }
+    if (message) options.onAnnounce?.(message)
+  }
+
+  function queueMessageAnnouncement(message: string) {
+    pendingMessageAnnouncement = message
+    // Keep one fixed window from its first Message. Announcing each intermediate
+    // count would cause several polite-region updates for the same burst.
+    if (messageTimer === null) messageTimer = schedule(flushMessageAnnouncement, COALESCE_WINDOW_MS)
   }
 
   function clearChannelListTimer() {
@@ -464,6 +486,7 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
       }
     },
     onViewChanged(input: { viewId: string; kind: 'channel' | 'topic'; name: string }): void {
+      if (input.viewId !== state.viewId) clearMessageTimer()
       const res = stepAnnouncements(state, { type: 'view_changed', ...input })
       state = res.state
       syncOfflineTimer()
@@ -479,14 +502,23 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
       selfId: string
       resolveSenderName?: (senderId: string) => string
     }): void {
+      if (input.viewId !== state.viewId) clearMessageTimer()
+      // A delayed timer must not merge Messages from a later window into the old one.
+      if (pendingMessageAnnouncement && state.burstStartMs !== null && now() - state.burstStartMs > COALESCE_WINDOW_MS) {
+        flushMessageAnnouncement()
+      }
       const res = stepAnnouncements(state, {
         type: 'timeline_updated',
         ...input,
         nowMs: now(),
       })
+      const hasNewLiveMessages = res.state.burstStartMs !== state.burstStartMs || res.state.burstCount !== state.burstCount
       state = res.state
       syncOfflineTimer()
-      if (res.announcement) options.onAnnounce?.(res.announcement)
+      if (res.announcement) {
+        if (hasNewLiveMessages) queueMessageAnnouncement(res.announcement)
+        else options.onAnnounce?.(res.announcement)
+      }
       notifyIfViewChanged()
     },
     syncChannelListLoading(isLoadingEmpty: boolean): void {
@@ -513,6 +545,7 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
       notifyIfViewChanged()
     },
     destroy(): void {
+      clearMessageTimer()
       clearOfflineTimer()
       clearChannelListTimer()
       listeners.clear()

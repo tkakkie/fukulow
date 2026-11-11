@@ -137,60 +137,58 @@ pub async fn list_messages(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization_id = auth.identity.organization.organization_id;
-    let mut tx = state
-        .pool
-        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .await?;
-    match channels::is_visible(
-        &mut *tx,
-        organization_id,
-        (auth.identity.member.id, auth.membership_revision),
-        channel_id,
-    )
-    .await?
-    {
-        Some(true) => {}
-        Some(false) => return Err(MessageError::NotFound),
-        None => return Err(MessageError::OrganizationUnavailable),
-    }
-    #[cfg(test)]
-    tests::membership::pause_history(channel_id).await;
-    let ascending = query.after_seq.is_some();
-    let sql = if ascending {
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-         FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 \
-         ORDER BY seq ASC LIMIT $4"
-    } else {
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-         FROM messages WHERE organization_id = $1 AND channel_id = $2 \
-           AND seq <= $3 ORDER BY seq DESC LIMIT $4"
-    };
-    let cursor = if ascending {
-        query.after_seq.unwrap_or(0)
-    } else {
-        // Convert exclusive before to an inclusive upper bound; validation guarantees >= 1.
-        query.before_seq.map(|seq| seq - 1).unwrap_or(i64::MAX)
-    };
-    let mut messages = sqlx::query_as::<_, Message>(sql)
-        .bind(organization_id)
-        .bind(channel_id)
-        .bind(cursor)
-        .bind(i64::from(limit) + 1)
-        .fetch_all(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    let has_more = messages.len() > usize::from(limit);
-    messages.truncate(usize::from(limit));
-    if !ascending {
-        messages.reverse();
-    }
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(MessagePage { messages, has_more }),
-    )
-        .into_response())
+    crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
+        match channels::is_visible(
+            &mut *tx,
+            organization_id,
+            (auth.identity.member.id, auth.membership_revision),
+            channel_id,
+        )
+        .await?
+        {
+            Some(true) => {}
+            Some(false) => return Err(MessageError::NotFound),
+            None => return Err(MessageError::OrganizationUnavailable),
+        }
+        #[cfg(test)]
+        tests::membership::pause_history(channel_id).await;
+        let ascending = query.after_seq.is_some();
+        let sql = if ascending {
+            "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 \
+             ORDER BY seq ASC LIMIT $4"
+        } else {
+            "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+             FROM messages WHERE organization_id = $1 AND channel_id = $2 \
+               AND seq <= $3 ORDER BY seq DESC LIMIT $4"
+        };
+        let cursor = if ascending {
+            query.after_seq.unwrap_or(0)
+        } else {
+            // Convert exclusive before to an inclusive upper bound; validation guarantees >= 1.
+            query.before_seq.map(|seq| seq - 1).unwrap_or(i64::MAX)
+        };
+        let mut messages = sqlx::query_as::<_, Message>(sql)
+            .bind(organization_id)
+            .bind(channel_id)
+            .bind(cursor)
+            .bind(i64::from(limit) + 1)
+            .fetch_all(&mut *tx)
+            .await?;
+        let has_more = messages.len() > usize::from(limit);
+        messages.truncate(usize::from(limit));
+        if !ascending {
+            messages.reverse();
+        }
+        Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(MessagePage { messages, has_more }),
+        )
+            .into_response())
+    })
+    .await
 }
 
 /// Send a Message, optionally joining/creating a Topic by name in the same transaction.

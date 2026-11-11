@@ -1,6 +1,6 @@
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
@@ -926,6 +926,8 @@ afterAll(() => {
   }
 })
 
+afterEach(() => vi.useRealTimers())
+
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
   it('renders no 再送する or 編集して送り直す when target is unavailable and keeps 破棄 working', async () => {
     // 1. Direct MessageRow check across both retryable and refused failed states under targetUnavailable
@@ -1367,6 +1369,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
   })
 
   it('renders Topic summary lines at latest activity, creates Topics from Composer, expands sidebar/panel Topic lists, and operates Topic view with isolated drafts and return focus', async () => {
+    vi.useFakeTimers()
     const net = fakeNetwork()
     const rawSession = createSession({
       selfId: 'me',
@@ -1571,6 +1574,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(afterMoveItems.at(-1)!.textContent).toContain('トピック: 仕様相談')
     expect(afterMoveItems.at(-1)!.textContent).toContain('2件›')
     expect(afterMoveItems.at(-1)!.textContent).toContain('仕様の追記です')
+    await vi.advanceTimersByTimeAsync(2_000)
     expect(announcements).toEqual([])
 
     // 4. Open すべてのトピック(2)› -> right panel TopicList shows both Topics and ＋ 新しいトピック focuses トピック名
@@ -1667,6 +1671,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       message: { ...record(7, 'c1'), id: 'm-7', sender: 'other', body: 'トピックへの新着通知', topic_id: 't-1' },
     })
     await settle()
+    flushSync()
+    expect(announcements).toEqual([])
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(announcements).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
     flushSync()
     expect(announcements).toEqual(['田中: トピックへの新着通知'])
 

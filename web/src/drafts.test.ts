@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { createDraftStore } from './drafts'
 
 it('keeps independent Account Session drafts by Organization, Channel, Topic and Reply root', () => {
@@ -35,4 +35,57 @@ it('clearing drafts invalidates every old Account Session view without fencing O
   expect(next.get(target)).toBe('new Account Session')
   expect(a.get(target)).toBe('')
   expect(a.hasDrafts()).toBe(false)
+})
+
+it('draft notifications observe committed writes and stop on unsubscribe or Account Session clear', () => {
+  const drafts = createDraftStore()
+  const old = drafts.scope()
+  const target = { organizationId: 'o', channelId: 'c' }
+  const observed = vi.fn(changed => {
+    expect(changed).toEqual(target)
+    expect(old.get(changed)).toBe('restored')
+    expect(old.revision(changed)).toBe(1)
+  })
+  const unsubscribe = old.subscribe(observed)
+  drafts.scope().set(target, 'restored')
+  expect(observed).toHaveBeenCalledOnce()
+  unsubscribe()
+  drafts.set(target, '')
+  expect(observed).toHaveBeenCalledOnce()
+
+  const ended = vi.fn()
+  old.subscribe(ended)
+  drafts.clear()
+  old.subscribe(ended)
+  const current = vi.fn()
+  drafts.scope().subscribe(current)
+  drafts.scope().set(target, 'new Account Session')
+  expect(ended).not.toHaveBeenCalled()
+  expect(current).toHaveBeenCalledExactlyOnceWith(target)
+})
+
+it('stores the Channel Topic name with its body in one revision and fences both on Account Session clear', () => {
+  const drafts = createDraftStore()
+  const old = drafts.scope()
+  const target = { organizationId: 'o', channelId: 'c' }
+  const observed = vi.fn(() => ({
+    text: old.get(target), topicDraft: old.getTopicDraft(target), revision: old.revision(target),
+  }))
+  old.subscribe(observed)
+  old.set(target, '本文', '仕様相談')
+  expect(observed).toHaveReturnedWith({ text: '本文', topicDraft: '仕様相談', revision: 1 })
+  expect(observed).toHaveBeenCalledOnce()
+  old.set(target, '', '次のトピック')
+  expect(drafts.hasDrafts()).toBe(true)
+  expect(observed).toHaveLastReturnedWith({ text: '', topicDraft: '次のトピック', revision: 2 })
+  drafts.clear()
+  expect(old.getTopicDraft(target)).toBe('')
+  old.set(target, '古い本文', '古いトピック')
+  expect(drafts.hasDrafts()).toBe(false)
+  const current = drafts.scope()
+  current.set(target, '', '新しいトピック')
+  old.set(target, '', '')
+  expect(current.getTopicDraft(target)).toBe('新しいトピック')
+  expect(current.revision(target)).toBe(1)
+  expect(observed).toHaveBeenCalledTimes(2)
 })

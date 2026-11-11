@@ -1,4 +1,45 @@
-use sqlx::{PgPool, migrate::MigrateError};
+use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConnection};
+
+pub async fn read_only<T, E>(
+    pool: &PgPool,
+    body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<sqlx::Error>,
+{
+    let mut guard = ReadOnlyConnection {
+        connection: pool.acquire().await?,
+        finished: false,
+    };
+    // SQLx 0.8.6 records transaction depth only after BEGIN's response, so its
+    // rollback-on-drop cannot recover a BEGIN cancelled before that response.
+    sqlx::Executor::execute(
+        &mut *guard.connection,
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    )
+    .await?;
+    let result = body(&mut guard.connection).await;
+    // End the snapshot even on ordinary body errors; only incomplete work is discarded.
+    let rolled_back = sqlx::Executor::execute(&mut *guard.connection, "ROLLBACK").await;
+    guard.finished = rolled_back.is_ok();
+    // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
+    let value = result?;
+    rolled_back?;
+    Ok(value)
+}
+
+struct ReadOnlyConnection {
+    connection: PoolConnection<Postgres>,
+    finished: bool,
+}
+
+impl Drop for ReadOnlyConnection {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.connection.close_on_drop();
+        }
+    }
+}
 
 pub async fn migrate_and_grant(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let exists: bool =
