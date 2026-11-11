@@ -807,3 +807,33 @@ it('checks a direct-link Organization through the API even when it is absent fro
     expect(s.auth.session).toBeNull()
   } finally { vi.unstubAllGlobals() }
 })
+
+it('C10 Organization re-selection restores Topic state and its retained draft', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  const net = await openChannelA(s)
+  const original = s.auth.session!
+  const topicMessage = { ...record(101), topic_id: 'T' }
+  net.event({ type: 'message', message: topicMessage })
+  net.topicMessages['A:T'] = ok({ messages: [topicMessage], has_more: false })
+  await original.topics('A').loadTopic('T')
+  original.sync.channel('A').topic('T').setDraft('Topic draft survives C10')
+  net.socket.onClose(4003); await settle()
+  expect(s.auth.organizationStatus).toBe('unavailable')
+  expect(original.topics('A').state.unavailable).toBe(true)
+  expect(await original.sync.channel('A').topic('T').submit('Topic T')).toBe(false)
+  await s.auth.selectOrganization('o')
+  const recoveredNet = s.nets.at(-1)!
+  recoveredNet.pages.A = ok({ messages: [record(100), topicMessage], has_more: false })
+  recoveredNet.lists[0].resolve(ok({ channels: [channel('A')] }))
+  await settle(); recoveredNet.subscribed('A', 101); await settle()
+  const recovered = s.auth.session!
+  await recovered.topics('A').loadTopic('T')
+  expect(recovered).not.toBe(original)
+  expect(s.auth.organizationStatus).toBe('ready')
+  expect(recovered.topics('A').state.unavailable).toBe(false)
+  expect(recovered.topics('A').state.topic('T').messages).toEqual([topicMessage])
+  expect(recovered.topics('A').state.lines.map(l => l.kind === 'message' ? l.message.seq : [l.topicId, l.position])).toEqual([100, ['T', 101]])
+  expect(recovered.sync.channel('A').topic('T').composer.draft).toBe('Topic draft survives C10')
+  recovered.close()
+})

@@ -8,6 +8,7 @@ import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { createSession } from './session'
 import { syncAdapter } from './sync.svelte'
 import Timeline from './Timeline.svelte'
+import TopicView from './TopicView.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import MessageRow from './ui/MessageRow.svelte'
 import Workspace from './Workspace.svelte'
@@ -3316,4 +3317,31 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await unmount(instance)
     sessionModel.close()
   })
+
+  it.each([403, 404])('Topic history %s shows Channel denial and keeps the Topic draft', async status => {
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: vi.fn(), ...net.options() })
+    net.pages.A = ok({ messages: [{ ...record(10), topic_id: 'T' }], has_more: false })
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle(); net.subscribed('A', 10); await settle()
+    const ch = syncAdapter(raw.sync).channel('A')
+    ch.topic('T').setDraft('失わないトピック下書き')
+    net.topicMessages['A:T'] = { ok: false, kind: 'http', status, error: 'channel_not_found' }
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(TopicView, { target: host as unknown as Element,
+      props: { channel: ch, topics: topicsAdapter(raw.topics, 'A'), channelId: 'A', topicId: 'T', topicName: 'Topic T', ongoToChannelList: vi.fn() } })
+    await settle()
+    expect(host.textContent).toContain('このチャンネルは利用できません。')
+    expect(buttonsByText(host, '再試行')).toHaveLength(0)
+    expect(buttonsByText(host, 'チャンネル一覧へ')).toHaveLength(1)
+    const textarea = queryAll(host, 'textarea')[0]
+    expect(textarea.disabled).toBe(true)
+    expect(textarea.value).toBe('失わないトピック下書き')
+    expect(await ch.topic('T').submit('Topic T')).toBe(false)
+    expect(net.sends).toHaveLength(0)
+    await unmount(instance); raw.close()
+  })
+
 })
