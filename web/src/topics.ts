@@ -20,7 +20,7 @@ export const topicsApi = (organizationId: string): TopicsApi => ({
 })
 const MAX_SUMMARY_RETRIES = 4
 type Paging = { asOfSeq?: number; before?: number; hasMore: boolean; loading: boolean; error: boolean }
-type TopicWindow = { messages: Map<number, Message>; before?: number; initialized: boolean; hasMore: boolean; loading: boolean; error: boolean; notFound: boolean }
+type TopicWindow = { messages: Map<number, Message>; before?: number; through?: number; initialized: boolean; hasMore: boolean; loading: boolean; error: boolean; notFound: boolean }
 type SummaryRetry = { attempt: number; timer?: ReturnType<typeof setTimeout>; terminal?: TopicSummaryError }
 const isRetryableSummaryFailure = <T>(r: Exclude<Result<T>, { ok: true }>) =>
   r.kind === 'network' || (r.kind === 'http' && r.status >= 500)
@@ -211,7 +211,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     function topic(topicId: string) {
       const t = w.topics.get(topicId)
       return { messages: selectTopicMessages(topicId, messages, t?.messages.values() ?? []),
-        before: t?.before,
+        before: t?.before, through: t?.through,
         initialized: t?.initialized ?? false,
         loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false,
         notFound: t?.notFound ?? false, summaryError: summaryErrorFor(topicId) }
@@ -400,6 +400,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       t.error = !result.ok && !missing
       if (result.ok) {
         t.initialized = true
+        t.through = Math.max(t.through ?? 0, result.data.messages.at(-1)?.seq ?? 0)
         for (const m of result.data.messages) t.messages.set(m.seq, m)
         t.before = result.data.messages[0]?.seq; t.hasMore = result.data.has_more
         withSync(() => { void sync.settleHistory(channel, result.data.messages) })

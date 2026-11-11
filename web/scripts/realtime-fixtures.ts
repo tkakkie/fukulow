@@ -119,7 +119,7 @@ export function expandSeqs(list: SeqItem[]): number[] | null {
 const channelKey = (ref: Json): string =>
   isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
 
-// Topic and Reply projections run at the controller layer; Unread server delivery runs, while Unread client runtime remains proposed.
+// Topic, Reply and Unread projections run at the controller layer.
 const plannedTypes = new Set(['load_unread', 'unread_result', 'fetch_unread', 'open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline', 'open_reply_chain', 'load_reply_chain', 'reply_chain_result', 'reply_chain_failed', 'fetch_reply_chain'])
 const plannedKeys = new Set(['unread', 'topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'])
 
@@ -134,9 +134,9 @@ function plannedTerm(value: Json, path: string, delivery = false, controller = f
   }
   if (!isObject(value)) return null
   for (const [key, item] of Object.entries(value)) {
-    if (plannedKeys.has(key) && !(controller && ['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position', 'reply_to'].includes(key))) return `${path}.${key}`
+    if (plannedKeys.has(key) && !(controller && ['unread', 'topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position', 'reply_to'].includes(key))) return `${path}.${key}`
     if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !controller && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7', 'P8'].includes(String(r))))) return `${path}.covers`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7', 'P8'].includes(String(r))))) return `${path}.covers`
     const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery, controller)
     if (found) return found
   }
@@ -484,7 +484,7 @@ type ClientStep = {
 export type Proposed = { owner: string[]; note?: string }
 export type ClientScenario = { id: string; proposed?: Proposed; layer?: 'controller'; never?: Pattern[]; steps: ClientStep[] }
 
-/** Scenarios to run, and proposed ones (validated, skipped by runners until their owner implements them). */
+/** Production scenarios and proposed ones (validated; independent reference tests may still execute them). */
 export function partitionScenarios<T extends { proposed?: Proposed }>(all: T[]): { running: T[]; proposed: T[] } {
   return { running: all.filter((s) => s.proposed === undefined), proposed: all.filter((s) => s.proposed !== undefined) }
 }
@@ -681,7 +681,7 @@ if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
     const all = readdirSync(join(dir, kind)).filter((n) => n.endsWith('.json'))
       .flatMap((n) => (JSON.parse(readFileSync(join(dir, kind, n), 'utf8')) as { scenarios: { id: string; proposed?: Proposed }[] }).scenarios)
     const { running, proposed } = partitionScenarios(all)
-    console.log(`  ${kind}: ${running.length} running, ${proposed.length} proposed (skipped by runners)`)
-    for (const s of proposed) console.log(`    proposed ${s.id} (owner ${s.proposed!.owner.join(', ')})`)
+    console.log(`  ${kind}: ${running.length} running, ${proposed.length} proposed (not executed by production runners)`)
+    for (const s of proposed) console.log(`    proposed ${s.id} (owner ${s.proposed!.owner.join(', ')})${s.proposed!.note ? `: ${s.proposed!.note}` : ''}`)
   }
 }

@@ -10,12 +10,6 @@
         "C4"
       ],
       "layer": "controller",
-      "proposed": {
-        "owner": [
-          "#143"
-        ],
-        "note": "Executed against the test-only P8 reference merge in web/scripts/realtime-fixtures.test.ts, including broken-rule checks. Remains proposed for the production web client until #143 implements Unread."
-      },
       "steps": [
         {"input":{"type":"session_start"}},
         {"input":{"type":"connection_ready"}},
@@ -37,6 +31,9 @@
         {"input":{"type":"message","channel":"A","message":{"seq":1}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"initialB"}]}},
+        {"input":{"type":"history_result","respond_to":"initialB","messages":[],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":0,"as":"subB"}]}},
+        {"input":{"type":"subscribed","channel":"B","caught_up_seq":0,"respond_to":"subB"}},
         {"input":{"type":"load_unread","channel":"B"},"effects":{"required":[{"type":"fetch_unread","channel":"B","as":"baselineB"}]}},
         {"input":{"type":"unread_result","channel":"B","respond_to":"baselineB","baseline":{"as_of_seq":0,"read_seq":0,"main_unread_count":0,"unread_count":0}}},
         {"input":{"type":"message","channel":"B","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}},"B":{"unread":{"as_of_seq":0,"read_seq":0,"main_unread_count":1,"unread_count":1}}}}}
@@ -54,7 +51,7 @@
         "owner": [
           "#143"
         ],
-        "note": "Executed against the test-only P8 reference merge in web/scripts/realtime-fixtures.test.ts, including broken-rule checks. Remains proposed for the production web client until #143 implements Unread."
+        "note": "Not executed by the production web controller: it serializes Channel-list fetches, so these overlapping requests cannot run unchanged. Executed against the independent P8 reference merge in web/scripts/realtime-fixtures.test.ts with broken-rule checks. Production serialization, stale-baseline selection and timeout/retry with the older response last are tested separately in web/src/unread.test.ts (#143)."
       },
       "steps": [
         {"input":{"type":"session_start"}},
@@ -91,7 +88,7 @@
         "owner": [
           "#143"
         ],
-        "note": "Test-only P8 reference merge, including a stale Topic-count mutation. Within one access generation, Channel/Topic positions only advance: equal as_of_seq/read_seq selects smaller unread_count and main_unread_count. Losing access drops the entry; regrant starts at committed seq. Existing server behavior suffices; production client remains proposed for #143."
+        "note": "Not executed by the production web controller: it serializes Channel-list fetches, so these overlapping requests cannot run unchanged. Executed against the independent P8 reference merge in web/scripts/realtime-fixtures.test.ts with broken-rule checks. Production serialization, stale-baseline selection and timeout/retry with the older response last are tested separately in web/src/unread.test.ts (#143)."
       },
       "steps": [
         {"input":{"type":"session_start"}},

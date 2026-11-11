@@ -105,11 +105,11 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => { unread(f); delete f.delivery.scenarios[0].steps[1].expect.unread_count })).toContain('missing required property "unread_count"')
   })
 
-  it('validates proposed P8 client baselines and keeps merge scenarios proposed for #143', () => {
+  it('validates running P8 controller baselines and rejects protocol-only Unread vocabulary', () => {
     const unread = JSON.parse(readFileSync(join(defaultDir, 'client/unread.json'), 'utf8'))
     const useUnread = (f: any) => { f.client = structuredClone(unread) }
     expect(problemsOf(useUnread)).toBe('')
-    expect(problemsOf((f) => { useUnread(f); delete f.client.scenarios[0].proposed })).toContain('planned vocabulary')
+    expect(problemsOf((f) => { useUnread(f); delete f.client.scenarios[0].layer })).toContain('planned vocabulary')
     const baseline = (f: any) => f.client.scenarios[0].steps.find((s: any) => s.input.type === 'unread_result').input
     expect(problemsOf((f) => { useUnread(f); delete baseline(f).baseline.as_of_seq })).toContain('missing required property "as_of_seq"')
     expect(problemsOf((f) => { useUnread(f); baseline(f).baseline.as_of_seq = -1 })).toContain('below the minimum')
@@ -234,7 +234,7 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => { f.client.scenarios[0].steps[1].input = { type: 'main_timeline_result', respond_to: 'f0', as_of_seq: 10, items: [], has_more: false } })).toContain('planned vocabulary')
   })
 
-  it('allows Topic and Reply vocabulary only at the controller layer and keeps Unread proposed', () => {
+  it('allows Topic Reply and Unread vocabulary only at the controller layer', () => {
     const topic = (f: any) => {
       f.client.scenarios[0].layer = 'controller'
       f.client.scenarios[0].covers = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7']
@@ -242,7 +242,7 @@ describe('realtime fixtures: validation', () => {
     }
     expect(problemsOf(topic)).toBe('')
     expect(problemsOf(f => { topic(f); delete f.client.scenarios[0].layer })).toContain('planned vocabulary')
-    expect(problemsOf(f => { topic(f); f.client.scenarios[0].covers = ['P8'] })).toContain('covers is planned vocabulary')
+    expect(problemsOf(f => { topic(f); f.client.scenarios[0].covers = ['P8'] })).toBe('')
   })
 
   it('rejects dangling references in delivery scenarios', () => {
@@ -311,6 +311,10 @@ describe('realtime fixtures: the CI entry point fails on an invalid fixture', ()
     const result = run()
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('realtime fixtures OK')
+    expect(result.stdout).toContain('proposed (not executed by production runners)')
+    for (const id of ['unread-reconnect-larger-baseline-then-read-position-wins', 'unread-topic-only-mark-read-equal-baseline-both-orders']) {
+      expect(result.stdout).toContain(`proposed ${id} (owner #143): Not executed by the production web controller`)
+    }
   })
 
   it('exits 1 and names the file for a malformed, a schema-invalid and a dangling fixture', () => {
@@ -403,7 +407,7 @@ describe('realtime fixtures: client pilot (out-of-order 100, 102, 101 via ack an
   })
 })
 
-// P8 reference only: no production Unread client (#143). Transport effects just bind fixture responses;
+// P8 independent reference. Production controller coverage is in unread-projections.test.ts. Transport effects bind fixture responses;
 // the model retains unique Channel events and recomputes counts from the winning REST baseline.
 type UnreadBaseline = NonNullable<ObservedChannel['unread']>
 type UnreadBug = 'accept-covered' | 'no-dedup' | 'global-dedup' | 'accept-older' | 'accept-older-position'
@@ -463,7 +467,7 @@ function unreadReference(bug?: UnreadBug): ClientUnderTest {
   }
 }
 
-describe('realtime fixtures: P8 Unread reference merge (production client pending #143)', () => {
+describe('realtime fixtures: P8 Unread reference merge', () => {
   const events = loadClientScenario('unread-events-before-rest-late-duplicate-and-replay')
   const reconnect = loadClientScenario('unread-reconnect-larger-baseline-then-read-position-wins')
   const topicRead = loadClientScenario('unread-topic-only-mark-read-equal-baseline-both-orders')
