@@ -42,7 +42,12 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Web boundary check (#48, #60): Workers/SharedWorkers and `?worker` imports are network uses allowed only in the API layer (they can hide communication). Known limits are in the header of `web/scripts/web-boundary.ts` (#60).
 - Web storage is forbidden everywhere. A future `src/ui-settings.ts` exemption must land with its guard: typed allow-list of keys and values, no free-form key or string value, tests that invalid ones cannot be stored (#48).
 - Hand-written API types are review-enforced, not CI: TypeScript is structural, so a same-shaped copy still type-checks, and an AST check cannot judge semantic duplication. Promote only with few false positives/negatives and a negative test (#49).
-- #260 AI models (credit cost): Codex sol and Antigravity Argon at medium; high only on H1-H6 or security. Astra reviews: high only for round 1 of risk:needs-review. Carbon dropped: no clear gain on #138 vs Argon on #222. Trial: Argon browser-check review of Codex/Claude web PRs.
+- #260 AI models (credit cost): Codex sol and Antigravity Argon at medium; high only on H1-H6 or security. Astra reviews: high only for round 1 of risk:needs-review. Carbon dropped: no clear gain on #138 vs Argon on #222.
+- #275 Copilot findings outside the PR's changes become new Issues and do not block it, except security, data loss or corruption, cross-Organization leaks, serious defects caused by the PR, or an unmet Done when. Reason: on #273 each re-review surfaced one pre-existing gap and cost a fix/CI cycle.
+- #275 Copilot is requested once per PR; another request only within the 2 AI review rounds and only when clearly needed; changing the reviewing AI does not reset the cap. Reason: credit cost; repeated Copilot reviews mostly found out-of-scope issues.
+- #275 The #260 Argon browser-check review trial ended: it found no defect the required review missed, so its cost-effectiveness is unproven. Argon stays the UI implementer.
+- #275 Issue-level AI review is required only for risk:needs-review. AI-decidable Issues (minor bug fixes, tests, docs) still go straight to status:ready; Issues needing maintainer approval go to status:human-review. Reason: credit cost.
+- #275 Until DM, Mention and Search are merged, new process improvements and doc rules are paused, except security, serious defects, MVP blockers or explicit maintainer requests. Reason: spend credit on MVP features.
 - k6 bumps are manual (Dependabot does not see `K6_IMAGE` in Makefile): keep the exact tag, type-check and smoke-test each bump; `@types/k6` versions need not match runtime; digest pinning deferred (#20).
 
 ## API contract

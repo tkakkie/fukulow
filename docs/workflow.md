@@ -41,10 +41,11 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
 
 ## 3. Issue review path
 - Maintainer approval is always needed for: any new feature or behaviour change (even if described in `docs/spec.md`); auth, permissions, real-time, migrations; API or schema contract changes;
-  new dependencies or languages; cost, deploy, secrets. Order: AI review (`status:ai-review`) -> `status:human-review` -> "OK" -> `status:ready`.
-- AI review of an Issue is required for `risk:needs-review` and large Issues; for small ones the author may skip it: go straight to `status:human-review` and record the decision and reason in the Issue.
+  new dependencies or languages; cost, deploy, secrets. Order: AI review (`status:ai-review`; `risk:needs-review` only, next bullet) -> `status:human-review` -> "OK" -> `status:ready`.
+- AI review of an Issue is required only for `risk:needs-review` (#275). Other Issues that need maintainer approval go straight to `status:human-review`; AI-decidable Issues (next bullet) still go straight to `status:ready`.
 - An AI decides alone only when none of the maintainer-required categories above applies: bug fixes with a clear repro, refactors without behaviour change, tests, CI, docs, patch updates. Then it sets `status:ready` itself; an auth/permissions bug fix or permission tests still go to the maintainer.
 - Max 2 review rounds; unresolved blocking findings -> `status:needs-decision` with the question.
+- Until DM, Mention and Search are merged, process improvements and doc rules are paused (no new Issue, no implementation of an existing one), except for security, serious defects, MVP blockers or an explicit maintainer request (#275).
 
 ## 4. Roles, models, effort
 - Codex: Rust server, DB, auth/permissions, real-time, concurrency, load tests. Claude: design, OpenAPI, docs, review. Antigravity: Svelte (screens, state modules), browser checks, E2E.
@@ -59,7 +60,7 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
   low = small copy, limit or type fixes; medium (default) = screens, state modules, vitest and E2E additions, conflict and CI fixes, browser checks; high = only when an H condition above holds or the change is security-relevant.
   Size alone does not raise effort. If an H condition or security relevance appears mid-work: stop, report, restart at `high`.
 - Claude: Sonnet by default; Opus only for round 1 of high-risk review or heavy implementation.
-- Trial (#260): a web/UI PR written by Codex or Claude also gets an Antigravity browser-check review (`gemini-4-argon-medium`): run the changed screens in a real browser and report runtime, focus and layout defects. It runs alongside the required review in the same round (not as a separate round) and does not replace it.
+- The #260 Antigravity browser-check review trial has ended (#275): web PRs get no extra browser-check review. Antigravity keeps its implementer role above.
 - Put the model and effort in the signature line.
 - Orchestrator: start each worker with the Bash tool and `run_in_background: true` (not `nohup ... &`): the harness notifies on exit, which resumes the sweep (section 1) with no user prompt. Run from the task worktree; keep the prompt, `-o` result and log in the scratchpad dir, outside the repo. On exit read the Codex result file and log, or the Antigravity log, then sweep.
   Codex: `cd <worktree> && codex exec -m <gpt-6.1-sol|gpt-6-astra> -c 'model_reasoning_effort="<medium|high>"' --sandbox <workspace-write|read-only> -C . -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1` (`workspace-write` to implement or fix, `read-only` to review or check; the log streams progress).
@@ -73,7 +74,8 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
 - AI review of an Issue or PR is at most 2 rounds in total per item; changing the reviewing AI does not reset it. Round 2 checks only changes and how earlier findings were addressed.
 - Non-blocking findings become follow-up Issues, not another round. Blocking findings unresolved after round 2 -> `status:needs-decision`.
 - PRs touching auth, permissions, real-time or migrations are reviewed by an AI that did not write them. AI-authored by astra: same.
-- Copilot auto-review is OFF (credits). Request once per PR, by hand, when CI is green and the work is done: `gh pr edit <n> --add-reviewer @copilot`. Only for `risk:needs-review` or large code PRs. Re-request only if the maintainer asks.
+- Copilot auto-review is OFF (credits). Request once per PR, by hand, when CI is green and the work is done: `gh pr edit <n> --add-reviewer @copilot`. Only for `risk:needs-review` or large code PRs. An AI requests another only within the 2 AI review rounds above and only when clearly needed (state why in the PR); changing the reviewing AI does not reset the cap.
+- Copilot findings in code the PR does not change become a new Issue and do not block the PR, except: security, data loss or corruption, cross-Organization information leak, a serious defect caused by this PR, or an unmet Done when (#275).
 - `status:human-review` only with CI green on the current head, required reviews and fixes completed, and the Copilot review (if requested) finished.
 - Every Issue comment, review and PR body ends with `AI: <name> / model: <id> / effort: <level>`. Everything on GitHub is in English.
 
