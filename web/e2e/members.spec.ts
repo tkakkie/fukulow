@@ -22,7 +22,9 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
     const requestPaths: string[] = []
     guest.on('request', request => requestPaths.push(new URL(request.url()).pathname + new URL(request.url()).search))
     await guest.goto(link)
-    await expect(guest).toHaveURL(new URL('/', link).href)
+    const clearedLink = new URL(link)
+    clearedLink.hash = ''
+    await expect(guest).toHaveURL(clearedLink.href)
     const invitation = guest.getByRole('region', { name: '招待を受ける' })
     await invitation.getByLabel('招待先のメールアドレス').fill(email)
     await invitation.getByLabel('組織での名前').fill('招待ゲスト')

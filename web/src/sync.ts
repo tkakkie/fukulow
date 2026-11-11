@@ -1,3 +1,4 @@
+import type { DraftStore } from './drafts'
 import * as api from './api'
 import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
@@ -11,6 +12,7 @@ export type TimelineApi = {
 type Wait = Extract<Effect, { type: 'wait' }>
 export type SyncOptions = {
   selfId: string
+  drafts?: DraftStore
   organizationId?: string
   checkMembership?: () => Promise<Result<unknown>>
   api?: TimelineApi
@@ -73,8 +75,18 @@ export function createSync(options: SyncOptions) {
   const channelListeners = new Map<string, Set<() => void>>()
   const timelines = new Map<string, ReturnType<typeof timeline>>()
   const extras = new Map<string, ChannelExtra>()
+  const submitted = new Map<string, { channel: string; detached: boolean; restore: () => void }>()
 
-  const getExtra = (channel: string): ChannelExtra => extras.get(channel) ?? emptyExtra
+  const draftTarget = (channel: string) => ({ organizationId: options.organizationId ?? '', channelId: channel })
+  const getExtra = (channel: string): ChannelExtra => {
+    const existing = extras.get(channel)
+    if (existing) return existing
+    const draft = options.drafts?.get(draftTarget(channel)) ?? ''
+    if (!draft) return emptyExtra
+    const extra = { ...emptyExtra, draft }
+    extras.set(channel, extra)
+    return extra
+  }
   function putExtra(channel: string, patch: Partial<ChannelExtra>): boolean {
     const prev = getExtra(channel)
     if (
@@ -86,6 +98,7 @@ export function createSync(options: SyncOptions) {
     }
     const olderError = patch.olderError ?? prev.olderError
     const draft = patch.draft ?? prev.draft
+    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel), draft)
     const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
     if (!olderError && draft === '' && composerError === null) extras.delete(channel)
     else extras.set(channel, { olderError, draft, composerError })
@@ -102,6 +115,14 @@ export function createSync(options: SyncOptions) {
 
   function dispatch(input: Input): Promise<void> {
     const previous = state
+    if (input.type === 'stop') {
+      for (const [id, draft] of submitted) {
+        draft.detached = previous.channels[draft.channel]?.pending.some(p => {
+          const request = previous.requests[p.request]
+          return p.clientMessageId === id && p.state !== 'unknown' && request !== undefined && !request.stale
+        }) ?? false
+      }
+    }
     const result = step(state, input)
     state = result.state
     const extraChanged = new Set<string>()
@@ -136,11 +157,11 @@ export function createSync(options: SyncOptions) {
 
   // A transport that never answers is an unknown outcome, rather than a permanently sending entry.
   // Deadlines/cancellation fence results but do not abort HTTP; a retry may overlap the underlying request.
-  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T>> {
+  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T> & { cancelled?: true }> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      const cancelled = new Promise<Result<T>>(resolve => {
-        requests.set(id, () => resolve({ ok: false, kind: 'network' }))
+      const cancelled = new Promise<Result<T> & { cancelled?: true }>(resolve => {
+        requests.set(id, () => resolve({ ok: false, kind: 'network', cancelled: true }))
         timeout = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
       })
       return await Promise.race([run(), cancelled])
@@ -240,7 +261,15 @@ export function createSync(options: SyncOptions) {
       case 'send': {
         const result = await request(effect.id, () => transport.sendMessage(effect.channel,
           { client_message_id: effect.client_message_id, body: effect.body,
-            ...(effect.reply_to ? { reply_to: effect.reply_to } : {}) }))
+            ...(effect.reply_to ? { reply_to: effect.reply_to } : {}) }).then(result => {
+          const draft = submitted.get(effect.client_message_id)
+          submitted.delete(effect.client_message_id)
+          // A closed Organization has no failed Message UI; retain a definite refusal's unedited text.
+          if (draft?.detached && !result.ok && result.kind === 'http' && [400, 403, 404, 409, 413, 415].includes(result.status)) draft.restore()
+          return result
+        }))
+        // Close cancels the wait while detached sends still observe definite refusals.
+        if (!result.ok && result.kind === 'network' && !result.cancelled) submitted.delete(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
           : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
         break
@@ -262,19 +291,23 @@ export function createSync(options: SyncOptions) {
   }
 
   function timeline(channel: string) {
+    // An empty draft can still have been edited since submit.
+    let draftRevision = 0
     let snapshot: TimelineState
     let last: ChannelState | undefined | null = null
     let lastExtra: ChannelExtra | null = null
     const listeners = new Set<() => void>()
     channelListeners.set(channel, listeners)
-    async function send(body: string, target: Pick<SendMessageRequest, 'reply_to'> = {}) {
+    async function send(body: string, target: Pick<SendMessageRequest, 'reply_to'> = {}, restore?: () => void) {
       if (!body.trim() || messageBodyError(body) !== null || !state.running || state.organization === 'unavailable') {
         return false
       }
       const clientMessageId = newId()
+      if (restore) submitted.set(clientMessageId, { channel, detached: false, restore })
       const before = state.channels[channel]?.pending
       const completion = dispatch({ type: 'user_send', channel, clientMessageId, body, ...target })
       const accepted = state.channels[channel]?.pending !== before
+      if (!accepted) submitted.delete(clientMessageId)
       await completion
       return accepted
     }
@@ -303,6 +336,7 @@ export function createSync(options: SyncOptions) {
       loadOlder: () => dispatch({ type: 'load_older', channel }),
       setDraft(draft: string) {
         if (draft === getExtra(channel).draft) return
+        draftRevision++
         setExtra(channel, { draft, composerError: null })
       },
       async submit() {
@@ -316,9 +350,14 @@ export function createSync(options: SyncOptions) {
         if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
           return false
         }
+        const revision = draftRevision
         putExtra(channel, { draft: '', composerError: null })
-        const accepted = await send(text)
-        if (!accepted && getExtra(channel).draft === '') setExtra(channel, { draft: text })
+        const storeRevision = options.drafts?.revision(draftTarget(channel))
+        const restore = () => {
+          if (draftRevision === revision && options.drafts?.revision(draftTarget(channel)) === storeRevision && getExtra(channel).draft === '') setExtra(channel, { draft: text })
+        }
+        const accepted = await send(text, {}, restore)
+        if (!accepted) restore()
         return accepted
       },
       send,
@@ -328,6 +367,7 @@ export function createSync(options: SyncOptions) {
         const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
         if (p?.state !== 'failed') return false
         const current = getExtra(channel).draft
+        draftRevision++
         putExtra(channel, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
         void dispatch({ type: 'user_discard', channel, clientMessageId })
         return true
@@ -348,6 +388,7 @@ export function createSync(options: SyncOptions) {
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     hasUnsavedChanges(): boolean {
+      if (options.drafts?.hasDrafts()) return true
       for (const extra of extras.values()) {
         if (extra.draft.length > 0) return true
       }

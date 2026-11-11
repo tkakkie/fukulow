@@ -1,3 +1,4 @@
+import { createNavigationTargets } from './navigation-targets'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import { createChannels, type ChannelsApi } from './channels'
@@ -39,8 +40,24 @@ export function createSession(options: SessionOptions) {
     checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
     onSessionEnded: notifyEnded,
   })
-  const channels = createChannels({ listChannels: () => observe(source.listChannels()),
-    createChannel: body => observe(source.createChannel(body)) })
+  const navigationTargets = createNavigationTargets({
+    topic: (channel, topic) => observe(api.getTopicSummary(organizationId, channel, topic)),
+    reply: (channel, message) => observe(api.listReplyChain(organizationId, channel, message, { limit: 1 })),
+    channelUnavailable: channel => { void sync.channelUnavailable(channel) },
+  })
+  let watched: string | null = null
+  const channels = createChannels(
+    {
+      listChannels: () => observe(source.listChannels()),
+      createChannel: body => observe(source.createChannel(body)),
+    },
+    id => {
+      if (!closed && !unavailable && id === watched && sync.get().organization === 'available' &&
+        sync.get().channels[id]?.state === 'unavailable') {
+        void sync.watch(id)
+      }
+    },
+  )
   function terminate() {
     if (unavailable) return
     unavailable = true
@@ -60,7 +77,6 @@ export function createSession(options: SessionOptions) {
       memberAvailability.set(id, lost)
     }
   })
-  let watched: string | null = null
   const stopFollowing = channels.subscribe(() => {
     const id = channels.get().selectedId
     if (id === watched) return
@@ -71,10 +87,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, channels: { ...channels, select(id: string) {
-      channels.select(id)
-      if (!closed && id === watched && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
-    } },
+    sync, channels, navigationTargets,
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
       const controller = createChannelMembers(organizationId, channel, r => {
@@ -90,6 +103,7 @@ export function createSession(options: SessionOptions) {
     },
     close() {
       closed = true
+      navigationTargets.close()
       stopFollowing(); stopSync(); stopMemberAccess()
       memberControllers.forEach(c => c.close()); memberControllers.clear()
       channels.close()
