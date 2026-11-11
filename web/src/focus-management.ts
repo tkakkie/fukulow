@@ -215,7 +215,6 @@ export function createTopicSummaryFocusController(
     revision: number
     topicId: string | null
     baselineActive: unknown
-    userMovedFocus: boolean
   }
 
   let pending: Pending | null = null
@@ -241,7 +240,8 @@ export function createTopicSummaryFocusController(
     const doc = getDoc()
     const target = event.target
     if (isResetOrDisconnectedActive(target, doc) || target === pending.baselineActive) return
-    pending.userMovedFocus = true
+    lastHandledRevision = pending.revision
+    clearPending()
   }
 
   const detachListener = () => {
@@ -257,7 +257,6 @@ export function createTopicSummaryFocusController(
   }
 
   const hasUserMovedFocus = (entry: Pending, doc: FocusDocument | null): boolean => {
-    if (entry.userMovedFocus) return true
     if (!doc) return false
     const active = doc.activeElement
     if (isResetOrDisconnectedActive(active, doc)) return false
@@ -288,7 +287,6 @@ export function createTopicSummaryFocusController(
         revision: snapshot.revision,
         topicId: returningTopicId,
         baselineActive: doc?.activeElement ?? null,
-        userMovedFocus: false,
       }
       if (doc?.addEventListener) {
         doc.addEventListener('focusin', onFocusIn, true)

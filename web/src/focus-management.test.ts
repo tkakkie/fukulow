@@ -456,6 +456,10 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     ctrl.syncNavigation({ revision: 3, focus: 'topic-summary' }, 't-1')
     activeElement = otherBtn
     for (const l of focusInListeners) l({ target: otherBtn })
+    expect(ctrl.isPending(3)).toBe(false)
+    expect(focusInListeners.size).toBe(0)
+    ctrl.syncNavigation({ revision: 3, focus: 'topic-summary' }, 't-1')
+    expect(ctrl.isPending(3)).toBe(false)
     expect(
       ctrl.step({ revision: 3, status: 'ready', findSummary: () => summary, composer }),
     ).toBe('cancelled')
