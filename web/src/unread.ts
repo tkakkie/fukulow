@@ -174,6 +174,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const unread = count(visit.scope.channel, c, visit.scope.topicId)
     if (unread === null) return
     visit.boundary = s.position; visit.unreadAtEntry = unread
+    enqueue(visit)
   }
   const isVisit = (v: Visit) => visit === v && visible && watched(v.scope.channel)
   function enqueue(v: Visit) {
@@ -233,6 +234,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     c.summaryReads.delete(topic)
     if (r.ok && r.data.topic.id === topic) {
       acceptScope(s, topicBaseline(r.data.as_of_seq, r.data.topic))
+      if (s.baseline && s.baseline.asOfSeq < c.requiredBase) s.error = true
       if (!s.error) c.summaryAttempts.delete(topic)
     } else {
       s.error = true
@@ -361,13 +363,16 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       visible = value
       if (visit) {
         const c = getChannel(visit.scope.channel), s = getScope(c, visit.scope.topicId)
-        if (!value) { stopScope(s); cancelDeadlines(visit.scope.channel) }
+        if (!value) {
+          stopScope(s); cancelDeadlines(visit.scope.channel)
+          if (visit.boundary === null) visit.presented.clear()
+        }
         // Returning to a visible document needs a fresh row presentation intent.
       }
       notify()
     },
     presented(id: symbol, seqs: number[]) {
-      if (!visit || visit.id !== id || !isVisit(visit) || visit.boundary === null) return
+      if (!visit || visit.id !== id || !isVisit(visit)) return
       const c = getChannel(visit.scope.channel)
       for (const seq of seqs) { const m = c.records.get(seq); if (m && inScope(m, visit.scope)) visit.presented.add(seq) }
       enqueue(visit)
