@@ -10,18 +10,22 @@ services:
       DATABASE_URL: postgres://fukulow:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/fukulow
       FUKULOW_COOKIE_SECURE: ${FUKULOW_COOKIE_SECURE:-true}
       FUKULOW_WS_ALLOWED_ORIGINS:
-      FUKULOW_SETUP_TOKEN:
-      FUKULOW_TRUSTED_PROXIES:
-      FUKULOW_CLIENT_IP_HEADER:
+      FUKULOW_SETUP_TOKEN: ${FUKULOW_SETUP_TOKEN:?Set FUKULOW_SETUP_TOKEN in .env}
+      FUKULOW_TRUSTED_PROXIES: ${FUKULOW_EDGE_PREFIX:-172.30.94}.2
+      FUKULOW_CLIENT_IP_HEADER: x-forwarded-for
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:8080:8080"
+    networks:
+      edge:
+        # Reserve a separate address so Docker cannot give the app the proxy's IP.
+        ipv4_address: ${FUKULOW_EDGE_PREFIX:-172.30.94}.3
+      backend:
 
   db:
     image: postgres:18
     restart: unless-stopped
+    networks: [backend]
     environment:
       POSTGRES_USER: fukulow
       POSTGRES_DB: fukulow
@@ -38,6 +42,10 @@ services:
     profiles: ["caddy"]
     image: caddy:2
     restart: unless-stopped
+    depends_on: [app]
+    networks:
+      edge:
+        ipv4_address: ${FUKULOW_EDGE_PREFIX:-172.30.94}.2
     ports: ["80:80", "443:443"]
     environment:
       # Public domain for automatic HTTPS (DNS must point to this host; ports 80/443 open).
@@ -50,9 +58,22 @@ services:
     profiles: ["nginx"]
     image: nginx:1
     restart: unless-stopped
+    depends_on: [app]
+    networks:
+      edge:
+        ipv4_address: ${FUKULOW_EDGE_PREFIX:-172.30.94}.2
     ports: ["80:80"]
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: ${FUKULOW_EDGE_PREFIX:-172.30.94}.0/29
+          gateway: ${FUKULOW_EDGE_PREFIX:-172.30.94}.1
+          ip_range: ${FUKULOW_EDGE_PREFIX:-172.30.94}.4/30
+  backend:
 
 volumes:
   caddy_data:

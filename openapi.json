@@ -2690,6 +2690,7 @@
       "SetupRequest": {
         "type": "object",
         "required": [
+          "setup_token",
           "organization_name",
           "name",
           "email",
@@ -2718,12 +2719,9 @@
             "minLength": 12
           },
           "setup_token": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": "string",
             "format": "password",
-            "description": "Required when FUKULOW_SETUP_TOKEN is configured on the server."
+            "description": "Must match the server's required FUKULOW_SETUP_TOKEN."
           }
         },
         "additionalProperties": false
