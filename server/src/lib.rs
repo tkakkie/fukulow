@@ -109,7 +109,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/api/v1/orgs/{org}/members/{id}/role",
-            axum::routing::patch(auth::members::change_role),
+            axum::routing::patch(auth::members::change_role::<channels::members::RoleChangeGuard>),
         )
         .route(
             "/api/v1/orgs/{org}/invites",

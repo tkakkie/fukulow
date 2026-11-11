@@ -168,6 +168,9 @@ pub async fn create_channel(
     }
     let organization_id = auth.identity.organization.organization_id;
     let mut tx = state.pool.begin().await?;
+    if matches!(input.visibility, ChannelVisibility::Private) {
+        auth::members::lock_organization(&mut tx, organization_id).await?;
+    }
     let actor = auth::members::current_actor(&mut tx, &auth, Action::CreateChannel).await?;
     let role = match actor {
         Actor::Member { role, .. } => role,

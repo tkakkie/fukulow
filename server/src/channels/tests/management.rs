@@ -1,6 +1,12 @@
 use super::*;
 
-async fn mutation(app: &Router, token: &str, channel: Uuid, target: Uuid, add: bool) -> Response {
+pub(super) async fn mutation(
+    app: &Router,
+    token: &str,
+    channel: Uuid,
+    target: Uuid,
+    add: bool,
+) -> Response {
     request(
         app,
         if add { "POST" } else { "DELETE" },
@@ -14,7 +20,7 @@ async fn mutation(app: &Router, token: &str, channel: Uuid, target: Uuid, add: b
     )
     .await
 }
-async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, target: Uuid) {
+pub(super) async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, target: Uuid) {
     sqlx::query(
         "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
     )
@@ -25,7 +31,7 @@ async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, target: Uuid) {
     .await
     .unwrap();
 }
-async fn snapshot(pool: &PgPool) -> Value {
+pub(super) async fn snapshot(pool: &PgPool) -> Value {
     sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(c) ORDER BY organization_id,channel_id,member_id) FROM channel_members c),(SELECT jsonb_agg(to_jsonb(p) ORDER BY organization_id,channel_id,member_id) FROM channel_read_positions p),(SELECT jsonb_agg(to_jsonb(p) ORDER BY organization_id,channel_id,member_id,topic_id) FROM topic_read_positions p))").fetch_one(pool).await.unwrap()
 }
 async fn denied(
@@ -296,9 +302,9 @@ async fn private_last_manager_last_grant_and_concurrent_removals_are_serialized(
         let b = Uuid::new_v4();
         let bt = member(&pool, org, b, "admin").await;
         let m = Uuid::new_v4();
-        let mt = member(&pool, org, m, "member").await;
+        member(&pool, org, m, "member").await;
         let g = Uuid::new_v4();
-        let gt = member(&pool, org, g, "guest").await;
+        member(&pool, org, g, "guest").await;
         let c = create(&app, &at, "Managed", "private").await;
         let c = Uuid::parse_str(c["id"].as_str().unwrap()).unwrap();
         for id in [b, m, g] {
@@ -332,38 +338,15 @@ async fn private_last_manager_last_grant_and_concurrent_removals_are_serialized(
             (StatusCode::CONFLICT, "last_channel_manager"),
         )
         .await;
-        // Temporary exception until #231, stacked next: last-manager demotion
-        // will return 409 last_channel_manager; do not add that guard in #149.
-        sqlx::query("UPDATE users SET role='member' WHERE organization_id=$1 AND id=$2")
-            .bind(org)
-            .bind(remaining)
-            .execute(&pool)
-            .await
-            .unwrap_or_else(|e| {
-                if remaining == b {
-                    panic!("Owner fixture needs another Organization Owner: {e}")
-                } else {
-                    panic!("{e}")
-                }
-            });
+        let owner_token = member(&pool, org, Uuid::new_v4(), "owner").await;
+        let before = snapshot(&pool).await;
+        let response = super::role_changes::change(&app, &owner_token, remaining, "member").await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
-            mutation(&app, token, c, remaining, false).await.status(),
-            StatusCode::NO_CONTENT
+            body(response).await,
+            json!({"error":"last_channel_manager"})
         );
-        assert_eq!(
-            mutation(&app, &mt, c, m, false).await.status(),
-            StatusCode::NO_CONTENT
-        );
-        denied(
-            &pool,
-            &app,
-            &gt,
-            c,
-            g,
-            false,
-            (StatusCode::CONFLICT, "last_channel_grant"),
-        )
-        .await;
+        assert_eq!(snapshot(&pool).await, before);
     }
 }
 

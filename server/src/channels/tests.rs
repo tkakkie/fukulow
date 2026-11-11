@@ -14,6 +14,7 @@ mod membership;
 mod name_length;
 mod name_whitespace;
 mod names;
+mod role_changes;
 mod visibility;
 
 fn router(pool: &PgPool) -> Router {
