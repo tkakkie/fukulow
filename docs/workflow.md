@@ -112,7 +112,8 @@ Cloud session (no `$FUKULOW_RUN_AS`, Codex or Antigravity): a Claude Code cloud 
 ## 11. Labels and milestones
 - Status: `status:working`, `status:ai-review`, `status:human-review`, `status:ready`, `status:needs-decision`. Filter: `label:status:human-review`.
 - Others: `security` (red), `bug` (orange), `risk:needs-review`, `blocked`. Urgent = `security`/`bug` + `status:human-review`/`status:needs-decision`. No area/type/ai labels.
-- Milestone = one-week sprint (at most 2 open); every Issue gets one. Modules are expressed with labels, not milestones.
+- Milestone = one-week sprint (at most 2 open) for work planned that week, or the undated `Backlog` for unscheduled, conditional or future work (not counted in the 2). Every Issue gets one; none means not yet triaged. Modules are expressed with labels, not milestones.
+- Only the maintainer moves an Issue from `Backlog` into a sprint; an AI may propose moves at a sprint boundary.
 
 ## 12. Needs the maintainer
 Merges; Issue approvals ("OK"); token/secret changes; adding a language, dependency or cost; deploy; anything in the AI prohibited list; denied permissions. Everything else proceeds without asking.
