@@ -1,0 +1,70 @@
+# Decisions: realtime
+
+Real-time delivery, admission, queues and timeouts. Writing rules and the other parts: [index](../decisions.md).
+
+## Real-time delivery
+- #195: SIGTERM/SIGINT stop acceptance and reject new requests, broadcast 1001, then drain HTTP, detached sends/notifications and sockets before closing the pool. Count before spawn/upgrade so caller disconnects and task handoffs cannot hide work.
+- #195: retain provisional 60 s drain / 75 s Compose stop_grace_period from measured drains: 2,048-send SIGTERM <=814 ms; idle 10k restart <1 s (measurements.md). These are not guaranteed worst-case times; pre-admission SQL can exceed them. Expiry skips runtime teardown.
+- #195 known limit: on normal exit, Tokio runtime teardown is outside the drain and can run past its 60 s deadline. Retain the current teardown behavior; no larger change now.
+- #195: sockets independently observe one shutdown watch and send Close concurrently, each capped at 1 s; a slow peer cannot serialize 10,000 closes. Upgrade callbacks retain a drain guard before handoff so late scheduling cannot race pool close.
+- #195: SIGKILL, crashes and drain expiry cannot promise COMMIT outcome or Close delivery. Retry the same client_message_id and resubscribe from the gap-free cursor; #135 resolves uncertain COMMITs without duplicate Messages.
+- Subscribe handoff: register live first, replay committed seq > cursor in 50-Message pages, flush newer queued events, then send `subscribed`. Clients dedupe by (channel_id, seq): duplicates allowed, no gaps (#18).
+- Full queues close with 4008, never silent loss; clients reconnect from each Channel's last seq. Per connection: 256 queued events, at most 256 subscriptions (#18).
+- Messages owns post-commit fan-out; Channels owns visibility. Fan-out checks all candidate Members in one visibility query (no per-recipient SQL) and shares canonical payloads; authorization-query failure closes with 4008 for replay (#18).
+- Message persistence and sign-out finish regardless of HTTP cancellation, so a commit cannot skip notification (#18).
+- Future subscription cursors are clamped to the committed high-water seq so clients resume live delivery after a database restore (#18).
+- One shared FIFO queue per connection: an accepted subscribe sends `subscribed` only after every event queued before it, across Channels (used by contract silence barriers). Not a cross-Channel order guarantee; preserve or replace with its proof (#116).
+- #57 PR B: notification runs detached after COMMIT; HTTP awaits persistence only. A guard armed before COMMIT makes an incomplete task signal that Organization/Channel's sockets to close with 1011, so reconnect replays (no durable queue).
+- #179: notifications reserve at most 40 tasks per Organization/Channel and 2,048 per Delivery before spawning. Publication takes one of 40 global execution permits only after the cursor lock; saturation latches 1011. HTTP never waits on notification capacity.
+- #179 chooses separate bounded cursor-wait reservations over coalescing to preserve hot-Channel admission and recovery behavior. The 2,048-task ceiling bounds retained work across Channels; the 10 s deadline still includes cursor waiting, and Drop frees reservations on every exit.
+- #190 chooses 512 reservations/Organization over 256: both preserve B in the controlled probe; 512 gives twice the temporary many-Channel headroom while leaving 1,536/2,048 slots beyond any one Organization. A conservative bound, not an optimum.
+- #190 counts reservations under one short mutex for acquisition and final removal, avoiding stale-entry races. Each guard retains its global permit until after removal, bounding Organization entries to 2,048; no async wait or publication lock is added.
+- Authorization reads `channels.visibility` fresh on each REST/replay check and fan-out; nothing is cached or carried from HTTP into fan-out, so a committed visibility change is seen next. Public costs one boundary query (#57 PR B).
+- #135 ambiguous-COMMIT recovery: persistence takes a scoped transaction advisory lock exclusively before COMMIT; watermark reads take it shared, then read in a separate READ COMMITTED statement, so replay recovers every committed Message without a later send.
+- #135: outcome lookups cannot prove rollback from absence, so they are not used. Each watermark is bounded to 10 s including pool acquisition; an unresolved outcome closes that socket with 1011. Cost: one extra statement per send.
+- #135 suppresses 1011 only for COMMIT errors known to roll back: SQLSTATE class 23 and 40000/40001/40002/40P01. I/O, shutdown, 40003 and timeouts (incl. 25P04) stay conservative.
+- #147 watermark: a materialized `set_config('lock_timeout', ...)` CTE precedes the shared lock in one statement (5 -> 4 round trips); the counter SELECT stays separate to keep #135's fresh snapshot.
+- #57 item 4: fan-out snapshots recipients under a per-Channel mutex; the global registry only hands out counted Channel leases. One publication cursor per Channel recovers missing committed Messages once in 50-Message pages and reauthorizes each page.
+- #57 item 4 evidence: under a forced reorder with 128 sockets, SQL fell from 779 to 12 statements (no per-socket refills). Item 6 (fixed offered-load comparison and queue caps) is #178.
+- #57 item 4: `auth` owns the active-Member predicate; `channels` owns one public/private grant predicate and query builder. Reads, subscribe, replay and fan-out are non-locking; batched candidates are bounded by `id = ANY($3)`.
+- #173: shared recovery covers at most one 50-Message page (also bounded by the 256 queue). A larger gap latches Channel failure (1011) and advances the cursor; replay itself stays paginated without this limit.
+- #173 safety: subscribers before the latch keep their failed epoch and reconnect from their cursor; later ones register live before the barrier-protected watermark. Cursors discard overlap: ascending at-least-once, no omissions while authorized.
+- #173: each recovery page re-queries visibility. Authorization-query failure sets overflow (4008) for that snapshot and advances; a page-read failure latches 1011 and keeps the cursor. Both fail closed and recover through replay.
+- #136 notification failure uses one watch per latched Organization/Channel epoch: the HTTP failure path is one lookup, swap and at most one spawn, with no recipients lock, subscriber iteration or inline wake-up.
+- #136 evidence: idle CPU at 10,000 sockets fell from ~58% to ~3% of one core. 1011 bulk-close median rose (~120 -> ~157 ms), a same-runtime scheduling artifact of waking 10,000 tasks at once, not a shown production regression.
+- #136: each socket owns one failure-monitor task (abort-on-drop) and awaits its oneshot in a `biased` select, keeping 4001/4003, then 4008, then 1011 priority. Outside a Tokio runtime `Signal::fail` keeps the latch and skips the wake.
+- Ping every 30 s; the first Ping after the last client frame starts one 60 s grace, so an idle unanswering socket closes with 1001 after ~90 s. Reason: keeps idle sockets exercised without frequent traffic at 10k sockets (#57 item 5).
+- Heartbeat uses the existing loop's single interval (no task, no env setting). All frame writes share the 5 s send deadline (4008 on timeout, 1001 on write error). Client Close is answered within 1 s (#57 item 5).
+- #148 separates two responsibilities: (1) gapless `seq` allocation (the counter row update, order within a Channel); (2) the #135 commit/watermark barrier (readers may trust every `seq` <= W is committed). Neither provides the other.
+- #148 fixtures for behaviour not implemented yet are marked `proposed` with an owner Issue: validated, skipped and listed by runners; planned vocabulary fails validation elsewhere. Membership-check fixtures are controller-layer: the pure protocol has no I/O.
+
+## Admission and timeouts
+- #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
+- Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).
+- The budget is partitioned (#156, #158): sends round up, watermarks round down (8 each in production), no borrowing; per Organization/Channel at most one send and four watermarks. No per-Organization DB admission reservation.
+- #156 chose bounded admission outside the pool over short-wait or try advisory locks: a DB lock wait still holds a connection, and try-lock turns normal contention into repeated 1011/reconnect and send failures.
+- Watermark admission waits at most 1 s; send admission 30 s (a queued send holds no connection), then 10 s persistence work, so a send response is bounded by 40 s. Session and Channel authorization still come first (#156).
+- The exclusive barrier precedes counter allocation with transaction-local `lock_timeout=10s` and `transaction_timeout=8s`, so PostgreSQL ends stuck work before the app's 10 s deadline; prevents leftover COMMIT backends/locks (#158).
+- #158: the owned transaction holds Channel and budget permits through COMMIT/ROLLBACK with explicit BEGIN/COMMIT; on error, cancel or deadline its Drop detaches and drops the connection instead of awaiting close behind a stuck COMMIT.
+- Exactly one Delivery per application pool (shared by its clones) sizes the budget once; only Delivery exposes watermark access outside `messages`. A stuck Channel holds at most four watermark and one send connection (#156).
+- `transaction_timeout` starts only at the barrier: pool acquisition and the initial canonical lookup come first, so up to 8 s of server work can outlive app abandonment; not an absolute HTTP bound. No prepared transactions (#158).
+- Socket abandonment does not prove rollback (PostgreSQL may still COMMIT), so #135's shared barrier, current authorization and canonical same-key retry stay necessary (#158).
+- #161 caps queued send waiters at 256 per Organization/Channel and 2,048 globally, reserved before spawning. #178 kept these values; one Organization can still consume all global slots.
+- #161: queue-cap rejection and 30 s admission expiry return 503 `ErrorBody` with a random 1-5 s Retry-After (shared saturation, so not 429). DB failures, unknown COMMIT and the 10 s work deadline stay 500/unknown outcome.
+- A dropped connection or response timeout is not evidence of non-persistence (detached work may run 30 s + 10 s): clients retry with the same client_message_id, never a new key (#158, #161).
+- Admission rejections log `admission_rejected operation=watermark|send scope=channel|global organization=... channel=...` to stderr, unthrottled for now (counters/rate limiting deferred); no logging dependency (#156).
+- Admission is a bounded-wait guard, not a dedicated HTTP pool: auth, history, replay and notification share the same pool (#156).
+- Known limits for the 10k target: FIFO budgets can delay unrelated Organizations; four watermarks per Channel cap popular-Channel reconnects (~1,000/s at ~4 ms each); 10,000 simultaneous reconnects need client backoff (#156).
+- #178 keeps send queue caps 256/2,048: smaller caps raised refusals; larger ones roughly doubled accepted HTTP/delivery delay with no shown capacity benefit; RSS did not discriminate. A conservative choice, not an optimality or fairness claim.
+- #179 isolates held cursor waiters from execution capacity. #190 prevents only one Organization monopolizing reservations; simultaneous multi-Organization exhaustion and contention for the 40 shared execution permits remain. No cross-Organization fairness guarantee.
+- [#199](https://github.com/tkakkie/fukulow/issues/199): measured, the cap stays 4; cap 2 cut steady-state throughput ~31% and raised recovery 1011 admission rejections ~45%, with no significant 10,000-client recovery-time improvement. The cap-2 change is not merged.
+- #199 known limit: two stuck Channels can hold all 8 watermark slots; another Organization's subscribe then fails with 1011. #213 defers per-Organization watermark fairness unless cross-tenant failure spread becomes a real problem.
+- #212 follows up handshake admission, listen backlog and accept pacing; client jitter is in #195. #199's local recovery was bounded by handshake capacity, not the watermark cap; it does not establish production 10,000-connection capacity.
+
+## Entries in other parts
+
+Entries that also govern this area, listed by the start of the entry in that part.
+
+- [auth](auth.md): `#149 channel_access_lost carries only channel_id, keeps`, `#149 observed loss fences queued/replay frames`, `Two independent revocations: ending an Account`, `Revocation boundary: history/replay deny once revocation`, `Classification precedence: known Account Session end`
+- [auth](auth.md): `Open sockets use the database expiry`, `The initial WebSocket session check is`, `#157 supervises the worker: any unexpected`, `#163/#195: successful return after registry drop`
+- [messages](messages.md): `#149 grant_id is a durable UUID`, `#149 fast subscription rechecks/failures target Organization+Channel`, `#149 subscriptions follow the current access`, `#149 API mutations lock Organization, Channels`
