@@ -12,7 +12,7 @@ export default defineConfig({
   webServer: {
     command: '../target/debug/fukulow-server',
     url: `http://127.0.0.1:${port}/api/v1/health`,
-    env: { FUKULOW_ADDR: `127.0.0.1:${port}` },
+    env: { FUKULOW_ADDR: `127.0.0.1:${port}`, FUKULOW_COOKIE_SECURE: 'false' },
     reuseExistingServer: false,
     timeout: 30_000,
   },
