@@ -407,7 +407,7 @@ describe('realtime fixtures: client pilot (out-of-order 100, 102, 101 via ack an
 // the model retains unique Channel events and recomputes counts from the winning REST baseline.
 type UnreadBaseline = NonNullable<ObservedChannel['unread']>
 type UnreadBug = 'accept-covered' | 'no-dedup' | 'global-dedup' | 'accept-older' | 'accept-older-position'
-  | 'drop-early' | 'drop-on-reconnect' | 'drop-suffix' | 'count-own'
+  | 'accept-stale-topic-count' | 'drop-early' | 'drop-on-reconnect' | 'drop-suffix' | 'count-own'
 function unreadReference(bug?: UnreadBug): ClientUnderTest {
   const channels = new Map<string, { baseline?: UnreadBaseline; events: Message[] }>()
   let request = 0
@@ -438,7 +438,9 @@ function unreadReference(bug?: UnreadBug): ClientUnderTest {
           const next = input.baseline as UnreadBaseline
           const old = state.baseline
           if (!old || bug === 'accept-older' || next.as_of_seq > old.as_of_seq
-            || (next.as_of_seq === old.as_of_seq && (bug === 'accept-older-position' || next.read_seq >= old.read_seq))) {
+            || (next.as_of_seq === old.as_of_seq && (bug === 'accept-older-position' || next.read_seq > old.read_seq
+              || (next.read_seq === old.read_seq && (bug === 'accept-stale-topic-count'
+                || (next.unread_count <= old.unread_count && next.main_unread_count <= old.main_unread_count)))))) {
             state.baseline = next
             if (bug === 'drop-suffix') state.events = []
           }
@@ -464,6 +466,7 @@ function unreadReference(bug?: UnreadBug): ClientUnderTest {
 describe('realtime fixtures: P8 Unread reference merge (production client pending #143)', () => {
   const events = loadClientScenario('unread-events-before-rest-late-duplicate-and-replay')
   const reconnect = loadClientScenario('unread-reconnect-larger-baseline-then-read-position-wins')
+  const topicRead = loadClientScenario('unread-topic-only-mark-read-equal-baseline-both-orders')
 
   it('unread-events-before-rest-late-duplicate-and-replay', () => {
     expect(runClientScenario(events, unreadReference())).toEqual([])
@@ -473,10 +476,15 @@ describe('realtime fixtures: P8 Unread reference merge (production client pendin
     expect(runClientScenario(reconnect, unreadReference())).toEqual([])
   })
 
+  it('unread-topic-only-mark-read-equal-baseline-both-orders', () => {
+    expect(runClientScenario(topicRead, unreadReference())).toEqual([])
+  })
+
   it.each([
     ['accept-covered', events], ['no-dedup', events], ['global-dedup', events],
     ['drop-early', events], ['drop-on-reconnect', events], ['count-own', events],
     ['accept-older', reconnect], ['accept-older-position', reconnect], ['drop-suffix', reconnect],
+    ['accept-stale-topic-count', topicRead],
   ] as const)('rejects %s merge logic', (bug, scenario) => {
     expect(runClientScenario(scenario, unreadReference(bug)).join('\n')).toContain(' unread is')
   })
