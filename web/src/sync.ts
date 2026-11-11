@@ -77,16 +77,27 @@ export function createSync(options: SyncOptions) {
   const getExtra = (channel: string): ChannelExtra => extras.get(channel) ?? emptyExtra
   function putExtra(channel: string, patch: Partial<ChannelExtra>): boolean {
     const prev = getExtra(channel)
-    const next: ChannelExtra = { ...prev, ...patch }
-    if (next.olderError === prev.olderError && next.draft === prev.draft && next.composerError === prev.composerError) {
+    if (
+      (patch.olderError === undefined || patch.olderError === prev.olderError) &&
+      (patch.draft === undefined || patch.draft === prev.draft) &&
+      (patch.composerError === undefined || patch.composerError === prev.composerError)
+    ) {
       return false
     }
-    if (!next.olderError && next.draft === '' && next.composerError === null) extras.delete(channel)
-    else extras.set(channel, next)
+    const olderError = patch.olderError ?? prev.olderError
+    const draft = patch.draft ?? prev.draft
+    const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
+    if (!olderError && draft === '' && composerError === null) extras.delete(channel)
+    else extras.set(channel, { olderError, draft, composerError })
     return true
   }
   function setExtra(channel: string, patch: Partial<ChannelExtra>) {
     if (putExtra(channel, patch)) channelListeners.get(channel)?.forEach(l => l())
+  }
+  function clearOlderError(channel: string, prev: ChannelState | undefined, next: ChannelState | undefined): boolean {
+    return ((prev?.older === undefined && next?.older !== undefined) ||
+      !next?.watched || next.state === 'unavailable' || next.cursor === null || !next.hasOlder) &&
+      putExtra(channel, { olderError: false })
   }
 
   function dispatch(input: Input): Promise<void> {
@@ -107,24 +118,19 @@ export function createSync(options: SyncOptions) {
           }
         }
       }
-      if (state !== previous) {
-        for (const channel of new Set([...Object.keys(previous.channels), ...Object.keys(state.channels)])) {
-          const prev = previous.channels[channel]
-          const next = state.channels[channel]
-          if (((prev?.older === undefined && next?.older !== undefined) ||
-            !next?.watched || next.state === 'unavailable' || next.cursor === null || !next.hasOlder) &&
-            putExtra(channel, { olderError: false })) {
-            extraChanged.add(channel)
-          }
+      for (const channel of result.changedChannels) {
+        if (clearOlderError(channel, previous.channels[channel], state.channels[channel])) {
+          extraChanged.add(channel)
         }
       }
     }
     if (state !== previous) listeners.forEach(l => l())
-    channelListeners.forEach((listeners, channel) => {
-      if (state.channels[channel] !== previous.channels[channel] || extraChanged.has(channel)) {
-        listeners.forEach(l => l())
-      }
-    })
+    for (const channel of result.changedChannels) {
+      channelListeners.get(channel)?.forEach(l => l())
+    }
+    for (const channel of extraChanged) {
+      if (!result.changedChannels.has(channel)) channelListeners.get(channel)?.forEach(l => l())
+    }
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 

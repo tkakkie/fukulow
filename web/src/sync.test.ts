@@ -599,3 +599,160 @@ it('controller: a late 401 from a pre-clamp send in the same session means Sign 
   expect(client.sync.get().session).toBe('sign_in_required')
   await client.sync.close()
 })
+
+it('controller skips unchanged Channels during olderError bookkeeping and keeps unrelated extra state identical', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(10, 'B')], has_more: true })
+  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 10 })
+  const bOlder = (await client.feed({ type: 'load_older', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_failed', respond_to: bOlder, status: 'network' })
+
+  const cLatest = (await client.feed({ type: 'watch', channel: 'C' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: cLatest, messages: [record(1, 'C')], has_more: false })
+  await client.feed({ type: 'subscribed', channel: 'C', caught_up_seq: 1 })
+
+  const b = client.sync.getTimeline('B')
+  const c = client.sync.getTimeline('C')
+  b.setDraft('draft B')
+  c.setDraft('draft C')
+  const bChannel = client.sync.get().channels.B
+  const cChannel = client.sync.get().channels.C
+  const bSnapshot = b.get()
+  const cSnapshot = c.get()
+  expect(bSnapshot).toMatchObject({ olderError: true, draft: 'draft B' })
+  expect(cSnapshot).toMatchObject({ olderError: false, draft: 'draft C' })
+
+  let visits = 0
+  for (const ch of [bChannel, cChannel]) {
+    for (const key of ['older', 'hasOlder'] as const) {
+      const value = ch[key]
+      Object.defineProperty(ch, key, {
+        configurable: true,
+        enumerable: true,
+        get() { visits++; return value },
+      })
+    }
+  }
+
+  let ownKeysCalls = 0
+  let bReads = 0
+  let cReads = 0
+  const trackChannels = () => {
+    const raw = client.sync.get().channels
+    client.sync.get().channels = new Proxy(raw, {
+      ownKeys(target) {
+        ownKeysCalls++
+        return Reflect.ownKeys(target)
+      },
+      get(target, prop, receiver) {
+        if (prop === 'B') bReads++
+        else if (prop === 'C') cReads++
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+  }
+
+  trackChannels()
+  await client.feed({ type: 'message', channel: 'A', message: record(101) })
+  trackChannels()
+  const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hi' }))
+    .find(e => e.type === 'send')!
+  trackChannels()
+  await client.feed({ type: 'ack', respond_to: send, message: { ...record(102), sender: 'me', client_message_id: 'c1', body: 'hi' } })
+  trackChannels()
+  const grace = (await client.feed({ type: 'message', channel: 'A', message: record(104) })).find(e => e.type === 'wait')!
+  trackChannels()
+  await client.feed({ type: 'timer_elapsed', respond_to: grace })
+
+  // Each of the 5 dispatches clones previous.channels once inside step; controller dispatch enumerates/reads 0 unchanged keys.
+  expect(ownKeysCalls).toBe(5)
+  expect(bReads).toBe(5)
+  expect(cReads).toBe(5)
+  expect(visits).toBe(0)
+  expect(client.sync.get().channels.B).toBe(bChannel)
+  expect(client.sync.get().channels.C).toBe(cChannel)
+  expect(b.get()).toBe(bSnapshot)
+  expect(c.get()).toBe(cSnapshot)
+
+  // When a 401 on Channel A empties state.channels, unrelated Channel B removed from previous.channels still clears olderError.
+  const send2 = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c2', body: 'bye' }))
+    .find(e => e.type === 'send')!
+  await client.feed({ type: 'send_failed', respond_to: send2, status: 401 })
+  expect(b.get()).toMatchObject({ olderError: false, draft: 'draft B' })
+  await client.sync.close()
+})
+
+it('controller clears olderError in the same dispatch when a non-stale before fetch fails while unwatched', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+
+  const a = client.sync.getTimeline('A')
+  const b = client.sync.getTimeline('B')
+  const observed: { loadingOlder: boolean; olderError: boolean }[] = []
+  const aListener = vi.fn(() => {
+    const s = a.get()
+    observed.push({ loadingOlder: s.loadingOlder, olderError: s.olderError })
+  })
+  const bListener = vi.fn()
+  a.subscribe(aListener)
+  b.subscribe(bListener)
+
+  await client.feed({ type: 'unwatch', channel: 'A' })
+  const older = (await client.feed({ type: 'load_older', channel: 'A' }))
+    .find(e => e.type === 'fetch_history' && e.page === 'before')!
+  expect(a.get()).toMatchObject({ loadingOlder: true, olderError: false })
+
+  await client.feed({ type: 'history_failed', respond_to: older, status: 'network' })
+  expect(a.get()).toMatchObject({ status: 'ready', hasOlder: true, loadingOlder: false, olderError: false })
+  expect(aListener).toHaveBeenCalledTimes(3)
+  expect(observed).toEqual([
+    { loadingOlder: false, olderError: false },
+    { loadingOlder: true, olderError: false },
+    { loadingOlder: false, olderError: false },
+  ])
+  expect(bListener).not.toHaveBeenCalled()
+  await client.sync.close()
+})
+
+it('controller clears olderError in the same dispatch when a non-stale before fetch fails after refresh sets hasOlder false', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+
+  const a = client.sync.getTimeline('A')
+  const b = client.sync.getTimeline('B')
+  const observed: { hasOlder: boolean; loadingOlder: boolean; olderError: boolean }[] = []
+  const aListener = vi.fn(() => {
+    const s = a.get()
+    observed.push({ hasOlder: s.hasOlder, loadingOlder: s.loadingOlder, olderError: s.olderError })
+  })
+  const bListener = vi.fn()
+  a.subscribe(aListener)
+  b.subscribe(bListener)
+
+  const older = (await client.feed({ type: 'load_older', channel: 'A' }))
+    .find(e => e.type === 'fetch_history' && e.page === 'before')!
+  const latest = (await client.feed({ type: 'refresh', channel: 'A' }))
+    .find(e => e.type === 'fetch_history' && e.page === 'latest')!
+  await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: false })
+  expect(a.get()).toMatchObject({ hasOlder: false, loadingOlder: true, olderError: false })
+
+  await client.feed({ type: 'history_failed', respond_to: older, status: 'network' })
+  expect(a.get()).toMatchObject({ status: 'ready', hasOlder: false, loadingOlder: false, olderError: false })
+  expect(aListener).toHaveBeenCalledTimes(4)
+  expect(observed).toEqual([
+    { hasOlder: true, loadingOlder: true, olderError: false },
+    { hasOlder: true, loadingOlder: true, olderError: false },
+    { hasOlder: false, loadingOlder: true, olderError: false },
+    { hasOlder: false, loadingOlder: false, olderError: false },
+  ])
+  expect(bListener).not.toHaveBeenCalled()
+  await client.sync.close()
+})
