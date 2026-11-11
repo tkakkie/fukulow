@@ -157,7 +157,7 @@ it('current chain authorization 403 and 404 cause Channel-only C9 and refuse sen
     await vi.advanceTimersByTimeAsync(60_000)
     expect(c.listReplyChain).toHaveBeenCalledTimes(calls)
     expect(c.sendMessage).toHaveBeenCalledTimes(1)
-    expect(c.sync.get().channels.A.pending[0].state).toBe('unknown')
+    expect(c.sync.get().channels.A.pending[0].state).toBe('failed')
     await c.sync.watch('A'); await c.replies.open('A', root())
     expect(c.replies.get('A').messages.length).toBeGreaterThan(0)
     await c.sync.close()

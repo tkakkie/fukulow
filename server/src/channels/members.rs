@@ -123,26 +123,25 @@ pub(super) async fn mutate(
     sqlx::query("SET LOCAL lock_timeout='5s'")
         .execute(&mut *tx)
         .await?;
-    // API mutations serialize Organization -> actor Member -> Channel -> grants
-    // -> #142 Unread serialization -> shared #135 baseline. Sends/mark-read take
-    // Member -> grant; sends then take exclusive #135, mark-read its position.
+    // Mutations: Organization -> Channel(s, ascending id) -> Member -> grants
+    // -> #142 -> shared #135. Role/deactivation paths also start at Organization
+    // and never acquire Channels after Members (#231 will add Channels first).
+    // Sends take Member -> grant -> exclusive #135; their FK KEY SHARE locks
+    // permit Organization/Channel NO KEY UPDATE, so cannot invert that order.
+    // Mark-read releases #135 before Member/grant/position locks; neither path
+    // waits back on a mutation's earlier locks.
     auth::members::lock_organization(&mut tx, org).await?;
-    let actor = auth::members::current_actor(&mut tx, auth, Action::ReadOrganization).await?;
     let public: bool=sqlx::query_scalar("SELECT visibility='public' FROM channels WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
         .bind(org).bind(channel).fetch_optional(&mut *tx).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"channel not found",None))?;
-    // An absent self-removal remains retryable after losing the private grant.
-    // It still needs current Organization Membership and an active self target.
-    let present: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3)")
-        .bind(org).bind(channel).bind(target).fetch_one(&mut *tx).await?;
-    if !add && target == auth.identity.member.id && !present {
-        tx.commit().await?;
-        return Ok((
-            StatusCode::NO_CONTENT,
-            [(header::CACHE_CONTROL, "no-store")],
-        )
-            .into_response());
+    let actor = auth::members::current_actor(&mut tx, auth, Action::ReadOrganization).await?;
+    // A retained stale self grant proves prior access and may be cleaned up. An
+    // absent grant is retryable only while visible: otherwise 204 reveals private
+    // Channel existence, so it must match a nonexistent Channel (404).
+    let present: Option<i64>=sqlx::query_scalar("SELECT membership_revision FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+        .bind(org).bind(channel).bind(target).fetch_optional(&mut *tx).await?;
+    if add || target != auth.identity.member.id || present.is_none() {
+        require_visible(&mut tx, auth, channel, true).await?;
     }
-    require_visible(&mut tx, auth, channel, true).await?;
     let role = match actor {
         Actor::Member { role, .. } => role,
         _ => return Err(ApiError::forbidden()),
@@ -166,21 +165,24 @@ pub(super) async fn mutate(
         },
     )?;
     let (_, revision) = auth::members::active_target(&mut tx, org, target).await?;
-    if add {
+    let changed = if add {
         sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id,membership_revision) VALUES ($1,$2,$3,$4) ON CONFLICT (organization_id,channel_id,member_id) DO UPDATE SET membership_revision=EXCLUDED.membership_revision,grant_id=gen_random_uuid() WHERE channel_members.membership_revision<>EXCLUDED.membership_revision")
-            .bind(org).bind(channel).bind(target).bind(revision).execute(&mut *tx).await?;
+            .bind(org).bind(channel).bind(target).bind(revision).execute(&mut *tx).await?.rows_affected() > 0
     } else {
-        if !public && present {
+        // Stale grants contribute nothing to the usable-grant/manager counts.
+        if !public && present == Some(revision) {
             protect(&mut tx, org, channel, target).await?;
         }
         sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
-            .bind(org).bind(channel).bind(target).execute(&mut *tx).await?;
-    }
+            .bind(org).bind(channel).bind(target).execute(&mut *tx).await?.rows_affected() > 0
+    };
     tx.commit().await?;
-    state
-        .session_changes
-        .recheck_subscriptions(&state.pool)
-        .await;
+    if changed {
+        state
+            .session_changes
+            .recheck_subscriptions(&state.pool, auth::SubscriptionScope::Channel(org, channel))
+            .await;
+    }
     Ok((
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],

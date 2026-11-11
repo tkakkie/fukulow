@@ -236,7 +236,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     if (c.subscription && state.connected) effects.push({ type: 'unsubscribe', channel: id })
     c.subscription = undefined
     c.state = 'unavailable'
-    c.pending = c.pending.map(p => p.state === 'sending' ? { ...p, state: 'unknown' } : p)
+    c.pending = c.pending.map(p => ({ ...p, state: 'failed' }))
     for (const [key, request] of Object.entries(state.requests)) {
       if (request.channel === id && request.type === 'send') state.requests[Number(key)] = { ...request, stale: true }
     }

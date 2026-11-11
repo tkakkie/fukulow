@@ -109,11 +109,11 @@ async fn run(
             .clone();
         if let Some(check) = check
             && (!matches!(
-                tokio::time::timeout_at(bound, check.check(&pool)).await,
+                tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All)).await,
                 Ok(Ok(()))
             ) || Instant::now() >= bound)
         {
-            check.failed();
+            check.failed(SubscriptionScope::All);
             for signal in sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

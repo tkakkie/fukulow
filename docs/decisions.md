@@ -84,10 +84,11 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 
 ## Channels and Messages
 - #149 Owner/Admin with access add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
-- #149 Role demotion keeps grants and may leave a private Channel unmanaged; #231 decides whether to prohibit it. No new manager requirement applies to an already unmanaged Channel.
+- #149 temporarily permits last-manager Role demotion until #231, stacked next (decided: 409 last_channel_manager). No new manager requirement applies to an already unmanaged Channel.
 - #149 grant_id is a durable UUID per grant lifetime; re-grant/renewal cannot revive an old subscription after a lost fast signal. Public non-Guests keep continuous access when a redundant grant is removed.
+- #149 fast subscription rechecks/failures target Organization+Channel for grants or Organization+Member for Role/activation; no-op grants skip them. Only the 30 s fallback scans all, avoiding cross-tenant work/failure propagation.
 - #149 subscriptions follow the current access path: public non-Guests ignore redundant grants; a Role change requiring a grant captures its lifetime. Reason: continuous access must survive promotion and redundant removal.
-- #149 API mutations lock Organization, actor Member, Channel, grants, then #142 Unread serialization/shared #135. Sends lock Member/grant through COMMIT before exclusive #135; mark-read releases its watermark barrier before Member/grant/position locks.
+- #149 API mutations lock Organization, Channels (ascending id), Members, grants, then #142 Unread serialization/shared #135. Sends lock Member/grant through COMMIT before exclusive #135; mark-read releases its watermark barrier before Member/grant/position locks.
 
 - Private Channel creation adds the creator atomically; composite FKs bind grants to the same Organization. Listing uses batched visibility/Unread queries in one snapshot, `no-store` (#22, #142).
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).

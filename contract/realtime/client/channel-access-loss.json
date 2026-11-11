@@ -189,7 +189,7 @@
                 "pending": [
                   {
                     "client_message_id": "pending",
-                    "state": "unknown"
+                    "state": "failed"
                   }
                 ]
               }
@@ -238,7 +238,7 @@
                 "pending": [
                   {
                     "client_message_id": "pending",
-                    "state": "unknown"
+                    "state": "failed"
                   }
                 ]
               }

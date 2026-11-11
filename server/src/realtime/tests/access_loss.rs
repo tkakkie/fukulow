@@ -43,7 +43,10 @@ async fn loss(f: &Fixture, pool: &PgPool, reader: Uuid, channel: Uuid, role: boo
             .execute(pool)
             .await
             .unwrap();
-        f.state.session_changes.recheck_subscriptions(pool).await;
+        f.state
+            .session_changes
+            .recheck_subscriptions(pool, crate::auth::SubscriptionScope::All)
+            .await;
     } else {
         assert_eq!(
             request(
@@ -567,7 +570,10 @@ async fn continuous_public_role_changes_adopt_grant_lifetimes_and_membership_los
     .await
     .unwrap();
     grant(&pool, f.organization, f.channel, reader).await;
-    f.state.session_changes.recheck_subscriptions(&pool).await;
+    f.state
+        .session_changes
+        .recheck_subscriptions(&pool, crate::auth::SubscriptionScope::All)
+        .await;
     access_lost(&mut socket, f.channel).await;
     subscribe(&mut socket, f.channel, 1).await;
     ready(&mut socket, f.channel, 1).await;
@@ -577,7 +583,10 @@ async fn continuous_public_role_changes_adopt_grant_lifetimes_and_membership_los
         .execute(&pool)
         .await
         .unwrap();
-    f.state.session_changes.recheck_subscriptions(&pool).await;
+    f.state
+        .session_changes
+        .recheck_subscriptions(&pool, crate::auth::SubscriptionScope::All)
+        .await;
     let frame = socket.next().await.unwrap().unwrap();
     assert!(
         matches!(frame,tungstenite::Message::Close(Some(close)) if u16::from(close.code)==4003)

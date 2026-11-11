@@ -1,11 +1,64 @@
 use super::*;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::watch;
 
-type Registry = Arc<Mutex<HashMap<Uuid, Arc<Entry>>>>;
+type Registry = Arc<Mutex<Entries>>;
+#[derive(Default)]
+struct Entries {
+    entries: HashMap<Uuid, Arc<Entry>>,
+    by_channel: HashMap<(Uuid, Uuid), HashSet<Uuid>>,
+    by_member: HashMap<(Uuid, Uuid), HashSet<Uuid>>,
+}
+impl Entries {
+    fn snapshot(&self, scope: auth::SubscriptionScope) -> Vec<Arc<Entry>> {
+        let ids = match scope {
+            auth::SubscriptionScope::All => None,
+            auth::SubscriptionScope::Channel(org, channel) => {
+                Some(self.by_channel.get(&(org, channel)))
+            }
+            auth::SubscriptionScope::Member(org, member) => {
+                Some(self.by_member.get(&(org, member)))
+            }
+        };
+        match ids {
+            None => self.entries.values().cloned().collect(),
+            Some(ids) => ids
+                .into_iter()
+                .flatten()
+                .filter_map(|id| self.entries.get(id).cloned())
+                .collect(),
+        }
+    }
+    fn insert(&mut self, id: Uuid, entry: Arc<Entry>) {
+        self.by_channel
+            .entry((entry.organization, entry.channel))
+            .or_default()
+            .insert(id);
+        self.by_member
+            .entry((entry.organization, entry.member.0))
+            .or_default()
+            .insert(id);
+        self.entries.insert(id, entry);
+    }
+    fn remove(&mut self, id: &Uuid) {
+        if let Some(entry) = self.entries.remove(id) {
+            for (index, key) in [
+                (&mut self.by_channel, (entry.organization, entry.channel)),
+                (&mut self.by_member, (entry.organization, entry.member.0)),
+            ] {
+                if let Some(ids) = index.get_mut(&key) {
+                    ids.remove(id);
+                    if ids.is_empty() {
+                        index.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+}
 #[derive(Default, Clone)]
 pub struct AccessChanges {
     entries: Registry,
@@ -20,7 +73,7 @@ struct Entry {
 
 pub(crate) struct AccessWatch {
     id: Uuid,
-    registry: Weak<Mutex<HashMap<Uuid, Arc<Entry>>>>,
+    registry: Weak<Mutex<Entries>>,
     entry: Arc<Entry>,
     pub changed: watch::Receiver<u8>,
 }
@@ -108,7 +161,7 @@ impl AccessChanges {
             .entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .values()
+            .snapshot(auth::SubscriptionScope::Channel(organization, channel))
         {
             if entry.organization == organization
                 && entry.channel == channel
@@ -130,24 +183,25 @@ impl auth::SubscriptionRecheck for AccessChanges {
     fn check<'a>(
         &'a self,
         pool: &'a sqlx::PgPool,
+        scope: auth::SubscriptionScope,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
     {
         let entries: Vec<_> = self
             .entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .values()
+            .snapshot(scope)
+            .into_iter()
             .filter(|e| *e.status.borrow() == 0)
-            .cloned()
             .collect();
         Box::pin(async move { check_entries(pool, &entries).await })
     }
-    fn failed(&self) {
+    fn failed(&self, scope: auth::SubscriptionScope) {
         for entry in self
             .entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .values()
+            .snapshot(scope)
         {
             entry.status.send_if_modified(|status| {
                 if *status == 0 {
@@ -198,8 +252,10 @@ async fn access_rows(
     pool: &sqlx::PgPool,
     entries: &[Arc<Entry>],
 ) -> Result<Vec<(bool, Option<Uuid>, bool)>, sqlx::Error> {
-    let sql = format!("SELECT COALESCE((c.visibility='public' AND u.role <> 'guest') OR cm.grant_id IS NOT NULL, false),
-        CASE WHEN c.visibility='public' AND u.role <> 'guest' THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL
+    let public_roles = auth::authorization::channel_roles_sql(false);
+    let explicit_roles = auth::authorization::channel_roles_sql(true);
+    let sql = format!("SELECT COALESCE((c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL), false),
+        CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL
         FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::uuid[]) WITH ORDINALITY r(organization_id,member_id,revision,channel_id,n)
         LEFT JOIN ({}) u ON u.organization_id=r.organization_id AND u.id=r.member_id AND u.membership_revision=r.revision
         LEFT JOIN channels c ON c.organization_id=r.organization_id AND c.id=r.channel_id AND u.id IS NOT NULL

@@ -44,6 +44,12 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
                 .await
                 .unwrap();
         }
+        if case == "private" {
+            let keeper = Uuid::new_v4();
+            member(&pool, org, keeper).await;
+            sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)")
+                .bind(org).bind(channel).bind(keeper).execute(&pool).await.unwrap();
+        }
         let state = AppState::for_test(pool.clone());
         let app = crate::app(state.clone());
         let key = Uuid::new_v4();
@@ -69,6 +75,8 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
         gate.entered.acquire().await.unwrap().forget();
         let revoke = {
             let pool = pool.clone();
+            let app = app.clone();
+            let token = token.clone();
             tokio::spawn(async move {
                 if case == "role" {
                     sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
@@ -78,7 +86,18 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
                         .await
                         .unwrap();
                 } else {
-                    sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
+                    assert_eq!(
+                        request(
+                            &app,
+                            "DELETE",
+                            &format!("/api/v1/channels/{channel}/members/{sender}"),
+                            &token,
+                            Value::Null
+                        )
+                        .await
+                        .status(),
+                        StatusCode::NO_CONTENT
+                    );
                 }
             })
         };

@@ -11,12 +11,19 @@ use uuid::Uuid;
 
 const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+#[derive(Clone, Copy)]
+pub enum SubscriptionScope {
+    All,
+    Channel(Uuid, Uuid),
+    Member(Uuid, Uuid),
+}
 pub trait SubscriptionRecheck: Send + Sync {
     fn check<'a>(
         &'a self,
         pool: &'a PgPool,
+        scope: SubscriptionScope,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
-    fn failed(&self);
+    fn failed(&self, scope: SubscriptionScope);
 }
 
 type SessionKey = (Uuid, Vec<u8>);
@@ -84,7 +91,7 @@ impl SessionChanges {
         *self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()) = Some(check);
     }
 
-    pub(crate) async fn recheck_subscriptions(&self, pool: &PgPool) {
+    pub(crate) async fn recheck_subscriptions(&self, pool: &PgPool, scope: SubscriptionScope) {
         let check = self
             .subscriptions
             .lock()
@@ -92,11 +99,11 @@ impl SessionChanges {
             .clone();
         if let Some(check) = check
             && !matches!(
-                tokio::time::timeout(CHECK_TIMEOUT, check.check(pool)).await,
+                tokio::time::timeout(CHECK_TIMEOUT, check.check(pool, scope)).await,
                 Ok(Ok(()))
             )
         {
-            check.failed();
+            check.failed(scope);
         }
     }
 

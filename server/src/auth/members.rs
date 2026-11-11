@@ -121,7 +121,7 @@ pub async fn change_role(
     tx.commit().await?;
     state
         .session_changes
-        .recheck_subscriptions(&state.pool)
+        .recheck_subscriptions(&state.pool, SubscriptionScope::Member(org, id))
         .await;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
