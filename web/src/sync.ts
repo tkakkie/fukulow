@@ -50,8 +50,25 @@ export function messageBodyError(body: string): string | null {
   return null
 }
 
-type ChannelExtra = { olderError: boolean; draft: string; composerError: string | null }
+export type ChannelExtra = { olderError: boolean; draft: string; composerError: string | null }
 const emptyExtra: ChannelExtra = { olderError: false, draft: '', composerError: null }
+
+export function putExtra(extras: Map<string, ChannelExtra>, channel: string, patch: Partial<ChannelExtra>): boolean {
+  const prev = extras.get(channel) ?? emptyExtra
+  if (
+    (patch.olderError === undefined || patch.olderError === prev.olderError) &&
+    (patch.draft === undefined || patch.draft === prev.draft) &&
+    (patch.composerError === undefined || patch.composerError === prev.composerError)
+  ) {
+    return false
+  }
+  const olderError = patch.olderError ?? prev.olderError
+  const draft = patch.draft ?? prev.draft
+  const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
+  if (!olderError && draft === '' && composerError === null) extras.delete(channel)
+  else extras.set(channel, { olderError, draft, composerError })
+  return true
+}
 
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
@@ -75,18 +92,13 @@ export function createSync(options: SyncOptions) {
   const extras = new Map<string, ChannelExtra>()
 
   const getExtra = (channel: string): ChannelExtra => extras.get(channel) ?? emptyExtra
-  function putExtra(channel: string, patch: Partial<ChannelExtra>): boolean {
-    const prev = getExtra(channel)
-    const next: ChannelExtra = { ...prev, ...patch }
-    if (next.olderError === prev.olderError && next.draft === prev.draft && next.composerError === prev.composerError) {
-      return false
-    }
-    if (!next.olderError && next.draft === '' && next.composerError === null) extras.delete(channel)
-    else extras.set(channel, next)
-    return true
-  }
   function setExtra(channel: string, patch: Partial<ChannelExtra>) {
-    if (putExtra(channel, patch)) channelListeners.get(channel)?.forEach(l => l())
+    if (putExtra(extras, channel, patch)) channelListeners.get(channel)?.forEach(l => l())
+  }
+  function clearOlderError(channel: string, prev: ChannelState | undefined, next: ChannelState | undefined): boolean {
+    return ((prev?.older === undefined && next?.older !== undefined) ||
+      !next?.watched || next.state === 'unavailable' || next.cursor === null || !next.hasOlder) &&
+      putExtra(extras, channel, { olderError: false })
   }
 
   function dispatch(input: Input): Promise<void> {
@@ -102,18 +114,21 @@ export function createSync(options: SyncOptions) {
         const req = previous.requests[input.request]
         if (req?.type === 'history' && req.page === 'before' && !req.stale) {
           const next = state.channels[req.channel]
-          if (state.running && next && next.state !== 'unavailable' && putExtra(req.channel, { olderError: true })) {
+          if (state.running && next && next.state !== 'unavailable' && putExtra(extras, req.channel, { olderError: true })) {
             extraChanged.add(req.channel)
           }
         }
       }
-      if (state !== previous) {
-        for (const channel of new Set([...Object.keys(previous.channels), ...Object.keys(state.channels)])) {
+      if (state.channels !== previous.channels) {
+        for (const channel in previous.channels) {
+          if (!Object.hasOwn(previous.channels, channel)) continue
           const prev = previous.channels[channel]
           const next = state.channels[channel]
-          if (((prev?.older === undefined && next?.older !== undefined) ||
-            !next?.watched || next.state === 'unavailable' || next.cursor === null || !next.hasOlder) &&
-            putExtra(channel, { olderError: false })) {
+          if (prev !== next && clearOlderError(channel, prev, next)) extraChanged.add(channel)
+        }
+        for (const channel in state.channels) {
+          if (Object.hasOwn(state.channels, channel) && !Object.hasOwn(previous.channels, channel) &&
+            clearOlderError(channel, undefined, state.channels[channel])) {
             extraChanged.add(channel)
           }
         }
@@ -308,7 +323,7 @@ export function createSync(options: SyncOptions) {
         if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
           return false
         }
-        putExtra(channel, { draft: '', composerError: null })
+        putExtra(extras, channel, { draft: '', composerError: null })
         const accepted = await send(text)
         if (!accepted && getExtra(channel).draft === '') setExtra(channel, { draft: text })
         return accepted
@@ -320,7 +335,7 @@ export function createSync(options: SyncOptions) {
         const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
         if (p?.state !== 'failed') return false
         const current = getExtra(channel).draft
-        putExtra(channel, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
+        putExtra(extras, channel, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
         void dispatch({ type: 'user_discard', channel, clientMessageId })
         return true
       },

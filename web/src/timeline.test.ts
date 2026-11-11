@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { createSync } from './sync'
+import { createSync, putExtra, type ChannelExtra } from './sync'
 import type { Message, MessagePage, Result } from './api'
 import { record } from './protocol-test-helpers'
 
@@ -150,4 +150,52 @@ it('reports loadOlder failures in olderError and clears olderError on retry', as
     messages: [record(9), record(10)],
   })
   await sync.close()
+})
+
+it('putExtra returns early without allocating and keeps ChannelExtra object identity on a no-op patch', () => {
+  let spreads = 0
+  let reads: (string | symbol)[] = []
+  const initial = new Proxy(
+    { olderError: true, draft: 'hello', composerError: 'err' } satisfies ChannelExtra,
+    {
+      get(target, prop, receiver) {
+        reads.push(prop)
+        return Reflect.get(target, prop, receiver)
+      },
+      ownKeys(target) {
+        spreads++
+        return Reflect.ownKeys(target)
+      },
+    },
+  )
+  const extras = new Map<string, ChannelExtra>([['B', initial]])
+
+  expect(putExtra(extras, 'B', {})).toBe(false)
+  expect(extras.get('B')).toBe(initial)
+  expect(reads).toEqual([])
+  expect(spreads).toBe(0)
+
+  reads = []
+  expect(putExtra(extras, 'B', { olderError: true })).toBe(false)
+  expect(extras.get('B')).toBe(initial)
+  expect(reads).toEqual(['olderError'])
+  expect(spreads).toBe(0)
+
+  reads = []
+  expect(putExtra(extras, 'B', { olderError: true, draft: 'hello', composerError: 'err' })).toBe(false)
+  expect(extras.get('B')).toBe(initial)
+  expect(spreads).toBe(0)
+
+  expect(putExtra(extras, 'C', { olderError: false })).toBe(false)
+  expect(putExtra(extras, 'C', { draft: '' })).toBe(false)
+  expect(putExtra(extras, 'C', { composerError: null })).toBe(false)
+  expect(extras.has('C')).toBe(false)
+
+  expect(putExtra(extras, 'B', { olderError: false })).toBe(true)
+  const updated = extras.get('B')
+  expect(updated).toEqual({ olderError: false, draft: 'hello', composerError: 'err' })
+  expect(updated).not.toBe(initial)
+
+  expect(putExtra(extras, 'B', { draft: '', composerError: null })).toBe(true)
+  expect(extras.has('B')).toBe(false)
 })

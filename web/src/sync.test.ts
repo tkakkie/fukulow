@@ -597,3 +597,58 @@ it('controller: a late 401 from a pre-clamp send in the same session means Sign 
   expect(client.sync.get().session).toBe('sign_in_required')
   await client.sync.close()
 })
+
+it('controller skips unchanged Channels during olderError bookkeeping and keeps unrelated extra state identical', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(10, 'B')], has_more: true })
+  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 10 })
+  const bOlder = (await client.feed({ type: 'load_older', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_failed', respond_to: bOlder, status: 'network' })
+
+  const cLatest = (await client.feed({ type: 'watch', channel: 'C' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: cLatest, messages: [record(1, 'C')], has_more: false })
+  await client.feed({ type: 'subscribed', channel: 'C', caught_up_seq: 1 })
+
+  const b = client.sync.getTimeline('B')
+  const c = client.sync.getTimeline('C')
+  b.setDraft('draft B')
+  c.setDraft('draft C')
+  const bChannel = client.sync.get().channels.B
+  const cChannel = client.sync.get().channels.C
+  const bSnapshot = b.get()
+  const cSnapshot = c.get()
+  expect(bSnapshot).toMatchObject({ olderError: true, draft: 'draft B' })
+  expect(cSnapshot).toMatchObject({ olderError: false, draft: 'draft C' })
+
+  let visits = 0
+  for (const ch of [bChannel, cChannel]) {
+    for (const key of ['older', 'hasOlder'] as const) {
+      const value = ch[key]
+      Object.defineProperty(ch, key, {
+        configurable: true,
+        enumerable: true,
+        get() { visits++; return value },
+      })
+    }
+  }
+
+  await client.feed({ type: 'message', channel: 'A', message: record(101) })
+  const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hi' }))
+    .find(e => e.type === 'send')!
+  await client.feed({ type: 'ack', respond_to: send, message: { ...record(102), sender: 'me', client_message_id: 'c1', body: 'hi' } })
+  const grace = (await client.feed({ type: 'message', channel: 'A', message: record(104) })).find(e => e.type === 'wait')!
+  await client.feed({ type: 'timer_elapsed', respond_to: grace })
+
+  expect(visits).toBe(0)
+  expect(client.sync.get().channels.B).toBe(bChannel)
+  expect(client.sync.get().channels.C).toBe(cChannel)
+  expect(b.get()).toBe(bSnapshot)
+  expect(c.get()).toBe(cSnapshot)
+
+  // When a 4001 terminal close empties state.channels, Channels removed from previous.channels still clear olderError.
+  await client.feed({ type: 'socket_closed', code: 4001 })
+  expect(b.get()).toMatchObject({ olderError: false, draft: 'draft B' })
+  await client.sync.close()
+})
