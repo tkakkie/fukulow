@@ -1,5 +1,7 @@
 # Invariants
 
+Writing: a Rule cell states what must hold, scope and exceptions included, in at most 160 characters.
+
 Rules that must always hold. Each one lists the test that guards it as `path::test_name`; the test must run in CI. Add the test with the code.
 
 | Rule | Test |

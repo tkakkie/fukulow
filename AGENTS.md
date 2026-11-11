@@ -1,25 +1,21 @@
 # fukulow
 
 Business chat app (Zulip-like: channels, topics, reply chains), built mostly by AI. Goals: high concurrency, fast display; product quality.
-Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (past measurement records), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13).
+Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (past measurement records), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13). Each doc's header says how to write it.
 
 ## What to read
-- Always this file; for a behaviour change, read the `docs/spec.md` index, then the relevant parts.
-- Web UI work (components, layout, styles, copy, keyboard): `docs/ui.md` first, in full.
-- `docs/decisions.md`, `docs/invariants.md`: by default search headings/keywords and read only the matches.
-- Auth, permissions, tenant scoping, real-time delivery, API contract, migrations: check the related decisions and invariants first (required).
-- Nothing found: try other keywords (spec terms, modules, error values) and related Issues/PRs before assuming no constraint.
-- `docs/measurements.md`: never in normal work or unrelated changes; for performance work, load tests, regression checks or comparing results, search and read only the related section.
-- A doc split into an index plus `docs/<kind>/<area>.md` parts: open the index only for related work, then the matching parts; a cross-area change reads every related part.
-- Reorganising or verifying docs: read them in full. "Not whole" is a default, never a ban on a needed check.
-- `docs/workflow.md` by task: implementing needs only "Workflow essentials"; PRs, reviews, labels, sweeps, conflicts, merges: the matching section.
+Always this file. Default: search headings/keywords, read only matches; split doc: index, then matching parts (cross-area: every related part). Nothing found: try other keywords (spec terms, modules, error values) and related Issues/PRs before assuming no constraint.
 
-## Writing docs
-- `decisions.md`: only current decisions, what + why in at most 300 characters each; split or link `#n` rather than blur a reason.
-- `measurements.md`: only results behind a decision, performance comparisons or key regression checks, with reproduction conditions and limits; no routine/debug logs, raw artifacts or duplicates; never silently rewrite or drop an old record.
-- `ui.md`: short shared UI rules (layout, navigation, tokens, components, states, accessibility, keyboard, copy); it wins over mockups.
-- `invariants.md`: a Rule cell states what must hold, scope and exceptions included, in at most 160 characters.
-- Splitting a doc (over ~40 KB, repeated conflicts, or a major `spec.md` feature) is evaluated, not automatic: only via its own approved Issue, never in an unrelated PR, no new doc kinds. Procedure: `docs/workflow.md` §13.
+| Task | Read first |
+|---|---|
+| Behaviour change | `docs/spec.md` index, relevant parts |
+| Auth, permissions, tenant scoping, real-time delivery, API contract, migrations | related decisions and invariants (required) |
+| Web UI (components, layout, styles, copy, keyboard) | `docs/ui.md`, in full |
+| Performance, load tests, regression checks, comparing results | related `docs/measurements.md` section only; never otherwise |
+| Implementing / PRs, reviews, labels, sweeps, conflicts, merges | "Workflow essentials" / matching `docs/workflow.md` section |
+| Toolchain, dependencies, languages / writing a doc | `docs/workflow.md` §8 / the doc's header (splits: §13) |
+
+Generated files (`openapi.json`, `web/src/api-schema.d.ts`, lockfiles) and CI/E2E/load logs: grep or read the relevant part first. Reorganising or verifying docs: read in full. "Not whole" is a default, never a ban on a needed diagnosis or consistency check.
 
 ## Stack
 Rust (axum, tokio, sqlx), PostgreSQL, WebSocket in `server/`; Svelte + Vite SPA (no SvelteKit/SSR) in `web/`, embedded (rust-embed). One Docker image; compose profile Caddy (default) or nginx; Xserver VPS.
@@ -36,6 +32,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 - Tier 1, review: Organization data is always scoped by `organization_id`; documented global operations (e.g. setup existence check) are exceptions; do not force a fake scope onto them.
 - Tier 1, review: changing permissions, tenant scoping or real-time delivery needs a denial test per denial the rule defines; cross-Organization alone is not enough (e.g. private Channel non-member).
 - Tier 2: `docs/spec.md` terms everywhere, no synonyms; errors as `ErrorBody`; SQL only in the table's owning module; indexes in the migration that needs them; no N+1 on hot paths; small files/functions; comments only for non-obvious reasons.
+- Tier 2: Rust, TypeScript, SQL, short bash (`#!/usr/bin/env bash`, `set -euo pipefail`, bash 3.2; over ~20 lines or sharing variables -> TypeScript); others need maintainer approval. Exact patch versions. Details: `docs/workflow.md` §8.
 - Sending a message is idempotent (client-generated id); reconnect uses per-channel sequence numbers.
 - No new dependency, abstraction or doc without a reason in the PR.
 
@@ -49,14 +46,8 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 
 ## Commands
 - Server: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-- Module direction (pinned toolchain, built web assets; re-verify on each Rust bump): `rustup component add rustc-dev && rustfmt --check --edition 2024 scripts/module-direction.rs && node --test scripts/check-module-direction.test.ts && node scripts/check-module-direction.ts`
 - Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build` (invariants checked statically; cargo matching runs in CI server job)
-- Migrations: `bash scripts/check-migrations.sh <base-sha>`, `node --test scripts/check-migrations.test.ts`; the schema guard runs in `cargo test` with Postgres. API types: `make api`.
-
-## Languages and versions (Tier 2)
-- Rust, TypeScript (web, tests, Node scripts), SQL, short bash; others need maintainer approval and a decisions line. Tool configs may use native formats; shared settings in `.env.example`/Makefile.
-- bash: `#!/usr/bin/env bash`, `set -euo pipefail`, bash 3.2 (no associative arrays); over ~20 lines or sharing variables -> TypeScript.
-- Exact patch versions, bumped deliberately. Rust: `rust-toolchain.toml`; Node: `.node-version` = `web/package.json` `engines`; Dockerfile and CI follow. Dependabot weekly; `cargo deny`, `npm audit` in CI.
+- Migrations: `bash scripts/check-migrations.sh <base-sha>`, `node --test scripts/check-migrations.test.ts`; the schema guard runs in `cargo test` with Postgres. API types: `make api`. Module direction: `docs/workflow.md` §8.
 
 ## Workflow essentials
 - Own worktree, branch `claude/|codex/|antigravity/<topic>`. Never push to `main`; only the maintainer merges (or tells an AI to).

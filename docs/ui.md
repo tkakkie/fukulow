@@ -1,5 +1,7 @@
 # UI rules
 
+Writing: short shared UI rules (layout, navigation, tokens, components, states, accessibility, keyboard, copy); it wins over mockups.
+
 Shared rules for the web UI (#200). Layout A2, chosen by the maintainer: [mockups](https://claude.ai/artifact/DsU9pFNvLgGfBkimjCSZm5), boards A2 to A2-4. When this doc and a mockup disagree, this doc wins. Behaviour is in `docs/spec/realtime.md` (C1-C10, P1-P8); this doc only says how the UI shows it and changes no sync or send policy. UI text uses `docs/spec.md` Terms (チャンネル, トピック, 返信のつながり, 組織, ログイン).
 
 ## 1. Layout

@@ -7,8 +7,8 @@ Never push to `main`. Never merge unless the maintainer explicitly says so.
 Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues, PRs, labels and reviews through its GitHub integration. Maintainer-only review (no second AI) is allowed only for (a) docs-only changes, or (b) changes limited to a CI script that checks doc length limits and its tests. Excluded: product code, auth, permissions, tenant scoping, real-time delivery, migrations, and anything that weakens an existing CI check. The Issue must state this scope and the maintainer must approve it; all other changes keep section 5. It never replaces CI: required checks `web`, `server`, `docker` must be green on the head, as the `main` ruleset requires.
 
 ## 1. Sweep (run at every wake-up, notification, user message, or finished AI run)
-1. `gh pr list --state open --limit 200 --json number,title,labels,headRefOid,mergeable,statusCheckRollup` and `gh issue list --state open --limit 200 --json number,title,labels,milestone`; if 200 come back, split with `--search 'created:<date'` until the list is exhausted. For cleanup also list recent merges: `gh pr list --state merged --limit 30 --json number,headRefName,labels,mergedAt`.
-2. For each item, find its row in section 2 and do the "Next action" if an AI can do it. Then re-list; repeat until nothing AI-doable is left.
+1. `gh pr list --state open --limit 200 --json number,title,labels,headRefOid` and `gh issue list --state open --limit 200 --json number,title,labels,milestone`; if 200 come back, split with `--search 'created:<date'` until the list is exhausted. For cleanup also list recent merges: `gh pr list --state merged --limit 30 --json number,headRefName,labels,mergedAt`. Checks and mergeability are not in the list: query them with `gh pr view <n> --json statusCheckRollup,mergeable` (or `gh pr checks <n>`) only for items whose section 2 row needs them.
+2. For each item, find its row in section 2 and do the "Next action" if an AI can do it. One list per sweep iteration: after acting, re-check only the items changed in that iteration with `gh pr view <n>` / `gh issue view <n>`; repeat until nothing AI-doable is left.
 3. Fix labels: at most one `status:*` label per item; an open item with none gets the one that matches its state; green + reviews done never stays unlabelled.
 4. Check for stalls (section 7): an AI run that ended without updating label/comment, stale CI, `blocked` whose blocker is merged.
 5. Waiting is not the same as human-pending. Items waiting for an async result (CI, Copilot, a background AI run) keep their current label; never move them to `status:human-review` or `status:needs-decision` to park them. Check async state with one non-blocking query per item per sweep (`gh pr checks <n>` without `--watch`, `gh pr view --json reviews`, the worker `-o` file and `pgrep`); never block the sweep on it.
@@ -66,6 +66,7 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
   Antigravity: `env HOME=<agy-home> PATH=/usr/local/argon-agy:$PATH /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model gemini-4-argon-<low|medium|high> --dangerously-skip-permissions --print-timeout 3600s --output-format stream-json < /dev/null > <scratch>/log.jsonl 2>&1` (JSON events, one per line, plus any stderr diagnostics, so progress is visible during the run; read the final report at the end of the log).
   Workers do not commit, push or use GitHub (Codex's sandbox enforces it; the prompt says so for Antigravity). The orchestrator reviews the diff, runs the checks, and commits with the worker as author (`GIT_AUTHOR_NAME=<Codex|Antigravity>`, `GIT_AUTHOR_EMAIL=<codex@users.noreply.github.com|noreply@example.com>`). A run that times out leaves its changes in the worktree: check them before restarting.
   Claude: the orchestrating session or a subagent works as itself.
+  Prompts reference docs by path and section instead of inlining doc text. Read worker, CI, E2E and load results from their summary (result file, failing-job tail, `load/summary.ts`) first; open a full log only when the summary cannot explain the result.
 - Exceptions to the area table need a line in the Issue (e.g. Codex implements the sync protocol/controller, H3 high; adapter and components stay with Antigravity).
 
 ## 5. Reviews
@@ -98,6 +99,9 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
 ## 8. Dependency updates and versions
 - Dependabot (weekly, grouped) opens PRs for Cargo, npm, GitHub Actions, Dockerfile and Docker Compose (`/` and `/load`). Preserve tag + digest pins; resolve new digests with `docker buildx imagetools inspect <tag>`, then build and verify proxy startup. PostgreSQL major upgrades remain manual. Pin exact patch versions; Rust = `rust-toolchain.toml`, Node = `.node-version` and `web/package.json` `engines`.
 - An AI reads the changelog for breaking changes, runs Commands, comments the result, then follows the PR rows of section 2: `status:human-review` (asks the maintainer to merge) only with CI green on the current head and the required review/fix cycle and Copilot (when applicable, section 5) completed.
+- Languages: Rust, TypeScript (web, tests, Node scripts), SQL, short bash; others need maintainer approval and a decisions line. Tool configs may use native formats; shared settings in `.env.example`/Makefile. bash: `#!/usr/bin/env bash`, `set -euo pipefail`, bash 3.2 (no associative arrays); over ~20 lines or sharing variables -> TypeScript.
+- Exact patch versions, bumped deliberately. Rust: `rust-toolchain.toml`; Node: `.node-version` = `web/package.json` `engines`; Dockerfile and CI follow. Dependabot weekly; `cargo deny`, `npm audit` in CI.
+- Module direction (pinned toolchain, built web assets; re-verify on each Rust bump): `rustup component add rustc-dev && rustfmt --check --edition 2024 scripts/module-direction.rs && node --test scripts/check-module-direction.test.ts && node scripts/check-module-direction.ts`
 - Rust toolchain bump: also re-verify the module-direction checker (`rustc_private`); a bump that breaks it is not merged until the checker is updated. k6 (`K6_IMAGE` in Makefile) is bumped by hand.
 - Security updates are a GitHub setting (Dependabot alerts/security updates); do not claim they work until a security PR is seen.
 
@@ -121,86 +125,9 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
 Merges; Issue approvals ("OK"); token/secret changes; adding a language, dependency or cost; deploy; anything in the AI prohibited list; denied permissions. Everything else proceeds without asking.
 
 ## 13. Splitting a doc
+- Splitting a doc (over ~40 KB, repeated conflicts, or a major `spec.md` feature) is evaluated, not automatic: only via its own approved Issue, never in an unrelated PR, no new doc kinds.
 - Triggers mean "evaluate": a doc over about 40 KB; repeated merge conflicts in the same doc (any size); a major feature added to `docs/spec.md`. Not splitting is a valid outcome when the benefit is small (e.g. a doc outside normal reading such as `docs/measurements.md`).
 - A split needs its own Issue approved by the maintainer; never split inside an unrelated PR. The Issue states its review mode: the cloud-session exception (top of this file) covers only doc-length CI scripts and their tests, so changing which files a CI check reads (e.g. the invariants check) follows the independent-review rules of section 5 unless the maintainer approves otherwise.
 - Shape: the original path stays as the index (area name, one-line scope, link); parts live in `docs/<kind>/<area>.md`, areas aligned to modules (`auth`, `channels`, `messages`, `realtime`) or product features. No per-decision files; no new doc kinds without maintainer approval. `AGENTS.md` is never split.
 - Move text verbatim, with an old location -> new location table in the PR. Check relative links, heading anchors and file-path references; fix only the reference a move breaks. No spec, decision or invariant change in the same PR; for `docs/spec.md` every guarantee keeps its meaning and scope. A constraint spanning areas is cross-referenced from each affected part.
 - No check gets weaker. Splitting `docs/invariants.md` also requires: `web/scripts/check-invariants.ts` verifies every part and a new part cannot escape it; no `path::test_name` reference is lost; the 160-character Rule limit holds in every part; existence, skip and cargo reconciliation still work; negative tests for the multi-file case; no invariant changes meaning.
-
-## 14. Operations: backup and restore (#198 C)
-
-### Backup and custody
-
-Use deployment `.env` (0600), pinned Node, Docker Compose and deployment `COMPOSE_PROJECT_NAME`. Scripts resolve root via `import.meta.url`; manual commands require checkout root. Backup requires PostgreSQL 18 in `db`. The drill reads the literal pinned `services.db.image` directly from tracked `compose.yml` without invoking Compose or loading secrets; update that single definition. Scripts ignore `DATABASE_URL`/suppress diagnostics. Never use `set -x`, print environment/`docker compose config`, save raw errors or put credentials/URLs in cron/arguments/logs. Keep records private.
-
-```sh
-umask 077
-mkdir -p /srv/fukulow-backups
-chmod 700 /srv/fukulow-backups
-node scripts/backup.ts /srv/fukulow-backups
-```
-
-Use an operator-owned 0700 non-symlink directory under a trusted parent outside checkout/web root. Archives are 0600; only `fukulow-*.dump` is final after flush, dump and `pg_restore --list`. Failures preserve older archives. Never copy `.partial-*`; remove leftovers only when no backup runs. `--list` checks structure: also drill. Separately protect roles, server configuration, TLS keys and `.env`; record code revision/migration versions. Never migrate the only restored copy with newer code.
-
-Schedule daily (e.g. 02:15 UTC), provision capacity, check success/free space daily. Keep ≥14 successful daily archives on VPS, ≥30 off VPS, and latest drilled archive until replacement passes. Pruning is manual: only finals with verified off-VPS copies, never last good copy or merely because a job ran.
-
-Copy off VPS: operator-controlled host, 0700 directory, encrypted storage, existing SSH keys, recovery-operator access; same retention on workstations. Archives contain Messages, password/Session hashes and permissions; `pg_dump` has no encryption, SSH protects transport only. Substitute filenames/host:
-
-```sh
-sha256sum /srv/fukulow-backups/fukulow-EXAMPLE.dump
-scp -p /srv/fukulow-backups/fukulow-EXAMPLE.dump backup@backup-host:/private/backups/.partial-EXAMPLE
-ssh backup@backup-host 'chmod 600 /private/backups/.partial-EXAMPLE && sha256sum /private/backups/.partial-EXAMPLE'
-```
-
-Compare hashes; rename remotely on the same filesystem to `fukulow-EXAMPLE.dump`, record success, drill that copy. Interrupted copies are never final; SCP alone is insufficient.
-
-### Disposable restore drill
-
-```sh
-node scripts/restore-drill.ts /private/backups/fukulow-EXAMPLE.dump
-```
-
-Trust archives (they execute SQL); ensure tmpfs fits, or arrange larger disposable capacity, never existing-data mounts. Random `fukulow-restore-drill-*` has no network/ports/mounts/Compose/production URL. After final-server readiness: archive check, restore with `--exit-on-error --single-transaction --no-owner --no-acl` (validating constraints), end all Sessions, bundled `pg_amcheck --install-missing --heapallindexed`. Failures fail the drill; `finally` removes container/anonymous volumes. Interrupted cleanup: inspect/remove only that exact container; never prune globally.
-
-Drill monthly/after schema/image/backup/procedure changes; record size, image/version, counts, time, resources/results privately.
-
-### Production recovery (maintainer-operated)
-
-Run each command only after its predecessor succeeds; keep stderr private.
-
-1. Retrieve trusted drilled final, verify off-VPS hash, select matching code. Declare maintenance; stop **all** app instances/writers (`docker compose -f compose.yml stop app`), disconnecting WebSockets; HTTP maintenance cannot stop writes. Close ingress. Preserve database; incident backup if readable. **Never use `compose down -v`, `pg_restore --clean`, or overwrite the only database.**
-2. On production PostgreSQL 18, use a fresh incident database; replace all example names. `createdb` already exists: stop/investigate.
-
-   ```sh
-   docker compose -f compose.yml exec -T db createdb -U fukulow -O fukulow fukulow_restore_20261111
-   docker compose -f compose.yml exec -T db pg_restore --list < /srv/fukulow-backups/fukulow-EXAMPLE.dump > /dev/null
-   docker compose -f compose.yml exec -T db pg_restore -U fukulow -d fukulow_restore_20261111 --exit-on-error --single-transaction --no-owner --no-acl < /srv/fukulow-backups/fukulow-EXAMPLE.dump
-   ```
-
-3. **Restore revives ended Sessions/old permissions: end every Account Session and reconcile all post-snapshot permission changes before reopening.** Keep all writers stopped: auth SQL globally deletes Sessions across Accounts/Organizations, transactionally with bounded waits/empty-table assertion, without live signals. Failure: stay stopped; verify zero rows. Require Sign in; single-Session API, cookies/expired-Session clearing are insufficient.
-
-   ```sh
-   docker compose -f compose.yml exec -T db psql -X -U fukulow -d fukulow_restore_20261111 -v ON_ERROR_STOP=1 < server/src/auth/end-all-sessions.sql
-   docker compose -f compose.yml exec -T db psql -X -U fukulow -d fukulow_restore_20261111 -v ON_ERROR_STOP=1 -Atc 'SELECT count(*) FROM public.account_sessions'
-   ```
-
-   Session revocation does **not** fix permissions. Reconcile incident records: deactivation/reactivation, Organization Memberships, owner/admin/member/guest Roles, private grants/removals, Membership revisions. Apply reviewed Organization-scoped corrections; never blindly reactivate/copy grants. Unknown changes: close affected access pending maintainer resolution.
-4. Check migration versions/checksums against code (`public._sqlx_migrations`, all `success=true`); Organization/Account/Member/Channel/Message counts against records; public/private history/attribution; tenant-scoped high-water vs max Message seq; no unvalidated constraints/invalid indexes. Run drill's `pg_amcheck`, then `ANALYZE`; resolve failures before switch. Checks cannot recover post-snapshot writes.
-5. App stopped: confirm names; connect `psql -X -U fukulow -d postgres -v ON_ERROR_STOP=1` through `docker compose -f compose.yml exec -T db`. Run each statement successfully outside a transaction (renames require it); block/terminate original connections:
-
-   ```sql
-   ALTER DATABASE fukulow WITH ALLOW_CONNECTIONS false;
-   SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'fukulow' AND pid <> pg_backend_pid();
-   ALTER DATABASE fukulow RENAME TO fukulow_before_restore_20261111;
-   ALTER DATABASE fukulow_restore_20261111 RENAME TO fukulow;
-   ```
-
-   New database connectable, original closed. Failure: inspect names/state, stay stopped, never auto-drop/overwrite. Revert: stop writers, preserve both, rename deliberately, enable chosen database only, repeat Session/permission corrections (either copy revives authority). Keep incident copy until maintainer acceptance.
-6. After the database-name switch, reapply the app role/password and database grants with matching code (`docker compose -f compose.yml run --rm migrate roles`); `--no-acl` deliberately omitted them. The private environment must supply `POSTGRES_APP_PASSWORD`; never restore role passwords from SQL. Failure: stay stopped. Restart matching code (`docker compose -f compose.yml up -d --no-deps app`), ingress closed. Check startup/migrations, liveness, fresh Sign in, old cookie/bearer rejection, Organization isolation/private denial; fresh browser: authorized history, send/retry/live delivery. Maintainer accepts permissions/checks before reopening; take/drill new backup.
-7. Rehearse C8 in isolation, writes paused: hold cursor N newer than backup, restore/reconnect below N; verify `subscribed.caught_up_seq=K <` **sent** `after_seq=N`, discard window/cursor, unsubscribe, bootstrap latest history, receive live Messages without stale collisions. Unknown sends retain `client_message_id`; clamp never auto-resends. Production requires fresh Sign in/history; never admit revived Sessions for rehearsal. Run recovery-code server/web suites, including `malformed_controls_and_future_cursor_do_not_break_subscription_state` and fixture `clamp-recovery-with-cached-messages-then-live-delivery`. **C8 cannot detect restored history already beyond the old cursor; clamp alone is not recovery.**
-
-### Recovery window
-
-No guaranteed RPO/RTO. Daily gap: interval + dump/copy lag, longer with failures/lost VPS-only copies. Assess loss from newest verified accessible off-VPS snapshot, never job start; later writes may be lost. Measure representative recovery hardware before estimating downtime.
-
-Initial drill conditions, result and timing limits: [measurements: backup restore drill](measurements.md#backup-restore-drill-198-c).

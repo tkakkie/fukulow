@@ -1,5 +1,5 @@
 // Verifies that every test named in docs/invariants.md is a real test that CI actually runs.
-// Also checks that every docs/decisions.md entry stays within MAX_DECISION_LENGTH (AGENTS.md "Writing docs").
+// Also checks that every docs/decisions.md entry stays within MAX_DECISION_LENGTH (docs/decisions.md header).
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
 //
 // A reference is `path::test_name` (path relative to the repository root).
@@ -210,7 +210,7 @@ export function tsTests(src: string, fileName = 'x.ts'): TsTest[] {
 
 export type Row = { line: number; rule: string; names: string[]; todo: boolean }
 
-/** Maximum Rule cell length in Unicode code points, markup included (AGENTS.md "Writing docs"). */
+/** Maximum Rule cell length in Unicode code points, markup included (docs/invariants.md header). */
 export const MAX_RULE_LENGTH = 160
 
 /** Parses the table in docs/invariants.md. Returns rows, or errors for malformed ones. */
@@ -433,7 +433,7 @@ export function cargoList(root: string): ListedTest[] {
   return listed
 }
 
-/** Maximum docs/decisions.md entry length in Unicode code points, after the leading `- ` (AGENTS.md "Writing docs"). */
+/** Maximum docs/decisions.md entry length in Unicode code points, after the leading `- ` (docs/decisions.md header). */
 export const MAX_DECISION_LENGTH = 300
 
 /**
