@@ -118,7 +118,7 @@ export function expandSeqs(list: SeqItem[]): number[] | null {
 const channelKey = (ref: Json): string =>
   isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
 
-// Topic projection vocabulary runs at the controller layer; Reply and Unread rules remain proposed.
+// Topic projections run at the controller layer; Reply and Unread delivery rules run on the server.
 const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
 const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'])
 
@@ -135,7 +135,7 @@ function plannedTerm(value: Json, path: string, delivery = false, controller = f
   for (const [key, item] of Object.entries(value)) {
     if (plannedKeys.has(key) && !(controller && ['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position'].includes(key))) return `${path}.${key}`
     if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !controller && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7'].includes(String(r))))) return `${path}.covers`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7', 'P8'].includes(String(r))))) return `${path}.covers`
     const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery, controller)
     if (found) return found
   }
@@ -269,6 +269,11 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
         break
       case 'sign_out':
         member(step.member)
+        break
+      case 'mark_read':
+      case 'unread':
+        member(step.as)
+        checkChannel(step.channel, at, false)
         break
       case 'history':
         member(step.as)

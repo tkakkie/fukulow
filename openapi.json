@@ -258,15 +258,13 @@
     "/api/v1/orgs/{org}/channels": {
       "get": {
         "tags": [
-          "crate::channels"
+          "crate::messages::unread"
         ],
-        "summary": "List visible Channels; Guests require an explicit current grant even for public Channels.",
         "operationId": "list_channels",
         "parameters": [
           {
             "name": "org",
             "in": "path",
-            "description": "Organization id",
             "required": true,
             "schema": {
               "type": "string",
@@ -276,7 +274,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Visible Channels in this Organization; Guest requires an explicit current grant on every Channel",
+            "description": "Visible Channels with current Member positions and Unread counts; refetch on reconnect",
             "content": {
               "application/json": {
                 "schema": {
@@ -296,7 +294,7 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, expired, or revoked Account Session credential",
+            "description": "Account Session unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -316,7 +314,7 @@
             }
           },
           "500": {
-            "description": "Database failure while resolving the session or listing visible Channels",
+            "description": "Database failure while listing visible Channels and Unread",
             "content": {
               "application/json": {
                 "schema": {
@@ -975,6 +973,150 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/channels/{id}/read": {
+      "put": {
+        "tags": [
+          "crate::messages::unread"
+        ],
+        "operationId": "mark_channel_read",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Monotonic Channel position for Messages without Topic only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadPosition"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ids, negative read_seq or malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Requires application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or watermark timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/channels/{id}/timeline": {
       "get": {
         "tags": [
@@ -1521,6 +1663,159 @@
           },
           "503": {
             "description": "Projection watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/read": {
+      "put": {
+        "tags": [
+          "crate::messages::unread"
+        ],
+        "operationId": "mark_topic_read",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "topic_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Monotonic position for this Topic only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadPosition"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ids, negative read_seq or malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Requires application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or watermark timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -2872,7 +3167,7 @@
           "channels": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Channel"
+              "$ref": "#/components/schemas/UnreadChannel"
             }
           }
         }
@@ -3081,6 +3376,21 @@
           }
         }
       },
+      "MarkReadRequest": {
+        "type": "object",
+        "required": [
+          "read_seq"
+        ],
+        "properties": {
+          "read_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic max, clamped to the latest committed Channel seq. Sending never marks read.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "Member": {
         "type": "object",
         "required": [
@@ -3282,6 +3592,18 @@
           },
           "can_manage_roles": {
             "$ref": "#/components/schemas/Capability"
+          }
+        }
+      },
+      "ReadPosition": {
+        "type": "object",
+        "required": [
+          "read_seq"
+        ],
+        "properties": {
+          "read_seq": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -3650,6 +3972,8 @@
           "first_seq",
           "last_seq",
           "message_count",
+          "read_seq",
+          "unread_count",
           "latest_message"
         ],
         "properties": {
@@ -3676,6 +4000,16 @@
           },
           "name": {
             "type": "string"
+          },
+          "read_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current Member position, independent of the Channel main timeline."
+          },
+          "unread_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Other senders' Messages above read_seq, bounded by the enclosing as_of_seq."
           }
         }
       },
@@ -3694,6 +4028,36 @@
             "$ref": "#/components/schemas/TopicSummary"
           }
         }
+      },
+      "UnreadChannel": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Channel"
+          },
+          {
+            "type": "object",
+            "required": [
+              "read_seq",
+              "main_unread_count",
+              "unread_count"
+            ],
+            "properties": {
+              "main_unread_count": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "read_seq": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "unread_count": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Channel badge: main-timeline Unread plus all Topic Unread."
+              }
+            }
+          }
+        ]
       },
       "Unsubscribe": {
         "type": "object",

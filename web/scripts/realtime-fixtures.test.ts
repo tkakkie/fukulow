@@ -89,6 +89,19 @@ describe('realtime fixtures: validation', () => {
     expect(checkFixtures(fixtureDir())).toEqual([])
   })
 
+  it('runs P8 server vocabulary and rejects invalid Unread steps and references', () => {
+    const steps = [
+      { do: 'mark_read', as: 'alice', channel: 'general', read_seq: 2, expect_read_seq: 2 },
+      { do: 'unread', as: 'alice', channel: 'general', expect: { read_seq: 2, main_unread_count: 0, unread_count: 0, topic_counts: {} } },
+    ]
+    const unread = (f: any) => { f.delivery.scenarios[0].covers = ['P8']; f.delivery.scenarios[0].steps = structuredClone(steps) }
+    expect(problemsOf(unread)).toBe('')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].read_seq = -1 })).toContain('below the minimum')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[1].as = 'unknown' })).toContain('undeclared member unknown')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].channel = 'unknown' })).toContain('undeclared channel unknown')
+    expect(problemsOf((f) => { unread(f); delete f.delivery.scenarios[0].steps[1].expect.unread_count })).toContain('missing required property "unread_count"')
+  })
+
   it('rejects malformed JSON', () => {
     expect(problemsOf(() => {}, { file: 'client/broken.json', text: '{ "kind": "client", ' })).toContain('client/broken.json: invalid JSON')
   })
@@ -165,7 +178,8 @@ describe('realtime fixtures: validation', () => {
     const propose = (f: any) => (f.client.scenarios[0].proposed = { owner: ['#138'] })
     expect(problemsOf(topicPage)).toContain('input.messages[0].topic is planned vocabulary; mark the scenario proposed')
     expect(problemsOf((f) => f.delivery.scenarios[0].steps.push({ do: 'main_timeline', as: 'alice', channel: 'general', query: { as_of_seq: 0 }, expect: { status: 200, as_of_seq: 0, items: [], has_more: false } }))).toBe('')
-    expect(problemsOf((f) => (f.delivery.scenarios[0].covers = ['P8']))).toContain('covers is planned vocabulary')
+    expect(problemsOf((f) => (f.delivery.scenarios[0].covers = ['P8']))).toBe('')
+    expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P8']))).toContain('covers is planned vocabulary')
     expect(problemsOf((f) => (f.client.scenarios[0].covers = ['P1']))).toContain('covers is planned vocabulary')
     // A planned key inside a forbidden or never pattern would silently match nothing; it must fail too.
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].effects = { forbidden: [{ type: 'fetch_history', before_position: 4 }] }))).toContain('before_position is planned vocabulary')

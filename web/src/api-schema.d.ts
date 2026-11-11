@@ -59,7 +59,6 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List visible Channels; Guests require an explicit current grant even for public Channels. */
         get: operations["list_channels"];
         put?: never;
         /**
@@ -120,6 +119,22 @@ export interface paths {
          */
         get: operations["reply_chain"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels/{id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["mark_channel_read"];
         post?: never;
         delete?: never;
         options?: never;
@@ -188,6 +203,22 @@ export interface paths {
         /** Topic-filtered history is cursor-neutral; use unfiltered GET /messages for gap fill. */
         get: operations["topic_history"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["mark_topic_read"];
         post?: never;
         delete?: never;
         options?: never;
@@ -392,7 +423,7 @@ export interface components {
             can_add_members: components["schemas"]["Capability"];
         };
         ChannelList: {
-            channels: components["schemas"]["Channel"][];
+            channels: components["schemas"]["UnreadChannel"][];
         };
         /** @enum {string} */
         ChannelVisibility: "public" | "private";
@@ -470,6 +501,13 @@ export interface components {
             before_position?: number | null;
             /** Format: int32 */
             limit?: number | null;
+        };
+        MarkReadRequest: {
+            /**
+             * Format: int64
+             * @description Monotonic max, clamped to the latest committed Channel seq. Sending never marks read.
+             */
+            read_seq: number;
         };
         Member: {
             /** Format: uuid */
@@ -549,6 +587,10 @@ export interface components {
             can_create_channels: components["schemas"]["Capability"];
             can_invite: components["schemas"]["Capability"];
             can_manage_roles: components["schemas"]["Capability"];
+        };
+        ReadPosition: {
+            /** Format: int64 */
+            read_seq: number;
         };
         ReplyChainPage: {
             /** @description More matching Messages follow; continue after the last returned seq. */
@@ -697,11 +739,32 @@ export interface components {
              */
             message_count: number;
             name: string;
+            /**
+             * Format: int64
+             * @description Current Member position, independent of the Channel main timeline.
+             */
+            read_seq: number;
+            /**
+             * Format: int64
+             * @description Other senders' Messages above read_seq, bounded by the enclosing as_of_seq.
+             */
+            unread_count: number;
         };
         TopicSummaryResponse: {
             /** Format: int64 */
             as_of_seq: number;
             topic: components["schemas"]["TopicSummary"];
+        };
+        UnreadChannel: components["schemas"]["Channel"] & {
+            /** Format: int64 */
+            main_unread_count: number;
+            /** Format: int64 */
+            read_seq: number;
+            /**
+             * Format: int64
+             * @description Channel badge: main-timeline Unread plus all Topic Unread.
+             */
+            unread_count: number;
         };
         Unsubscribe: {
             /** Format: uuid */
@@ -737,6 +800,7 @@ export type Identity = components['schemas']['Identity'];
 export type InviteResponse = components['schemas']['InviteResponse'];
 export type ListMessagesQuery = components['schemas']['ListMessagesQuery'];
 export type ListProjectionQuery = components['schemas']['ListProjectionQuery'];
+export type MarkReadRequest = components['schemas']['MarkReadRequest'];
 export type Member = components['schemas']['Member'];
 export type MemberList = components['schemas']['MemberList'];
 export type Message = components['schemas']['Message'];
@@ -745,6 +809,7 @@ export type MessagePage = components['schemas']['MessagePage'];
 export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
 export type Organization = components['schemas']['Organization'];
 export type OrganizationCapabilities = components['schemas']['OrganizationCapabilities'];
+export type ReadPosition = components['schemas']['ReadPosition'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
 export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
 export type Role = components['schemas']['Role'];
@@ -763,6 +828,7 @@ export type TimelineTopic = components['schemas']['TimelineTopic'];
 export type TopicPage = components['schemas']['TopicPage'];
 export type TopicSummary = components['schemas']['TopicSummary'];
 export type TopicSummaryResponse = components['schemas']['TopicSummaryResponse'];
+export type UnreadChannel = components['schemas']['UnreadChannel'];
 export type Unsubscribe = components['schemas']['Unsubscribe'];
 export type $defs = Record<string, never>;
 export interface operations {
@@ -948,14 +1014,13 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Organization id */
                 org: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Visible Channels in this Organization; Guest requires an explicit current grant on every Channel */
+            /** @description Visible Channels with current Member positions and Unread counts; refetch on reconnect */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -973,7 +1038,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            /** @description Account Session unavailable */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -991,7 +1056,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Database failure while resolving the session or listing visible Channels */
+            /** @description Database failure while listing visible Channels and Unread */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -1393,6 +1458,100 @@ export interface operations {
             };
         };
     };
+    mark_channel_read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MarkReadRequest"];
+            };
+        };
+        responses: {
+            /** @description Monotonic Channel position for Messages without Topic only */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadPosition"];
+                };
+            };
+            /** @description Invalid ids, negative read_seq or malformed JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request body exceeds size limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Requires application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or watermark timeout */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_timeline: {
         parameters: {
             query?: {
@@ -1688,6 +1847,101 @@ export interface operations {
                 };
             };
             /** @description Projection watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    mark_topic_read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+                topic_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MarkReadRequest"];
+            };
+        };
+        responses: {
+            /** @description Monotonic position for this Topic only */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadPosition"];
+                };
+            };
+            /** @description Invalid ids, negative read_seq or malformed JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request body exceeds size limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Requires application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or watermark timeout */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

@@ -1,5 +1,38 @@
 use super::*;
 
+#[sqlx::test]
+async fn delivery_contract_rejects_incorrect_unread_counts_and_positions(pool: PgPool) {
+    for change_count in [false, true] {
+        let mut scenario = scenarios()
+            .into_iter()
+            .find(|s| s.id == "unread-positions-are-independent-and-monotonic")
+            .unwrap();
+        let mut changed = None;
+        for (step, item) in scenario.steps.iter_mut().enumerate() {
+            match item {
+                Step::Unread { expect, .. } if change_count => {
+                    expect.unread_count += 1;
+                    changed = Some(step);
+                    break;
+                }
+                Step::MarkRead {
+                    expect_read_seq, ..
+                } if !change_count => {
+                    *expect_read_seq += 1;
+                    changed = Some(step);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let step = changed.unwrap();
+        assert_eq!(
+            Runner::run(pool.clone(), scenario).await,
+            Err(Failure::Unread { step })
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Wrong {
     Sequence,

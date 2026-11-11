@@ -78,7 +78,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
 
 ## Channels and Messages
-- Private Channel creation adds the creator in the same transaction; composite FKs bind memberships to a Channel and Member of the same Organization. Listing is one scoped query, `no-store` (#22).
+- Private Channel creation adds the creator atomically; composite FKs bind grants to the same Organization. Listing uses batched visibility/Unread queries in one snapshot, `no-store` (#22, #142).
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
 - Channel names are unique per Organization across visibility, `lower(name COLLATE "C")` (ASCII folds, non-ASCII as-is); duplicates 409. Existing duplicates fail the migration for the operator to resolve; no auto-rename (#51).
 - Accepted (#51): a 409 on creation lets an Organization Member infer a private Channel name exists (names only, no members or messages).
@@ -133,6 +133,13 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Main-timeline paging correctness (`position_W`, W as page anchor) is fixed in the spec; its cost is a measured feasibility gate in #137 that stops and asks on a miss, not a guarantee (maintainer, 2026-11-11, #148).
 - Topic counts are an as-of-W baseline plus deduplicated live Messages with `seq` > W; a Topic seen only live has no count until a summary fetch. Reason: replay below W or late older pages must neither double-count nor drop the baseline (#148).
 - Unread keeps a Channel position (Messages without Topic) and per-Topic positions; badge = sum. Initial position = latest committed `seq` when the Member gains access; older history is not unread (maintainer, 2026-11-11, #148, #142).
+- #142 Messages owns read positions. Migration/grant triggers capture the committed counter at access time, discard revoked positions and initialize existing Topics; later Topics inherit the grant baseline. Reason: first-fetch initialization loses Messages sent after a grant.
+- #142 access triggers serialize per Organization (seed 142) so Member/Channel creation cannot miss initialization. New grants hold shared #135 through COMMIT. Mark-read rechecks access after W, locks Member/position; revocation deletes positions, denying a waiting update.
+- #142 triggers mirror Channel visibility, including current-revision private grants on reactivation; changes to visibility must update both predicates. The position/visibility equivalence test guards this duplication without reversing module ownership.
+- #142 list counts range-scan messages_topic_seq from read positions, skipping fully read Topics by last_seq: O(Channels + Topics + unread-range Messages), independent of read history. Own Messages in those ranges are filtered; see measurements.md.
+- #142 missing positions suppress only that Channel's Unread at committed seq (Topic projections: W), with a list error log; reads persist nothing and mark-read stays 404. Zero would mark all history unread; a list-wide 500 would hide unaffected Channels.
+- #142 access changes serialize per Organization: public Channel inserts are set-based O(active Members + their Topics); Member activation is O(visible Channels + Topics), retaining shared #135 locks until COMMIT. Accept at current scale; remeasure larger Organizations.
+- #142 backfill blocks sends, Member and grant writes under SHARE ROW EXCLUSIVE; work scales with visible Member×Channel pairs plus their Topics. Startup lock acquisition times out at 5 s; once acquired, a large backfill can extend the write outage.
 - Move, Edit, Delete (principles only, #148): clients apply entries idempotently; a later change takes a Channel log position. Open: replay of a changed Message (current or as it was), of a deleted one, read positions after a Move. `channel_events` vs `channel_log`: Sprint 3 (#160).
 - DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
 
