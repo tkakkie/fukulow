@@ -2,9 +2,10 @@ import type { components, ServerEvent } from './api-schema.d.ts'
 
 type Message = components['schemas']['Message']
 type MessagePage = components['schemas']['MessagePage']
+type ReplyTarget = Pick<components['schemas']['SendMessageRequest'], 'reply_to'>
 export type Failure = number | 'network' | 'timeout'
 export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff'
-export type Pending = { clientMessageId: string; body: string; state: 'sending' | 'unknown' | 'failed'; request: number }
+export type Pending = ReplyTarget & { clientMessageId: string; body: string; state: 'sending' | 'unknown' | 'failed'; request: number }
 export type ChannelState = {
   state: 'loading' | 'ready' | 'unavailable'
   watched: boolean
@@ -48,7 +49,7 @@ export type Effect =
   | { type: 'subscribe'; id: number; channel: string; after_seq: number }
   | { type: 'unsubscribe'; channel: string }
   | { type: 'fetch_history'; id: number; channel: string; page: 'latest' | 'after' | 'before'; seq?: number }
-  | { type: 'send'; id: number; channel: string; client_message_id: string; body: string }
+  | (ReplyTarget & { type: 'send'; id: number; channel: string; client_message_id: string; body: string })
   | { type: 'wait'; id: number; purpose: Purpose; channel?: string; attempt: number }
   | { type: 'cancel_timer'; id: number }
   | { type: 'sign_in' }
@@ -59,7 +60,7 @@ export type Input =
   | { type: 'socket_closed'; connection: number; code: number }
   | { type: 'event'; connection: number; event: ServerEvent; subscription?: number }
   | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }
-  | { type: 'user_send'; channel: string; clientMessageId: string; body: string }
+  | (ReplyTarget & { type: 'user_send'; channel: string; clientMessageId: string; body: string })
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
   | { type: 'history_result'; request: number; page: MessagePage }
   | { type: 'history_failed'; request: number; status: Failure }
@@ -221,7 +222,8 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     const sending: Pending = { ...p, state: 'sending', request: n }
     c.pending = c.pending.includes(p) ? c.pending.map(entry => entry === p ? sending : entry) : [...c.pending, sending]
     state.requests[n] = { type: 'send', channel: id, clientMessageId: p.clientMessageId }
-    effects.push({ type: 'send', id: n, channel: id, client_message_id: p.clientMessageId, body: p.body })
+    effects.push({ type: 'send', id: n, channel: id, client_message_id: p.clientMessageId, body: p.body,
+      ...(p.reply_to ? { reply_to: p.reply_to } : {}) })
   }
   const unavailable = (id: string) => {
     invalidate(id)
@@ -309,7 +311,8 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     case 'user_send': {
       const c = channel(input.channel)
       if (c.state === 'unavailable' || !input.body.trim() || c.pending.some(p => p.clientMessageId === input.clientMessageId)) break
-      const p: Pending = { clientMessageId: input.clientMessageId, body: input.body, state: 'sending', request: 0 }
+      const p: Pending = { clientMessageId: input.clientMessageId, body: input.body, state: 'sending', request: 0,
+        ...(input.reply_to ? { reply_to: input.reply_to } : {}) }
       attempt(input.channel, p)
       break
     }

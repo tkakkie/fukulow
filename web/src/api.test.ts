@@ -99,3 +99,16 @@ it('encodes Topic projection paths and generated query fields, preserving zero W
   ])
   for (const [, init] of f.mock.calls) expect(init).toMatchObject({ credentials: 'same-origin', cache: 'no-store' })
 })
+
+import { listReplyChain } from './api'
+
+it('encodes Reply chain anchors and exclusive continuation using generated query fields', async () => {
+  const f = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'))
+  await listReplyChain('o /1', 'c/2', 'm /3', { after_seq: 0, limit: 2 }, f)
+  await listReplyChain('o', 'c', 'm', { after_seq: 7, limit: undefined }, f)
+  expect(f.mock.calls.map(([path]) => path)).toEqual([
+    '/api/v1/orgs/o%20%2F1/channels/c%2F2/messages/m%20%2F3/chain?after_seq=0&limit=2',
+    '/api/v1/orgs/o/channels/c/messages/m/chain?after_seq=7',
+  ])
+  for (const [, init] of f.mock.calls) expect(init).toMatchObject({ credentials: 'same-origin', cache: 'no-store' })
+})
