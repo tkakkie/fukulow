@@ -40,7 +40,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Web boundary check (#48, #60): Workers/SharedWorkers and `?worker` imports are network uses allowed only in the API layer (they can hide communication). Known limits are in the header of `web/scripts/web-boundary.ts` (#60).
 - Web storage is forbidden everywhere. A future `src/ui-settings.ts` exemption must land with its guard: typed allow-list of keys and values, no free-form key or string value, tests that invalid ones cannot be stored (#48).
 - Hand-written API types are review-enforced, not CI: TypeScript is structural, so a same-shaped copy still type-checks, and an AST check cannot judge semantic duplication. Promote only with few false positives/negatives and a negative test (#49).
-- AI models: Codex sol/medium by default, high on H1-H6; astra reviews (high for round 1 of risk:needs-review or gate changes). Adopted after comparing ribbitto's policy and public comparisons; revisit if results disagree.
+- #260 AI models (credit cost): Codex sol and Antigravity Argon at medium; high only on H1-H6 or security. Astra reviews: high only for round 1 of risk:needs-review. Carbon dropped: no clear gain on #138 vs Argon on #222. Trial: Argon browser-check review of Codex/Claude web PRs.
 - k6 bumps are manual (Dependabot does not see `K6_IMAGE` in Makefile): keep the exact tag, type-check and smoke-test each bump; `@types/k6` versions need not match runtime; digest pinning deferred (#20).
 
 ## API contract

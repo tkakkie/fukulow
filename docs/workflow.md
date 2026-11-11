@@ -1,10 +1,10 @@
 # Workflow (operating procedure for AIs)
 
 Follow this without waiting for a human prompt. Rules: `AGENTS.md`. Rationale: `docs/decisions.md`.
-Run commands for GitHub as your own identity: `$FUKULOW_RUN_AS <claude|codex|antigravity> <command>` (local helper, configured outside the repo) (`< /dev/null`), e.g. `... gh pr list`, `... git push -q origin HEAD:<branch>`.
+All AIs run `gh` and `git` directly as the maintainer account (`tkakkie`, maintainer decision); the signature line (section 5) tells the AIs apart.
 Never push to `main`. Never merge unless the maintainer explicitly says so.
 
-Cloud session (no `$FUKULOW_RUN_AS`, Codex or Antigravity): a Claude Code cloud session does Issues, PRs, labels and reviews through its GitHub integration. Maintainer-only review (no second AI) is allowed only for (a) docs-only changes, or (b) changes limited to a CI script that checks doc length limits and its tests. Excluded: product code, auth, permissions, tenant scoping, real-time delivery, migrations, and anything that weakens an existing CI check. The Issue must state this scope and the maintainer must approve it; all other changes keep section 5. It never replaces CI: required checks `web`, `server`, `docker` must be green on the head, as the `main` ruleset requires.
+Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues, PRs, labels and reviews through its GitHub integration. Maintainer-only review (no second AI) is allowed only for (a) docs-only changes, or (b) changes limited to a CI script that checks doc length limits and its tests. Excluded: product code, auth, permissions, tenant scoping, real-time delivery, migrations, and anything that weakens an existing CI check. The Issue must state this scope and the maintainer must approve it; all other changes keep section 5. It never replaces CI: required checks `web`, `server`, `docker` must be green on the head, as the `main` ruleset requires.
 
 ## 1. Sweep (run at every wake-up, notification, user message, or finished AI run)
 1. `gh pr list --state open --limit 200 --json number,title,labels,headRefOid,mergeable,statusCheckRollup` and `gh issue list --state open --limit 200 --json number,title,labels,milestone`; if 200 come back, split with `--search 'created:<date'` until the list is exhausted. For cleanup also list recent merges: `gh pr list --state merged --limit 30 --json number,headRefName,labels,mergedAt`.
@@ -48,22 +48,23 @@ Cloud session (no `$FUKULOW_RUN_AS`, Codex or Antigravity): a Claude Code cloud 
 
 ## 4. Roles, models, effort
 - Codex: Rust server, DB, auth/permissions, real-time, concurrency, load tests. Claude: design, OpenAPI, docs, review. Antigravity: Svelte (screens, state modules), browser checks, E2E.
-- Codex implements with `gpt-6.1-sol`, effort `medium`; `high` when any H holds (judge from the whole Issue and the files actually touched; size alone never qualifies):
+- Codex implements with `gpt-6.1-sol`, effort `medium`; `high` only when any H holds or the change is security-relevant (judge from the whole Issue and the files actually touched; size alone never qualifies):
   H1 auth, permissions, Organization separation, sessions. H2 DB integrity, migrations, transactions, locks. H3 real-time reconnect, event order, dedup, delivery.
   H4 a security, correctness or CI verification gate is added, removed or loosened. H5 behaviour-preserving conversion without an old/new comparison test.
   H6 concurrent paths sharing state or caches, or whether a background job runs, retries or stops. The PR body lists the H numbers applied (or "none").
-- Effort is fixed at launch. If an H condition first appears mid-work: the implementer stops and reports; the orchestrator restarts at `high`.
-- Codex reviews and checks use `gpt-6-astra`: `high` for round 1 of `risk:needs-review` or gate changes, `medium` for round 2 and delta checks.
+- Effort is fixed at launch. If an H condition or security relevance first appears mid-work: the implementer stops and reports; the orchestrator restarts at `high`.
+- Codex reviews and checks use `gpt-6-astra`: `high` only for round 1 of `risk:needs-review`, `medium` for every other review, round 2 and delta checks.
 - Astra implements only after two substantive sol attempts at `high` both failed the Issue's acceptance criteria (one failing test or CI run is not an attempt); record why in the Issue. Same independent-review rules apply.
-- Antigravity: `agy` (`/usr/local/argon-agy/agy`) with the Argon model (Gemini 4 Argon; list with `agy models`); effort is the `--model` suffix `gemini-4-argon-low|medium|high`, fixed at launch. `<agy-home>` is the maintainer-provisioned directory that holds the Antigravity login, shared by all worktrees (an empty `HOME` triggers a login prompt):
-  low = small copy, limit or type fixes; medium = new screens or state modules, vitest additions, conflict and CI fixes, browser checks; high = browser-side real-time, auth-screen session handling, new E2E suites, multi-screen state design.
-  Size alone does not raise effort. If harder than expected: stop, report, restart higher.
+- Antigravity: `agy` (`/usr/local/argon-agy/agy`) with the Argon model (Gemini 4 Argon; list with `agy models`; not Carbon, #260); effort is the `--model` suffix `gemini-4-argon-low|medium|high`, fixed at launch. `<agy-home>` is the maintainer-provisioned directory that holds the Antigravity login, shared by all worktrees (an empty `HOME` triggers a login prompt):
+  low = small copy, limit or type fixes; medium (default) = screens, state modules, vitest and E2E additions, conflict and CI fixes, browser checks; high = only when an H condition above holds or the change is security-relevant.
+  Size alone does not raise effort. If an H condition or security relevance appears mid-work: stop, report, restart at `high`.
 - Claude: Sonnet by default; Opus only for round 1 of high-risk review or heavy implementation.
-- Launch every AI under its own identity via `$FUKULOW_RUN_AS <name> <cli ...>` (its own GitHub token). Put the model and effort in the signature line.
+- Trial (#260): a web/UI PR written by Codex or Claude also gets an Antigravity browser-check review (`gemini-4-argon-medium`): run the changed screens in a real browser and report runtime, focus and layout defects. It runs alongside the required review in the same round (not as a separate round) and does not replace it.
+- Put the model and effort in the signature line.
 - Orchestrator: start each worker with the Bash tool and `run_in_background: true` (not `nohup ... &`): the harness notifies on exit, which resumes the sweep (section 1) with no user prompt. Run from the task worktree; keep the prompt, `-o` result and log in the scratchpad dir, outside the repo. On exit read the result file and the log, then sweep.
-  Codex: `cd <worktree> && $FUKULOW_RUN_AS codex codex exec -m <gpt-6.1-sol|gpt-6-astra> -c 'model_reasoning_effort="<medium|high>"' --sandbox danger-full-access -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1`
-  Antigravity: `$FUKULOW_RUN_AS antigravity env HOME=<agy-home> PATH=/usr/local/argon-agy:$PATH GIT_AUTHOR_NAME=Antigravity GIT_AUTHOR_EMAIL=noreply@example.com GIT_COMMITTER_NAME=Antigravity GIT_COMMITTER_EMAIL=noreply@example.com /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model gemini-4-argon-<low|medium|high> --print-timeout 3000s --output-format text < /dev/null > <scratch>/log 2>&1`
-  Claude: the orchestrating session or a subagent works as itself; `$FUKULOW_RUN_AS claude gh|git ...` (with `< /dev/null`) only gives its GitHub commands the Claude identity. It is not a worker launcher.
+  Codex: `cd <worktree> && codex exec -m <gpt-6.1-sol|gpt-6-astra> -c 'model_reasoning_effort="<medium|high>"' --sandbox danger-full-access -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1`
+  Antigravity: `env HOME=<agy-home> PATH=/usr/local/argon-agy:$PATH GIT_AUTHOR_NAME=Antigravity GIT_AUTHOR_EMAIL=noreply@example.com GIT_COMMITTER_NAME=Antigravity GIT_COMMITTER_EMAIL=noreply@example.com /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model gemini-4-argon-<low|medium|high> --print-timeout 3000s --output-format text < /dev/null > <scratch>/log 2>&1`
+  Claude: the orchestrating session or a subagent works as itself.
 - Exceptions to the area table need a line in the Issue (e.g. Codex implements the sync protocol/controller, H3 high; adapter and components stay with Antigravity).
 
 ## 5. Reviews
@@ -90,7 +91,7 @@ Cloud session (no `$FUKULOW_RUN_AS`, Codex or Antigravity): a Claude Code cloud 
 | Dependent Issue waits on a PR | label it `blocked`, comment "blocked by #n" (all blockers listed); the sweeper removes it once every blocker is merged (closed unmerged: re-evaluate, see section 2) |
 | Async result (CI, Copilot, background AI) is overdue with no notification | check directly: `gh pr checks`, `gh pr view --json reviews`, the worker log/`-o` file and `pgrep`. Finished: handle the result. Still running: keep the current label and do other work; it is checked again at the next sweep, not in a loop. Repeated checks in one sweep are not allowed (no busy loop); the next sweep or stall check looks again. Dead without a result: relaunch (section 4). Not a human decision, so no `status:needs-decision` |
 | Results arrive while orchestrator idle | run the sweep at once, do not wait for the next user message |
-| An AI is stuck or needs higher effort | stop it, comment findings, restart at the next effort (section 4) |
+| An AI is stuck or needs higher effort | stop it, comment findings; restart at `high` only when section 4 allows it, otherwise report (`status:needs-decision`) |
 | Needs a token, secret or denied permission | `status:needs-decision` with the exact request; continue other items |
 
 ## 8. Dependency updates and versions
