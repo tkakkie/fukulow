@@ -287,6 +287,7 @@ mod access;
 mod concurrency;
 mod denials;
 mod measurement;
+mod roles;
 
 #[sqlx::test]
 async fn unread_public_access_transitions_preserve_continuous_access_and_reset_new_access(

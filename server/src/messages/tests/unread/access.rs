@@ -2,7 +2,7 @@ use super::*;
 
 // Compare the trigger-maintained rows with the production authorization query,
 // rather than copying its visibility predicate into the test.
-async fn assert_positions_match_visibility(pool: &PgPool) {
+pub(super) async fn assert_positions_match_visibility(pool: &PgPool) {
     let pairs: Vec<(Uuid, Uuid, i64, Uuid)> = sqlx::query_as(
         "SELECT u.organization_id,u.id,u.membership_revision,c.id FROM users u \
          JOIN channels c ON c.organization_id=u.organization_id",
