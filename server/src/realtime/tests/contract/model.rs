@@ -164,6 +164,7 @@ pub(super) enum Step {
         channel: ChannelRef,
         expect: UnreadExpectation,
     },
+    ReplyChain(ReplyChainSpec),
     Expect {
         socket: String,
         events: Vec<Event>,
@@ -183,6 +184,7 @@ pub(super) struct PostSpec {
     pub key: Option<String>,
     pub label: Option<String>,
     pub topic_name: Option<String>,
+    pub reply_to: Option<String>,
     #[serde(default = "created")]
     pub expect_status: u16,
 }
@@ -294,4 +296,23 @@ pub(super) enum Event {
 pub(super) struct Barrier {
     pub channel: String,
     pub caught_up_seq: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplyChainSpec {
+    #[serde(rename = "as")]
+    pub member: String,
+    pub channel: ChannelRef,
+    pub anchor: String,
+    pub query: std::collections::BTreeMap<String, i64>,
+    pub expect: ReplyChainExpectation,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplyChainExpectation {
+    pub status: u16,
+    pub root: String,
+    pub seqs: Vec<Seq>,
+    pub has_more: bool,
 }

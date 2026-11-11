@@ -20,7 +20,7 @@
     "Seq": { "type": "integer", "minimum": 1 },
     "Cursor": { "type": "integer", "minimum": 0 },
     "Rule": {
-      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P2/P5/P8 run; client projections and other P rules remain proposed (semantic).",
+      "$comment": "A rule of docs/spec.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P1/P2/P5/P6/P7/P8 run; client projections and other P rules remain proposed (semantic).",
       "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
     },
     "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
@@ -274,6 +274,68 @@
           "additionalProperties": false
         },
         {
+          "type": "object",
+          "required": [
+            "do",
+            "as",
+            "channel",
+            "anchor",
+            "query",
+            "expect"
+          ],
+          "properties": {
+            "do": {
+              "const": "reply_chain"
+            },
+            "as": {
+              "$ref": "#/$defs/Label"
+            },
+            "channel": {
+              "$ref": "#/$defs/ChannelRef"
+            },
+            "anchor": {
+              "$ref": "#/$defs/Label"
+            },
+            "query": {
+              "type": "object",
+              "properties": {
+                "after_seq": {
+                  "type": "integer"
+                },
+                "limit": {
+                  "type": "integer"
+                }
+              },
+              "additionalProperties": false
+            },
+            "expect": {
+              "type": "object",
+              "required": [
+                "status",
+                "root",
+                "seqs",
+                "has_more"
+              ],
+              "properties": {
+                "status": {
+                  "$ref": "#/$defs/HttpStatus"
+                },
+                "root": {
+                  "$ref": "#/$defs/Label"
+                },
+                "seqs": {
+                  "$ref": "#/$defs/SeqList"
+                },
+                "has_more": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "$comment": "Open a WebSocket authenticated as Member 'as'. expect_handshake: the upgrade must be refused with this HTTP status (no socket exists afterwards).",
           "type": "object",
           "required": ["do", "socket", "as"],
@@ -328,6 +390,7 @@
             "key": { "$ref": "#/$defs/Label" },
             "label": { "$ref": "#/$defs/Label" },
             "topic_name": { "$ref": "#/$defs/Label" },
+            "reply_to": { "$ref": "#/$defs/Label" },
             "expect_status": { "$ref": "#/$defs/HttpStatus" }
           },
           "additionalProperties": false
@@ -503,7 +566,7 @@
     },
 
     "ClientScenario": {
-      "$comment": "A scenario a client satisfies. The harness starts a client with no state and feeds 'steps' in order. Each step delivers one input (what happened outside the client: an event, a response, a user action) and then checks what the client did in response: 'effects' are the external requests the client emitted while handling this step's input (an effect emitted earlier is never re-checked), and 'observe' is what the client shows afterwards. Only what a step lists is checked. 'never' effects must not be emitted in any step. Semantic: every respond_to refers to a label bound by 'as' in an earlier step's required effects; labels are unique; an 'ack'/'send_failed' respond_to names a 'send' effect, 'history_result'/'history_failed' a 'fetch_history', 'subscribed' a 'subscribe', 'timer_elapsed' a 'wait', 'membership_check_result' a 'membership_check', 'main_timeline_result' a 'fetch_main_timeline'. layer 'controller': the scenario observes a request the client makes on its own (the C10 Membership check); a runner of a pure, I/O-free protocol layer skips it, a runner of the whole client must run it.",
+      "$comment": "A scenario a client satisfies. The harness starts a client with no state and feeds 'steps' in order. Each step delivers one input (what happened outside the client: an event, a response, a user action) and then checks what the client did in response: 'effects' are the external requests the client emitted while handling this step's input (an effect emitted earlier is never re-checked), and 'observe' is what the client shows afterwards. Only what a step lists is checked. 'never' effects must not be emitted in any step. Semantic: every respond_to refers to a label bound by 'as' in an earlier step's required effects; labels are unique; an 'ack'/'send_failed' respond_to names a 'send' effect, 'history_result'/'history_failed' a 'fetch_history', 'subscribed' a 'subscribe', 'timer_elapsed' a 'wait', 'membership_check_result' a 'membership_check', 'main_timeline_result' a 'fetch_main_timeline'. layer 'controller': the scenario observes a request the client makes on its own (the C10 Membership check or P1-P5 Topic projections); a runner of a pure, I/O-free protocol layer skips it, a runner of the whole client must run it.",
       "type": "object",
       "required": ["id", "title", "covers", "steps"],
       "properties": {

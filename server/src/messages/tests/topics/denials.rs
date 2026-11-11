@@ -214,11 +214,12 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
                 "new" | "existing" | "retry" => {
                     send_message(
                         State(state.clone()),
-                        auth,
+                        DeferredOrganizationAuth(Some(auth)),
                         Ok(Path((org, channel))),
                         ApiJson(SendMessageRequest {
                             client_message_id: if name == "retry" { key } else { Uuid::new_v4() },
                             body: "Topic Message".into(),
+                            reply_to: None,
                             topic_name: Some(if name == "new" { "New" } else { "Existing" }.into()),
                         }),
                     )

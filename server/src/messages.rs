@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::{ApiError, ApiJson, Auth, ErrorBody},
+    auth::{ApiError, ApiJson, Auth, DeferredOrganizationAuth, ErrorBody},
     channels,
 };
 
@@ -21,6 +21,8 @@ mod admission;
 mod commit;
 mod delivery;
 mod failure;
+pub(crate) mod replies;
+pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub(crate) mod topics;
 pub(crate) mod unread;
 #[cfg(test)]
@@ -56,10 +58,16 @@ pub struct Message {
     pub created_at: String,
     #[schema(required = true)]
     pub topic_id: Option<Uuid>,
+    /// Confirmed parent Message; null for a non-Reply.
+    #[schema(required = true)]
+    pub reply_to: Option<Uuid>,
+    /// Stable root even when the parent is outside the loaded window; null for a non-Reply.
+    #[schema(required = true)]
+    pub reply_root_id: Option<Uuid>,
 }
 
 /// Idempotency key: (organization, sender, client_message_id), derived from the session.
-/// Matching body, Channel and normalized Topic name returns the canonical Message/sequence;
+/// Matching body, Channel, normalized Topic name and reply target returns the canonical Message/sequence;
 /// changing any of them returns 409.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -68,10 +76,13 @@ pub struct SendMessageRequest {
     /// 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming.
     #[schema(min_length = 1, max_length = 4000)]
     pub body: String,
-    /// Join or create a Topic in this Channel. Omitted/null sends without a Topic.
+    /// Join or create a Topic in this Channel. Omitted/null sends without a Topic unless replying.
     /// 1..=60 Unicode scalars, no NUL or surrounding/only trim whitespace; ASCII case folds.
     #[schema(min_length = 1, max_length = 60)]
     pub topic_name: Option<String>,
+    /// Confirmed parent in this Organization/Channel. Omitted/null is a non-Reply.
+    /// A Reply inherits its parent's Topic; topic_name must be omitted/null.
+    pub reply_to: Option<Uuid>,
 }
 
 /// Use after_seq XOR before_seq, or neither for the latest page. Cursors are exclusive.
@@ -146,12 +157,12 @@ pub async fn list_messages(
     tests::membership::pause_history(channel_id).await;
     let ascending = query.after_seq.is_some();
     let sql = if ascending {
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
+        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 \
          ORDER BY seq ASC LIMIT $4"
     } else {
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
+        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND channel_id = $2 \
            AND seq <= $3 ORDER BY seq DESC LIMIT $4"
@@ -183,17 +194,19 @@ pub async fn list_messages(
 }
 
 /// Send a Message, optionally joining/creating a Topic by name in the same transaction.
+/// For all sends, Account Session authentication precedes input validation (400/413/415),
+/// which precedes organization_unavailable (404) and Channel authorization.
 /// The session supplies organization and sender. A successful retry returns the same
 /// canonical message with 201, allocating no new sequence and publishing no new event.
-/// A reused client_message_id with different body, Channel or normalized Topic name returns 409.
+/// A reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.
 #[utoipa::path(post, path = "/api/v1/orgs/{org}/channels/{id}/messages", request_body = SendMessageRequest,
     params(("org" = Uuid, Path, description = "Organization id"), ("id" = Uuid, Path, description = "Channel id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, description = "Confirmed Message; an idempotent retry returns the same Message and sequence", body = Message),
-        (status = 400, description = "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
-        (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
-        (status = 409, description = "Client message id reused with different body, Channel or normalized Topic name", body = ErrorBody),
+        (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; reply_parent_not_found for an unknown, uncommitted or foreign Organization/Channel parent", body = ErrorBody),
+        (status = 409, description = "Client message id reused with different body, Channel, normalized Topic name or reply target", body = ErrorBody),
         (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody),
         (status = 500, description = "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id", body = ErrorBody),
@@ -201,12 +214,13 @@ pub async fn list_messages(
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)")))))]
 pub async fn send_message(
     State(state): State<AppState>,
-    auth: Auth,
+    DeferredOrganizationAuth(auth): DeferredOrganizationAuth,
     path: Result<Path<(Uuid, Uuid)>, PathRejection>,
     ApiJson(input): ApiJson<SendMessageRequest>,
 ) -> Result<Response, MessageError> {
     let Path((_, channel_id)) = path.map_err(|_| MessageError::InvalidInput)?;
     input.validate()?;
+    let auth = auth.ok_or(MessageError::OrganizationUnavailable)?;
     let organization_id = auth.identity.organization.organization_id;
     let sender = (auth.identity.member.id, auth.membership_revision);
     require_visible(&state.pool, organization_id, sender, channel_id).await?;
@@ -241,6 +255,9 @@ pub async fn send_message(
 
 impl SendMessageRequest {
     fn validate(&self) -> Result<(), MessageError> {
+        if self.reply_to.is_some() && self.topic_name.is_some() {
+            return Err(MessageError::ReplyTopicNotAllowed);
+        }
         if self.body.contains('\0')
             || self.body.trim().is_empty()
             || self.body.chars().count() > 4000
@@ -276,6 +293,9 @@ pub enum MessageError {
     InvalidInput,
     NotFound,
     TopicNotFound,
+    ReplyTopicNotAllowed,
+    ReplyParentNotFound,
+    ReplyChainNotFound,
     OrganizationUnavailable,
     Conflict,
     AdmissionRejected,
@@ -293,12 +313,15 @@ impl IntoResponse for MessageError {
     fn into_response(self) -> Response {
         let (status, error) = match self {
             Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
+            Self::ReplyTopicNotAllowed => (StatusCode::BAD_REQUEST, "reply_topic_not_allowed"),
+            Self::ReplyParentNotFound => (StatusCode::NOT_FOUND, "reply_parent_not_found"),
+            Self::ReplyChainNotFound => (StatusCode::NOT_FOUND, "reply_chain_not_found"),
             Self::TopicNotFound => (StatusCode::NOT_FOUND, "topic_not_found"),
             Self::NotFound => (StatusCode::NOT_FOUND, "channel not found"),
             Self::OrganizationUnavailable => (StatusCode::NOT_FOUND, "organization_unavailable"),
             Self::Conflict => (
                 StatusCode::CONFLICT,
-                "client message id reused with different body, channel or Topic",
+                "client message id reused with different body, channel, Topic or reply target",
             ),
             Self::Database(error) => return ApiError::from(error).into_response(),
             rejection @ (Self::AdmissionRejected | Self::ProjectionAdmissionRejected) => {
@@ -353,7 +376,7 @@ async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     client_message_id: Uuid,
 ) -> Result<Option<Message>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
+        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
     )
@@ -372,11 +395,13 @@ fn canonical(
 ) -> Result<Message, MessageError> {
     if message.channel_id != channel_id
         || message.body != input.body
-        || name_key
-            != input
-                .topic_name
-                .as_ref()
-                .map(|name| name.to_ascii_lowercase())
+        || message.reply_to != input.reply_to
+        || (input.reply_to.is_none()
+            && name_key
+                != input
+                    .topic_name
+                    .as_ref()
+                    .map(|name| name.to_ascii_lowercase()))
     {
         return Err(MessageError::Conflict);
     }
@@ -430,11 +455,23 @@ async fn persist_admitted(
     )
     .await?
     {
-        let name_key =
-            topics::name_key(tx.connection()?, organization_id, message.topic_id).await?;
+        let name_key = if message.reply_to.is_none() {
+            topics::name_key(tx.connection()?, organization_id, message.topic_id).await?
+        } else {
+            None
+        };
         tx.rollback().await?;
         return canonical(message, channel_id, &input, name_key);
     }
+    // Read before waiting for the Channel barrier: an uncommitted parent is absent,
+    // never a foreign-key wait or an implicitly accepted optimistic client id.
+    let parent = replies::parent(
+        tx.connection()?,
+        organization_id,
+        channel_id,
+        input.reply_to,
+    )
+    .await?;
     // Bound every subsequent lock wait, including the counter and idempotency key.
     commit::lock(tx.connection()?, organization_id, channel_id, false).await?;
     // Row locking serializes only sends in this channel. Both allocation and insertion
@@ -444,22 +481,27 @@ async fn persist_admitted(
          ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = channel_message_sequences.seq + 1 \
          RETURNING seq",
     ).bind(organization_id).bind(channel_id).fetch_one(tx.connection()?).await?;
-    let topic_id = topics::join(
-        tx.connection()?,
-        organization_id,
-        channel_id,
-        seq,
-        input.topic_name.as_deref(),
-    )
-    .await?;
+    let topic_id = if let Some(parent) = &parent {
+        parent.topic_id
+    } else {
+        topics::join(
+            tx.connection()?,
+            organization_id,
+            channel_id,
+            seq,
+            input.topic_name.as_deref(),
+        )
+        .await?
+    };
+    let reply_root_id = parent.as_ref().map(|p| p.reply_root_id.unwrap_or(p.id));
     let message = sqlx::query_as::<_, Message>(
-        "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+        "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
-         RETURNING id, channel_id, seq, client_message_id, sender, body, topic_id, \
+         RETURNING id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at",
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
-        .bind(input.client_message_id).bind(&input.body).bind(topic_id).fetch_optional(tx.connection()?).await?;
+        .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).fetch_optional(tx.connection()?).await?;
     if let Some(message) = message {
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
@@ -479,7 +521,11 @@ async fn persist_admitted(
     let message = existing(pool, organization_id, sender, input.client_message_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
-    let name_key = topics::name_key(pool, organization_id, message.topic_id).await?;
+    let name_key = if message.reply_to.is_none() {
+        topics::name_key(pool, organization_id, message.topic_id).await?
+    } else {
+        None
+    };
     canonical(message, channel_id, &input, name_key)
 }
 
@@ -518,7 +564,7 @@ pub(crate) async fn replay_page(
     through: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
+        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
          ORDER BY seq ASC LIMIT $5",

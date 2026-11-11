@@ -92,11 +92,34 @@ export interface paths {
         put?: never;
         /**
          * Send a Message, optionally joining/creating a Topic by name in the same transaction.
+         *     For all sends, Account Session authentication precedes input validation (400/413/415),
+         *     which precedes organization_unavailable (404) and Channel authorization.
          *     The session supplies organization and sender. A successful retry returns the same
          *     canonical message with 201, allocating no new sequence and publishing no new event.
-         *     A reused client_message_id with different body, Channel or normalized Topic name returns 409.
+         *     A reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.
          */
         post: operations["send_message"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch the root and all descendants from any anchor in the chain. No depth cap.
+         *     after_seq defaults to 0 and is exclusive; limit defaults to 50, maximum 200.
+         *     A page is a projection, never evidence of Channel-log contiguity.
+         */
+        get: operations["reply_chain"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -406,6 +429,16 @@ export interface components {
             id: string;
             /**
              * Format: uuid
+             * @description Stable root even when the parent is outside the loaded window; null for a non-Reply.
+             */
+            reply_root_id: string | null;
+            /**
+             * Format: uuid
+             * @description Confirmed parent Message; null for a non-Reply.
+             */
+            reply_to: string | null;
+            /**
+             * Format: uuid
              * @description Member id of the sender.
              */
             sender: string;
@@ -452,11 +485,28 @@ export interface components {
             /** Format: int64 */
             read_seq: number;
         };
+        ReplyChainPage: {
+            /** @description More matching Messages follow; continue after the last returned seq. */
+            has_more: boolean;
+            /** @description Root and all descendants, ascending by seq. Projection only: never moves the sync cursor. */
+            messages: components["schemas"]["Message"][];
+            /** Format: uuid */
+            root_id: string;
+        };
+        ReplyChainQuery: {
+            /**
+             * Format: int64
+             * @description Exclusive forward continuation; omitted/0 starts with the root.
+             */
+            after_seq?: number | null;
+            /** Format: int32 */
+            limit?: number | null;
+        };
         /** @enum {string} */
         Role: "owner" | "admin" | "member" | "guest";
         /**
          * @description Idempotency key: (organization, sender, client_message_id), derived from the session.
-         *     Matching body, Channel and normalized Topic name returns the canonical Message/sequence;
+         *     Matching body, Channel, normalized Topic name and reply target returns the canonical Message/sequence;
          *     changing any of them returns 409.
          */
         SendMessageRequest: {
@@ -465,7 +515,13 @@ export interface components {
             /** Format: uuid */
             client_message_id: string;
             /**
-             * @description Join or create a Topic in this Channel. Omitted/null sends without a Topic.
+             * Format: uuid
+             * @description Confirmed parent in this Organization/Channel. Omitted/null is a non-Reply.
+             *     A Reply inherits its parent's Topic; topic_name must be omitted/null.
+             */
+            reply_to?: string | null;
+            /**
+             * @description Join or create a Topic in this Channel. Omitted/null sends without a Topic unless replying.
              *     1..=60 Unicode scalars, no NUL or surrounding/only trim whitespace; ASCII case folds.
              */
             topic_name?: string | null;
@@ -639,6 +695,8 @@ export type MessagePage = components['schemas']['MessagePage'];
 export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
 export type Organization = components['schemas']['Organization'];
 export type ReadPosition = components['schemas']['ReadPosition'];
+export type ReplyChainPage = components['schemas']['ReplyChainPage'];
+export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
 export type Role = components['schemas']['Role'];
 export type SendMessageRequest = components['schemas']['SendMessageRequest'];
 export type ServerEvent = components['schemas']['ServerEvent'];
@@ -1118,7 +1176,7 @@ export interface operations {
                     "application/json": components["schemas"]["Message"];
                 };
             };
-            /** @description Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden */
+            /** @description Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1136,7 +1194,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists */
+            /** @description organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; reply_parent_not_found for an unknown, uncommitted or foreign Organization/Channel parent */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1145,7 +1203,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Client message id reused with different body, Channel or normalized Topic name */
+            /** @description Client message id reused with different body, Channel, normalized Topic name or reply target */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1182,6 +1240,86 @@ export interface operations {
                 };
             };
             /** @description Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    reply_chain: {
+        parameters: {
+            query?: {
+                /** @description Exclusive forward continuation; omitted/0 starts with the root. */
+                after_seq?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+                /** @description Channel id */
+                id: string;
+                /** @description Root or descendant Message id in the Reply chain */
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Root and all descendants in ascending seq; exclusive continuation with exact has_more; cursor-neutral */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplyChainPage"];
+                };
+            };
+            /** @description Malformed Organization id, Channel id, Message id or after_seq, negative after_seq, or limit outside 1..=200 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found for authorization; reply_chain_not_found for unknown or foreign Organization/Channel anchor */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or commit barrier timeout reading the Reply chain */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
