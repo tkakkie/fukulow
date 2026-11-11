@@ -20,7 +20,7 @@ Later: attachments, reactions, push notifications, bots/webhooks, multiple organ
 
 ## Parts
 - [Accounts](spec/accounts.md): Accounts and Memberships; Members, Roles and Invites; Setup.
-- [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability.
+- [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability; Operations: backup and restore (#198 C).
 - [Realtime](spec/realtime.md): Real-time sync contract.
 
 ## Performance targets (first)

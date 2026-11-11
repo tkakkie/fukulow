@@ -1,5 +1,7 @@
 # Measurements
 
+Writing: only results behind a decision, performance comparisons or key regression checks, with reproduction conditions and limits; no routine/debug logs, raw artifacts or duplicates; never silently rewrite or drop an old record.
+
 Past measurement records: values, conditions, compared targets, methods, limits and commits. Evidence only: nothing here is a performance, capacity or latency guarantee of `docs/spec.md`. Current decisions drawn from these records live in `docs/decisions.md`.
 
 How to use: do not read this file whole. Search the Issue number or topic and read that section only, when doing performance work, load tests, regression investigation or comparing results.
@@ -518,6 +520,6 @@ EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON), captured after each sample window: befo
 
 Limits: at 1M rows the planner's conservative range estimates trigger JIT (69 functions, ~9.7/11.0 ms compilation in the two after plans), whereas the 100k after plans do not. Thus latency is not constant across history sizes despite eliminating reads of already-read Messages. This focused warm-cache comparison supports O(unread-range Messages + Channel/Topic lookup work), not arbitrary-history latency, cold-cache, many-Topic, simultaneous reconnect or production performance. Own Messages in unread ranges still require filtering. Raw plans/results remain outside Git at `/private/tmp/unread-142-measure-{5000,50000}.log`; older records above are unchanged.
 
-Reproduce with the dataset and cached image above: follow [workflow §14](workflow.md#14-operations-backup-and-restore-198-c), run `node scripts/backup.ts /absolute/private/backup-directory` in the separately named source Compose project, then `node scripts/restore-drill.ts /absolute/private/backup-directory/fukulow-EXAMPLE.dump`.
+Reproduce with the dataset and cached image above: follow [deployment: Operations](spec/deployment.md#operations-backup-and-restore-198-c), run `node scripts/backup.ts /absolute/private/backup-directory` in the separately named source Compose project, then `node scripts/restore-drill.ts /absolute/private/backup-directory/fukulow-EXAMPLE.dump`.
 
 The measured drill time covers container startup, restore, ending Sessions and heap/index checks only. It excludes backup creation, download/image pull, incident detection, finding the right archive, permission reconciliation, database switch, app restart, client checks and human approval. Production dataset size, disk, CPU, contention and failure modes differ; measure a representative drill on the recovery hardware before estimating outage duration. No measured drill time is a guaranteed recovery deadline.
