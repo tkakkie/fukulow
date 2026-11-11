@@ -1,12 +1,20 @@
 import { randomUUID } from 'node:crypto'
-import { closeSync, openSync } from 'node:fs'
+import { closeSync, openSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { docker } from './backup.ts'
 
-// Coupled to compose.yml services.db.image; backup.test.ts checks agreement without loading secrets via Compose.
-export const DRILL_POSTGRES_IMAGE = 'postgres:18'
+// Read only the tracked file: invoking Compose here could load deployment secrets.
+export function postgresImageFromCompose(compose = readFileSync(new URL('../compose.yml', import.meta.url), 'utf8')): string {
+  const database = compose.match(/^  db:\n((?: {4}[^\n]*\n|\n)*)/m)?.[1]
+  const image = database?.match(/^    image: (\S+)$/m)?.[1]
+  if (!image || !/^postgres:18(?:\.\d+)?@sha256:[a-f0-9]{64}$/.test(image)) {
+    throw new Error('Compose db must use a literal PostgreSQL 18 tag and sha256 digest')
+  }
+  return image
+}
 
 export function restoreDrill(archive: string): void {
+  const image = postgresImageFromCompose()
   const started = performance.now()
   const name = `fukulow-restore-drill-${randomUUID()}`
   let created = false
@@ -14,7 +22,7 @@ export function restoreDrill(archive: string): void {
     // No Compose, host ports, bind mounts, shared volumes or production connection string.
     docker(['run', '-d', '--name', name, '--network', 'none', '--tmpfs', '/var/lib/postgresql',
       '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_USER=fukulow',
-      '-e', 'POSTGRES_DB=fukulow', DRILL_POSTGRES_IMAGE])
+      '-e', 'POSTGRES_DB=fukulow', image])
     created = true
     const exec = ['exec', '-i', name]
     let ready = false

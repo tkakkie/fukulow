@@ -60,6 +60,11 @@ async function check(profile: string) {
     }
     const app = proxy('ps', '-q', 'app')
     const [state] = JSON.parse(run(['inspect', app]))
+    assert.equal(state.Config.User, '10001:10001')
+    assert.equal(run(['exec', app, 'id', '-u']), '10001')
+    assert.match(run(['exec', app, 'cat', '/proc/1/status']), /^Uid:\s+10001\s+10001\s+10001\s+10001$/m)
+    run(['exec', app, 'sh', '-c', 'test ! -w /usr/local/bin/fukulow-server'])
+    assert.deepEqual(state.HostConfig.LogConfig, { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } })
     assert.equal(state.HostConfig.PortBindings['8080/tcp'][0].HostIp, '127.0.0.1')
     assert.deepEqual(request('/api/v1/setup'), { status: 200, body: '{"setup_required":true}' })
     const setup = { ...owner, organization_name: 'Compose', name: 'Owner' }
@@ -128,9 +133,13 @@ async function check(profile: string) {
         `198.51.100.${n}`, debugUrl).status, 401)
     }
     assert.equal(request('/api/v1/session', owner, '192.0.2.199', debugUrl).status, 429)
+    proxy('stop', 'app')
+    const [stopped] = JSON.parse(run(['inspect', app]))
+    assert.equal(stopped.State.ExitCode, 0, 'PID 1 must handle default SIGTERM without SIGKILL')
+    assert.equal(stopped.State.OOMKilled, false)
     await restartApp()
     assert.equal(request('/api/v1/setup').body, '{"setup_required":false}')
-    console.log(`PASS ${profile}: token, sign-in, backend/public/debug-port spoofing, independent client budgets, restart, retained setup`)
+    console.log(`PASS ${profile}: non-root, log rotation, SIGTERM exit 0, token, sign-in, backend/public/debug-port spoofing, independent client budgets, restart, retained setup`)
   } finally {
     spawnSync('docker', ['rm', '-f', helper], { cwd, env, stdio: 'ignore' })
     proxy('down', '-v', '--remove-orphans')

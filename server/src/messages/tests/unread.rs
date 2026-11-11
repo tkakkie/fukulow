@@ -289,6 +289,7 @@ mod access;
 mod concurrency;
 mod denials;
 mod measurement;
+mod policy;
 mod roles;
 
 #[sqlx::test]
