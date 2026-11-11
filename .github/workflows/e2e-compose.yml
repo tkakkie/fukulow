@@ -45,17 +45,20 @@ jobs:
                 - "127.0.0.1::443"
           YAML
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Expose GitHub Actions cache credentials to buildx bake
+      - name: Build isolated image with existing CI layer cache
+        # Run bake inside the action so the cache-writing runtime token reaches only
+        # this child process. Unlike ci.yml it is not exported to later steps,
+        # which run third-party npm and browser code.
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const url = process.env.ACTIONS_RESULTS_URL;
-            const token = process.env.ACTIONS_RUNTIME_TOKEN;
-            if (!url || !token) { throw new Error("Actions cache credentials are not available"); }
-            core.exportVariable("ACTIONS_RESULTS_URL", url);
-            core.exportVariable("ACTIONS_RUNTIME_TOKEN", token);
-      - name: Build isolated image with existing CI layer cache
-        run: docker buildx bake --load --file compose.yml --file "$RUNNER_TEMP/compose-e2e.yml" --set "app.cache-from=type=gha,scope=docker" --set "app.cache-to=type=gha,scope=docker,mode=max"
+            if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
+              throw new Error("Actions cache credentials are not available");
+            }
+            await exec.exec("docker", ["buildx", "bake", "--load",
+              "--file", "compose.yml", "--file", `${process.env.RUNNER_TEMP}/compose-e2e.yml`,
+              "--set", "app.cache-from=type=gha,scope=docker",
+              "--set", "app.cache-to=type=gha,scope=docker,mode=max"]);
       - name: Start fresh stack and wait for HTTPS health
         run: |
           docker compose --env-file /dev/null -p "$COMPOSE_PROJECT_NAME" up -d --no-build --wait --wait-timeout 120
