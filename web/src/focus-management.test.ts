@@ -5,9 +5,13 @@ import {
   discardAndFocusComposer,
   focusAfterPanelClose,
   focusDialogOnOpen,
+  focusIfVisible,
+  isTargetVisible,
+  resolveChannelListNavigation,
   resolveSkipLinkTargetId,
   restoreFocusAfterDialogClose,
   stepDialogTab,
+  type VisibleFocusableTarget,
 } from './focus-management'
 
 describe('focus-management: focus after discard, edit-and-resend, dialog and panel close (docs/ui.md §2, §5, §6)', () => {
@@ -115,6 +119,69 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     expect(fallbackComposer.focus).toHaveBeenCalledOnce()
   })
 
+  it('focusDialogOnOpen skips a disabled first control and falls back to the dialog when all controls are disabled', () => {
+    const disabledFirst = { focus: vi.fn(), isConnected: true, disabled: true }
+    const firstEnabled = { focus: vi.fn(), isConnected: true }
+    const secondEnabled = { focus: vi.fn(), isConnected: true }
+    const dialogEl = { focus: vi.fn(), isConnected: true }
+
+    expect(focusDialogOnOpen([disabledFirst, firstEnabled, secondEnabled], dialogEl)).toBe(firstEnabled)
+    expect(disabledFirst.focus).not.toHaveBeenCalled()
+    expect(firstEnabled.focus).toHaveBeenCalledOnce()
+    expect(secondEnabled.focus).not.toHaveBeenCalled()
+    expect(dialogEl.focus).not.toHaveBeenCalled()
+
+    const disabledSecond = { focus: vi.fn(), isConnected: true, disabled: true }
+    expect(focusDialogOnOpen([disabledFirst, disabledSecond], dialogEl)).toBe(dialogEl)
+    expect(disabledFirst.focus).not.toHaveBeenCalled()
+    expect(disabledSecond.focus).not.toHaveBeenCalled()
+    expect(dialogEl.focus).toHaveBeenCalledOnce()
+  })
+
+  it('stepDialogTab skips disabled controls, including when the active element is disabled', () => {
+    const disabledFirst = { focus: vi.fn(), isConnected: true, disabled: true }
+    const firstBtn = { focus: vi.fn(), isConnected: true }
+    const disabledMiddle = { focus: vi.fn(), isConnected: true, disabled: true }
+    const secondBtn = { focus: vi.fn(), isConnected: true }
+    const thirdBtn = { focus: vi.fn(), isConnected: true }
+    const disabledLast = { focus: vi.fn(), isConnected: true, disabled: true }
+    const dialogEl = { focus: vi.fn(), isConnected: true }
+    const controls = [disabledFirst, firstBtn, disabledMiddle, secondBtn, thirdBtn, disabledLast]
+
+    // Forward Tab skips disabledMiddle and wraps past disabledLast/disabledFirst
+    expect(stepDialogTab(controls, firstBtn, false, dialogEl)).toBe(secondBtn)
+    expect(secondBtn.focus).toHaveBeenCalledOnce()
+    expect(stepDialogTab(controls, thirdBtn, false, dialogEl)).toBe(firstBtn)
+    expect(firstBtn.focus).toHaveBeenCalledOnce()
+
+    // Shift+Tab skips disabledMiddle and wraps past disabledFirst/disabledLast
+    expect(stepDialogTab(controls, secondBtn, true, dialogEl)).toBe(firstBtn)
+    expect(firstBtn.focus).toHaveBeenCalledTimes(2)
+    expect(stepDialogTab(controls, firstBtn, true, dialogEl)).toBe(thirdBtn)
+    expect(thirdBtn.focus).toHaveBeenCalledOnce()
+
+    // Active element itself is disabled inside focusables: steps forward/backward to the nearest enabled control
+    expect(stepDialogTab(controls, disabledMiddle, false, dialogEl)).toBe(secondBtn)
+    expect(secondBtn.focus).toHaveBeenCalledTimes(2)
+    expect(stepDialogTab(controls, disabledMiddle, true, dialogEl)).toBe(firstBtn)
+    expect(firstBtn.focus).toHaveBeenCalledTimes(3)
+    expect(stepDialogTab(controls, disabledFirst, false, dialogEl)).toBe(firstBtn)
+    expect(stepDialogTab(controls, disabledFirst, true, dialogEl)).toBe(thirdBtn)
+
+    // Active element is disabled and already excluded from focusables (e.g. :not(:disabled) selector)
+    const excludedDisabledActive = { focus: vi.fn(), isConnected: true, disabled: true }
+    expect(stepDialogTab([firstBtn, secondBtn, thirdBtn], excludedDisabledActive, false, dialogEl)).toBe(firstBtn)
+    expect(stepDialogTab([firstBtn, secondBtn, thirdBtn], excludedDisabledActive, true, dialogEl)).toBe(thirdBtn)
+    expect(excludedDisabledActive.focus).not.toHaveBeenCalled()
+
+    // All controls disabled (including active): falls back to dialog container
+    expect(stepDialogTab([disabledFirst, disabledMiddle], disabledFirst, false, dialogEl)).toBe(dialogEl)
+    expect(dialogEl.focus).toHaveBeenCalledOnce()
+    expect(disabledFirst.focus).not.toHaveBeenCalled()
+    expect(disabledMiddle.focus).not.toHaveBeenCalled()
+    expect(disabledLast.focus).not.toHaveBeenCalled()
+  })
+
   it('resolves the skip link target ID to the visible primary region at every phone level and desktop/tablet breakpoint', () => {
     // Phone (< 600px): targets the active screen's region at each level
     expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'channels', panelOpen: false })).toBe(
@@ -137,5 +204,126 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
         }
       }
     }
+  })
+
+  it('opens the Channel drawer only at tablet widths and focuses the Channel list on チャンネル一覧へ', () => {
+    // Phone (< 600px): switches to 'channels' screen without opening tablet drawer
+    for (const width of [320, 375, 599]) {
+      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
+    }
+    // Tablet (600-959px): opens the Channel drawer
+    for (const width of [600, 768, 959]) {
+      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: true, mobileLevel: 'channels' })
+    }
+    // Desktop (>= 960px): Channel column is permanently visible, drawer stays closed
+    for (const width of [960, 1280, 1440]) {
+      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
+    }
+
+    const visibleHeading = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [{ width: 260, height: 20 }],
+    }
+    expect(focusIfVisible(visibleHeading, () => ({ display: 'block', visibility: 'visible' }))).toBe(true)
+    expect(visibleHeading.focus).toHaveBeenCalledOnce()
+  })
+
+  it('focusIfVisible guards against hidden headings and focuses only when rendered and visible', () => {
+    const visibleRects = () => [{ width: 260, height: 20 }]
+    const visibleStyle = () => ({ display: 'block', visibility: 'visible' })
+
+    // Null / undefined / disconnected / disabled / [hidden]
+    expect(focusIfVisible(null, visibleStyle)).toBe(false)
+    expect(focusIfVisible(undefined, visibleStyle)).toBe(false)
+
+    const disconnected: VisibleFocusableTarget = { focus: vi.fn(), isConnected: false, getClientRects: visibleRects }
+    expect(focusIfVisible(disconnected, visibleStyle)).toBe(false)
+    expect(disconnected.focus).not.toHaveBeenCalled()
+
+    const disabled: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      disabled: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(disabled, visibleStyle)).toBe(false)
+    expect(disabled.focus).not.toHaveBeenCalled()
+
+    const hiddenAttr: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      hidden: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(hiddenAttr, visibleStyle)).toBe(false)
+    expect(hiddenAttr.focus).not.toHaveBeenCalled()
+
+    const hiddenAncestor: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      closest: (sel) => (sel.includes('[inert]') ? {} : null),
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(hiddenAncestor, visibleStyle)).toBe(false)
+    expect(hiddenAncestor.focus).not.toHaveBeenCalled()
+
+    // Computed display: none, visibility: hidden, visibility: collapse
+    const displayNone: VisibleFocusableTarget = { focus: vi.fn(), isConnected: true, getClientRects: visibleRects }
+    expect(focusIfVisible(displayNone, () => ({ display: 'none', visibility: 'visible' }))).toBe(false)
+    expect(displayNone.focus).not.toHaveBeenCalled()
+
+    const visibilityHidden: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(visibilityHidden, () => ({ display: 'block', visibility: 'hidden' }))).toBe(false)
+    expect(visibilityHidden.focus).not.toHaveBeenCalled()
+
+    const visibilityCollapse: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(visibilityCollapse, () => ({ display: 'block', visibility: 'collapse' }))).toBe(false)
+    expect(visibilityCollapse.focus).not.toHaveBeenCalled()
+
+    // Ancestor display: none (empty getClientRects) or zero-size box
+    const closedDrawerHeading: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [],
+    }
+    expect(isTargetVisible(closedDrawerHeading, visibleStyle)).toBe(false)
+    expect(focusIfVisible(closedDrawerHeading, visibleStyle)).toBe(false)
+    expect(closedDrawerHeading.focus).not.toHaveBeenCalled()
+
+    const zeroWidth: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [{ width: 0, height: 20 }],
+    }
+    expect(focusIfVisible(zeroWidth, visibleStyle)).toBe(false)
+    expect(zeroWidth.focus).not.toHaveBeenCalled()
+
+    const zeroHeight: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [{ width: 260, height: 0 }],
+    }
+    expect(focusIfVisible(zeroHeight, visibleStyle)).toBe(false)
+    expect(zeroHeight.focus).not.toHaveBeenCalled()
+
+    // Visible heading: non-zero box and visible style -> focuses once
+    const visibleHeading: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      closest: () => null,
+      getClientRects: visibleRects,
+    }
+    expect(isTargetVisible(visibleHeading, visibleStyle)).toBe(true)
+    expect(focusIfVisible(visibleHeading, visibleStyle)).toBe(true)
+    expect(visibleHeading.focus).toHaveBeenCalledOnce()
   })
 })

@@ -12,7 +12,10 @@
   import CreateChannelForm from './CreateChannelForm.svelte'
   import {
     focusAfterPanelClose,
+    focusIfVisible,
     focusTarget,
+    MOBILE_BREAKPOINT_PX,
+    resolveChannelListNavigation,
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
@@ -101,6 +104,7 @@
     }),
   )
 
+  let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
@@ -152,7 +156,7 @@
     const revision = state.revision
     void tick().then(() => {
       if (nav.state.revision !== revision) return
-      if (state.focus === 'list') focusTarget(document.getElementById('channel-content'))
+      if (state.focus === 'list') focusIfVisible(channelListHeadingRef)
       else if (state.focus === 'heading') focusTarget(panelHeadingRef)
       else if (state.focus === 'reply-composer') {
         if (!focusTarget(document.querySelector<HTMLElement>('#panel-content textarea'))) focusTarget(panelHeadingRef)
@@ -208,8 +212,16 @@
   function closePanel() { nav.navigate({ type: 'close' }) }
   function togglePanel() { if (panelOpen) closePanel(); else openPanel() }
   function goToChannelList() {
-    if (viewportWidth < 600) nav.navigate({ type: 'list' })
-    else drawerOpen = true
+    const width = typeof window !== 'undefined' ? window.innerWidth : viewportWidth
+    viewportWidth = width
+    const next = resolveChannelListNavigation(width)
+    drawerOpen = next.drawerOpen
+    if (width < MOBILE_BREAKPOINT_PX && nav.navigate({ type: 'list' })) {
+      return
+    }
+    void tick().then(() => {
+      focusIfVisible(channelListHeadingRef)
+    })
   }
 
   function handleWindowKeydown(e: KeyboardEvent) {
@@ -264,8 +276,12 @@
         ariaLabel="チャンネル一覧"
         ariaExpanded={drawerOpen}
         onclick={() => {
-          drawerOpen = !drawerOpen
-          if (viewportWidth < 600) nav.navigate({ type: 'list' })
+          if (viewportWidth < MOBILE_BREAKPOINT_PX) {
+            drawerOpen = false
+            nav.navigate({ type: 'list' })
+          } else {
+            drawerOpen = !drawerOpen
+          }
         }}
       >
         #
@@ -279,7 +295,7 @@
     </div>
   </nav>
 
-  <nav id="channel-content" class="channel-column" aria-label="チャンネル" tabindex="-1">
+  <nav id="channel-content" class="channel-column" aria-labelledby="channel-list-heading" tabindex="-1">
     <div class="channel-column__header">
       {#if organizations.length > 1 && onselectorganization}
         <label class="org-switcher">
@@ -298,6 +314,14 @@
       {#if organization}
         <p class="member-summary">{organization.organization.name} / {organization.member.name} さん</p>
       {/if}
+      <h2
+        bind:this={channelListHeadingRef}
+        id="channel-list-heading"
+        class="channel-column__heading"
+        tabindex="-1"
+      >
+        チャンネル
+      </h2>
     </div>
 
     <div class="channel-column__scroll">
@@ -638,6 +662,14 @@
     font-weight: var(--font-weight-medium);
     color: var(--text2);
     overflow-wrap: anywhere;
+  }
+
+  .channel-column__heading {
+    margin: 0;
+    border-radius: var(--radius-8);
+    font-size: var(--font-size-13);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text2);
   }
 
   .main-card {

@@ -99,6 +99,7 @@ test('phone list, view and panel levels preserve drafts across Back, parent repl
   await expect(composer(page)).toHaveValue('電話の下書き')
   await page.goBack()
   await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+  await expect(page.locator('#channel-list-heading')).toBeFocused()
   await page.goForward()
   await expect(composer(page)).toHaveValue('電話の下書き')
   await page.setViewportSize({ width: 1280, height: 800 })
@@ -106,6 +107,7 @@ test('phone list, view and panel levels preserve drafts across Back, parent repl
   await page.setViewportSize({ width: 375, height: 667 })
   await page.getByRole('button', { name: 'チャンネル一覧へ戻る', exact: true }).first().click()
   await expect(page).toHaveURL(new RegExp(`/o/${org}$`))
+  await expect(page.locator('#channel-list-heading')).toBeFocused()
   await page.locator('.channel-list button').filter({ hasText: firstName }).last().click()
   await expect(composer(page)).toHaveValue('電話の下書き')
 })
@@ -163,6 +165,7 @@ test('phone direct-link parent buttons replace without leaving; real Back can le
   await expect(composer(page)).toBeFocused()
   await page.getByRole('button', { name: 'チャンネル一覧へ戻る', exact: true }).first().click()
   await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+  await expect(page.locator('#channel-list-heading')).toBeFocused()
   expect(await page.evaluate(() => history.length)).toBe(length)
   await page.goBack()
   await expect(page).toHaveURL(/\/api\/v1\/health$/)
@@ -237,17 +240,157 @@ test('C9 Channel list action preserves desktop and tablet state and replaces the
     const length = await page.evaluate(() => history.length)
     await action.click()
     await expect(page.locator('#channel-content')).toBeVisible()
+    await expect(page.locator('#channel-list-heading')).toBeVisible()
+    await expect(page.locator('#channel-list-heading')).toBeFocused()
     if (width < 600) {
       await expect(page).toHaveURL(`/o/${org}`)
       await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
-      await expect(page.locator('#channel-content')).toBeFocused()
       await expect(page.locator('#main-content')).toBeHidden()
     } else {
       await expect(page).toHaveURL(`/o/${org}/c/${first}`)
       await expect(page.locator('#main-content')).toBeVisible()
-      if (width < 960) await expect(page.locator('.workspace')).toHaveAttribute('data-drawer-open', 'true')
+      await expect(page.locator('.workspace')).toHaveAttribute('data-drawer-open', width < 960 ? 'true' : 'false')
     }
     expect(await page.evaluate(() => history.length)).toBe(length)
+  }
+})
+
+test('single-Channel phone list intent and Back/Forward preserve URL and History length and focus the heading only when visible', async ({
+  page,
+  browser,
+}) => {
+  type AcceptInviteRequest = import('../src/api-schema.d.ts').components['schemas']['AcceptInviteRequest']
+  type AddChannelMemberRequest = import('../src/api-schema.d.ts').components['schemas']['AddChannelMemberRequest']
+  type Channel = import('../src/api-schema.d.ts').components['schemas']['Channel']
+  type CreateChannelRequest = import('../src/api-schema.d.ts').components['schemas']['CreateChannelRequest']
+  type CreateInviteRequest = import('../src/api-schema.d.ts').components['schemas']['CreateInviteRequest']
+  type Identity = import('../src/api-schema.d.ts').components['schemas']['Identity']
+  type InviteResponse = import('../src/api-schema.d.ts').components['schemas']['InviteResponse']
+
+  const base = `/api/v1/orgs/${org}`
+  const channelReq: CreateChannelRequest = { name: `Phone single-${crypto.randomUUID()}`, visibility: 'private' }
+  const channelRes = await page.request.post(`${base}/channels`, { data: channelReq })
+  expect(channelRes.ok()).toBe(true)
+  const singleChannel = (await channelRes.json()) as Channel
+
+  const email = `phone-single-${crypto.randomUUID()}@example.invalid`
+  const password = 'correct horse phone nav'
+  const inviteReq: CreateInviteRequest = { email, role: 'guest' }
+  const inviteRes = await page.request.post(`${base}/invites`, { data: inviteReq })
+  expect(inviteRes.ok()).toBe(true)
+  const invite = (await inviteRes.json()) as InviteResponse
+
+  const guestContext = await browser.newContext()
+  try {
+    const acceptReq: AcceptInviteRequest = { token: invite.token, email, name: 'Phone Guest', password }
+    const acceptRes = await guestContext.request.post(`${base}/invites/accept`, { data: acceptReq })
+    expect(acceptRes.ok()).toBe(true)
+    const guestIdentity = (await acceptRes.json()) as Identity
+
+    const addReq: AddChannelMemberRequest = { member_id: guestIdentity.member.id }
+    const addRes = await page.request.post(`${base}/channels/${singleChannel.id}/members`, { data: addReq })
+    expect(addRes.ok()).toBe(true)
+
+    const loginRes = await guestContext.request.post('/api/v1/session', { data: { email, password } })
+    expect(loginRes.ok()).toBe(true)
+
+    const guestPage = await guestContext.newPage()
+    await guestPage.setViewportSize({ width: 375, height: 667 })
+
+    const heading = guestPage.locator('#channel-list-heading')
+    const singleChannelBtn = guestPage.locator('#channel-content .channel-list button')
+    const backToListBtn = guestPage.getByRole('button', { name: 'チャンネル一覧へ戻る', exact: true }).first()
+
+    // 1. Direct link to Channel view -> phone `list` intent replaces URL to /o/{org}, adds no extra entry, and focuses #channel-list-heading
+    await guestPage.goto('/api/v1/health')
+    await guestPage.goto(`/o/${org}/c/${singleChannel.id}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
+    await expect(composer(guestPage)).toBeEnabled()
+    const directLen = await guestPage.evaluate(() => history.length)
+
+    await backToListBtn.click()
+    await expect(guestPage).toHaveURL(`/o/${org}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(singleChannelBtn).toHaveCount(1)
+    await expect(heading).toBeVisible()
+    await expect(heading).toBeFocused()
+    expect(await guestPage.evaluate(() => history.length)).toBe(directLen)
+
+    // Real Back leaves directly to /api/v1/health (proving no synthetic parent entry); Forward returns to /o/{org}
+    await guestPage.goBack()
+    await expect(guestPage).toHaveURL(/\/api\/v1\/health$/)
+    expect(await guestPage.evaluate(() => history.length)).toBe(directLen)
+    await guestPage.goForward()
+    await expect(guestPage).toHaveURL(`/o/${org}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(singleChannelBtn).toHaveCount(1)
+    expect(await guestPage.evaluate(() => history.length)).toBe(directLen)
+
+    // 2. Selecting the single Channel pushes 1 entry, opening panel pushes 1 entry; Back/Forward keep URL and History consistent
+    await singleChannelBtn.click()
+    await expect(guestPage).toHaveURL(`/o/${org}/c/${singleChannel.id}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
+    await expect(composer(guestPage)).toBeFocused()
+    expect(await guestPage.evaluate(() => history.length)).toBe(directLen + 1)
+
+    await guestPage.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true }).click()
+    await expect(guestPage).toHaveURL(`/o/${org}/c/${singleChannel.id}?panel=topics`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
+    await expect(guestPage.locator('#panel-content h2')).toBeFocused()
+    const totalLen = directLen + 2
+    expect(await guestPage.evaluate(() => history.length)).toBe(totalLen)
+
+    await guestPage.goBack()
+    await expect(guestPage).toHaveURL(`/o/${org}/c/${singleChannel.id}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
+    expect(await guestPage.evaluate(() => history.length)).toBe(totalLen)
+
+    await guestPage.goBack()
+    await expect(guestPage).toHaveURL(`/o/${org}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(heading).toBeFocused()
+    expect(await guestPage.evaluate(() => history.length)).toBe(totalLen)
+
+    await guestPage.goForward()
+    await expect(guestPage).toHaveURL(`/o/${org}/c/${singleChannel.id}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
+    await expect(composer(guestPage)).toBeFocused()
+    expect(await guestPage.evaluate(() => history.length)).toBe(totalLen)
+
+    await guestPage.goForward()
+    await expect(guestPage).toHaveURL(`/o/${org}/c/${singleChannel.id}?panel=topics`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
+    await expect(guestPage.locator('#panel-content h2')).toBeFocused()
+    expect(await guestPage.evaluate(() => history.length)).toBe(totalLen)
+
+    // 3. Visibility guard on `list`: neither aria-hidden heading on phone nor closed drawer at 768px receives focus
+    await guestPage.goBack()
+    await expect(guestPage).toHaveURL(`/o/${org}/c/${singleChannel.id}`)
+    await heading.evaluate(el => {
+      el.setAttribute('aria-hidden', 'true')
+    })
+    await backToListBtn.click()
+    await expect(guestPage).toHaveURL(`/o/${org}`)
+    await expect(heading).toHaveAttribute('aria-hidden', 'true')
+    await expect(heading).not.toBeFocused()
+    expect(await guestPage.evaluate(() => history.length)).toBe(totalLen)
+    await heading.evaluate(el => {
+      el.removeAttribute('aria-hidden')
+    })
+
+    await guestPage.goForward()
+    await expect(guestPage).toHaveURL(`/o/${org}/c/${singleChannel.id}?panel=topics`)
+    await guestPage.setViewportSize({ width: 768, height: 800 })
+    await expect(heading).toBeHidden()
+    await guestPage.goBack()
+    await expect(guestPage).toHaveURL(`/o/${org}`)
+    await expect(heading).toBeHidden()
+    await expect(heading).not.toBeFocused()
+    expect(await guestPage.evaluate(() => history.length)).toBe(totalLen)
+
+    await guestPage.goto('about:blank')
+  } finally {
+    await guestContext.close()
   }
 })
 

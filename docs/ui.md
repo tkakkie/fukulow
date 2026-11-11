@@ -83,7 +83,7 @@ States look the same everywhere (board A2-2):
 | Empty | EmptyState: what is empty + what to do | Composer stays usable |
 | Error, retryable | message + `再試行` | network/5xx/1011; keeps what is already shown |
 | Error, not retryable | message + where to go | no retry button |
-| チャンネル unavailable (C9) | `このチャンネルは利用できません` + `チャンネル一覧へ` | Composer disabled; never retried in a loop; reselecting tries again |
+| チャンネル unavailable (C9) | `このチャンネルは利用できません` + `チャンネル一覧へ` | Composer disabled; never retried in a loop; reselecting tries again. `チャンネル一覧へ` shows the チャンネル list (desktop column, tablet drawer, phone full screen) and, once it is shown, focuses the list heading (`tabindex="-1"` if needed); never a hidden element |
 | 組織 unavailable (C10) | `この組織は利用できません` + `メンバー資格を再確認` / `組織を切り替える` (no チャンネル retry/list action) | terminal until explicit re-selection: no automatic reconnect, resubscribe or send retry for that 組織; loaded Messages and drafts stay visible until re-selection; other 組織 unaffected. Copy says access was lost and pending Messages could not be confirmed, never that they were not sent |
 | Reconnecting | StatusBanner `再接続しています…` (visual only, no live role; the page status region announces it, §6) | content stays; banner only after 2 s offline; send behaviour unchanged (presentation only) |
 | Sending | Message with `送信中…` in `--text2` | resolved by C5 |
