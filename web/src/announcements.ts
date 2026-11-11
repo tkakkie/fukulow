@@ -17,6 +17,7 @@ export type AnnounceableMessage = {
   body: string
   topic_id?: string | null
   reply_to?: string | null
+  reply_root_id?: string | null
 }
 
 export type AnnouncementState = {
@@ -299,7 +300,8 @@ export function stepAnnouncements(
               !prev.announcedSeqs.has(m.seq) &&
               ((input.replyChainIds !== undefined &&
                 (input.replyChainIds.has(m.id) ||
-                  (m.reply_to != null && input.replyChainIds.has(m.reply_to)))) ||
+                  (m.reply_to != null && input.replyChainIds.has(m.reply_to)) ||
+                  (m.reply_root_id != null && input.replyChainIds.has(m.reply_root_id)))) ||
                 input.topicId === undefined ||
                 (input.topicId === null
                   ? (m.topic_id ?? null) === null && (m.reply_to ?? null) === null
