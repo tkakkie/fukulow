@@ -1,3 +1,4 @@
+// Regression tests for executable invariant references, Rule text/IDs and distinct cross-part row resolution.
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
 import { checkDecisions, MAX_DECISION_LENGTH, checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
@@ -148,6 +149,20 @@ describe('docs/invariants.md parsing', () => {
     expect(parseInvariants(ruleRow(fits + '`')).errors[0]).toContain('161 characters')
   })
 
+  it('excludes a valid ID tag from the 160-code-point Rule limit and Rule text', () => {
+    const rule = '𠮷'.repeat(160)
+    const { rows, errors } = parseInvariants(ruleRow('{#row-123} ' + rule))
+    expect(errors).toEqual([])
+    expect(rows[0]).toMatchObject({ id: 'row-123', rule })
+    expect(parseInvariants(ruleRow('{#row-123} ' + rule + 'x')).errors[0]).toContain('161 characters (max 160)')
+  })
+
+  it.each(['{#Bad_ID} text', '{#} text', '{#valid}text', '{#valid}', '{#-bad} text', '{#bad--id} text', '{#bad-} text', '{#unclosed text', '{#valid}\ttext'])(
+    'rejects malformed rule ID tag %s (negative)', (rule) => {
+      expect(parseInvariants(ruleRow(rule)).errors).toEqual([`line 3: malformed rule ID tag: ${rule}`])
+    },
+  )
+
   it('fails closed on an escaped pipe in a Rule cell as a column-count error (negative)', () => {
     const { rows, errors } = parseInvariants(ruleRow('a \\| b'))
     expect(rows).toEqual([])
@@ -228,7 +243,7 @@ describe('split invariants', () => {
 
   it('accepts 160 code points in the second part and valid cross-references', () => {
     const { root, put } = fixture()
-    put('docs/invariants/b.md', table('𠮷'.repeat(160)) + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name from the row in that part.\n\n- [a](a.md): `ok_test`\n')
+    put('docs/invariants/b.md', table('𠮷'.repeat(160)) + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.\n\n- [a](a.md): `ok_test`\n')
     expect(checkInvariants(root)).toEqual([])
   })
 
@@ -281,11 +296,105 @@ describe('split invariants', () => {
     ['malformed line', 'not a bullet', 'expected a Rows in other parts bullet'],
     ['malformed bullet', '- [a](a.md): `ok_test`, other_test', 'expected a Rows in other parts bullet'],
     ['mismatched label', '- [wrong](a.md): `ok_test`', 'expected a Rows in other parts bullet'],
-    ['repeated prose', 'Rows that also govern this area, listed by a test name from the row in that part.', 'expected a Rows in other parts bullet'],
+    ['repeated prose', 'Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.', 'expected a Rows in other parts bullet'],
   ])('rejects cross-reference %s (negative)', (_label, bullet, reason) => {
     const { root, put } = fixture()
-    put('docs/invariants/b.md', table('second') + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name from the row in that part.\n\n' + bullet + '\n')
+    put('docs/invariants/b.md', table('second') + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.\n\n' + bullet + '\n')
     expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 9: ' + reason])
+  })
+
+  const cross = (target: string, tokens: string) => `\n## Rows in other parts\n\n- [${target}](${target}.md): ${tokens}\n`
+
+  it('resolves a unique test name even when two references in that row have the same suffix', () => {
+    const { root, put } = fixture()
+    put('server/tests/b.rs', '#[test]\nfn ok_test() {}\n')
+    put('docs/invariants/a.md', '| Rule | Test |\n|---|---|\n| first | `server/tests/a.rs::ok_test`, `server/tests/b.rs::ok_test` |\n')
+    put('docs/invariants/b.md', table('second') + cross('a', '`ok_test`'))
+    expect(checkInvariants(root)).toEqual([])
+  })
+
+  it('rejects a test name matching zero rows (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/b.md', table('second') + cross('a', '`ok`'))
+    expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 7: test name not found in a.md: ok'])
+  })
+
+  it('rejects the pre-#282 prose line, which promised only test names (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('first'))
+    put('docs/invariants/b.md', table('second') + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name from the row in that part.\n\n- [a](a.md): `ok_test`\n')
+    expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 7: expected a Rows in other parts bullet'])
+  })
+
+  it('rejects a test name matching two rows (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('first') + table('another'))
+    put('docs/invariants/b.md', table('second') + cross('a', '`ok_test`'))
+    expect(checkInvariants(root)).toEqual([
+      'docs/invariants/b.md: line 7: test name matches 2 rows in a.md; reference the row by its #id instead: ok_test',
+    ])
+  })
+
+  it('resolves #id to its row even when its test name is shared by another row', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('{#first-row} first') + table('another'))
+    put('docs/invariants/b.md', table('second') + cross('a', '`#first-row`'))
+    expect(checkInvariants(root)).toEqual([])
+  })
+
+  it('rejects duplicate rule IDs across parts and names both places (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('{#shared} first') + cross('b', '`#shared`'))
+    put('docs/invariants/b.md', table('{#shared} second') + cross('a', '`#shared`'))
+    expect(checkInvariants(root)).toEqual([
+      'docs/invariants/b.md: line 3: duplicate rule ID (first at docs/invariants/a.md: line 3): #shared',
+    ])
+  })
+
+  it('rejects duplicate Rule text after stripping the ID tag (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('{#first-row} first'))
+    put('docs/invariants/b.md', table('first') + cross('a', '`#first-row`'))
+    expect(checkInvariants(root)).toEqual([
+      'docs/invariants/b.md: line 3: duplicate Rule text (first at docs/invariants/a.md: line 3): first',
+    ])
+  })
+
+  it('rejects a rule ID reference not found in the linked part (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/b.md', table('second') + cross('a', '`#missing`'))
+    expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 7: rule ID not found in a.md: #missing'])
+  })
+
+  it('rejects a rule ID that exists only in another part (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('first') + cross('b', '`#elsewhere`'))
+    put('docs/invariants/b.md', table('{#elsewhere} second') + cross('a', '`#elsewhere`'))
+    expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 7: rule ID not found in a.md: #elsewhere'])
+  })
+
+  it('rejects an unreferenced rule ID even if a bullet uses its test name (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('{#unused} first'))
+    put('docs/invariants/b.md', table('second') + cross('a', '`ok_test`'))
+    expect(checkInvariants(root)).toEqual(['docs/invariants/a.md: line 3: rule ID is never referenced: #unused'])
+  })
+
+  it.each(['`ok_test`, `#first-row`', '`#first-row`, `ok_test`', '`#first-row`, `#first-row`'])(
+    'rejects the same row twice in one bullet: %s (negative)', (tokens) => {
+      const { root, put } = fixture()
+      put('docs/invariants/a.md', table('{#first-row} first'))
+      put('docs/invariants/b.md', table('second') + cross('a', tokens))
+      const last = tokens.slice(tokens.lastIndexOf(', ') + 2).slice(1, -1)
+      expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 7: same row referenced twice in a.md: ' + last])
+    },
+  )
+
+  it('allows referencing the same row in separate bullets', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/a.md', table('{#first-row} first'))
+    put('docs/invariants/b.md', table('second') + cross('a', '`#first-row`') + '- [a](a.md): `ok_test`\n')
+    expect(checkInvariants(root)).toEqual([])
   })
 })
 
