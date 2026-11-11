@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { secretSafe } from './helpers.ts'
 
 // The server and its database are shared and start empty (CI service / fresh local DB),
 // so these tests run serially in state order: not set up -> setup -> set up.
@@ -18,7 +19,7 @@ test('setup signs the Owner in automatically', async ({ page }) => {
   await page.getByLabel('オーナーの名前').fill('Alice')
   await page.getByLabel('メールアドレス').fill(owner.email)
   await page.getByLabel('パスワード（12文字以上）').fill(owner.password)
-  await page.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only')
+  await secretSafe(() => page.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only'))
   await page.getByRole('button', { name: 'セットアップして開始' }).click()
 
   await expect(page.getByText('Acme / Alice さん')).toBeVisible()
@@ -144,5 +145,5 @@ test('phone zero-Channels reaches creation and sign-out; creating a Channel and 
   await page.keyboard.press('Escape')
   await expect(page.getByRole('button', { name: 'パネルを開く(⌘.)' })).toBeFocused()
 
-  expect(errors).toEqual([])
+  expect(errors.length, 'No browser console or page errors').toBe(0)
 })

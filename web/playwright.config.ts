@@ -3,11 +3,18 @@ import { defineConfig } from '@playwright/test'
 // The Rust binary serves the built app (web/dist is embedded at cargo build time).
 const port = Number(process.env.E2E_PORT ?? 18080)
 
+// Playwright 1.65 otherwise captures the whole page on failure, even with trace off.
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = '1'
+
 export default defineConfig({
   testDir: './e2e',
   workers: 1,
   timeout: 30_000,
-  use: { baseURL: `http://127.0.0.1:${port}` },
+  // Locator failures can still supply ARIA contexts. Retain no raw per-test output;
+  // the reporter writes its allowlisted report separately after test cleanup.
+  preserveOutput: 'never',
+  reporter: process.env.CI ? [['dot'], ['./scripts/e2e-reporter.ts']] : 'list',
+  use: { baseURL: `http://127.0.0.1:${port}`, trace: 'off' },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   webServer: {
     command: '../target/debug/fukulow-server',
@@ -19,5 +26,8 @@ export default defineConfig({
     },
     reuseExistingServer: false,
     timeout: 30_000,
+    // The server logs no request headers/bodies; see auth.rs and main.rs.
+    stdout: process.env.CI ? 'pipe' : 'ignore',
+    stderr: 'pipe',
   },
 })
