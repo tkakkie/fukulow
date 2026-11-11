@@ -9,3 +9,9 @@ unsafe_code = "forbid"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+# Tests hash passwords often; unoptimized Argon2 made tests/auth.rs ~5x slower (11.8s -> 2.4s locally). Release builds are unaffected.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

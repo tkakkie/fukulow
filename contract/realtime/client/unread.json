@@ -79,6 +79,32 @@
         {"input":{"type":"message","channel":"A","message":{"seq":5}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":5}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}}
       ]
+    },
+    {
+      "id": "unread-topic-only-mark-read-equal-baseline-both-orders",
+      "title": "Topic-only mark-read lowers counts at equal as_of_seq and Channel read_seq in either response order",
+      "covers": [
+        "P8"
+      ],
+      "layer": "controller",
+      "proposed": {
+        "owner": [
+          "#143"
+        ],
+        "note": "Test-only P8 reference merge, including a stale Topic-count mutation. Within one access generation, Channel/Topic positions only advance: equal as_of_seq/read_seq selects smaller unread_count and main_unread_count. Losing access drops the entry; regrant starts at committed seq. Existing server behavior suffices; production client remains proposed for #143."
+      },
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"Astale"}]}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"Anewer"}]}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"Anewer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}}}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"Astale","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}}}}},
+        {"input":{"type":"load_unread","channel":"B"},"effects":{"required":[{"type":"fetch_unread","channel":"B","as":"Bstale"}]}},
+        {"input":{"type":"load_unread","channel":"B"},"effects":{"required":[{"type":"fetch_unread","channel":"B","as":"Bnewer"}]}},
+        {"input":{"type":"unread_result","channel":"B","respond_to":"Bstale","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}},"observe":{"channels":{"B":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}}}}},
+        {"input":{"type":"unread_result","channel":"B","respond_to":"Bnewer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}},"observe":{"channels":{"B":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}}}}}
+      ]
     }
   ]
 }
