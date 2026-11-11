@@ -187,3 +187,53 @@ it('tracks unsaved drafts and pending sends across all Channels for session-leve
   expect(sync.hasUnsavedChanges()).toBe(false)
   await sync.close()
 })
+
+it('no-op extra patches and dispatches leaving olderError false notify no Channel listener and keep extra-state identity', async () => {
+  let closeSocket!: (code: number) => void
+  const listMessages = vi.fn().mockImplementation(async (channel: string) => ({
+    ok: true,
+    data: { messages: [record(1, channel)], has_more: false },
+  }))
+  const sync = createSync({
+    selfId: 'me',
+    connect: handlers => {
+      closeSocket = handlers.onClose
+      handlers.onReady()
+      return { send() {}, close() {} }
+    },
+    api: { listMessages, sendMessage: vi.fn() },
+  })
+  await sync.start()
+  await sync.watch('B')
+
+  const b = sync.getTimeline('B')
+  b.setDraft('bad\0')
+  expect(await b.submit()).toBe(false)
+  const bSnapshot = b.get()
+  expect(bSnapshot.composerError).not.toBeNull()
+  const bListener = vi.fn()
+  b.subscribe(bListener)
+
+  await sync.watch('A')
+  expect(await b.submit()).toBe(false)
+  b.setDraft('bad\0')
+  expect(bListener).not.toHaveBeenCalled()
+  expect(b.get()).toBe(bSnapshot)
+
+  b.setDraft('fixed')
+  expect(b.get()).toMatchObject({ draft: 'fixed', composerError: null })
+
+  const c = sync.getTimeline('C')
+  c.setDraft('draft C')
+  const cBeforeWatch = c.get()
+  const d = sync.getTimeline('D')
+  const dEmpty = d.get()
+  d.setDraft('temp')
+  d.setDraft('')
+
+  await sync.watch('C')
+  closeSocket(4001)
+  expect(c.get()).toBe(cBeforeWatch)
+  expect(d.get()).toBe(dEmpty)
+  await sync.close()
+})

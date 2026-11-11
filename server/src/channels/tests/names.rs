@@ -73,7 +73,10 @@ async fn channel_name_uniqueness_is_scoped_to_organization(pool: PgPool) {
         let organization_id = organization(&pool).await;
         let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
         let channel = create(&app, &token, "Shared", visibility).await;
-        assert_eq!(list(&app, &token).await, json!({"channels": [channel]}));
+        assert_eq!(
+            list(&app, &token).await,
+            json!({"channels": [unread_channel(&channel)]})
+        );
     }
 }
 
@@ -154,7 +157,10 @@ async fn concurrent_duplicate_channel_creates_leave_one_channel(pool: PgPool) {
     }
     assert_eq!(created.len(), 1);
     assert_eq!(conflicts, 7);
-    assert_eq!(list(&app, &token).await, json!({"channels": created}));
+    assert_eq!(
+        list(&app, &token).await,
+        json!({"channels": created.iter().map(unread_channel).collect::<Vec<_>>()})
+    );
     let counts: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM channels WHERE organization_id = $1), \
                 (SELECT count(*) FROM channel_members WHERE organization_id = $1)",

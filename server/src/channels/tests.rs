@@ -103,6 +103,15 @@ async fn list(app: &Router, token: &str) -> Value {
     body(response).await
 }
 
+fn unread_channel(channel: &Value) -> Value {
+    let mut channel = channel.clone();
+    channel["read_seq"] = json!(0);
+    channel["as_of_seq"] = json!(0);
+    channel["main_unread_count"] = json!(0);
+    channel["unread_count"] = json!(0);
+    channel
+}
+
 #[tokio::test]
 async fn channels_require_authentication_without_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -203,9 +212,12 @@ async fn private_channel_is_listed_only_for_its_creator(pool: PgPool) {
     let private = create(&app, &creator, "B private", "private").await;
     assert_eq!(
         list(&app, &creator).await,
-        json!({"channels": [public.clone(), private.clone()]})
+        json!({"channels": [unread_channel(&public), unread_channel(&private)]})
     );
-    assert_eq!(list(&app, &other).await, json!({"channels": [public]}));
+    assert_eq!(
+        list(&app, &other).await,
+        json!({"channels": [unread_channel(&public)]})
+    );
 
     let memberships: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT channel_id, member_id FROM channel_members WHERE organization_id = $1",
@@ -237,8 +249,16 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
     let private_b = create(&app, &token_b, "B private", "private").await;
 
     for (token, foreign, expected) in [
-        (&token_a, second, json!({"channels": [private_a, public_a]})),
-        (&token_b, first, json!({"channels": [private_b, public_b]})),
+        (
+            &token_a,
+            second,
+            json!({"channels": [unread_channel(&private_a), unread_channel(&public_a)]}),
+        ),
+        (
+            &token_b,
+            first,
+            json!({"channels": [unread_channel(&private_b), unread_channel(&public_b)]}),
+        ),
     ] {
         assert_eq!(list(&app, token).await, expected);
         let response = app
@@ -333,7 +353,10 @@ async fn foreign_membership_does_not_grant_private_channel_visibility(pool: PgPo
     .unwrap();
 
     assert_eq!(list(&app, &reader_a).await, json!({"channels": []}));
-    assert_eq!(list(&app, &reader_b).await, json!({"channels": [private]}));
+    assert_eq!(
+        list(&app, &reader_b).await,
+        json!({"channels": [unread_channel(&private)]})
+    );
 }
 
 #[sqlx::test]
@@ -512,7 +535,10 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(list(&app, &token).await, json!({"channels":[public]}));
+    assert_eq!(
+        list(&app, &token).await,
+        json!({"channels":[unread_channel(&public)]})
+    );
     let private_id = private["id"].as_str().unwrap().parse::<Uuid>().unwrap();
     let public_id = public["id"].as_str().unwrap().parse::<Uuid>().unwrap();
     assert!(

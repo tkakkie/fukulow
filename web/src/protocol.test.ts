@@ -552,3 +552,28 @@ it('a late non-401 result of a stale request is ignored and a 401 from a replace
   expect(d.feed({ type: 'send_failed', request: other, status: 401 })).toEqual([])
   expect(d.get().session).toBe('signed_in')
 })
+
+it('step reports only added, modified and removed Channel IDs in changedChannels', () => {
+  const d = boot()
+  const added = step(d.get(), { type: 'watch', channel: 'B' })
+  expect(added.changedChannels).toEqual(new Set(['B']))
+  const bHistory = id(added.effects, 'fetch_history')
+  let state = step(added.state, { type: 'history_result', request: bHistory, page: { messages: [record(1, 'B')], has_more: false } }).state
+  state = step(state, { type: 'event', connection: d.connection, event: { type: 'subscribed', channel_id: 'B', caught_up_seq: 1 } }).state
+
+  const noop = step(state, { type: 'event', connection: d.connection, event: { type: 'message', message: { ...record(100) } } })
+  expect(noop.changedChannels).toEqual(new Set())
+
+  const updated = step(state, { type: 'event', connection: d.connection, event: { type: 'message', message: record(101) } })
+  expect(updated.changedChannels).toEqual(new Set(['A']))
+
+  const send = step(updated.state, { type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hi' })
+  const sendReq = id(send.effects, 'send')
+  expect(step(send.state, { type: 'send_failed', request: sendReq, status: 401 }).changedChannels)
+    .toEqual(new Set(['A', 'B']))
+  expect(step(updated.state, { type: 'socket_closed', connection: d.connection, code: 4001 }).changedChannels)
+    .toEqual(new Set(['A', 'B']))
+  expect(step(updated.state, { type: 'stop' }).changedChannels).toEqual(new Set(['A', 'B']))
+  expect(step(updated.state, { type: 'session_replaced', selfId: 'other' }).changedChannels)
+    .toEqual(new Set(['A', 'B']))
+})
