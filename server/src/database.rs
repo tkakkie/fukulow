@@ -1,5 +1,18 @@
 use sqlx::{PgPool, migrate::MigrateError};
 
+pub async fn migrate_and_grant(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'fukulow_app')")
+            .fetch_one(pool)
+            .await?;
+    if !exists {
+        return Err("Database role fukulow_app is missing; run `migrate roles` first".into());
+    }
+    migrate(pool).await?;
+    grants(pool).await?;
+    Ok(())
+}
+
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     let mut connection = pool.acquire().await?;
     // Discard the migration-only timeout and advisory lock on every exit.
@@ -35,6 +48,9 @@ pub async fn roles(pool: &PgPool, password: &str) -> Result<(), Box<dyn std::err
 async fn update_roles(pool: &PgPool, password: &str) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::raw_sql(include_str!("../../deploy/db-role-settings.sql"))
         .execute(&mut *transaction)
         .await?;
     sqlx::query("SELECT set_config('fukulow.app_password', $1, true)")

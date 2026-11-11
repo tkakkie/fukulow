@@ -8,8 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         [] => {}
         [command] if command == "migrate" => {
             let pool = migration_pool().await?;
-            fukulow_server::database::migrate(&pool).await?;
-            fukulow_server::database::grants(&pool).await?;
+            fukulow_server::database::migrate_and_grant(&pool).await?;
             return Ok(());
         }
         [command, action] if command == "migrate" && action == "roles" => {

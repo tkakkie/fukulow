@@ -7,6 +7,13 @@ const cwd = fileURLToPath(new URL('..', import.meta.url))
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
 const args = (profile: string) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', '--profile', profile, 'config', '--format', 'json']
 
+test('upgrade rehearsal pins both old images for the post-merge Compose shape', () => {
+  // HEAD is available even in CI's shallow checkout and has the post-merge shape.
+  const output = execFileSync(process.execPath, ['scripts/check-db-upgrade.ts', '--check-config'],
+    { cwd, env: { PATH: process.env.PATH, CHECK_UPGRADE_REVISION: 'HEAD' }, encoding: 'utf8' })
+  assert.match(output, /PASS old stack images: app=.+ migrate=true/)
+})
+
 test('both profiles require a nonempty setup token before starting containers', () => {
   for (const profile of ['caddy', 'nginx']) {
     for (const token of [undefined, '']) {

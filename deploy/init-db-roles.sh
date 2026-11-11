@@ -6,6 +6,7 @@ set -euo pipefail
 if ! psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<'SQL'
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+\i /opt/fukulow/db-role-settings.sql
 \getenv app_password POSTGRES_APP_PASSWORD
 SELECT set_config('fukulow.app_password', :'app_password', true);
 \i /opt/fukulow/db-roles.sql

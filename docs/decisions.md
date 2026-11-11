@@ -15,12 +15,13 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - PostgreSQL 17+ is required (`transaction_timeout`); on older servers every send/subscription fails loudly. Compose and CI use 18; no startup check (#158).
 - Dependabot security updates were enabled on 2026-11-08 but no security PR has been seen, so do not claim they work. VPS automatic OS security updates are planned with the deploy work.
 
-- #194 B: shared initdb/explicit roles SQL keeps `fukulow` owner and updates `fukulow_app` without changing rows. Bound/quoted password input and server literal quoting avoid injection; role-update diagnostics are hidden. Reject ownership/memberships rather than silently reassigning them.
+- #194 B: shared initdb/explicit roles SQL keeps `fukulow` owner and updates `fukulow_app` without changing rows. Bind/quote passwords after transaction-local log/nested-stat suppression; fail closed without settings rights. Reject ownership/memberships rather than reassigning them.
 - #194 B: grant DML/sequence USAGE by default for future owner-created objects; normalize migration history to SELECT after migrating. Revoke public CREATE/TEMP so indirect privileges cannot bypass trigger protection. Reapply grants after #198 no-ACL restore.
 
 ## Rules, CI and AI process
 - Rules have tiers: Absolute (CI only with a reliable check), Default (deviation needs a PR line), Free. Reason: hard rules without a good check push AIs into awkward code; boundaries and tenant isolation are worth enforcing (#29).
 - One crate with module boundaries, each module owning its tables. Reason: cross-crate refactors are costly for AI-driven work; revisit when build time, dependencies or conflicts hurt.
+- #194 B: `database` is composition-level deployment/startup plumbing, outside the four domain modules traced by module direction; review enforces that it never depends on them.
 - #200 adds `docs/ui.md` as a doc kind for web UI rules. Reason: several AIs build screens in parallel; one short rule set keeps look, states, focus and copy consistent without re-deciding per PR.
 - Minimal docs. Reason: AI credit cost. `AGENTS.md` holds always-needed rules, `docs/workflow.md` procedures that change more often, so an AI keeps going alone and stops only on a human decision (#101, #174).
 - `organization_id` exemptions and why: `organizations` (tenant root), `_sqlx_migrations` (SQLx bookkeeping), `accounts` and `account_sessions` (global Account data). The same names in another schema are not exempt.

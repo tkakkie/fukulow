@@ -1,5 +1,6 @@
 use super::*;
 use fukulow_server::database::{grants, roles, validate_migrations};
+use futures_util::FutureExt;
 use sqlx::postgres::PgPoolOptions;
 
 async fn app_pool(owner: &PgPool, password: &str) -> Result<PgPool, sqlx::Error> {
@@ -16,11 +17,30 @@ async fn app_pool(owner: &PgPool, password: &str) -> Result<PgPool, sqlx::Error>
         .await
 }
 
+async fn role_settings(owner: &PgPool) -> Vec<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT ARRAY[current_setting('log_statement'), current_setting('log_min_messages'), \
+         current_setting('log_parameter_max_length'), current_setting('log_parameter_max_length_on_error'), \
+         current_setting('pg_stat_statements.track', true)]",
+    )
+    .fetch_one(owner)
+    .await
+    .unwrap()
+}
+
 pub(super) async fn check_app_role(owner: PgPool) {
+    // Reuse one connection so leakage of transaction-local settings is observable.
+    let owner = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(owner.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let settings = role_settings(&owner).await;
     // Keep the cluster-wide role/password lifecycle in one test to avoid rotation races.
     // Exercise quotes, backslashes and SQL-looking input without a password in SQL.
     let original = "role-test-only-'\\; DROP TABLE users; --";
     roles(&owner, original).await.unwrap();
+    assert_eq!(role_settings(&owner).await, settings);
     let app = app_pool(&owner, original).await.unwrap();
     validate_migrations(&app).await.unwrap();
     let flags: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
@@ -104,7 +124,12 @@ pub(super) async fn check_app_role(owner: PgPool) {
         "DROP TABLE future_role_test",
         "ALTER SEQUENCE future_role_test_id_seq RESTART",
     ] {
-        assert!(sqlx::raw_sql(statement).execute(&app).await.is_err());
+        let error = sqlx::raw_sql(statement).execute(&app).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("42501"),
+            "{statement}: {error}"
+        );
     }
 
     // Reapplying fixes excess direct grants and updates the existing role's password.
@@ -118,32 +143,40 @@ pub(super) async fn check_app_role(owner: PgPool) {
     let app = app_pool(&owner, updated).await.unwrap();
     grants(&owner).await.unwrap();
     validate_migrations(&app).await.unwrap();
-    assert!(
-        sqlx::query("TRUNCATE messages CASCADE")
-            .execute(&app)
-            .await
-            .is_err()
-    );
-    assert!(
-        sqlx::query("CREATE TABLE denied (organization_id uuid NOT NULL)")
-            .execute(&app)
-            .await
-            .is_err()
-    );
+    for statement in [
+        "TRUNCATE messages CASCADE",
+        "CREATE TABLE denied (organization_id uuid NOT NULL)",
+    ] {
+        let error = sqlx::raw_sql(statement).execute(&app).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("42501"),
+            "{statement}: {error}"
+        );
+    }
     assert!(roles(&owner, "").await.is_err());
     sqlx::query("ALTER TABLE future_role_test OWNER TO fukulow_app")
         .execute(&owner)
         .await
         .unwrap();
-    let error = roles(&owner, "rejected-role-test-only").await.unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "Database roles update failed (diagnostics suppressed)"
-    );
+    // Restore cluster-global ownership even if the rejection assertion panics.
+    let result = std::panic::AssertUnwindSafe(async {
+        let error = roles(&owner, "rejected-role-test-only").await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Database roles update failed (diagnostics suppressed)"
+        );
+    })
+    .catch_unwind()
+    .await;
     sqlx::query("ALTER TABLE future_role_test OWNER TO CURRENT_USER")
         .execute(&owner)
         .await
         .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(role_settings(&owner).await, settings);
     let flags: (bool, bool) = sqlx::query_as(
         "SELECT rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = 'fukulow_app'",
     )
@@ -155,4 +188,5 @@ pub(super) async fn check_app_role(owner: PgPool) {
     let still_works = app_pool(&owner, updated).await.unwrap();
     still_works.close().await;
     app.close().await;
+    owner.close().await;
 }
