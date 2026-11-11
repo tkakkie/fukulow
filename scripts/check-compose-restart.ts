@@ -14,6 +14,7 @@ const directory = mkdtempSync(join(tmpdir(), 'fukulow-restart-'))
 const override = join(directory, 'restart.yml')
 const stop = new AbortController()
 const env = { ...process.env, CHECK_IMAGE: image, POSTGRES_PASSWORD: 'restart-check-only', FUKULOW_SETUP_TOKEN: 'restart-setup-test-only',
+  POSTGRES_APP_PASSWORD: 'restart-app-test-only',
   // Separate from deployment defaults and the security check's second-octet range.
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(192, 256)}.${randomInt(256)}` }
 const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
@@ -96,6 +97,8 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 
 try {
   writeFileSync(override, `services:
+  migrate:
+    image: \${CHECK_IMAGE}
   app:
     image: \${CHECK_IMAGE}
     container_name: ${project}-app

@@ -8,16 +8,20 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - OpenAPI generated from Rust, committed, diff-checked in CI. Reason: future native clients (Kotlin).
 - `organization_id` on every table from day one. Reason: multi-organization later without retrofit.
 - Public repo. Reason: free CI minutes.
-- Migrations run at startup before listening. PostgreSQL 18 persists under `/var/lib/postgresql` (its new data path).
+- #194 B: one-shot `migrate` holds owner credentials; app waits for success and only validates migration versions/checksums/state. Owner credentials stay out of app. PostgreSQL 18 persists under `/var/lib/postgresql`.
 - Deployment is single-process: live delivery, revocation, throttles and admission are process-local. Multiple server processes need shared publication/revocation and a shared limiter first (#18, #57).
 - #195: shutdown also returns 503 for non-API paths, including static assets and SPA routes; these middleware rejections are outside OpenAPI.
-- A second instance blocked on the migration advisory lock past the 5 s timeout fails startup and relies on Compose `restart: unless-stopped` to retry (#88, #93).
+- #194 B: migration advisory/DDL lock waits fail after 5 s (#88, #93). The one-shot service does not restart automatically; operators resolve the blocker and rerun, keeping app stopped on failure.
 - PostgreSQL 17+ is required (`transaction_timeout`); on older servers every send/subscription fails loudly. Compose and CI use 18; no startup check (#158).
 - Dependabot security updates were enabled on 2026-11-08 but no security PR has been seen, so do not claim they work. VPS automatic OS security updates are planned with the deploy work.
+
+- #194 B: shared initdb/explicit roles SQL keeps `fukulow` owner and updates `fukulow_app` without changing rows. Bind/quote passwords after transaction-local log/nested-stat suppression; fail closed without settings rights. Reject ownership/memberships rather than reassigning them.
+- #194 B: grant DML/sequence USAGE by default for future owner-created objects; normalize migration history to SELECT after migrating. Revoke public CREATE/TEMP so indirect privileges cannot bypass trigger protection. Reapply grants after #198 no-ACL restore.
 
 ## Rules, CI and AI process
 - Rules have tiers: Absolute (CI only with a reliable check), Default (deviation needs a PR line), Free. Reason: hard rules without a good check push AIs into awkward code; boundaries and tenant isolation are worth enforcing (#29).
 - One crate with module boundaries, each module owning its tables. Reason: cross-crate refactors are costly for AI-driven work; revisit when build time, dependencies or conflicts hurt.
+- #194 B: `database` is composition-level deployment/startup plumbing, outside the four domain modules traced by module direction; review enforces that it never depends on them.
 - #200 adds `docs/ui.md` as a doc kind for web UI rules. Reason: several AIs build screens in parallel; one short rule set keeps look, states, focus and copy consistent without re-deciding per PR.
 - Minimal docs. Reason: AI credit cost. `AGENTS.md` holds always-needed rules, `docs/workflow.md` procedures that change more often, so an AI keeps going alone and stops only on a human decision (#101, #174).
 - `organization_id` exemptions and why: `organizations` (tenant root), `_sqlx_migrations` (SQLx bookkeeping), `accounts` and `account_sessions` (global Account data). The same names in another schema are not exempt.
@@ -160,7 +164,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #163 manual check: `node scripts/check-compose-restart.ts` verifies `restart: unless-stopped` after killing the real main process (host-PID helper when in-container SIGKILL is ignored); Rust tests cover the panic path.
 
 ## Admission and timeouts
-- #88 bounds startup migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
+- #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
 - Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).
 - The budget is partitioned (#156, #158): sends round up, watermarks round down (8 each in production), no borrowing; per Organization/Channel at most one send and four watermarks. No per-Organization DB admission reservation.
 - #156 chose bounded admission outside the pool over short-wait or try advisory locks: a DB lock wait still holds a connection, and try-lock turns normal contention into repeated 1011/reconnect and send failures.

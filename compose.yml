@@ -7,20 +7,33 @@ services:
     restart: unless-stopped
     environment:
       FUKULOW_ADDR: 0.0.0.0:8080
-      DATABASE_URL: postgres://fukulow:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/fukulow
+      DATABASE_URL: postgres://fukulow_app:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}@db:5432/fukulow
       FUKULOW_COOKIE_SECURE: ${FUKULOW_COOKIE_SECURE:-true}
       FUKULOW_WS_ALLOWED_ORIGINS:
       FUKULOW_SETUP_TOKEN: ${FUKULOW_SETUP_TOKEN:?Set FUKULOW_SETUP_TOKEN in .env}
       FUKULOW_TRUSTED_PROXIES: ${FUKULOW_EDGE_PREFIX:-172.30.94}.2
       FUKULOW_CLIENT_IP_HEADER: x-forwarded-for
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     networks:
       edge:
         # Reserve a separate address so Docker cannot give the app the proxy's IP.
         ipv4_address: ${FUKULOW_EDGE_PREFIX:-172.30.94}.3
       backend:
+
+  migrate:
+    image: fukulow-app
+    entrypoint: ["fukulow-server", "migrate"]
+    command: []
+    restart: "no"
+    networks: [backend]
+    environment:
+      DATABASE_URL: postgres://fukulow:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/fukulow
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: postgres:18
@@ -30,8 +43,13 @@ services:
       POSTGRES_USER: fukulow
       POSTGRES_DB: fukulow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}
     volumes:
       - postgres_data:/var/lib/postgresql
+      - ./deploy/init-db-roles.sh:/docker-entrypoint-initdb.d/10-db-roles.sh:ro
+      - ./deploy/db-roles.sql:/opt/fukulow/db-roles.sql:ro
+      - ./deploy/db-role-settings.sql:/opt/fukulow/db-role-settings.sql:ro
+      - ./deploy/db-grants.sql:/opt/fukulow/db-grants.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fukulow -d fukulow"]
       interval: 2s

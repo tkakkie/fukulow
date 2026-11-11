@@ -941,6 +941,10 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
 
 #[sqlx::test]
 async fn session_cannot_access_another_organization(pool: PgPool) {
+    check_tenant_denials(pool).await;
+}
+
+async fn check_tenant_denials(pool: PgPool) {
     let app = router(&pool);
     let first = setup(&app).await;
     let first_id = first["organization"]["organization_id"]
@@ -1479,6 +1483,10 @@ async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: Pg
 
 #[sqlx::test]
 async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool: PgPool) {
+    check_member_identity(pool).await;
+}
+
+async fn check_member_identity(pool: PgPool) -> Value {
     let app = router(&pool);
     let identity = setup(&app).await;
     let organization: Uuid = identity["organization"]["organization_id"]
@@ -1526,28 +1534,38 @@ async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool:
     .unwrap();
     assert_eq!(member.to_string(), identity["member"]["id"]);
     assert_eq!(revision, 1);
+    identity
 }
 
 #[sqlx::test]
 async fn member_truncate_is_refused_and_preserves_history(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
+    check_member_truncate(pool, identity, "P0001").await;
+}
+
+async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &str) {
     let error = sqlx::query("TRUNCATE users CASCADE")
         .execute(&pool)
         .await
         .unwrap_err();
-    assert!(
-        error
-            .as_database_error()
-            .unwrap()
-            .message()
-            .contains("Member rows must never be truncated")
-    );
-    let member: Uuid = sqlx::query_scalar("SELECT id FROM users")
+    let error = error.as_database_error().unwrap();
+    assert_eq!(error.code().as_deref(), Some(expected_code));
+    if expected_code == "P0001" {
+        assert!(
+            error
+                .message()
+                .contains("Member rows must never be truncated")
+        );
+    }
+    // check_member_identity adds a guard Owner (#221 last-Owner rule): look up the setup Member.
+    let member: Uuid = identity["member"]["id"].as_str().unwrap().parse().unwrap();
+    let preserved: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM users WHERE id = $1)")
+        .bind(member)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(member.to_string(), identity["member"]["id"]);
+    assert!(preserved);
 }
 
 #[sqlx::test]
@@ -2006,6 +2024,16 @@ async fn web_and_native_share_account_and_ip_failure_budgets(pool: PgPool) {
             assert_throttled(response).await;
         }
     }
+}
+
+#[path = "support/database_roles.rs"]
+mod database_roles;
+
+#[sqlx::test]
+async fn app_role_denies_ddl_and_both_memberships_and_preserves_member_and_tenant_protection(
+    pool: PgPool,
+) {
+    database_roles::check_app_role(pool).await;
 }
 
 async fn additional_owner(pool: &PgPool, organization: Uuid) -> Uuid {

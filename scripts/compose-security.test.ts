@@ -4,8 +4,15 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
-const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
+const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
 const args = (profile: string) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', '--profile', profile, 'config', '--format', 'json']
+
+test('upgrade rehearsal pins both old images for the post-merge Compose shape', () => {
+  // HEAD is available even in CI's shallow checkout and has the post-merge shape.
+  const output = execFileSync(process.execPath, ['scripts/check-db-upgrade.ts', '--check-config'],
+    { cwd, env: { PATH: process.env.PATH, CHECK_UPGRADE_REVISION: 'HEAD' }, encoding: 'utf8' })
+  assert.match(output, /PASS old stack images: app=.+ migrate=true/)
+})
 
 test('both profiles require a nonempty setup token before starting containers', () => {
   for (const profile of ['caddy', 'nginx']) {
@@ -20,10 +27,45 @@ test('both profiles require a nonempty setup token before starting containers', 
 test('the shipped deployment example cannot start either profile without a setup token', () => {
   for (const profile of ['caddy', 'nginx']) {
     const result = spawnSync('docker', ['compose', '--env-file', '.env.example', '-f', 'compose.yml', '--profile', profile, 'config'],
-      { cwd, env: { PATH: process.env.PATH }, encoding: 'utf8' })
+      { cwd, env: { PATH: process.env.PATH, POSTGRES_APP_PASSWORD: env.POSTGRES_APP_PASSWORD }, encoding: 'utf8' })
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, /FUKULOW_SETUP_TOKEN/)
   }
+})
+
+test('both profiles require an app password and keep owner credentials outside app', () => {
+  for (const profile of ['caddy', 'nginx']) {
+    for (const password of [undefined, '']) {
+      const result = spawnSync('docker', args(profile), { cwd, env: { ...env, POSTGRES_APP_PASSWORD: password }, encoding: 'utf8' })
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /POSTGRES_APP_PASSWORD/)
+    }
+    const { services: { app, migrate } } = JSON.parse(execFileSync('docker', args(profile), { cwd, env, encoding: 'utf8' }))
+    assert.equal(app.environment.DATABASE_URL, `postgres://fukulow_app:${env.POSTGRES_APP_PASSWORD}@db:5432/fukulow`)
+    assert.ok(!Object.values(app.environment).some(value => String(value).includes(env.POSTGRES_PASSWORD)))
+    assert.equal(app.environment.POSTGRES_APP_PASSWORD, undefined)
+    assert.equal(app.environment.POSTGRES_PASSWORD, undefined)
+    assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
+    assert.deepEqual(Object.keys(migrate.networks), ['backend'])
+    assert.equal(migrate.environment.DATABASE_URL, `postgres://fukulow:${env.POSTGRES_PASSWORD}@db:5432/fukulow`)
+    assert.deepEqual(migrate.entrypoint, ['fukulow-server', 'migrate'])
+    assert.deepEqual(migrate.command, [])
+    assert.equal(migrate.restart, 'no')
+  }
+})
+
+test('the disposable load stack also separates owner migrations from app credentials', () => {
+  const loadEnv = { PATH: process.env.PATH, LOAD_PROJECT: 'roles-config-test', LOAD_PORT: '18194',
+    LOAD_DB_PASSWORD: 'load-owner-config-test-only', LOAD_APP_PASSWORD: 'load-app-config-test-only',
+    LOAD_SETUP_TOKEN: 'load-setup-config-test-only' }
+  const loadArgs = ['compose', '--env-file', '/dev/null', '-f', 'load/compose.yml', 'config', '--format', 'json']
+  const { services: { app, migrate } } = JSON.parse(execFileSync('docker', loadArgs, { cwd, env: loadEnv, encoding: 'utf8' }))
+  assert.equal(app.environment.DATABASE_URL, `postgres://fukulow_app:${loadEnv.LOAD_APP_PASSWORD}@db:5432/fukulow`)
+  assert.equal(migrate.environment.DATABASE_URL, `postgres://fukulow:${loadEnv.LOAD_DB_PASSWORD}@db:5432/fukulow`)
+  assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
+  const result = spawnSync('docker', loadArgs, { cwd, env: { ...loadEnv, LOAD_APP_PASSWORD: undefined }, encoding: 'utf8' })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /LOAD_APP_PASSWORD/)
 })
 
 test('both profiles isolate the database and trust only the fixed proxy IP, including custom prefixes', () => {
