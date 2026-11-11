@@ -59,8 +59,9 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 Rows that also govern this area, listed by a test name from the row in that part.
 
-- [auth](auth.md): `added_error_responses_have_error_body_and_meaningful_descriptions`, `session_signals_are_scoped_latched_and_released_with_last_socket`, `failed_epoch_closes_but_new_epoch_checks_current_database`, `latched_membership_at_connect_yields_4003_and_session_end_wins`, `legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_on_http`
-- [channels](channels.md): `public_authorization_skips_membership_sql_but_checks_organization_and_channel`, `guest_visibility_requires_explicit_current_grants_and_role_is_read_afresh`, `noop_grant_mutations_skip_subscription_rechecks`, `fast_subscription_rechecks_and_failures_are_scoped`
-- [messages](messages.md): `notification_cancelled_before_first_poll_signals_only_its_organization_channel`, `coalesced_failures_latch_all_epochs_without_closing_later_subscribers`, `frame_live_and_ping_traffic_does_not_repoll_failure_waits`, `send_saturation_cannot_take_reserved_watermark_capacity`, `shared_gap_recovery_accepts_one_page_and_latches_above_the_bound`, `global_notification_execution_saturation_latches_without_leaking_reservations`
-- [topics](topics.md): `send_completes_while_topic_projection_query_is_paused`
-- [deployment](deployment.md): `generated_openapi_matches_committed_contract`
+- [auth](auth.md): `sign_out_burst_over_1024_keeps_unrelated_sessions_open`, `failed_check_result_cannot_fail_reconnected_epoch`, `latched_membership_at_connect_yields_4003_and_session_end_wins`, `secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie`
+- [channels](channels.md): `notification_rechecks_public_visibility_after_http_response`, `guest_visibility_requires_explicit_current_grants_and_role_is_read_afresh`, `observed_loss_blocks_new_frame_handoff_but_allows_only_the_inflight_frame`, `noop_grant_mutations_skip_subscription_rechecks`, `fast_subscription_rechecks_and_failures_are_scoped`
+- [messages](messages.md): `notification_timeout_signals_and_releases_capacity`, `coalesced_failures_latch_all_epochs_without_closing_later_subscribers`, `spawned_wait_keeps_topology_and_epoch_races_latched`, `send_saturation_cannot_take_reserved_watermark_capacity`, `shared_gap_recovery_accepts_one_page_and_latches_above_the_bound`, `held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturation`
+- [topics](topics.md): `shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish`, `send_completes_while_topic_projection_query_is_paused`
+- [replies](replies.md): `reply_live_replay_member_revision_and_removed_grant_denials_have_positive_controls`
+- [deployment](deployment.md): `generated_openapi_matches_committed_contract`, `channel_list_database_failure_returns_generic_500`

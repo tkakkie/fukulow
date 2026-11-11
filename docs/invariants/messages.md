@@ -43,8 +43,8 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 Rows that also govern this area, listed by a test name from the row in that part.
 
-- [auth](auth.md): `added_error_responses_have_error_body_and_meaningful_descriptions`
 - [channels](channels.md): `session_cannot_access_another_organization`
-- [topics](topics.md): `topic_live_replay_cross_organization_and_private_nonmember_denials_have_positive_controls`
-- [realtime](realtime.md): `ambiguous_commit_rollback_allows_gap_free_same_key_retry`, `shared_gap_query_failure_latches_only_affected_channel_for_replay`, `organization_cap_preserves_other_organization_live_delivery_and_replays_affected_channel`
-- [web](web.md): `keeps independent Account Session drafts by Organization, Channel, Topic and Reply root`
+- [topics](topics.md): `shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish`
+- [realtime](realtime.md): `ambiguous_commit_rollback_allows_gap_free_same_key_retry`, `shared_gap_query_failure_latches_only_affected_channel_for_replay`, `organization_cap_rejection_is_channel_scoped_and_releases_partial_reservations`
+- [web](web.md): `sign-out, expiry, 401 and Account replacement drop every Organization draft`, `a send ACK, refusal and late refusal after settlement preserve text typed after submit in the Account Session store`, `A to B to A shows a late 409 restore in the current Composer without user action`
+- [deployment](deployment.md): `channel_list_database_failure_returns_generic_500`

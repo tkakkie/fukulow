@@ -28,8 +28,9 @@ Web real-time client: protocol, sync controller, Organization sync, shared contr
 
 Rows that also govern this area, listed by a test name from the row in that part.
 
-- [messages](messages.md): `send_admission_expiry_returns_503_without_persisting_and_releases_slot`
-- [topics](topics.md): `topic_ack_history_live_reconnect_and_shared_gap_payloads_are_identical`, `initial timeline history below W settles an unknown own send without duplicate display`, `current projection 403 and 404 refuse Channel sends and retries while other Channels remain usable`
-- [replies](replies.md): `reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_match`, `reply_openapi_contract_has_nullable_membership_send_target_and_bounded_chain_projection`
+- [messages](messages.md): `treats admission 503 as retryable and preserves the send key`
+- [topics](topics.md): `forwards Topic Messages without losing their generated topic_id`, `initial timeline history below W settles an unknown own send without duplicate display`, `a main read superseded by bootstrap cannot cause a late C9 denial`
+- [replies](replies.md): `reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_match`, `validates running Reply delivery labels and pages`
+- [unread](unread.md): `refetches counts after bootstrap covers history newer than the initial Channel-list snapshot`
 - [realtime](realtime.md): `timeline_contract_rejects_incorrect_pages`
-- [web](web.md): `releases its listener with the last observer, without closing the controller or dropping sync state`, `an explicit retry loads the Channel again, and selecting it again watches it again`, `ordinary REST organization_unavailable ends only its Organization`
+- [web](web.md): `releases its controller listener with the last observer`, `an unavailable Channel stays in the session: no sign-out and no automatic retry`, `a REST 401 after a handshake failure ends the Account Session`

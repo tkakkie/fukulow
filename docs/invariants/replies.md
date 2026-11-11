@@ -36,3 +36,9 @@ Reply chains, server and web, incl. their real-time delivery tests. Writing rule
 | Reply controller session replacement clears chains and cancels reads before sync teardown | `web/src/replies.test.ts::Reply controller replacement clears chains before sync teardown and cancels outstanding reads` |
 | Reply adapters open anchors only in their bound Channel; mismatches neither fetch nor replace either Channel chain | `web/src/replies.svelte.test.ts::opens only anchors from the adapter Channel and preserves both chains on a mismatch` |
 | Shared Reply denial fixtures distinguish chain errors, Channel-only C9 and Organization-wide C10 | `web/src/reply-projections.test.ts::runs all shared Reply projections through createReplySync`, `web/src/reply-projections.test.ts::rejects incorrect chain errors and Channel or Organization denial scope` |
+
+## Rows in other parts
+
+Rows that also govern this area, listed by a test name from the row in that part.
+
+- [web](web.md): `reselecting the same Channel target never writes History, including an open tab`, `close settles every stalled Topic and Reply load without publishing or Channel denial`

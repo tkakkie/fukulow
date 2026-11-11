@@ -36,3 +36,4 @@ Rows that also govern this area, listed by a test name from the row in that part
 - [channels](channels.md): `management_rechecks_demoted_deactivated_stale_and_removed_actors`
 - [messages](messages.md): `unread_mark_and_removal_serialize_without_recreating_revoked_positions`
 - [realtime](realtime.md): `delivery_contract_rejects_incorrect_unread_counts_and_positions`, `idle_all_sessions_and_effective_loss_preserve_other_channels_and_redundant_grants`
+- [sync](sync.md): `unread-events-before-rest-late-duplicate-and-replay`

@@ -25,5 +25,5 @@ Web UI shell: sign-in/session UI, navigation, tokens, timeline, a11y, setup. Wri
 
 Rows that also govern this area, listed by a test name from the row in that part.
 
-- [messages](messages.md): `send_admission_expiry_returns_503_without_persisting_and_releases_slot`, `clearing drafts invalidates every old Account Session view without fencing Organization switches`
-- [topics](topics.md): `ensureSummary bounds automatic retries on persistent 503 and network failures, enters terminal retryable error, and restarts on explicit retry or new generation`
+- [messages](messages.md): `treats admission 503 as retryable and preserves the send key`, `an admission refusal cannot restore a draft after the Account Session store was cleared`
+- [topics](topics.md): `retains Topic window, baselines and paging cursors across C9 loss and same-Channel recovery with replay`
