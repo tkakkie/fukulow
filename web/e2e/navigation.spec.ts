@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { createChannel, signInOwner } from './helpers.ts'
 
 let org: string
 let first: string
@@ -7,25 +8,9 @@ let firstName: string
 let secondName: string
 
 test.beforeEach(async ({ page }) => {
-  const setup = await page.request.get('/api/v1/setup')
-  expect(setup.ok()).toBe(true)
-  if ((await setup.json()).setup_required) {
-    const response = await page.request.post('/api/v1/setup', { data: {
-      organization_name: 'Acme', name: 'Alice', email: 'owner@example.com', password: 'correct horse battery',
-      setup_token: process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only',
-    } })
-    expect(response.ok()).toBe(true)
-  }
-  const login = await page.request.post('/api/v1/session', { data: { email: 'owner@example.com', password: 'correct horse battery' } })
-  expect(login.ok()).toBe(true)
-  org = (await login.json()).identity.organizations[0].organization_id
-  const create = async (name: string) => {
-    const response = await page.request.post(`/api/v1/orgs/${org}/channels`, { data: { name: `${name}-${crypto.randomUUID()}`, visibility: 'public' } })
-    expect(response.ok()).toBe(true)
-    return await response.json() as { id: string; name: string }
-  }
-  const a = await create('Navigation one')
-  const b = await create('Navigation two')
+  org = await signInOwner(page.request)
+  const a = await createChannel(page.request, org, `Navigation one-${crypto.randomUUID()}`)
+  const b = await createChannel(page.request, org, `Navigation two-${crypto.randomUUID()}`)
   first = a.id; firstName = a.name
   second = b.id; secondName = b.name
 })

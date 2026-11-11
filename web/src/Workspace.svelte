@@ -120,7 +120,7 @@
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
     if (organization?.member.id === senderId) return organization.member.name
-    return 'メンバー'
+    return members?.state.members.find((member) => member.id === senderId)?.name ?? 'メンバー'
   }
 
   $effect(() => () => announcementController.destroy())
