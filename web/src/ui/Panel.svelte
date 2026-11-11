@@ -51,7 +51,13 @@
   }
 </script>
 
-<aside {id} class="ui-panel" class:ui-panel--reply={mode === 'reply'} aria-label={ariaLabel} tabindex="-1">
+<aside
+  {id}
+  class="ui-panel"
+  class:ui-panel--reply={mode === 'reply'}
+  aria-label={mode === 'reply' ? '返信のつながり' : ariaLabel}
+  tabindex="-1"
+>
   <header class="ui-panel__header">
     <div class="ui-panel__title-row">
       {#if showBack && onback}

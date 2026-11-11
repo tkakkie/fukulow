@@ -3477,6 +3477,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const panel = host.querySelector('#panel-content')
     expect(panel).not.toBeNull()
+    expect(panel!.tagName.toLowerCase()).toBe('aside')
+    expect(panel!.getAttribute('aria-label')).toBe('返信のつながり')
     expect(panel!.querySelector('h2')?.textContent).toBe('返信のつながり')
     expect(panel!.textContent).toContain('タイムライン親メッセージ')
     expect(panel!.textContent).toContain('既存の返信1')
@@ -3557,7 +3559,10 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     expect(testDoc.activeElement).toBe(railChannelBtn)
 
-    // Close panel before testing Topic view
+    // Close panel before testing Topic view; verify tabs mode keeps complementary landmark name 詳細パネル
+    navigation.navigate({ type: 'tab', tab: 'overview' })
+    flushSync()
+    expect(host.querySelector('aside#panel-content')?.getAttribute('aria-label')).toBe('詳細パネル')
     navigation.navigate({ type: 'close' })
     flushSync()
     await settle()
