@@ -169,9 +169,11 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     if (queuedList) { queuedList = false; void refresh() }
   }
+  const needsRecovery = (c: Channel, s: Scope) => s.error || (s.baseline !== undefined &&
+    (s.baseline.asOfSeq < c.requiredBase || s.baseline.readSeq < s.requiredPosition))
   function count(id: string, c: Channel, topic: string | null, records: Iterable<Message> = c.records.values()): number | null {
     const s = getScope(c, topic)
-    if (!s.baseline || s.baseline.asOfSeq < c.requiredBase || s.baseline.readSeq < s.requiredPosition || s.error || s.stopped || c.stopped || c.error) return null
+    if (!s.baseline || needsRecovery(c, s) || s.stopped || c.stopped || c.error) return null
     return scopeCount(s.baseline, s.position, records, { channel: id, topicId: topic }, sync.get().selfId)
   }
   function aggregateCount(id: string, c: Channel): number | null {
@@ -396,7 +398,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     fence(channel, c); prune(c); notify()
     if (!c.stopped) {
       if (c.requiredAfter > 0 || c.main.error) void refresh()
-      for (const [topic, s] of c.topics) if (s.baseline && s.baseline.readSeq < s.requiredPosition) void refreshTopic(channel, topic)
+      for (const [topic, s] of c.topics) if (!s.stopped && needsRecovery(c, s) &&
+        !c.summaryReads.has(topic) && !c.summaryTimers.has(topic)) void refreshTopic(channel, topic)
     }
   }
   if (active()) { reconcile(); void refresh() }
