@@ -19,7 +19,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [auth](auth.md): `startup_requires_setup_token_regardless_of_cookie_security`, `proxy_cidrs_match_only_peers_in_the_configured_networks`
 - [topics](topics.md): `topic_openapi_contract_includes_all_shapes_and_discriminators`
