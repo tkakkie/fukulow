@@ -10,7 +10,9 @@
   import CreateChannelForm from './CreateChannelForm.svelte'
   import {
     focusAfterPanelClose,
+    focusChannelList,
     focusTarget,
+    resolveChannelListNavigation,
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
@@ -89,6 +91,8 @@
     }),
   )
 
+  let channelNavRef = $state<HTMLElement | null>(null)
+  let channelScrollRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
@@ -188,9 +192,31 @@
     else openPanel()
   }
 
+  const FOCUSABLE_IN_CHANNEL_COLUMN =
+    'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+
   function goToChannelList() {
-    drawerOpen = true
-    mobileLevel = 'channels'
+    const width = typeof window !== 'undefined' ? window.innerWidth : viewportWidth
+    viewportWidth = width
+    const next = resolveChannelListNavigation(width)
+    drawerOpen = next.drawerOpen
+    mobileLevel = next.mobileLevel
+    void tick().then(() => {
+      const selectedChannel =
+        channelNavRef?.querySelector<HTMLElement>('.channel-list button[aria-current="true"]:not(:disabled)') ?? null
+      const channelButtons = channelNavRef
+        ? Array.from(channelNavRef.querySelectorAll<HTMLElement>('.channel-list button:not(:disabled)'))
+        : []
+      const fallbackControls = channelScrollRef
+        ? Array.from(channelScrollRef.querySelectorAll<HTMLElement>(FOCUSABLE_IN_CHANNEL_COLUMN))
+        : []
+      focusChannelList({
+        selectedChannel,
+        channelButtons,
+        fallbackControls,
+        landmarkFallback: channelNavRef,
+      })
+    })
   }
 
   function handleWindowKeydown(e: KeyboardEvent) {
@@ -260,7 +286,7 @@
     </div>
   </nav>
 
-  <nav id="channel-content" class="channel-column" aria-label="チャンネル" tabindex="-1">
+  <nav bind:this={channelNavRef} id="channel-content" class="channel-column" aria-label="チャンネル" tabindex="-1">
     <div class="channel-column__header">
       {#if organizations.length > 1 && onselectorganization}
         <label class="org-switcher">
@@ -281,7 +307,7 @@
       {/if}
     </div>
 
-    <div class="channel-column__scroll">
+    <div bind:this={channelScrollRef} class="channel-column__scroll">
       {#if !organizationUnavailable && (s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut))}
         <StatusBanner
           tone="danger"

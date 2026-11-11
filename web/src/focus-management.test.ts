@@ -4,7 +4,9 @@ import {
   decideEditAndResend,
   discardAndFocusComposer,
   focusAfterPanelClose,
+  focusChannelList,
   focusDialogOnOpen,
+  resolveChannelListNavigation,
   resolveSkipLinkTargetId,
   restoreFocusAfterDialogClose,
   stepDialogTab,
@@ -137,5 +139,76 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
         }
       }
     }
+  })
+
+  it('opens the Channel drawer only at tablet widths and focuses the Channel list on チャンネル一覧へ', () => {
+    // Phone (< 600px): switches to 'channels' screen without opening tablet drawer
+    for (const width of [320, 375, 599]) {
+      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
+    }
+    // Tablet (600-959px): opens the Channel drawer
+    for (const width of [600, 768, 959]) {
+      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: true, mobileLevel: 'channels' })
+    }
+    // Desktop (>= 960px): Channel column is permanently visible, drawer stays closed
+    for (const width of [960, 1280, 1440]) {
+      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
+    }
+
+    // 1. Prefers the currently selected Channel row
+    const firstBtn = { focus: vi.fn(), isConnected: true }
+    const selectedBtn = { focus: vi.fn(), isConnected: true }
+    const createInput = { focus: vi.fn(), isConnected: true }
+    const navLandmark = { focus: vi.fn(), isConnected: true }
+
+    expect(
+      focusChannelList({
+        selectedChannel: selectedBtn,
+        channelButtons: [firstBtn, selectedBtn],
+        fallbackControls: [createInput],
+        landmarkFallback: navLandmark,
+      }),
+    ).toBe(selectedBtn)
+    expect(selectedBtn.focus).toHaveBeenCalledOnce()
+    expect(firstBtn.focus).not.toHaveBeenCalled()
+
+    // 2. Falls back to the first connected, enabled Channel button when selectedChannel is absent or disconnected
+    const disconnectedSelected = { focus: vi.fn(), isConnected: false }
+    const disabledFirst = { focus: vi.fn(), isConnected: true, disabled: true }
+    const enabledSecond = { focus: vi.fn(), isConnected: true }
+    expect(
+      focusChannelList({
+        selectedChannel: disconnectedSelected,
+        channelButtons: [disabledFirst, enabledSecond],
+        fallbackControls: [createInput],
+        landmarkFallback: navLandmark,
+      }),
+    ).toBe(enabledSecond)
+    expect(disconnectedSelected.focus).not.toHaveBeenCalled()
+    expect(disabledFirst.focus).not.toHaveBeenCalled()
+    expect(enabledSecond.focus).toHaveBeenCalledOnce()
+
+    // 3. Falls back to Channel column controls (e.g. Channel creation input) when no Channels exist
+    expect(
+      focusChannelList({
+        selectedChannel: null,
+        channelButtons: [],
+        fallbackControls: [createInput],
+        landmarkFallback: navLandmark,
+      }),
+    ).toBe(createInput)
+    expect(createInput.focus).toHaveBeenCalledOnce()
+    expect(navLandmark.focus).not.toHaveBeenCalled()
+
+    // 4. Falls back to the Channel navigation landmark when no interactive controls exist
+    expect(
+      focusChannelList({
+        selectedChannel: null,
+        channelButtons: [],
+        fallbackControls: [],
+        landmarkFallback: navLandmark,
+      }),
+    ).toBe(navLandmark)
+    expect(navLandmark.focus).toHaveBeenCalledOnce()
   })
 })

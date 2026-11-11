@@ -1,12 +1,14 @@
 export type FocusableTarget = {
   focus(): void
   isConnected?: boolean
+  disabled?: boolean
 }
 
 export type MobileLevel = 'channels' | 'view' | 'panel'
 export type SkipLinkTargetId = 'channel-content' | 'main-content' | 'panel-content'
 
 export const MOBILE_BREAKPOINT_PX = 600
+export const DESKTOP_BREAKPOINT_PX = 960
 
 /**
  * Resolves the ID of the currently visible primary region for the page skip link (`メッセージへ移動`)
@@ -29,18 +31,56 @@ export function resolveSkipLinkTargetId(options: {
   return 'main-content'
 }
 
+/**
+ * Resolves the responsive layout state for `チャンネル一覧へ` (`docs/ui.md` §3, §5):
+ * opens the Channel drawer only at tablet widths (`600-959px`), enters the `'channels'`
+ * screen level for phone (`< 600px`), and keeps desktop (`>= 960px`) drawer-free.
+ */
+export function resolveChannelListNavigation(viewportWidth: number): {
+  drawerOpen: boolean
+  mobileLevel: MobileLevel
+} {
+  return {
+    drawerOpen: viewportWidth >= MOBILE_BREAKPOINT_PX && viewportWidth < DESKTOP_BREAKPOINT_PX,
+    mobileLevel: 'channels',
+  }
+}
+
 export type RestoreDecision =
   | { action: 'restore_now' }
   | { action: 'confirm_replace'; clientMessageId: string }
 
 /**
- * Focuses `target` if present and connected (`docs/ui.md` §2, §5, §6).
+ * Focuses `target` if present, connected and not disabled (`docs/ui.md` §2, §5, §6).
  * Returns true when `.focus()` was called.
  */
 export function focusTarget(target: FocusableTarget | null | undefined): boolean {
-  if (!target || target.isConnected === false) return false
+  if (!target || target.isConnected === false || target.disabled === true) return false
   target.focus()
   return true
+}
+
+/**
+ * Moves focus into the Channel list (`docs/ui.md` §5 C9 `チャンネル一覧へ`):
+ * prefers the selected Channel row, then the first Channel row, then any enabled
+ * control in the Channel column (e.g. Channel creation input when empty),
+ * and finally the Channel navigation landmark (`tabindex="-1"`).
+ */
+export function focusChannelList(options: {
+  selectedChannel?: FocusableTarget | null
+  channelButtons?: readonly FocusableTarget[]
+  fallbackControls?: readonly FocusableTarget[]
+  landmarkFallback?: FocusableTarget | null
+}): FocusableTarget | null {
+  if (focusTarget(options.selectedChannel)) return options.selectedChannel ?? null
+  for (const btn of options.channelButtons ?? []) {
+    if (focusTarget(btn)) return btn
+  }
+  for (const ctrl of options.fallbackControls ?? []) {
+    if (focusTarget(ctrl)) return ctrl
+  }
+  if (focusTarget(options.landmarkFallback)) return options.landmarkFallback ?? null
+  return null
 }
 
 /**
@@ -128,7 +168,7 @@ export function stepDialogTab(
   shiftKey: boolean,
   dialogFallback?: FocusableTarget | null,
 ): FocusableTarget | null {
-  const connected = focusables.filter((el) => el.isConnected !== false)
+  const connected = focusables.filter((el) => el.isConnected !== false && el.disabled !== true)
   if (connected.length === 0) {
     if (focusTarget(dialogFallback)) return dialogFallback ?? null
     return null

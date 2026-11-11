@@ -123,6 +123,8 @@ test('keeps loaded Messages and the unsent draft visible in error and unavailabl
   clientSocket!.send(JSON.stringify(refusal))
 
   await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
+  await expect(timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })).toBeVisible()
+  await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
   await expect(timeline.getByText(loadedMessage)).toBeVisible()
   await expect(composer).toBeVisible()
   await expect(composer).toHaveValue(unsentDraft)
@@ -169,6 +171,8 @@ test('keeps loaded Messages and the unsent draft visible in error and unavailabl
   latestOutcome = 'not_found'
   await timeline.getByRole('button', { name: '再試行' }).click()
   await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
+  await expect(timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })).toBeVisible()
+  await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
   await expect(timeline.getByRole('alert').filter({ hasText: 'メッセージを読み込めませんでした。' })).toHaveCount(0)
   await expect(timeline.getByText(confirmedInError)).toBeVisible()
   await expect(composer).toBeVisible()
@@ -413,4 +417,200 @@ test('shows Composer validation error and keeps the draft when body exceeds 4000
 
   await expect(timeline.getByRole('alert').filter({ hasText: 'メッセージは4000文字以内にしてください。' })).toBeVisible()
   await expect(composer).toHaveValue(oversized)
+})
+
+test('C9 renders no 再試行 and チャンネル一覧へ moves focus to the Channel list across desktop, tablet and phone widths', async ({
+  page,
+}) => {
+  let clientSocket: WebSocketRoute | undefined
+  await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
+    ws.connectToServer()
+    clientSocket = ws
+  })
+
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await signIn(page)
+  const target = await createChannel(page, nextChannelName('c9-focus-target'))
+  const other = await createChannel(page, nextChannelName('c9-focus-other'))
+
+  const nav = page.getByRole('navigation', { name: 'チャンネル' })
+  await nav.getByRole('button', { name: target.name }).click()
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+
+  const timeline = page.getByRole('region', { name: 'タイムライン' })
+  const goToListButton = timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })
+  const targetChannelButton = nav.getByRole('button', { name: target.name })
+
+  const refusal: ServerEvent = { type: 'error', channel_id: target.id, code: 'channel_not_found' }
+  clientSocket!.send(JSON.stringify(refusal))
+
+  // 1. Desktop (1280px): C9 has no 再試行, and チャンネル一覧へ moves focus into the Channel list
+  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
+  await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
+  await expect(goToListButton).toBeVisible()
+
+  await goToListButton.click()
+  await expect(nav).toBeVisible()
+  await expect(targetChannelButton).toBeFocused()
+  await expect(goToListButton).not.toBeFocused()
+
+  // 2. Tablet drawer (768px): Channel column starts hidden; チャンネル一覧へ opens the drawer and focuses the Channel list
+  await page.setViewportSize({ width: 768, height: 800 })
+  await expect(nav).toBeHidden()
+  await goToListButton.click()
+  await expect(nav).toBeVisible()
+  await expect(targetChannelButton).toBeFocused()
+
+  // 3. Phone (375px): enter the Channel view level, trigger C9, and verify チャンネル一覧へ switches to the Channel list and focuses it
+  await page.setViewportSize({ width: 375, height: 800 })
+  await nav.getByRole('button', { name: other.name }).click()
+  await expect(page.getByRole('heading', { name: other.name })).toBeVisible()
+  await page.getByRole('button', { name: 'チャンネル一覧へ戻る' }).click()
+  await targetChannelButton.click()
+  await expect(page.getByRole('heading', { name: target.name })).toBeVisible()
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+  await expect(nav).toBeHidden()
+
+  clientSocket!.send(JSON.stringify(refusal))
+  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
+  await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
+
+  await goToListButton.click()
+  await expect(nav).toBeVisible()
+  await expect(timeline).toBeHidden()
+  await expect(targetChannelButton).toBeFocused()
+})
+
+test('confirms before replacing a non-empty Composer draft on 編集して送り直す (置き換える / キャンセル)', async ({
+  page,
+}) => {
+  await signIn(page)
+  const target = await createChannel(page, nextChannelName('draft-replace-confirm'))
+
+  let refuseNext = true
+  await page.route(`**/api/v1/orgs/*/channels/${target.id}/messages`, async route => {
+    if (route.request().method() === 'POST' && refuseNext) {
+      refuseNext = false
+      return route.fulfill({ status: 400, ...errorJson('invalid_input') })
+    }
+    return route.continue()
+  })
+
+  const timeline = page.getByRole('region', { name: 'タイムライン' })
+  const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
+  const sendButton = timeline.getByRole('button', { name: '送信' })
+  const editButton = timeline.getByRole('button', { name: '編集して送り直す', exact: true })
+
+  const refusedBody = `refused-body-${Date.now()}`
+  await composer.fill(refusedBody)
+  await sendButton.click()
+
+  await expect(editButton).toBeVisible()
+  await expect(composer).toHaveValue('')
+
+  const currentDraft = `existing-draft-${Date.now()}`
+  await composer.fill(currentDraft)
+
+  // 1. Clicking 編集して送り直す with a non-empty draft opens the confirmation dialog; キャンセル keeps both
+  await editButton.click()
+  const dialog = page.getByRole('dialog', { name: '入力中の下書きを置き換えますか？' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '置き換える', exact: true })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'キャンセル', exact: true })).toBeVisible()
+
+  await dialog.getByRole('button', { name: 'キャンセル', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(composer).toHaveValue(currentDraft)
+  await expect(editButton).toBeVisible()
+  await expect(timeline.getByText(refusedBody)).toBeVisible()
+
+  // 2. Clicking 置き換える replaces the draft with the refused Message, removes the failed row and focuses the Composer
+  await editButton.click()
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: '置き換える', exact: true }).click()
+
+  await expect(dialog).toHaveCount(0)
+  await expect(composer).toHaveValue(refusedBody)
+  await expect(composer).toBeFocused()
+  await expect(editButton).toHaveCount(0)
+
+  const confirmed = page.waitForResponse(
+    res => new URL(res.url()).pathname.endsWith(`/channels/${target.id}/messages`) && res.request().method() === 'POST',
+  )
+  await sendButton.click()
+  expect((await confirmed).status()).toBe(201)
+  await expect(timeline.getByText(refusedBody)).toBeVisible()
+  await expect(composer).toHaveValue('')
+})
+
+test('discards failed sends via 破棄, focuses Composer when active, and hides resend/edit when target is unavailable', async ({
+  page,
+}) => {
+  let clientSocket: WebSocketRoute | undefined
+  await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
+    ws.connectToServer()
+    clientSocket = ws
+  })
+
+  await signIn(page)
+  const target = await createChannel(page, nextChannelName('discard-failed'))
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+
+  let postMode: 'abort' | 'refuse' | 'pass' = 'abort'
+  await page.route(`**/api/v1/orgs/*/channels/${target.id}/messages`, async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    if (postMode === 'abort') return route.abort('failed')
+    if (postMode === 'refuse') return route.fulfill({ status: 400, ...errorJson('invalid_input') })
+    return route.continue()
+  })
+
+  const timeline = page.getByRole('region', { name: 'タイムライン' })
+  const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
+  const sendButton = timeline.getByRole('button', { name: '送信' })
+  const discardButtons = timeline.getByRole('button', { name: '破棄', exact: true })
+
+  // 1. Active Channel: 破棄 removes the failed Message and moves focus to the Composer
+  const firstFailed = `discard-active-${Date.now()}`
+  await composer.fill(firstFailed)
+  await sendButton.click()
+  await expect(timeline.getByRole('alert').filter({ hasText: '送信を確認できませんでした。' })).toBeVisible()
+  await expect(discardButtons).toHaveCount(1)
+
+  await discardButtons.click()
+  await expect(discardButtons).toHaveCount(0)
+  await expect(timeline.getByText(firstFailed)).toHaveCount(0)
+  await expect(timeline.getByRole('alert')).toHaveCount(0)
+  await expect(composer).toBeFocused()
+
+  // 2. Target unavailable (C9): hides 再送する and 編集して送り直す while keeping failed text and 破棄
+  const unknownFailed = `discard-c9-unknown-${Date.now()}`
+  await composer.fill(unknownFailed)
+  await sendButton.click()
+  await expect(timeline.getByRole('button', { name: '再送する', exact: true })).toBeVisible()
+
+  postMode = 'refuse'
+  const refusedFailed = `discard-c9-refused-${Date.now()}`
+  await composer.fill(refusedFailed)
+  await sendButton.click()
+  await expect(timeline.getByRole('button', { name: '編集して送り直す', exact: true })).toBeVisible()
+  await expect(discardButtons).toHaveCount(2)
+
+  const refusal: ServerEvent = { type: 'error', channel_id: target.id, code: 'channel_not_found' }
+  clientSocket!.send(JSON.stringify(refusal))
+
+  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
+  await expect(timeline.getByRole('button', { name: '再送する', exact: true })).toHaveCount(0)
+  await expect(timeline.getByRole('button', { name: '編集して送り直す', exact: true })).toHaveCount(0)
+  await expect(timeline.getByText(unknownFailed)).toBeVisible()
+  await expect(timeline.getByText(refusedFailed)).toBeVisible()
+  await expect(discardButtons).toHaveCount(2)
+
+  await discardButtons.first().click()
+  await expect(discardButtons).toHaveCount(1)
+  await expect(timeline.getByText(unknownFailed)).toHaveCount(0)
+  await expect(timeline.getByText(refusedFailed)).toBeVisible()
+
+  await discardButtons.first().click()
+  await expect(discardButtons).toHaveCount(0)
+  await expect(timeline.getByText(refusedFailed)).toHaveCount(0)
 })
