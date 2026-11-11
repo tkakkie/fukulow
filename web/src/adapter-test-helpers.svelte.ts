@@ -2,8 +2,10 @@ import { flushSync, tick } from 'svelte'
 import type {
   Channel,
   ClientMessage,
+  MarkReadRequest,
   Message,
   MessagePage,
+  ReadPosition,
   ReplyChainPage,
   Result,
   SendMessageRequest,
@@ -13,10 +15,12 @@ import type {
   TopicPage,
   TopicSummary,
   TopicSummaryResponse,
+  UnreadChannel,
 } from './api'
 import type { RealtimeHandlers } from './realtime'
 import { record } from './protocol-test-helpers'
 import type { SessionOptions } from './session'
+import type { UnreadScope } from './unread'
 
 export { record }
 export const channel = (id: string, name = id): Channel => ({ id, name, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: true } } })
@@ -72,8 +76,15 @@ export function fakeNetwork() {
   const sends: ({ channel: string; body: SendMessageRequest } & Deferred<Result<Message>>)[] = []
   const lists: Deferred<Result<{ channels: Channel[] }>>[] = []
   const creates: ({ name: string } & Deferred<Result<Channel>>)[] = []
+  const caughtUp: Record<string, number> = {}
+  const unreadChannels: Record<string, UnreadChannel> = {}
+  let unreadListResult: Result<{ channels: UnreadChannel[] }> | null = null
+  const markReads: { scope: UnreadScope; body: MarkReadRequest }[] = []
+  const markReadResults: Record<string, Result<ReadPosition>> = {}
+  const pendingMarkReads: ({ scope: UnreadScope; body: MarkReadRequest } & Deferred<Result<ReadPosition>>)[] = []
+  let holdMarkReads = false
   let ids = 0
-  function toTimelinePage(page: MessagePage): TimelinePage {
+  function toTimelinePage(page: MessagePage, channelId?: string): TimelinePage {
     const byTopic = new Map<string, TopicSummary>()
     const items: TimelineItem[] = []
     for (const m of page.messages) {
@@ -88,7 +99,7 @@ export function fakeNetwork() {
           last_seq: m.seq,
           message_count: (prev?.message_count ?? 0) + 1,
           latest_message: m,
-          read_seq: 0,
+          read_seq: m.seq,
           unread_count: 0,
         })
       }
@@ -96,12 +107,35 @@ export function fakeNetwork() {
     for (const topic of byTopic.values()) items.push({ kind: 'topic', topic })
     items.sort((a, b) => (a.kind === 'message' ? a.message.seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.seq : b.topic.last_seq))
     return {
-      as_of_seq: page.messages.at(-1)?.seq ?? 0,
+      as_of_seq: Math.max(channelId ? (caughtUp[channelId] ?? 0) : 0, page.messages.at(-1)?.seq ?? 0),
       has_more: page.has_more,
       items,
     }
   }
-  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'sync'> => ({
+  function defaultUnreadChannel(id: string): UnreadChannel {
+    const tl = timelines[id]
+    const page = pages[id]
+    const maxSeq = Math.max(
+      caughtUp[id] ?? 0,
+      tl?.ok ? tl.data.as_of_seq : 0,
+      page?.ok ? (page.data.messages.at(-1)?.seq ?? 0) : 0,
+    )
+    return {
+      id,
+      name: id,
+      visibility: 'public',
+      capabilities: {
+        can_add_members: { allowed: false },
+        can_remove_members: { allowed: false },
+        can_leave: { allowed: true },
+      },
+      as_of_seq: maxSeq,
+      read_seq: maxSeq,
+      unread_count: 0,
+      main_unread_count: 0,
+    }
+  }
+  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'unreadApi' | 'sync'> => ({
     channelsApi: {
       listChannels() {
         const d = deferred<Result<{ channels: Channel[] }>>()
@@ -119,13 +153,13 @@ export function fakeNetwork() {
         history.push({ channel, query: query?.before_position !== undefined ? { before_seq: query.before_position } : undefined })
         if (timelines[channel]) return timelines[channel]
         const page = pages[channel] ?? { ok: true, data: { messages: [], has_more: false } }
-        return page.ok ? { ok: true, data: toTimelinePage(page.data) } : page
+        return page.ok ? { ok: true, data: toTimelinePage(page.data, channel) } : page
       },
       async listTopics(channel) {
         if (topicLists[channel]) return topicLists[channel]
         const page = pages[channel]
         if (page && !page.ok) return page
-        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false })
+        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false }, channel)
         return {
           ok: true,
           data: {
@@ -140,7 +174,7 @@ export function fakeNetwork() {
         if (custom) return custom
         const page = pages[channel]
         if (page && !page.ok) return page
-        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false })
+        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false }, channel)
         const found = tl.items.find(i => i.kind === 'topic' && i.topic.id === topic)
         if (found?.kind === 'topic') return { ok: true, data: { as_of_seq: tl.as_of_seq, topic: found.topic } }
         return { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
@@ -183,6 +217,54 @@ export function fakeNetwork() {
         return { ok: true, data: { root_id: root.id, messages, has_more: false } }
       },
     },
+    unreadApi: {
+      async listChannels() {
+        if (unreadListResult) return unreadListResult
+        const idsSet = new Set([
+          ...Object.keys(unreadChannels),
+          ...Object.keys(pages),
+          ...Object.keys(timelines),
+          ...Object.keys(caughtUp),
+        ])
+        const rows = [...idsSet].map(id => unreadChannels[id] ?? defaultUnreadChannel(id))
+        return { ok: true, data: { channels: rows } }
+      },
+      markRead(scope, body) {
+        markReads.push({ scope, body })
+        if (holdMarkReads) {
+          const d = deferred<Result<ReadPosition>>()
+          pendingMarkReads.push({ scope, body, resolve: d.resolve })
+          return d.promise
+        }
+        const key = `${scope.channel}:${scope.topicId ?? ''}`
+        if (markReadResults[key]) return Promise.resolve(markReadResults[key])
+        const row = unreadChannels[scope.channel]
+        if (row) {
+          if (scope.topicId === null) {
+            row.read_seq = Math.max(row.read_seq, body.read_seq)
+          } else {
+            const summaryRes = topicSummaries[`${scope.channel}:${scope.topicId}`]
+            if (summaryRes?.ok && body.read_seq >= summaryRes.data.topic.last_seq) {
+              const cleared = summaryRes.data.topic.unread_count
+              summaryRes.data.topic.read_seq = Math.max(summaryRes.data.topic.read_seq, body.read_seq)
+              summaryRes.data.topic.unread_count = 0
+              row.unread_count = Math.max(0, row.unread_count - cleared)
+            }
+          }
+        }
+        return Promise.resolve({ ok: true, data: { read_seq: body.read_seq } })
+      },
+      async getTopicSummary(channel, topic) {
+        const custom = topicSummaries[`${channel}:${topic}`]
+        if (custom) return custom
+        const page = pages[channel]
+        if (page && !page.ok) return page
+        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false }, channel)
+        const found = tl.items.find(i => i.kind === 'topic' && i.topic.id === topic)
+        if (found?.kind === 'topic') return { ok: true, data: { as_of_seq: tl.as_of_seq, topic: found.topic } }
+        return { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
+      },
+    },
     sync: {
       newId: () => `${selfId}-c${++ids}`,
       api: {
@@ -204,11 +286,41 @@ export function fakeNetwork() {
     },
   })
   return {
-    sockets, history, pages, timelines, topicLists, topicSummaries, topicMessages, replyChains, replyHistory, sends, lists, creates, options,
+    sockets,
+    history,
+    pages,
+    timelines,
+    topicLists,
+    topicSummaries,
+    topicMessages,
+    replyChains,
+    replyHistory,
+    sends,
+    lists,
+    creates,
+    unreadChannels,
+    get unreadListResult() {
+      return unreadListResult
+    },
+    set unreadListResult(v: Result<{ channels: UnreadChannel[] }> | null) {
+      unreadListResult = v
+    },
+    markReads,
+    markReadResults,
+    pendingMarkReads,
+    get holdMarkReads() {
+      return holdMarkReads
+    },
+    set holdMarkReads(v: boolean) {
+      holdMarkReads = v
+    },
+    options,
     get socket() { return sockets.at(-1)! },
     event: (e: ServerEvent) => sockets.at(-1)!.onEvent(e),
-    subscribed: (channel: string, caught_up_seq: number) =>
-      sockets.at(-1)!.onEvent({ type: 'subscribed', channel_id: channel, caught_up_seq }),
+    subscribed: (channel: string, caught_up_seq: number) => {
+      caughtUp[channel] = Math.max(caughtUp[channel] ?? 0, caught_up_seq)
+      sockets.at(-1)!.onEvent({ type: 'subscribed', channel_id: channel, caught_up_seq })
+    },
     subscribeCount: (channel: string) =>
       sockets.flatMap(s => s.sent).filter(m => m.type === 'subscribe' && m.channel_id === channel).length,
   }

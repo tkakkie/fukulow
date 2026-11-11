@@ -305,4 +305,170 @@ describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.m
     expect(moved.state.pinned).toBe(false)
     expect(moved.state.belowCount).toBe(1)
   })
+
+  it('positions at the first Unread Message after loading needed older pages, then preserves anchor on further older loads', () => {
+    let s = initialTimelineScrollState('c1')
+
+    // 1. Initial page (seq 3, 4) arrives while older pages are still loading to reach first Unread (m-2)
+    let step = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: null,
+      awaitingFirstUnread: true,
+    })
+    s = step.state
+    expect(step.action).toBe('none')
+    expect(s.initialized).toBe(false)
+
+    // 2. Older page (seq 1, 2) arrives and resolves firstUnreadMessageId = 'm-2'
+    step = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2), msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-2',
+      awaitingFirstUnread: false,
+    })
+    s = step.state
+    expect(step.action).toBe('scroll_first_unread')
+    expect(s.initialized).toBe(true)
+    expect(s.firstUnreadScrolledId).toBe('m-2')
+
+    // 3. Repeating sync with the same firstUnreadMessageId does not re-scroll
+    const repeat = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2), msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-2',
+      awaitingFirstUnread: false,
+    })
+    expect(repeat.action).toBe('none')
+    expect(repeat.state).toBe(s)
+
+    // 4. User loads an even older page above m-1 -> preserves anchor rather than re-jumping to m-2
+    const older = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(0), msg(1), msg(2), msg(3), msg(4)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-2',
+      awaitingFirstUnread: false,
+    })
+    expect(older.action).toBe('preserve_anchor')
+    expect(older.state.firstUnreadScrolledId).toBe('m-2')
+  })
+
+  it('defers initial positioning while displayed is false and applies it when displayed becomes true', () => {
+    let s = initialTimelineScrollState('c1')
+    const v1 = Symbol('v1')
+
+    // Hidden while ready with first Unread known: does not consume initial positioning
+    const hidden = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      visitId: v1,
+      displayed: false,
+      status: 'ready',
+      messages: [msg(1), msg(2), msg(3), msg(4), msg(5)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-5',
+      awaitingFirstUnread: false,
+    })
+    expect(hidden.action).toBe('none')
+    expect(hidden.state.initialized).toBe(false)
+    expect(hidden.state.firstUnreadScrolledId ?? null).toBeNull()
+    s = hidden.state
+
+    // Displayed becomes true: now emits scroll_first_unread
+    const shown = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      visitId: v1,
+      displayed: true,
+      status: 'ready',
+      messages: [msg(1), msg(2), msg(3), msg(4), msg(5)],
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: 'm-5',
+      awaitingFirstUnread: false,
+    })
+    expect(shown.action).toBe('scroll_first_unread')
+    expect(shown.state.initialized).toBe(true)
+    expect(shown.state.firstUnreadScrolledId).toBe('m-5')
+  })
+
+  it('resets initial scroll state on a new visit (new visitId) to the same Channel with unchanged rows', () => {
+    let s = initialTimelineScrollState('c1')
+    const v1 = Symbol('v1')
+    const v2 = Symbol('v2')
+    const rows = [msg(1), msg(2), msg(3)]
+
+    // 1. First visit initializes at bottom
+    const init = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      visitId: v1,
+      displayed: true,
+      status: 'ready',
+      messages: rows,
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: null,
+      awaitingFirstUnread: false,
+    })
+    expect(init.action).toBe('scroll_bottom')
+    s = init.state
+
+    // 2. User scrolls upward (unpinned)
+    s = stepTimelineScroll(s, {
+      type: 'scroll',
+      metrics: { scrollTop: 0, scrollHeight: 1000, clientHeight: 500 },
+    }).state
+    expect(s.pinned).toBe(false)
+
+    // 3. Channel becomes unavailable (visitId becomes null): does not jump while unavailable
+    const unavail = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      visitId: null,
+      displayed: true,
+      status: 'unavailable',
+      messages: rows,
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: null,
+      awaitingFirstUnread: false,
+    })
+    expect(unavail.action).toBe('none')
+    s = unavail.state
+
+    // 4. New visit on the same Channel with unchanged rows and 0 Unread re-initializes to bottom
+    const revisit = stepTimelineScroll(s, {
+      type: 'sync',
+      channelId: 'c1',
+      visitId: v2,
+      displayed: true,
+      status: 'ready',
+      messages: rows,
+      pendingIds: [],
+      selfId: 'me',
+      firstUnreadMessageId: null,
+      awaitingFirstUnread: false,
+    })
+    expect(revisit.action).toBe('scroll_bottom')
+    expect(revisit.state.pinned).toBe(true)
+    expect(revisit.state.visitId).toBe(v2)
+  })
 })

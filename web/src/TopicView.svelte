@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
   import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
@@ -16,14 +16,19 @@
     applyTimelineScrollAction,
     createTimelineScrollController,
     handleTimelineContainerScroll,
+    isTimelineDisplayed,
     measureTimelineItems,
+    measureVisibleConfirmedSeqs,
+    type ScrollAction,
     type ScrollAnchor,
   } from './timeline-scroll'
   import type { TopicsAdapter } from './topics.svelte'
+  import type { UnreadAdapter } from './unread.svelte'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
+  import ReadMarker from './ui/ReadMarker.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
@@ -33,11 +38,13 @@
     channel,
     topics,
     replies = null,
+    unread = null,
     channelId,
     topicId,
     topicName,
     topicStatus = 'idle',
     selfId = '',
+    viewSelected = true,
     organizationUnavailable = false,
     reconnecting = false,
     resolveSenderName,
@@ -51,11 +58,13 @@
     channel: ChannelSync
     topics: TopicsAdapter
     replies?: RepliesAdapter | null
+    unread?: UnreadAdapter | null
     channelId: string
     topicId: string
     topicName: string
     topicStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
     selfId?: string
+    viewSelected?: boolean
     organizationUnavailable?: boolean
     reconnecting?: boolean
     resolveSenderName?: (senderId: string) => string
@@ -67,12 +76,37 @@
     onswitchorganization?: () => void
   } = $props()
 
+  const currentChannelId = $derived(channelId)
+  const currentTopicId = $derived(topicId)
   const s = $derived(channel.timeline)
-  const tc = $derived(channel.topic(topicId))
+  const tc = $derived(channel.topic(currentTopicId))
   const composerState = $derived(tc.composer)
   const tState = $derived(topics.state)
   const rState = $derived(replies ? replies.state : null)
-  const view = $derived(tState.topic(topicId))
+  const uState = $derived(unread ? unread.state : null)
+  const view = $derived(tState.topic(currentTopicId))
+  const entry = $derived(uState?.entry?.scope.topicId === currentTopicId ? uState.entry : null)
+  const uGeneration = $derived(uState?.generation ?? null)
+  const entryId = $derived(entry?.id ?? null)
+  const hasFirstUnreadInView = $derived(
+    Boolean(entry?.firstUnread && view.messages.some((m) => m.id === entry.firstUnread!.id)),
+  )
+  const needsOlderUnreadPage = $derived(
+    Boolean(
+      entry &&
+        (entry.unreadAtEntry ?? 0) > 0 &&
+        (entry.needsOlder || (entry.firstUnread !== null && !hasFirstUnreadInView)),
+    ),
+  )
+  const firstUnreadMessageId = $derived(
+    entry &&
+      entry.boundary !== null &&
+      (entry.unreadAtEntry ?? 0) > 0 &&
+      !needsOlderUnreadPage &&
+      entry.firstUnread
+      ? entry.firstUnread.id
+      : null,
+  )
   const replyCounts = $derived(
     countRepliesByMessageId([s.messages, view.messages, rState?.messages ?? []]),
   )
@@ -82,6 +116,18 @@
   )
   const targetUnavailable = $derived(
     organizationUnavailable || channelUnavailable || topicUnavailable,
+  )
+  const topicScope = $derived(uState?.topics[currentTopicId] ?? null)
+  const awaitingEntryBoundary = $derived(
+    Boolean(
+      unread &&
+        !targetUnavailable &&
+        !uState?.stopped &&
+        !uState?.error &&
+        !topicScope?.stopped &&
+        !topicScope?.error &&
+        (entry === null || entry.boundary === null),
+    ),
   )
   const pending = $derived(
     s.pending.filter(
@@ -106,8 +152,38 @@
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
   let requestedHistoryFor = ''
+  let initialScrollApplied = false
+  let scrolledFirstUnreadId: string | null = null
+  let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
+  let lastScrollScopeKey = ''
+  let lastScrollEntryId: symbol | null = null
+  let currentVisitId: symbol | undefined
+  let enteredTarget = false
+  const topicStopped = $derived(Boolean(uState?.stopped || topicScope?.stopped))
   const focusableMessageIds = $derived(view.messages.map((m) => m.id))
   const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds, activeRowId))
+
+  function isDocumentVisible(): boolean {
+    if (typeof document === 'undefined') return true
+    return (document.visibilityState ?? 'visible') === 'visible'
+  }
+
+  function reportPresented() {
+    if (!unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
+    if (!isDocumentVisible()) return
+    const currentEntry = uState?.entry
+    if (!currentEntry || currentEntry.scope.topicId !== topicId) return
+    if (currentEntry.boundary === null || needsOlderUnreadPage) return
+    if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+      if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
+    } else if (!initialScrollApplied) {
+      return
+    }
+    const seqs = measureVisibleConfirmedSeqs(scrollEl!)
+    if (seqs.length > 0) {
+      unread.presented(currentEntry.id, seqs)
+    }
+  }
 
   function captureCurrentAnchor() {
     if (!scrollEl) return
@@ -116,15 +192,21 @@
 
   function handleScroll() {
     handleTimelineContainerScroll(scrollEl, scrollController)
+    reportPresented()
   }
 
-  function applyScrollAction(action: 'none' | 'scroll_bottom' | 'preserve_anchor', anchor: ScrollAnchor | null) {
-    applyTimelineScrollAction(scrollEl, scrollController, action, anchor)
+  function applyScrollAction(
+    action: ScrollAction,
+    anchor: ScrollAnchor | null,
+    firstUnreadId?: string | null,
+  ) {
+    applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
   }
 
   function jumpToBottom() {
     const action = scrollController.jumpToBottom()
     applyScrollAction(action, null)
+    reportPresented()
   }
 
   function loadOlderWithAnchor() {
@@ -143,16 +225,92 @@
   $effect(() => () => scrollController.destroy())
 
   $effect(() => {
-    const key = `${channelId}:${topicId}:${tState.generation}`
+    const u = unread
+    const id = currentChannelId
+    const tId = currentTopicId
+    const active = !targetUnavailable
+    if (!u || !id || !tId || !active) return
+    return () => {
+      enteredTarget = false
+      const vid =
+        currentVisitId ??
+        untrack(() => (u.state.entry?.scope.topicId === tId ? u.state.entry.id : undefined))
+      currentVisitId = undefined
+      if (vid) u.leave(vid)
+    }
+  })
+
+  $effect(() => {
+    const u = unread
+    const id = currentChannelId
+    const tId = currentTopicId
+    const active = !targetUnavailable
+    const generation = uGeneration
+    const currentEntryId = entryId
+    const stopped = topicStopped
+    if (!u || !id || !tId || !active || !generation) return
+    if (currentEntryId) {
+      enteredTarget = true
+      currentVisitId = currentEntryId
+      return
+    }
+    if (enteredTarget && stopped) return
+    let cancelled = false
+    u.visibility(isDocumentVisible())
+    const promise = u.enter(tId)
+    const syncVid = untrack(() =>
+      u.state.entry?.scope.topicId === tId ? u.state.entry.id : undefined,
+    )
+    if (syncVid) {
+      enteredTarget = true
+      currentVisitId = syncVid
+    }
+    void promise.then((vid) => {
+      if (cancelled) return
+      if (vid) {
+        enteredTarget = true
+        currentVisitId = vid
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  })
+
+  $effect(() => {
+    const u = unread
+    const doc = typeof document !== 'undefined' ? document : null
+    if (!u || !doc) return
+    const syncVisibility = () => {
+      const vis = (doc.visibilityState ?? 'visible') === 'visible'
+      u.visibility(vis)
+      if (vis) reportPresented()
+    }
+    syncVisibility()
+    doc.addEventListener('visibilitychange', syncVisibility)
+    return () => doc.removeEventListener('visibilitychange', syncVisibility)
+  })
+
+  $effect(() => {
+    const tId = currentTopicId
+    const key = `${currentChannelId}:${tId}:${tState.generation}`
     if (targetUnavailable || s.status === 'loading') return
-    const hasBaseline = tState.topics.some((t) => t.topicId === topicId && t.baseline !== null)
+    const hasBaseline = tState.topics.some((t) => t.topicId === tId && t.baseline !== null)
     if (!hasBaseline && view.summaryError === null) {
-      void topics.ensureSummary(topicId)
+      void topics.ensureSummary(tId)
     }
     if (!view.initialized && view.hasMore && !view.loading && !view.error && requestedHistoryFor !== key) {
       requestedHistoryFor = key
-      void topics.loadTopic(topicId)
+      void topics.loadTopic(tId)
     }
+  })
+
+  $effect(() => {
+    if (!needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
+      return
+    }
+    if (effectiveStatus !== 'ready') return
+    loadOlderWithAnchor()
   })
 
   const effectiveStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
@@ -166,24 +324,97 @@
   )
 
   $effect(() => {
+    const scopeKey = `${currentChannelId}/${currentTopicId}`
+    const currentEntryId = entryId
+    if (
+      scopeKey !== lastScrollScopeKey ||
+      (currentEntryId !== null && currentEntryId !== lastScrollEntryId)
+    ) {
+      lastScrollScopeKey = scopeKey
+      lastScrollEntryId = currentEntryId
+      initialScrollApplied = false
+      scrolledFirstUnreadId = null
+      pendingScrollAction = null
+    }
+    const displayed = isTimelineDisplayed(scrollEl, viewSelected)
     const messages = view.messages
     const pendingIds = pending.map((p) => p.clientMessageId)
+    const status = effectiveStatus
+    const targetFirstUnreadId = firstUnreadMessageId
+    const awaitingFirstUnread =
+      awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error)
     const { action, anchor } = scrollController.sync({
-      channelId: `${channelId}/${topicId}`,
-      status: effectiveStatus,
+      channelId: scopeKey,
+      visitId: currentEntryId,
+      displayed,
+      status,
       messages,
       pendingIds,
       selfId,
+      firstUnreadMessageId: targetFirstUnreadId,
+      awaitingFirstUnread,
     })
     if (action !== 'none') {
-      void tick().then(() => {
-        applyScrollAction(action, anchor)
-      })
-    } else {
-      void tick().then(() => {
-        captureCurrentAnchor()
-      })
+      pendingScrollAction = { action, anchor }
     }
+    void tick().then(() => {
+      if (!isTimelineDisplayed(scrollEl, viewSelected)) {
+        if (
+          !initialScrollApplied &&
+          pendingScrollAction &&
+          (pendingScrollAction.action === 'scroll_bottom' ||
+            pendingScrollAction.action === 'scroll_first_unread')
+        ) {
+          pendingScrollAction = null
+          scrollController.resetInitialScroll()
+        }
+        return
+      }
+      if (pendingScrollAction) {
+        const deferred = pendingScrollAction
+        pendingScrollAction = null
+        applyScrollAction(deferred.action, deferred.anchor, targetFirstUnreadId)
+        if (deferred.action === 'scroll_first_unread' && targetFirstUnreadId) {
+          scrolledFirstUnreadId = targetFirstUnreadId
+        }
+        if (deferred.action === 'scroll_bottom' || deferred.action === 'scroll_first_unread') {
+          initialScrollApplied = true
+        }
+      } else {
+        captureCurrentAnchor()
+        if (status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
+          initialScrollApplied = true
+        }
+      }
+      reportPresented()
+    })
+  })
+
+  $effect(() => {
+    if (!unread || !viewSelected || targetUnavailable) return
+    if (entry?.boundary === null || needsOlderUnreadPage) return
+    void tick().then(() => {
+      reportPresented()
+    })
+  })
+
+  $effect(() => {
+    const container = scrollEl
+    const u = unread
+    if (!container || !u || typeof IntersectionObserver === 'undefined') return
+    void view.messages
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          reportPresented()
+        }
+      },
+      { root: container, threshold: 0 },
+    )
+    for (const node of container.querySelectorAll<HTMLElement>('[data-confirmed-seq]')) {
+      observer.observe(node)
+    }
+    return () => observer.disconnect()
   })
 
   function handleDiscard(clientMessageId: string) {
@@ -310,7 +541,14 @@
       {#if view.messages.length > 0 || pending.length > 0}
         <ul class="topic-view__list" aria-label="メッセージ一覧">
           {#each view.messages as m (m.id)}
-            <li class="topic-view__item" data-message-id={m.id}>
+            <li
+              class="topic-view__item"
+              data-message-id={m.id}
+              data-confirmed-seq={m.seq}
+            >
+              {#if firstUnreadMessageId === m.id}
+                <ReadMarker />
+              {/if}
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}

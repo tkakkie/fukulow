@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { TopicsAdapter } from './topics.svelte'
+  import type { UnreadAdapter } from './unread.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Skeleton from './ui/Skeleton.svelte'
@@ -8,12 +9,14 @@
 
   let {
     topics,
+    unread = null,
     activeTopicId = null,
     unavailable = false,
     onselecttopic,
     onstartnewtopic,
   }: {
     topics: TopicsAdapter
+    unread?: UnreadAdapter | null
     channelId?: string
     activeTopicId?: string | null
     unavailable?: boolean
@@ -22,6 +25,7 @@
   } = $props()
 
   const state = $derived(topics.state)
+  const uState = $derived(unread ? unread.state : null)
   const orderedTopics = $derived([...state.topics].reverse())
 
   $effect(() => {
@@ -60,6 +64,7 @@
 
       <ul class="topic-list-panel__list" aria-label="トピック一覧">
         {#each orderedTopics as t (t.topicId)}
+          {@const topicUnread = uState?.topics[t.topicId]?.unreadCount ?? null}
           <li
             class="topic-list-panel__item"
             class:topic-list-panel__item--active={activeTopicId === t.topicId}
@@ -70,6 +75,7 @@
               name={t.baseline?.summary.name ?? 'トピック'}
               messageCount={t.messageCount ?? undefined}
               latestBody={t.latestMessage.body}
+              unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
               onclick={() => onselecttopic(t.topicId)}
               onretry={!unavailable && !state.unavailable && t.summaryError === 'retryable'
                 ? () => void topics.retrySummary(t.topicId)

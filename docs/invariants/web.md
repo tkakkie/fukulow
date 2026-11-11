@@ -27,3 +27,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [messages](messages.md): `treats admission 503 as retryable and preserves the send key`, `an admission refusal cannot restore a draft after the Account Session store was cleared`
 - [topics](topics.md): `retains Topic window, baselines and paging cursors across C9 loss and same-Channel recovery with replay`
+- [unread](unread.md): `positions at the first Unread Message after loading needed older pages, then preserves anchor on further older loads`

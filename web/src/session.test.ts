@@ -414,3 +414,68 @@ it('composes replies and topics over a single sync instance and fences replaceSe
     session.close()
   }
 })
+
+it('composes unread, replies and topics over a single sync instance and fences replaceSession/close in order (unread -> replies -> topics -> sync)', async () => {
+  const { net, session, onEnded } = open()
+  try {
+    expect(net.sockets).toHaveLength(1)
+    const anchor = { ...record(100, 'A'), sender: 'other' }
+    net.pages.A = ok({ messages: [anchor], has_more: false })
+    net.unreadChannels.A = {
+      id: 'A',
+      name: 'A',
+      visibility: 'public',
+      capabilities: {
+        can_add_members: { allowed: false },
+        can_remove_members: { allowed: false },
+        can_leave: { allowed: true },
+      },
+      as_of_seq: 100,
+      read_seq: 0,
+      unread_count: 1,
+      main_unread_count: 1,
+    }
+    net.replyChains['A:id100'] = ok({
+      root_id: 'id100',
+      messages: [anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }],
+      has_more: false,
+    })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+
+    await session.replies.open('A', anchor)
+    await session.unread.enter({ channel: 'A', topicId: null })
+    expect(session.unread.get('A').unreadCount).toBe(1)
+    expect(session.unread.get('A').entry?.firstUnread?.id).toBe('id100')
+    expect(net.sockets).toHaveLength(1)
+
+    const order: string[] = []
+    session.unread.subscribe(() => {
+      if (!order.includes('unread')) order.push('unread')
+    })
+    session.replies.subscribe(() => {
+      if (!order.includes('replies')) order.push('replies')
+    })
+    session.topics.subscribe(() => {
+      if (!order.includes('topics')) order.push('topics')
+    })
+    session.sync.subscribe(() => {
+      if (!order.includes('sync')) order.push('sync')
+    })
+
+    await session.sync.replaceSession('next')
+    expect(order).toEqual(['unread', 'replies', 'topics', 'sync'])
+    expect(session.unread.get('A').unreadCount).toBeNull()
+    expect(session.unread.get('A').entry).toBeNull()
+    expect(session.replies.get('A').anchor).toBeNull()
+
+    order.length = 0
+    await session.sync.close()
+    expect(order).toEqual(['unread', 'replies', 'topics', 'sync'])
+    expect(onEnded).not.toHaveBeenCalled()
+  } finally {
+    session.close()
+  }
+})
