@@ -146,6 +146,33 @@ it('records collect-time drops and backs off a stale recovery response before co
   c.close(); expect(vi.getTimerCount()).toBe(0)
 })
 
+it.each(['failure', 'unresolved success'] as const)('coalesces pending recovery notifications into the retry backoff after %s', async result => {
+  vi.useFakeTimers()
+  const c = retentionClient(); await c.boot()
+  c.feed([msg(2, 'T'), msg(3, 'T')])
+  await c.baseline(3, 3, 0, 0); c.topic('T', 3, 3, 0); c.feed([])
+  expect(c.records.size).toBe(0)
+  const pending = held<TopicSummaryResponse>()
+  let requests = 0
+  c.api.getTopicSummary = () => ++requests === 1 ? pending.promise : Promise.resolve(ok({
+    as_of_seq: 4, topic: summary('T', 4, 3, 0) }))
+  c.topic('T', 4, 0, 2); await flush()
+  for (let i = 0; i < 3; i++) c.topic('T', 4, 0, 2)
+  await flush(); expect(requests).toBe(1)
+  pending.resolve(result === 'failure' ? { ok: false, kind: 'network', retryAfterMs: 3000 }
+    : ok({ as_of_seq: 4, topic: summary('T', 4, 0, 2) }))
+  await flush()
+  expect(requests).toBe(1)
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 3, unreadCount: null, error: true })
+  for (let i = 0; i < 3; i++) { c.topic('T', 4, 0, 2); c.feed([]) }
+  await vi.advanceTimersByTimeAsync(result === 'failure' ? 2999 : 499)
+  expect(requests).toBe(1)
+  await vi.advanceTimersByTimeAsync(1); expect(requests).toBe(2)
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 3, unreadCount: 0, error: false })
+  await vi.advanceTimersByTimeAsync(30_000); expect(requests).toBe(2)
+  c.close(); expect(vi.getTimerCount()).toBe(0)
+})
+
 it('keeps recovery active when leaving a visit fences an in-flight summary', async () => {
   const c = retentionClient(); await c.boot()
   c.feed([msg(2, 'T'), msg(3, 'T')])

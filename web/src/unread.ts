@@ -262,6 +262,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const retry = c.summaryTimers.get(topic)
     if (retry !== undefined) { clearTimeout(retry); c.summaryTimers.delete(topic) }
     const operation = Symbol()
+    const recoveryPosition = s.error ? s.requiredPosition : undefined
     c.summaryReads.set(topic, operation)
     const r = await request(() => options.api.getTopicSummary(id, topic), id)
     if (!watched(id) || c.token !== token || c.summaryReads.get(topic) !== operation) return
@@ -279,13 +280,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         }
       }
     }
-    if (s.error && !s.stopped && !c.queuedSummaries.has(topic)) {
+    // Pending recovery absorbs notifications; only a successful read made stale by
+    // new requirements needs an immediate follow-up. Failures always use backoff.
+    const queued = c.queuedSummaries.delete(topic)
+    const rerun = queued && r.ok && (recoveryPosition === undefined || s.requiredPosition > recoveryPosition)
+    if (s.error && !s.stopped && !rerun) {
       const attempt = c.summaryAttempts.get(topic) ?? 0
       c.summaryAttempts.set(topic, attempt + 1)
       c.summaryTimers.set(topic, setTimeout(() => { c.summaryTimers.delete(topic); void refreshTopic(id, topic) }, retryDelay(attempt, r)))
     }
     resolveBoundary(); prune(c); notify()
-    if (c.queuedSummaries.delete(topic)) void refreshTopic(id, topic)
+    if (rerun) void refreshTopic(id, topic)
   }
   function collect(id: string, c: Channel) {
     if (!watched(id)) return
