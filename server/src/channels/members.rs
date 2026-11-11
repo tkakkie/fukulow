@@ -124,8 +124,9 @@ pub(super) async fn mutate(
         .execute(&mut *tx)
         .await?;
     // Mutations: Organization -> Channel(s, ascending id) -> Member -> grants
-    // -> #142 -> shared #135. Role/deactivation paths also start at Organization
-    // and never acquire Channels after Members (#231 will add Channels first).
+    // -> #142 -> shared #135. Role changes lock all affected private Channels
+    // in ascending id before Members; deactivation starts at Organization and
+    // never acquires Channels after Members (#237 owns its manager protection).
     // Sends take Member -> grant -> exclusive #135; their FK KEY SHARE locks
     // permit Organization/Channel NO KEY UPDATE, so cannot invert that order.
     // Mark-read releases #135 before Member/grant/position locks; neither path
@@ -171,7 +172,7 @@ pub(super) async fn mutate(
     } else {
         // Stale grants contribute nothing to the usable-grant/manager counts.
         if !public && present == Some(revision) {
-            protect(&mut tx, org, channel, target).await?;
+            protect(&mut tx, org, &[channel], target, true).await?;
         }
         sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
             .bind(org).bind(channel).bind(target).execute(&mut *tx).await?.rows_affected() > 0
@@ -193,24 +194,56 @@ pub(super) async fn mutate(
 async fn protect(
     connection: &mut sqlx::PgConnection,
     org: Uuid,
-    channel: Uuid,
+    channels: &[Uuid],
     target: Uuid,
+    remove_grant: bool,
 ) -> Result<(), ApiError> {
     let sql = format!(
-        "SELECT count(*),count(*) FILTER (WHERE u.role IN ('owner','admin')),count(*) FILTER (WHERE u.id<>$3),count(*) FILTER (WHERE u.id<>$3 AND u.role IN ('owner','admin')) FROM channel_members cm JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=$2",
+        "SELECT count(*) FILTER (WHERE u.role IN ('owner','admin')),count(*) FILTER (WHERE u.id<>$3),count(*) FILTER (WHERE u.id<>$3 AND u.role IN ('owner','admin')) FROM channel_members cm JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=ANY($2) GROUP BY cm.channel_id",
         auth::members::ACTIVE_SCOPED_MEMBERS_SQL
     );
-    let (_, managers, remaining, remaining_managers): (i64, i64, i64, i64) = sqlx::query_as(&sql)
+    let counts: Vec<(i64, i64, i64)> = sqlx::query_as(&sql)
         .bind(org)
-        .bind(channel)
+        .bind(channels)
         .bind(target)
-        .fetch_one(connection)
+        .fetch_all(connection)
         .await?;
-    if remaining == 0 {
-        return Err(ApiError(StatusCode::CONFLICT, "last_channel_grant", None));
-    }
-    if managers > 0 && remaining_managers == 0 {
-        return Err(ApiError(StatusCode::CONFLICT, "last_channel_manager", None));
+    for (managers, remaining, remaining_managers) in counts {
+        if remove_grant && remaining == 0 {
+            return Err(ApiError(StatusCode::CONFLICT, "last_channel_grant", None));
+        }
+        if managers > 0 && remaining_managers == 0 {
+            return Err(ApiError(StatusCode::CONFLICT, "last_channel_manager", None));
+        }
     }
     Ok(())
+}
+
+pub struct RoleChangeGuard(Vec<Uuid>);
+
+impl auth::members::RoleChangeGuard for RoleChangeGuard {
+    async fn lock(
+        connection: &mut sqlx::PgConnection,
+        organization: Uuid,
+        target: Uuid,
+    ) -> Result<Self, ApiError> {
+        // Organization serialization keeps this set stable through the update;
+        // lock before current_actor takes its Member lock, even for self changes.
+        let channels = sqlx::query_scalar("SELECT c.id FROM channels c WHERE c.organization_id=$1 AND c.visibility='private' AND EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=$2) ORDER BY c.id FOR NO KEY UPDATE OF c")
+            .bind(organization).bind(target).fetch_all(connection).await?;
+        Ok(Self(channels))
+    }
+
+    async fn check(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        organization: Uuid,
+        target: Uuid,
+        role: Role,
+    ) -> Result<(), ApiError> {
+        if matches!(role, Role::Owner | Role::Admin) {
+            return Ok(());
+        }
+        protect(connection, organization, &self.0, target, false).await
+    }
 }

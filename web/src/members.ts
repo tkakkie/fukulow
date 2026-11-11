@@ -5,6 +5,7 @@ export const roles = Object.keys(roleNames) as Role[]
 export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   if (r.kind === 'network') return 'サーバーに接続できません。もう一度お試しください。'
   if (r.error === 'last_owner') return '最後のオーナーのロールは変更できません。'
+  if (r.error === 'last_channel_manager') return 'チャンネルの管理者がいなくなるため、ロールを変更できません。先に別のオーナーまたは管理者を追加してください。'
   if (r.error === 'invite_sign_in_required') return 'このアドレスのアカウントでログインしてから招待を受けてください。'
   if (r.error === 'invite_account_mismatch') return '招待先のアカウントでログインしてください。'
   if (r.error === 'invite_issuer_unauthorized') return '招待したメンバーの権限が変更されています。組織の管理者に新しい招待を依頼してください。'

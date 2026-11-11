@@ -2706,7 +2706,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description last_owner: the last active Owner cannot be demoted */
+            /** @description last_owner: the last active Owner cannot be demoted; last_channel_manager: a private Channel cannot lose its last usable Owner/Admin grantee (no Channel details) */
             409: {
                 headers: {
                     [name: string]: unknown;
