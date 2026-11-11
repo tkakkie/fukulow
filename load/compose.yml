@@ -11,6 +11,7 @@ services:
       FUKULOW_ADDR: 0.0.0.0:8080
       DATABASE_URL: postgres://fukulow:${LOAD_DB_PASSWORD:?Set LOAD_DB_PASSWORD}@db:5432/fukulow
       FUKULOW_COOKIE_SECURE: "false"
+      FUKULOW_SETUP_TOKEN: ${LOAD_SETUP_TOKEN:?Set LOAD_SETUP_TOKEN for the disposable stack}
     ports:
       - "127.0.0.1:${LOAD_PORT:?Set LOAD_PORT}:8080"
     depends_on:

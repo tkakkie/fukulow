@@ -1,0 +1,37 @@
+import { execFileSync, spawnSync } from 'node:child_process'
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+const cwd = fileURLToPath(new URL('..', import.meta.url))
+const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
+const args = (profile: string) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', '--profile', profile, 'config', '--format', 'json']
+
+test('both profiles require a nonempty setup token before starting containers', () => {
+  for (const profile of ['caddy', 'nginx']) {
+    for (const token of [undefined, '']) {
+      const result = spawnSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_SETUP_TOKEN: token }, encoding: 'utf8' })
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /FUKULOW_SETUP_TOKEN/)
+    }
+  }
+})
+
+test('both profiles isolate the database and trust only the fixed proxy IP, including custom prefixes', () => {
+  for (const profile of ['caddy', 'nginx']) {
+    for (const prefix of ['172.30.94', '172.29.193']) {
+      const config = JSON.parse(execFileSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_EDGE_PREFIX: prefix }, encoding: 'utf8' }))
+      const { app, db } = config.services
+      assert.equal(app.ports, undefined)
+      assert.deepEqual(Object.keys(app.networks).sort(), ['backend', 'edge'])
+      assert.equal(app.networks.edge.ipv4_address, `${prefix}.3`)
+      assert.deepEqual(Object.keys(db.networks), ['backend'])
+      assert.equal(db.ports, undefined)
+      assert.deepEqual(Object.keys(config.services[profile].networks), ['edge'])
+      assert.equal(config.services[profile].networks.edge.ipv4_address, `${prefix}.2`)
+      assert.equal(app.environment.FUKULOW_TRUSTED_PROXIES, `${prefix}.2`)
+      assert.equal(app.environment.FUKULOW_CLIENT_IP_HEADER, 'x-forwarded-for')
+      assert.deepEqual(config.networks.edge.ipam.config, [{ subnet: `${prefix}.0/29`, gateway: `${prefix}.1` }])
+    }
+  }
+})

@@ -5,9 +5,8 @@ use sqlx::postgres::PgPoolOptions;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let setup_token = match std::env::var("FUKULOW_SETUP_TOKEN") {
         Ok(token) if token.is_empty() => return Err("FUKULOW_SETUP_TOKEN must not be empty".into()),
-        Ok(token) => Some(token),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(error.into()),
+        Ok(token) => token,
+        Err(_) => return Err("FUKULOW_SETUP_TOKEN must be set to a nonempty value".into()),
     };
     let database_url = std::env::var("DATABASE_URL")?;
     let origins = std::env::var("FUKULOW_WS_ALLOWED_ORIGINS").ok();

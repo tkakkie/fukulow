@@ -13,8 +13,8 @@ const helper = `${project}-kill`
 const directory = mkdtempSync(join(tmpdir(), 'fukulow-restart-'))
 const override = join(directory, 'restart.yml')
 const stop = new AbortController()
-const env = { ...process.env, CHECK_IMAGE: image, POSTGRES_PASSWORD: 'restart-check-only' }
-const compose = ['compose', '-p', project, '-f', 'compose.yml', '-f', override]
+const env = { ...process.env, CHECK_IMAGE: image, POSTGRES_PASSWORD: 'restart-check-only', FUKULOW_SETUP_TOKEN: 'restart-setup-test-only' }
+const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
 
 async function run(command: string, args: string[], allowFailure = false, cleaning = false) {
   const result = await new Promise<{ code: number | null, stdout: string, stderr: string }>((resolve, reject) => {
@@ -102,7 +102,7 @@ try {
   db:
     container_name: ${project}-db
 networks:
-  default:
+  edge:
     name: ${project}-network
 volumes:
   postgres_data:

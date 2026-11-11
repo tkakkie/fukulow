@@ -21,7 +21,46 @@ type Account = String;
 #[derive(Clone, Default)]
 pub struct SignInThrottle {
     buckets: Arc<Mutex<Buckets>>,
-    proxy: Option<(HeaderName, Vec<IpAddr>)>,
+    proxy: Option<(HeaderName, Vec<ProxyNetwork>)>,
+}
+
+#[derive(Clone)]
+struct ProxyNetwork {
+    address: IpAddr,
+    prefix: u8,
+}
+
+impl ProxyNetwork {
+    fn parse(value: &str) -> Result<Self, &'static str> {
+        const ERROR: &str =
+            "FUKULOW_TRUSTED_PROXIES must contain comma-separated IP addresses or CIDRs";
+        let (address, prefix) = match value.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix.parse::<u8>().map_err(|_| ERROR)?)),
+            None => (value, None),
+        };
+        let address = address.parse::<IpAddr>().map_err(|_| ERROR)?;
+        let bits = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = prefix.unwrap_or(bits);
+        if prefix > bits {
+            return Err(ERROR);
+        }
+        Ok(Self { address, prefix })
+    }
+
+    fn contains(&self, peer: IpAddr) -> bool {
+        let peer = peer.to_canonical();
+        let (address, peer, bits) = match (self.address, peer) {
+            (IpAddr::V4(address), IpAddr::V4(peer)) => {
+                (u32::from(address) as u128, u32::from(peer) as u128, 32)
+            }
+            (IpAddr::V6(address), IpAddr::V6(peer)) => (u128::from(address), u128::from(peer), 128),
+            (IpAddr::V6(address), IpAddr::V4(peer)) => {
+                (u128::from(address), u128::from(peer.to_ipv6_mapped()), 128)
+            }
+            _ => return false,
+        };
+        self.prefix == 0 || address >> (bits - self.prefix) == peer >> (bits - self.prefix)
+    }
 }
 
 #[derive(Default)]
@@ -79,7 +118,7 @@ fn ip_key(ip: IpAddr) -> IpAddr {
 }
 
 impl SignInThrottle {
-    /// Exact proxy peer IPs, plus a header whose rightmost value is the client IP.
+    /// Proxy peer IPs/CIDRs, plus a header whose rightmost value is the client IP.
     /// Both settings must be present; the default trusts no forwarded headers.
     pub fn with_proxy_config(
         peers: Option<&str>,
@@ -90,11 +129,8 @@ impl SignInThrottle {
             (Some(peers), Some(header)) => {
                 let peers = peers
                     .split(',')
-                    .map(|ip| ip.trim().parse::<IpAddr>().map(|ip| ip.to_canonical()))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(
-                        |_| "FUKULOW_TRUSTED_PROXIES must contain comma-separated IP addresses",
-                    )?;
+                    .map(|ip| ProxyNetwork::parse(ip.trim()))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let header = HeaderName::from_bytes(header.as_bytes())
                     .map_err(|_| "FUKULOW_CLIENT_IP_HEADER must be a nonempty HTTP header name")?;
                 Some((header, peers))
@@ -114,7 +150,7 @@ impl SignInThrottle {
     pub(super) fn client_ip(&self, peer: ConnectInfo<SocketAddr>, headers: &HeaderMap) -> IpAddr {
         let peer = peer.0.ip().to_canonical();
         if let Some((header, trusted)) = &self.proxy
-            && trusted.contains(&peer)
+            && trusted.iter().any(|network| network.contains(peer))
         {
             let mut values = headers.get_all(header).iter();
             if let Some(value) = values.next()
@@ -489,12 +525,85 @@ mod tests {
     }
 
     #[test]
+    fn proxy_cidrs_match_only_peers_in_the_configured_networks() {
+        for (network, allowed, denied) in [
+            ("192.0.2.65/26", "192.0.2.127", "192.0.2.128"),
+            ("192.0.2.1/32", "192.0.2.1", "192.0.2.2"),
+            ("0.0.0.0/0", "203.0.113.1", "2001:db8::1"),
+            ("2001:db8:1::1/48", "2001:db8:1:ffff::1", "2001:db8:2::1"),
+            ("2001:db8::1/128", "2001:db8::1", "2001:db8::2"),
+            ("::/0", "2001:db8::1", ""),
+            ("::ffff:192.0.2.0/120", "::ffff:192.0.2.99", "192.0.3.1"),
+            ("::ffff:192.0.2.0/80", "192.0.2.99", "2001:db8::1"),
+            ("::ffff:192.0.2.1", "192.0.2.1", "192.0.2.2"),
+            ("172.30.94.2", "172.30.94.2", "172.30.94.1"),
+        ] {
+            let throttle =
+                SignInThrottle::with_proxy_config(Some(network), Some("x-forwarded-for")).unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", "198.51.100.99".parse().unwrap());
+            let peer = |ip: &str| ConnectInfo(SocketAddr::new(ip.parse().unwrap(), 1234));
+            assert_eq!(
+                throttle.client_ip(peer(allowed), &headers),
+                "198.51.100.99".parse::<IpAddr>().unwrap(),
+                "{network}"
+            );
+            if !denied.is_empty() {
+                assert_eq!(
+                    throttle.client_ip(peer(denied), &headers),
+                    denied.parse::<IpAddr>().unwrap(),
+                    "{network}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn untrusted_or_malformed_forwarding_cannot_rotate_failure_budgets() {
+        for (peer, repeated, invalid) in [
+            ("172.30.94.1:1234", false, false),
+            ("172.30.94.2:1234", true, false),
+            ("172.30.94.2:1234", false, true),
+        ] {
+            let throttle =
+                SignInThrottle::with_proxy_config(Some("172.30.94.2"), Some("x-forwarded-for"))
+                    .unwrap();
+            let peer = ConnectInfo(peer.parse().unwrap());
+            for n in 1..=IP_LIMIT {
+                let mut headers = HeaderMap::new();
+                let value = if invalid {
+                    format!("198.51.100.{n}, invalid")
+                } else {
+                    format!("198.51.100.{n}")
+                };
+                headers.append("x-forwarded-for", value.parse().unwrap());
+                if repeated {
+                    headers.append("x-forwarded-for", "203.0.113.1".parse().unwrap());
+                }
+                let ip = throttle.client_ip(peer, &headers);
+                assert_eq!(ip, peer.0.ip());
+                throttle.begin(ip).unwrap().failed();
+            }
+            assert!(
+                throttle
+                    .begin(throttle.client_ip(peer, &HeaderMap::new()))
+                    .is_err()
+            );
+            assert!(throttle.begin("203.0.113.99".parse().unwrap()).is_ok());
+        }
+    }
+
+    #[test]
     fn proxy_configuration_rejects_partial_or_invalid_settings() {
         for (peers, header) in [
             (Some("192.0.2.1"), None),
             (None, Some("x-forwarded-for")),
             (Some(""), Some("x-forwarded-for")),
-            (Some("192.0.2.0/24"), Some("x-forwarded-for")),
+            (Some("192.0.2.0/33"), Some("x-forwarded-for")),
+            (Some("2001:db8::/129"), Some("x-forwarded-for")),
+            (Some("192.0.2.0/-1"), Some("x-forwarded-for")),
+            (Some("192.0.2.0/24/1"), Some("x-forwarded-for")),
+            (Some("192.0.2.1,"), Some("x-forwarded-for")),
             (Some("192.0.2.1"), Some("")),
             (Some("192.0.2.1"), Some("bad header")),
         ] {

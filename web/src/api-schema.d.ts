@@ -502,7 +502,7 @@ export interface components {
             password: string;
             /**
              * Format: password
-             * @description Required when FUKULOW_SETUP_TOKEN is configured on the server.
+             * @description Must match the server's required FUKULOW_SETUP_TOKEN.
              */
             setup_token?: string | null;
         };
