@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { createChannel, signInOwner } from './helpers.ts'
+import { secretSafe, createChannel, signInOwner } from './helpers.ts'
 
 let org: string
 let first: string
@@ -32,7 +32,7 @@ test('creating a Channel opens it and pushes its URL while preserving the open t
   await page.getByRole('button', { name: 'チャンネルを作成', exact: true }).click()
   const created = await response
   expect(created.ok()).toBe(true)
-  const channel = await created.json()
+  const channel = await secretSafe(() => created.json())
   await expect(page).toHaveURL(`/o/${org}/c/${channel.id}?panel=overview`)
   await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
   await expect(composer(page)).toBeFocused()
@@ -123,9 +123,9 @@ test('unknown Channel and Organization links show API-owned unavailable states',
 })
 
 test('Topic back keeps the panel and announces the API Topic name; reload adds no parent entries', async ({ page }) => {
-  const sent = await page.request.post(`/api/v1/orgs/${org}/channels/${first}/messages`, { data: { client_message_id: crypto.randomUUID(), body: 'Topic control', topic_name: '日報' } })
+  const sent = await secretSafe(() => page.request.post(`/api/v1/orgs/${org}/channels/${first}/messages`, { data: { client_message_id: crypto.randomUUID(), body: 'Topic control', topic_name: '日報' } }))
   expect(sent.ok()).toBe(true)
-  const message = await sent.json()
+  const message = await secretSafe(() => sent.json())
   const url = `/o/${org}/c/${first}/t/${message.topic_id}?panel=members`
   await page.goto(url)
   await expect(page.getByRole('heading', { name: '日報', exact: true })).toBeVisible()
@@ -255,29 +255,29 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
 
   const base = `/api/v1/orgs/${org}`
   const channelReq: CreateChannelRequest = { name: `Phone single-${crypto.randomUUID()}`, visibility: 'private' }
-  const channelRes = await page.request.post(`${base}/channels`, { data: channelReq })
+  const channelRes = await secretSafe(() => page.request.post(`${base}/channels`, { data: channelReq }))
   expect(channelRes.ok()).toBe(true)
-  const singleChannel = (await channelRes.json()) as Channel
+  const singleChannel = (await secretSafe(() => channelRes.json())) as Channel
 
   const email = `phone-single-${crypto.randomUUID()}@example.invalid`
   const password = 'correct horse phone nav'
   const inviteReq: CreateInviteRequest = { email, role: 'guest' }
-  const inviteRes = await page.request.post(`${base}/invites`, { data: inviteReq })
+  const inviteRes = await secretSafe(() => page.request.post(`${base}/invites`, { data: inviteReq }))
   expect(inviteRes.ok()).toBe(true)
-  const invite = (await inviteRes.json()) as InviteResponse
+  const invite = (await secretSafe(() => inviteRes.json())) as InviteResponse
 
   const guestContext = await browser.newContext()
   try {
     const acceptReq: AcceptInviteRequest = { token: invite.token, email, name: 'Phone Guest', password }
-    const acceptRes = await guestContext.request.post(`${base}/invites/accept`, { data: acceptReq })
+    const acceptRes = await secretSafe(() => guestContext.request.post(`${base}/invites/accept`, { data: acceptReq }))
     expect(acceptRes.ok()).toBe(true)
-    const guestIdentity = (await acceptRes.json()) as Identity
+    const guestIdentity = (await secretSafe(() => acceptRes.json())) as Identity
 
     const addReq: AddChannelMemberRequest = { member_id: guestIdentity.member.id }
-    const addRes = await page.request.post(`${base}/channels/${singleChannel.id}/members`, { data: addReq })
+    const addRes = await secretSafe(() => page.request.post(`${base}/channels/${singleChannel.id}/members`, { data: addReq }))
     expect(addRes.ok()).toBe(true)
 
-    const loginRes = await guestContext.request.post('/api/v1/session', { data: { email, password } })
+    const loginRes = await secretSafe(() => guestContext.request.post('/api/v1/session', { data: { email, password } }))
     expect(loginRes.ok()).toBe(true)
 
     const guestPage = await guestContext.newPage()
@@ -381,12 +381,12 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
 })
 
 test('beforeunload warns for a draft in an Organization that is not selected, including while selection is unavailable', async ({ page }) => {
-  const identityResponse = await page.request.get('/api/v1/me')
+  const identityResponse = await secretSafe(() => page.request.get('/api/v1/me'))
   expect(identityResponse.ok()).toBe(true)
-  const identity = await identityResponse.json() as import('../src/api-schema.d.ts').components['schemas']['AccountIdentity']
-  const memberResponse = await page.request.get(`/api/v1/orgs/${org}/me`)
+  const identity = await secretSafe(() => identityResponse.json()) as import('../src/api-schema.d.ts').components['schemas']['AccountIdentity']
+  const memberResponse = await secretSafe(() => page.request.get(`/api/v1/orgs/${org}/me`))
   expect(memberResponse.ok()).toBe(true)
-  const member = await memberResponse.json() as import('../src/api-schema.d.ts').components['schemas']['Identity']
+  const member = await secretSafe(() => memberResponse.json()) as import('../src/api-schema.d.ts').components['schemas']['Identity']
   const other = '00000000-0000-0000-0000-000000000003'
   const otherOrganization = { ...identity.organizations[0]!, organization_id: other, name: 'Other Organization' }
   await page.route('**/api/v1/me', route => route.fulfill({ json: { ...identity, organizations: [...identity.organizations, otherOrganization] } }))

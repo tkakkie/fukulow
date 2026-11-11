@@ -1,60 +1,60 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join, relative } from 'node:path'
+import { readdirSync, readFileSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import ts from 'typescript'
 import type { FullResult, Reporter, TestCase, TestError, TestResult, TestStep } from '@playwright/test/reporter'
 
-// Raw Playwright reports include config/env, request data, fill values and source.
-// Publish only this projection; keep payloads, subtitles, stacks and output private.
 const actions = new Set(['Click', 'Fill', 'Press', 'Select', 'Navigate', 'Reload', 'GET', 'POST', 'DELETE', 'PUT', 'PATCH', 'Expect'])
-function stepTitle(step: TestStep) {
-  const action = step.title.split(/[\s"(]/, 1)[0]
-  return actions.has(action) ? action : step.category
-}
+const categories = new Set(['hook', 'expect', 'pw:api', 'test.step', 'fixture', 'test.attach'])
+const testStatuses = new Set(['passed', 'failed', 'timedOut', 'skipped', 'interrupted'])
+const runStatuses = new Set(['passed', 'failed', 'timedout', 'interrupted'])
+const e2eDir = resolve(import.meta.dirname, '../e2e')
+
+// Titles and paths come only from public repository source, never runtime titles
+// (which may interpolate credentials). Dynamic declarations get a fixed title.
+const sources = new Map(readdirSync(e2eDir).filter(file => file.endsWith('.ts')).map(file => {
+  const path = join(e2eDir, file)
+  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+  const titles = new Map<number, string>()
+  function visit(node: ts.Node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'test') {
+      const title = node.arguments[0]
+      titles.set(source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+        title && ts.isStringLiteralLike(title) ? title.text : 'Parameterized test')
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return [path, { file: `e2e/${file}`, lines: source.getLineStarts().length, titles }] as const
+}))
 
 function location(value: TestError['location']) {
-  return value && { file: relative(process.cwd(), value.file), line: value.line, column: value.column }
+  if (!value) return undefined
+  const source = sources.get(resolve(value.file))
+  return source && Number.isSafeInteger(value.line) && value.line > 0 && value.line <= source.lines
+    ? { file: source.file, line: value.line } : undefined
 }
 
+function duration(value: number) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0 }
+function startTime(value: Date) { return new Date(duration(Date.prototype.getTime.call(value))).toISOString() }
+
 function errorSummary(error: TestError) {
-  // Even assertion first lines can contain payloads; dot keeps full CI log errors.
   const message = error.message ?? ''
-  const timeout = /(?:Test timeout of|Timeout) (\d+)ms exceeded/.exec(message)
   return {
-    message: timeout ? `Timeout after ${timeout[1]}ms` : message.includes('expect(') ? 'Assertion failed' : 'Error (details omitted)',
+    classification: /(?:Test timeout of|Timeout) \d+ms exceeded/.test(message) ? 'timeout'
+      : message.includes('expect(') ? 'assertion' : 'error',
     location: location(error.location),
   }
 }
 
 function stepSummary(step: TestStep): object {
+  const action = step.title.split(/[\s"(]/, 1)[0]
   return {
-    title: stepTitle(step), category: step.category, location: location(step.location),
-    startTime: step.startTime.toISOString(), duration: step.duration,
+    title: actions.has(action) ? action : 'Step',
+    category: categories.has(step.category) ? step.category : 'other',
+    location: location(step.location), startTime: startTime(step.startTime), duration: duration(step.duration),
     error: step.error && errorSummary(step.error), steps: step.steps.map(stepSummary),
   }
-}
-
-export function snapshotOnly(context: string): string {
-  // error-context.md also contains errors and a ~200-line test source excerpt.
-  const snapshot = /# Page snapshot\r?\n\r?\n```yaml\r?\n([\s\S]*?)\r?\n```/.exec(context)?.[1]
-  if (!snapshot) return '# Page snapshot\n\nSnapshot unavailable.\n'
-  const lines: string[] = []
-  let hiddenBelow: number | undefined
-  for (const line of snapshot.split('\n')) {
-    const indent = line.search(/\S/)
-    if (hiddenBelow !== undefined && (indent > hiddenBelow || indent === -1)) continue
-    hiddenBelow = undefined
-    // Invite links are readonly textboxes; setup tokens are also form values.
-    const field = /^(\s*)- ((?:textbox|searchbox|combobox)(?: "(?:\\.|[^"\\])*")?(?: \[[^\]]*\])*)(?::|$)/.exec(line)
-    if (field) {
-      lines.push(`${field[1]}- ${field[2]}: [value omitted]`)
-      hiddenBelow = indent
-    } else if (/^\s*- ["']?(?:textbox|searchbox|combobox)\b/.test(line) || /^\s*- \/(?:url|placeholder):/.test(line)) {
-      lines.push(`${' '.repeat(indent)}- [value omitted]`)
-      hiddenBelow = indent
-    } else {
-      lines.push(line)
-    }
-  }
-  return `# Page snapshot\n\n\`\`\`yaml\n${lines.join('\n')}\n\`\`\`\n`
 }
 
 export default class E2EReporter implements Reporter {
@@ -70,25 +70,20 @@ export default class E2EReporter implements Reporter {
 
   onError(error: TestError) { this.errors.push(errorSummary(error)) }
 
-  async onTestEnd(test: TestCase, result: TestResult) {
-    const index = this.tests.length
+  onTestEnd(test: TestCase, result: TestResult) {
     this.tests.push({
-      title: test.title, location: location(test.location), status: result.status,
-      startTime: result.startTime.toISOString(), duration: result.duration,
+      title: sources.get(resolve(test.location.file))?.titles.get(test.location.line) ?? 'Test',
+      location: location(test.location), status: testStatuses.has(result.status) ? result.status : 'unknown',
+      startTime: startTime(result.startTime), duration: duration(result.duration),
       errors: result.errors.map(errorSummary), steps: result.steps.map(stepSummary),
     })
-    if (result.status === test.expectedStatus) return
-    const context = result.attachments.find(a => a.name === 'error-context' && a.path)
-    if (!context?.path) return
-    const destination = join(this.outputDir, `test-${index}`, 'error-context.md')
-    await mkdir(dirname(destination), { recursive: true })
-    await writeFile(destination, snapshotOnly(await readFile(context.path, 'utf8')))
   }
 
   async onEnd(result: FullResult) {
     await mkdir(this.outputDir, { recursive: true })
     await writeFile(join(this.outputDir, 'report.json'), JSON.stringify({
-      status: result.status, startTime: result.startTime.toISOString(), duration: result.duration,
+      status: runStatuses.has(result.status) ? result.status : 'unknown',
+      startTime: startTime(result.startTime), duration: duration(result.duration),
       tests: this.tests, errors: this.errors,
     }, null, 2))
   }

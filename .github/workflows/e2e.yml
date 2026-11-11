@@ -44,8 +44,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: e2e-failure-diagnostics
-          path: |
-            web/test-results/ci-diagnostics/**/error-context.md
-            web/test-results/ci-diagnostics/report.json
+          path: web/test-results/ci-diagnostics/report.json
           retention-days: 3
           if-no-files-found: ignore

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { secretSafe } from './helpers.ts'
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test'
 import type { ClientMessage, components, ServerEvent } from '../src/api-schema.d.ts'
 
@@ -26,9 +27,9 @@ let channelSeq = 0
 const nextChannelName = (prefix: string) => `${prefix}-${++channelSeq}-${Date.now()}`
 
 async function signIn(page: Page): Promise<string> {
-  const statusRes = await page.request.get('/api/v1/setup')
+  const statusRes = await secretSafe(() => page.request.get('/api/v1/setup'))
   expect(statusRes.ok()).toBe(true)
-  const { setup_required } = (await statusRes.json()) as SetupStatus
+  const { setup_required } = (await secretSafe(() => statusRes.json())) as SetupStatus
 
   await page.goto('/')
   if (setup_required) {
@@ -36,7 +37,7 @@ async function signIn(page: Page): Promise<string> {
     await page.getByLabel('オーナーの名前').fill('Alice')
     await page.getByLabel('メールアドレス').fill(owner.email)
     await page.getByLabel('パスワード（12文字以上）').fill(owner.password)
-    await page.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only')
+    await secretSafe(() => page.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only'))
     await page.getByRole('button', { name: 'セットアップして開始' }).click()
   } else {
     await page.getByLabel('メールアドレス').fill(owner.email)
@@ -45,9 +46,9 @@ async function signIn(page: Page): Promise<string> {
   }
   await expect(page.getByText('Acme / Alice さん')).toBeVisible()
 
-  const meRes = await page.request.get('/api/v1/me')
+  const meRes = await secretSafe(() => page.request.get('/api/v1/me'))
   expect(meRes.ok()).toBe(true)
-  const me = (await meRes.json()) as AccountIdentity
+  const me = (await secretSafe(() => meRes.json())) as AccountIdentity
   return me.organizations[0].organization_id
 }
 
@@ -59,7 +60,7 @@ async function createChannel(page: Page, name: string): Promise<Channel> {
   await page.getByRole('button', { name: 'チャンネルを作成' }).click()
   const res = await created
   expect(res.ok()).toBe(true)
-  const channel = (await res.json()) as Channel
+  const channel = (await secretSafe(() => res.json())) as Channel
   await expect(page.getByRole('heading', { name: channel.name })).toBeVisible()
   return channel
 }
@@ -344,7 +345,7 @@ test('shows 再送する on an unknown send outcome and resends with the same cl
   await resendButton.click()
   const response = await confirmedRes
   expect(response.status()).toBe(201)
-  const confirmed = (await response.json()) as Message
+  const confirmed = (await secretSafe(() => response.json())) as Message
 
   expect(sentRequests).toHaveLength(3)
   expect(sentRequests[2].client_message_id).toBe(sentRequests[0].client_message_id)
@@ -361,16 +362,16 @@ test('shows the loadOlder error on failure and clears it on a successful retry',
   // Seed 101 Messages so `latest` returns 52..101 (has_more: true) and the first older page
   // returns 2..51 with `has_more: true`, keeping the loadOlder section mounted after retry.
   const channelReq: CreateChannelRequest = { name: nextChannelName('load-older'), visibility: 'public' }
-  const channelRes = await page.request.post(`/api/v1/orgs/${orgId}/channels`, { data: channelReq })
+  const channelRes = await secretSafe(() => page.request.post(`/api/v1/orgs/${orgId}/channels`, { data: channelReq }))
   expect(channelRes.status()).toBe(201)
-  const target = (await channelRes.json()) as Channel
+  const target = (await secretSafe(() => channelRes.json())) as Channel
 
   for (let i = 1; i <= 101; i++) {
     const msgReq: SendMessageRequest = {
       client_message_id: randomUUID(),
       body: `paged-msg-${String(i).padStart(3, '0')}`,
     }
-    const msgRes = await page.request.post(`/api/v1/orgs/${orgId}/channels/${target.id}/messages`, { data: msgReq })
+    const msgRes = await secretSafe(() => page.request.post(`/api/v1/orgs/${orgId}/channels/${target.id}/messages`, { data: msgReq }))
     expect(msgRes.status()).toBe(201)
   }
 
@@ -432,16 +433,16 @@ test('single-Channel C9 チャンネル一覧へ focuses heading only when visib
   const base = `/api/v1/orgs/${orgId}`
 
   const channelReq: CreateChannelRequest = { name: nextChannelName('c9-single'), visibility: 'private' }
-  const channelRes = await page.request.post(`${base}/channels`, { data: channelReq })
+  const channelRes = await secretSafe(() => page.request.post(`${base}/channels`, { data: channelReq }))
   expect(channelRes.status()).toBe(201)
-  const singleChannel = (await channelRes.json()) as Channel
+  const singleChannel = (await secretSafe(() => channelRes.json())) as Channel
 
   const guestEmail = `c9-single-${randomUUID()}@example.invalid`
   const guestPassword = 'correct horse guest c9'
   const inviteReq: CreateInviteRequest = { email: guestEmail, role: 'guest' }
-  const inviteRes = await page.request.post(`${base}/invites`, { data: inviteReq })
+  const inviteRes = await secretSafe(() => page.request.post(`${base}/invites`, { data: inviteReq }))
   expect(inviteRes.ok()).toBe(true)
-  const invite = (await inviteRes.json()) as InviteResponse
+  const invite = (await secretSafe(() => inviteRes.json())) as InviteResponse
 
   const guestContext = await browser.newContext()
   try {
@@ -451,25 +452,25 @@ test('single-Channel C9 チャンネル一覧へ focuses heading only when visib
       name: 'C9 Single Guest',
       password: guestPassword,
     }
-    const acceptRes = await guestContext.request.post(`${base}/invites/accept`, { data: acceptReq })
+    const acceptRes = await secretSafe(() => guestContext.request.post(`${base}/invites/accept`, { data: acceptReq }))
     expect(acceptRes.ok()).toBe(true)
-    const guestIdentity = (await acceptRes.json()) as Identity
+    const guestIdentity = (await secretSafe(() => acceptRes.json())) as Identity
     const guestMemberId = guestIdentity.member.id
 
     const grantGuest = async () => {
       const addReq: AddChannelMemberRequest = { member_id: guestMemberId }
-      const addRes = await page.request.post(`${base}/channels/${singleChannel.id}/members`, { data: addReq })
+      const addRes = await secretSafe(() => page.request.post(`${base}/channels/${singleChannel.id}/members`, { data: addReq }))
       expect(addRes.ok()).toBe(true)
     }
     const revokeGuest = async () => {
-      const delRes = await page.request.delete(`${base}/channels/${singleChannel.id}/members/${guestMemberId}`)
+      const delRes = await secretSafe(() => page.request.delete(`${base}/channels/${singleChannel.id}/members/${guestMemberId}`))
       expect(delRes.ok()).toBe(true)
     }
 
     await grantGuest()
-    const loginRes = await guestContext.request.post('/api/v1/session', {
+    const loginRes = await secretSafe(() => guestContext.request.post('/api/v1/session', {
       data: { email: guestEmail, password: guestPassword },
-    })
+    }))
     expect(loginRes.ok()).toBe(true)
 
     const guestPage = await guestContext.newPage()

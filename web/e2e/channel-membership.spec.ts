@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test'
+import { secretSafe } from './helpers.ts'
 
 test('shared Member panel adds, confirms removal and leave, explains protection and shows live C9', async ({ page, browser }) => {
-  const setupResponse = await page.request.get('/api/v1/setup')
+  const setupResponse = await secretSafe(() => page.request.get('/api/v1/setup'))
   expect(setupResponse.ok()).toBe(true)
-  const setup = await setupResponse.json()
+  const setup = await secretSafe(() => setupResponse.json())
   if (setup.setup_required) {
-    const response = await page.request.post('/api/v1/setup', { data: { setup_token: process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only', organization_name: 'Acme', name: 'Alice', email: 'owner@example.com', password: 'correct horse battery' } })
+    const response = await secretSafe(() => page.request.post('/api/v1/setup', { data: { setup_token: process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only', organization_name: 'Acme', name: 'Alice', email: 'owner@example.com', password: 'correct horse battery' } }))
     expect(response.ok()).toBe(true)
   }
   await page.goto('/')
@@ -13,25 +14,25 @@ test('shared Member panel adds, confirms removal and leave, explains protection 
   await page.getByLabel('パスワード', { exact: true }).fill('correct horse battery')
   await page.getByRole('button', { name: 'ログイン', exact: true }).click()
   await expect(page.getByText('Acme / Alice さん')).toBeVisible()
-  const meResponse = await page.request.get('/api/v1/me')
+  const meResponse = await secretSafe(() => page.request.get('/api/v1/me'))
   expect(meResponse.ok()).toBe(true)
-  const me = await meResponse.json()
+  const me = await secretSafe(() => meResponse.json())
   const org = me.organizations[0].organization_id
   const base = `/api/v1/orgs/${org}`
   const name = `メンバー149-${crypto.randomUUID()}`
-  const channelResponse = await page.request.post(`${base}/channels`, { data: { name, visibility: 'private' } })
+  const channelResponse = await secretSafe(() => page.request.post(`${base}/channels`, { data: { name, visibility: 'private' } }))
   expect(channelResponse.ok()).toBe(true)
-  const channel = await channelResponse.json()
+  const channel = await secretSafe(() => channelResponse.json())
   const guestName = `参加ゲスト-${crypto.randomUUID()}`
   const email = `guest149-${crypto.randomUUID()}@example.invalid`
-  const inviteResponse = await page.request.post(`${base}/invites`, { data: { email, role: 'guest' } })
+  const inviteResponse = await secretSafe(() => page.request.post(`${base}/invites`, { data: { email, role: 'guest' } }))
   expect(inviteResponse.ok()).toBe(true)
-  const invite = await inviteResponse.json()
+  const invite = await secretSafe(() => inviteResponse.json())
   const guestContext = await browser.newContext()
   try {
-    const accepted = await guestContext.request.post(`${base}/invites/accept`, { data: { token: invite.token, email, name: guestName, password: 'Guest test password 149' } })
+    const accepted = await secretSafe(() => guestContext.request.post(`${base}/invites/accept`, { data: { token: invite.token, email, name: guestName, password: 'Guest test password 149' } }))
     expect(accepted.ok()).toBe(true)
-    const guestMember = (await accepted.json()).member
+    const guestMember = (await secretSafe(() => accepted.json())).member
     await page.reload()
     await page.getByRole('button', { name: `🔒 ${name}`, exact: true }).click()
     await page.getByRole('button', { name: 'パネルを開く(⌘.)' }).click()
@@ -77,9 +78,9 @@ test('shared Member panel adds, confirms removal and leave, explains protection 
     await gp.getByRole('button', { name: `${guestName}としてチャンネルを退出` }).click()
     await guest.getByRole('dialog').getByRole('button', { name: '退出する', exact: true }).click()
     await expect(composer).toBeDisabled()
-    const check = await page.request.get(`${base}/channels/${channel.id}/members`)
+    const check = await secretSafe(() => page.request.get(`${base}/channels/${channel.id}/members`))
     expect(check.ok()).toBe(true)
-    expect((await check.json()).members.some((m: { id: string }) => m.id === guestMember.id)).toBe(false)
+    expect((await secretSafe(() => check.json())).members.some((m: { id: string }) => m.id === guestMember.id)).toBe(false)
     await page.setViewportSize({ width: 320, height: 700 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   } finally { await guestContext.close() }

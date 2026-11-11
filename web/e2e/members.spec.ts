@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { secretSafe } from './helpers.ts'
 
 // auth.spec.ts bootstraps the shared disposable database before this file.
 test('Owner creates an Invite link; new Guest accepts, signs in and sees no implicit public Channels', async ({ page, browser }) => {
@@ -15,16 +16,17 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
   await page.getByLabel('メールアドレス', { exact: true }).fill(email)
   await page.getByLabel('招待するロール', { exact: true }).selectOption('guest')
   await page.getByRole('button', { name: '招待リンクを作成' }).click()
-  const link = await page.getByLabel('招待リンク（7日間有効・1回限り）').inputValue()
+  const link = await secretSafe(() => page.getByLabel('招待リンク（7日間有効・1回限り）').inputValue())
   const guestContext = await browser.newContext()
   try {
     const guest = await guestContext.newPage()
     const requestPaths: string[] = []
     guest.on('request', request => requestPaths.push(new URL(request.url()).pathname + new URL(request.url()).search))
-    await guest.goto(link)
-    const clearedLink = new URL(link)
+    await secretSafe(() => guest.goto(link))
+    const clearedLink = await secretSafe(() => new URL(link))
+    const fragment = clearedLink.hash.slice(1)
     clearedLink.hash = ''
-    await expect(guest).toHaveURL(clearedLink.href)
+    await expect.poll(() => guest.url() === clearedLink.href, { message: 'Invite fragment is removed from the URL' }).toBe(true)
     const invitation = guest.getByRole('region', { name: '招待を受ける' })
     await invitation.getByLabel('招待先のメールアドレス').fill(email)
     await invitation.getByLabel('組織での名前').fill('招待ゲスト')
@@ -40,6 +42,6 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
     await guest.locator('summary').click()
     await expect(guest.getByText('招待ゲスト（ゲスト）')).toBeVisible()
     await expect(guest.getByRole('button', { name: '招待リンクを作成' })).toHaveCount(0)
-    expect(requestPaths.every(path => !path.includes('invite=') && !path.includes(new URL(link).hash.slice(1)))).toBe(true)
+    expect(requestPaths.every(path => !path.includes('invite=') && !path.includes(fragment)), 'Invite token never enters a request URL').toBe(true)
   } finally { await guestContext.close() }
 })
