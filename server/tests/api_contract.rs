@@ -855,6 +855,17 @@ fn unread_openapi_exposes_positions_counts_and_scoped_monotonic_updates() {
         0
     );
     assert_eq!(schemas["ReadPosition"]["required"], json!(["read_seq"]));
+    let channel = &schemas["UnreadChannel"]["allOf"][1];
+    for field in ["as_of_seq", "read_seq", "main_unread_count", "unread_count"] {
+        assert!(
+            channel["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field))
+        );
+        assert_eq!(channel["properties"][field]["type"], "integer");
+        assert_eq!(channel["properties"][field]["format"], "int64");
+    }
     for field in ["read_seq", "unread_count"] {
         assert!(
             schemas["TopicSummary"]["required"]

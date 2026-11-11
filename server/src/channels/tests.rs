@@ -106,6 +106,7 @@ async fn list(app: &Router, token: &str) -> Value {
 fn unread_channel(channel: &Value) -> Value {
     let mut channel = channel.clone();
     channel["read_seq"] = json!(0);
+    channel["as_of_seq"] = json!(0);
     channel["main_unread_count"] = json!(0);
     channel["unread_count"] = json!(0);
     channel

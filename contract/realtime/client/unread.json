@@ -1,0 +1,79 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "unread-events-before-rest-late-duplicate-and-replay",
+      "title": "REST already covers events at or below its baseline; only other senders above the baseline add once by Channel and seq",
+      "covers": [
+        "P8",
+        "C1",
+        "C4"
+      ],
+      "layer": "controller",
+      "proposed": {
+        "owner": [
+          "#143"
+        ],
+        "note": "Unread client merge state is not implemented. Server snapshot and reconnect baseline inputs are covered by messages/tests/unread/baseline.rs; validate and skip this client scenario until #143."
+      },
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":0,"as":"sub"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":0,"respond_to":"sub"}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"baseline"}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":1}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"baseline","baseline":{"as_of_seq":1,"read_seq":0,"main_unread_count":1,"unread_count":1}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":2,"unread_count":2}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":1}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":2,"unread_count":2}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":2,"unread_count":2}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":3,"sender":"me"}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":2,"unread_count":2}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"retry"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"retry"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"message","channel":"A","message":{"seq":1}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}}
+      ]
+    },
+    {
+      "id": "unread-reconnect-larger-baseline-then-read-position-wins",
+      "title": "Out-of-order reconnect refetches choose larger as_of_seq first, then larger read_seq when baselines are equal",
+      "covers": [
+        "P8",
+        "C4"
+      ],
+      "layer": "controller",
+      "proposed": {
+        "owner": [
+          "#143"
+        ],
+        "note": "Unread client merge state is not implemented. Server snapshot and reconnect baseline inputs are covered by messages/tests/unread/baseline.rs; validate and skip this client scenario until #143."
+      },
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":0,"as":"sub"}]}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":0,"respond_to":"sub"}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"old"}]}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"retry"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"retry"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"newer"}]}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"newer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"old","baseline":{"as_of_seq":2,"read_seq":0,"main_unread_count":2,"unread_count":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"equalOld"}]}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"equalNew"}]}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"equalNew","baseline":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}}}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"equalOld","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":5}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":5}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}}
+      ]
+    }
+  ]
+}

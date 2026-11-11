@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) mod baseline;
+
 async fn channels(app: &Router, token: &str) -> Value {
     let response = request(app, "GET", "/api/v1/channels", token, Value::Null).await;
     assert_eq!(response.status(), StatusCode::OK);

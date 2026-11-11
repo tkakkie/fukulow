@@ -92,14 +92,27 @@ describe('realtime fixtures: validation', () => {
   it('runs P8 server vocabulary and rejects invalid Unread steps and references', () => {
     const steps = [
       { do: 'mark_read', as: 'alice', channel: 'general', read_seq: 2, expect_read_seq: 2 },
-      { do: 'unread', as: 'alice', channel: 'general', expect: { read_seq: 2, main_unread_count: 0, unread_count: 0, topic_counts: {} } },
+      { do: 'unread', as: 'alice', channel: 'general', expect: { as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, topic_counts: {} } },
     ]
     const unread = (f: any) => { f.delivery.scenarios[0].covers = ['P8']; f.delivery.scenarios[0].steps = structuredClone(steps) }
     expect(problemsOf(unread)).toBe('')
+    expect(problemsOf((f) => { unread(f); delete f.delivery.scenarios[0].steps[1].expect.as_of_seq })).toContain('missing required property "as_of_seq"')
+    expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[1].expect.as_of_seq = -1 })).toContain('below the minimum')
     expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].read_seq = -1 })).toContain('below the minimum')
     expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[1].as = 'unknown' })).toContain('undeclared member unknown')
     expect(problemsOf((f) => { unread(f); f.delivery.scenarios[0].steps[0].channel = 'unknown' })).toContain('undeclared channel unknown')
     expect(problemsOf((f) => { unread(f); delete f.delivery.scenarios[0].steps[1].expect.unread_count })).toContain('missing required property "unread_count"')
+  })
+
+  it('validates proposed P8 client baselines and keeps merge scenarios proposed for #143', () => {
+    const unread = JSON.parse(readFileSync(join(defaultDir, 'client/unread.json'), 'utf8'))
+    const useUnread = (f: any) => { f.client = structuredClone(unread) }
+    expect(problemsOf(useUnread)).toBe('')
+    expect(problemsOf((f) => { useUnread(f); delete f.client.scenarios[0].proposed })).toContain('planned vocabulary')
+    const baseline = (f: any) => f.client.scenarios[0].steps.find((s: any) => s.input.type === 'unread_result').input
+    expect(problemsOf((f) => { useUnread(f); delete baseline(f).baseline.as_of_seq })).toContain('missing required property "as_of_seq"')
+    expect(problemsOf((f) => { useUnread(f); baseline(f).baseline.as_of_seq = -1 })).toContain('below the minimum')
+    expect(problemsOf((f) => { useUnread(f); baseline(f).respond_to = 'unknown' })).toContain('not bound by an earlier step')
   })
 
   it('rejects malformed JSON', () => {

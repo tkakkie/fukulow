@@ -5,9 +5,13 @@ use sqlx::Row;
 pub struct UnreadChannel {
     #[serde(flatten)]
     pub channel: channels::Channel,
+    /// Latest committed Channel seq in the positions/counts snapshot; 0 if empty.
+    pub as_of_seq: i64,
+    /// Current Member position for Messages without Topic; independent of as_of_seq.
     pub read_seq: i64,
+    /// Other senders' Messages without Topic above read_seq, bounded by as_of_seq.
     pub main_unread_count: i64,
-    /// Channel badge: main-timeline Unread plus all Topic Unread.
+    /// Channel badge: main-timeline Unread plus all Topic Unread, bounded by as_of_seq.
     pub unread_count: i64,
 }
 
@@ -32,8 +36,11 @@ pub struct ReadPosition {
 // Each aggregate is a parameterized index range from the persisted position.
 // Fully read Topics never touch Messages; a missing position suppresses only
 // that Channel's Unread at its snapshot's committed counter, without persisting.
+// The counter and Messages commit atomically, so this snapshot's counts are
+// exactly bounded by its counter, including own and already-read Messages.
 pub(super) const LIST_COUNTS_SQL: &str = r#"
-SELECT c.channel_id, COALESCE(p.read_seq, s.seq, 0) AS read_seq,
+SELECT c.channel_id, COALESCE(s.seq, 0) AS as_of_seq,
+    COALESCE(p.read_seq, s.seq, 0) AS read_seq,
     p.channel_id IS NULL AS missing_position,
     main.unread_count AS main_unread_count,
     main.unread_count + topic.unread_count AS unread_count
@@ -78,6 +85,8 @@ pub async fn list_channels(
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await?;
     let channels = channels::visible_list(&mut *tx, &auth).await?;
+    #[cfg(test)]
+    tests::unread::baseline::pause_list(auth.identity.member.id).await;
     let ids = channels.iter().map(|c| c.id).collect::<Vec<_>>();
     // Two batched queries in one authorization/data snapshot, independent of the
     // number of Channels or Topics. No Message or position outside ids is read.
@@ -101,6 +110,7 @@ pub async fn list_channels(
         counts.insert(
             row.try_get::<Uuid, _>("channel_id")?,
             (
+                row.try_get::<i64, _>("as_of_seq")?,
                 row.try_get::<i64, _>("read_seq")?,
                 row.try_get::<i64, _>("main_unread_count")?,
                 row.try_get::<i64, _>("unread_count")?,
@@ -109,10 +119,11 @@ pub async fn list_channels(
     }
     let mut result = Vec::with_capacity(channels.len());
     for channel in channels {
-        let (read_seq, main_unread_count, unread_count) =
+        let (as_of_seq, read_seq, main_unread_count, unread_count) =
             counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
         result.push(UnreadChannel {
             channel,
+            as_of_seq,
             read_seq,
             main_unread_count,
             unread_count,

@@ -3305,23 +3305,31 @@
           {
             "type": "object",
             "required": [
+              "as_of_seq",
               "read_seq",
               "main_unread_count",
               "unread_count"
             ],
             "properties": {
+              "as_of_seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Latest committed Channel seq in the positions/counts snapshot; 0 if empty."
+              },
               "main_unread_count": {
                 "type": "integer",
-                "format": "int64"
+                "format": "int64",
+                "description": "Other senders' Messages without Topic above read_seq, bounded by as_of_seq."
               },
               "read_seq": {
                 "type": "integer",
-                "format": "int64"
+                "format": "int64",
+                "description": "Current Member position for Messages without Topic; independent of as_of_seq."
               },
               "unread_count": {
                 "type": "integer",
                 "format": "int64",
-                "description": "Channel badge: main-timeline Unread plus all Topic Unread."
+                "description": "Channel badge: main-timeline Unread plus all Topic Unread, bounded by as_of_seq."
               }
             }
           }

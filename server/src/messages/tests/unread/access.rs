@@ -174,6 +174,7 @@ async fn unread_missing_position_suppresses_only_affected_channel_at_committed_b
     assert_eq!(cs.len(), 2);
     let c = cs.iter().find(|c| c["id"] == channel.to_string()).unwrap();
     assert_eq!(c["read_seq"], 3);
+    assert_eq!(c["as_of_seq"], 3);
     assert_eq!(c["main_unread_count"], 0);
     assert_eq!(c["unread_count"], 0);
     let other = cs

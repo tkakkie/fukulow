@@ -119,8 +119,8 @@ const channelKey = (ref: Json): string =>
   isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
 
 // Topic projections run at the controller layer; Reply and Unread delivery rules run on the server.
-const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
-const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'])
+const plannedTypes = new Set(['load_unread', 'unread_result', 'fetch_unread', 'open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
+const plannedKeys = new Set(['unread', 'topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'])
 
 /** The path of the first planned term in a scenario, or null. */
 function plannedTerm(value: Json, path: string, delivery = false, controller = false): string | null {
@@ -328,6 +328,7 @@ const respondsTo: Record<string, string> = {
   timer_elapsed: 'wait',
   membership_check_result: 'membership_check',
   main_timeline_result: 'fetch_main_timeline',
+  unread_result: 'fetch_unread',
 }
 
 function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
