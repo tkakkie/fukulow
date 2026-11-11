@@ -9,11 +9,20 @@ services:
       nofile: 65536
     environment:
       FUKULOW_ADDR: 0.0.0.0:8080
-      DATABASE_URL: postgres://fukulow:${LOAD_DB_PASSWORD:?Set LOAD_DB_PASSWORD}@db:5432/fukulow
+      DATABASE_URL: postgres://fukulow_app:${LOAD_APP_PASSWORD:?Set LOAD_APP_PASSWORD}@db:5432/fukulow
       FUKULOW_COOKIE_SECURE: "false"
       FUKULOW_SETUP_TOKEN: ${LOAD_SETUP_TOKEN:?Set LOAD_SETUP_TOKEN for the disposable stack}
     ports:
       - "127.0.0.1:${LOAD_PORT:?Set LOAD_PORT}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  migrate:
+    image: ${LOAD_APP_IMAGE:-${LOAD_PROJECT:?Set LOAD_PROJECT}-app}
+    command: ["fukulow-server", "migrate"]
+    environment:
+      DATABASE_URL: postgres://fukulow:${LOAD_DB_PASSWORD:?Set LOAD_DB_PASSWORD}@db:5432/fukulow
+      POSTGRES_APP_PASSWORD: ${LOAD_APP_PASSWORD:?Set LOAD_APP_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -24,6 +33,11 @@ services:
       POSTGRES_USER: fukulow
       POSTGRES_DB: fukulow
       POSTGRES_PASSWORD: ${LOAD_DB_PASSWORD}
+      POSTGRES_APP_PASSWORD: ${LOAD_APP_PASSWORD}
+    volumes:
+      - ../deploy/init-db-roles.sh:/docker-entrypoint-initdb.d/10-db-roles.sh:ro
+      - ../deploy/db-roles.sql:/opt/fukulow/db-roles.sql:ro
+      - ../deploy/db-grants.sql:/opt/fukulow/db-grants.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fukulow -d fukulow"]
       interval: 1s

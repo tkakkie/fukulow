@@ -114,6 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       POSTGRES_PASSWORD: ci-compose-only
+      POSTGRES_APP_PASSWORD: ci-compose-app-only
       FUKULOW_SETUP_TOKEN: ci-setup-test-only
     steps:
       - uses: actions/checkout@v7
@@ -137,6 +138,12 @@ jobs:
           POSTGRES_PASSWORD: ci-compose-only
       - name: Both proxy profiles reject forwarded-IP spoofing
         run: node scripts/check-compose-security.ts
+        env:
+          CHECK_COMPOSE_IMAGE: fukulow-app
+      - name: Upgrade populated main volume and verify backup/restore with app grants
+        run: |
+          git fetch origin main --depth=1
+          node scripts/check-db-upgrade.ts
         env:
           CHECK_COMPOSE_IMAGE: fukulow-app
       - run: docker compose --profile caddy up -d --no-build --wait

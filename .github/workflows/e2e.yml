@@ -29,5 +29,13 @@ jobs:
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
+      - name: Provision least-privilege connection and run one-shot migrations
+        env:
+          POSTGRES_APP_PASSWORD: ci-e2e-app-only
+        run: |
+          target/debug/fukulow-server migrate roles
+          target/debug/fukulow-server migrate
+      - name: Use only the app role for browser tests
+        run: echo 'DATABASE_URL=postgres://fukulow_app:ci-e2e-app-only@127.0.0.1:5432/postgres' >> "$GITHUB_ENV"
       - run: npm --prefix web exec -- playwright install --with-deps chromium
       - run: npm --prefix web run e2e

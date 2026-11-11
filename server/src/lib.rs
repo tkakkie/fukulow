@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod channels;
+pub mod database;
 pub mod messages;
 pub mod openapi;
 pub mod realtime;
