@@ -59,6 +59,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * List visible Channels with the current Member's read positions and Unread counts.
+         * @description Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.
+         */
         get: operations["list_channels"];
         put?: never;
         /**
@@ -1025,6 +1029,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Organization id */
                 org: string;
             };
             cookie?: never;

@@ -260,11 +260,14 @@
         "tags": [
           "crate::messages::unread"
         ],
+        "summary": "List visible Channels with the current Member's read positions and Unread counts.",
+        "description": "Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.",
         "operationId": "list_channels",
         "parameters": [
           {
             "name": "org",
             "in": "path",
+            "description": "Organization id",
             "required": true,
             "schema": {
               "type": "string",
