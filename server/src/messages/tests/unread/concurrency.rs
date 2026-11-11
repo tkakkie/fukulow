@@ -57,7 +57,7 @@ async fn unread_grant_excludes_uncommitted_send_and_mark_waits_for_commit_barrie
 }
 
 // Observe the actual SQL wait, rather than inferring admission from elapsed time.
-async fn waiting(pool: &PgPool, query: &str) {
+pub(super) async fn waiting(pool: &PgPool, query: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE $1)").bind(query).fetch_one(pool).await.unwrap();

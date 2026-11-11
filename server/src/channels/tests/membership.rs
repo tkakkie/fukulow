@@ -94,3 +94,37 @@ async fn channel_creation_denies_deactivation_after_auth_without_inserting(pool:
         }
     }
 }
+
+#[sqlx::test]
+async fn channel_creation_rechecks_guest_role_after_auth_with_positive_control(pool: PgPool) {
+    let org = organization(&pool).await;
+    let id = Uuid::new_v4();
+    let token = member(&pool, org, id, "member").await;
+    let state = AppState::for_test(pool.clone());
+    create(&router(&pool), &token, "Allowed", "public").await;
+    let auth = extract_auth(state.clone(), &token).await;
+    sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
+        .bind(org)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = create_channel(
+        State(state),
+        auth,
+        ApiJson(CreateChannelRequest {
+            name: "Denied".into(),
+            visibility: ChannelVisibility::Private,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+    let channels: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM channels WHERE organization_id=$1")
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(channels, 1);
+}

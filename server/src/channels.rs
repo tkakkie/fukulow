@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::{self, ApiError, ApiJson, Auth, ErrorBody},
+    auth::{
+        self, Action, Actor, ApiError, ApiJson, Auth, Capability, ErrorBody, Resource, Role,
+        authorize,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::Type)]
@@ -21,13 +24,38 @@ pub enum ChannelVisibility {
     Private,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Channel {
     pub id: Uuid,
     /// At most 128 Unicode scalar values.
     #[schema(max_length = 128)]
     pub name: String,
     pub visibility: ChannelVisibility,
+    pub capabilities: ChannelCapabilities,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ChannelCapabilities {
+    pub can_add_members: Capability,
+}
+
+impl ChannelCapabilities {
+    fn for_visible(organization: Uuid, role: Role, public: bool) -> Self {
+        Self {
+            can_add_members: authorize(
+                Actor::Member {
+                    organization,
+                    role,
+                    channel_member: true,
+                },
+                Action::AddChannelMembers,
+                Resource::Channel {
+                    organization,
+                    public,
+                },
+            ),
+        }
+    }
 }
 
 /// Identity and organization come from the session, never from request fields.
@@ -48,30 +76,47 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     auth: &Auth,
 ) -> Result<Vec<Channel>, ApiError> {
+    auth.require(Action::ReadOrganization)?;
+    let visible = visible_channel_sql();
     // The LEFT JOIN retains one empty row for an active Member with no visible Channels.
     let sql = format!(
-        "SELECT c.id, c.name, c.visibility FROM ({}) u \
+        "SELECT c.id, c.name, c.visibility, u.role FROM ({}) u \
          LEFT JOIN channels c ON c.organization_id = $1 \
-         AND ({VISIBLE_CHANNEL_SQL}) WHERE u.id = $2 AND u.membership_revision = $3 \
+         AND ({visible}) WHERE u.id = $2 AND u.membership_revision = $3 \
          ORDER BY lower(c.name COLLATE \"C\"), c.id",
         auth::ACTIVE_MEMBERS_SQL
     );
-    let rows = sqlx::query_as::<_, (Option<Uuid>, Option<String>, Option<ChannelVisibility>)>(&sql)
-        .bind(auth.identity.organization.organization_id)
-        .bind(auth.identity.member.id)
-        .bind(auth.membership_revision)
-        .fetch_all(executor)
-        .await?;
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Option<Uuid>,
+            Option<String>,
+            Option<ChannelVisibility>,
+            Role,
+        ),
+    >(&sql)
+    .bind(auth.identity.organization.organization_id)
+    .bind(auth.identity.member.id)
+    .bind(auth.membership_revision)
+    .fetch_all(executor)
+    .await?;
     if rows.is_empty() {
         return Err(ApiError::organization_unavailable());
     }
     let channels = rows
         .into_iter()
-        .filter_map(|(id, name, visibility)| {
+        .filter_map(|(id, name, visibility, role)| {
+            let visibility = visibility?;
+            let capabilities = ChannelCapabilities::for_visible(
+                auth.identity.organization.organization_id,
+                role,
+                matches!(visibility, ChannelVisibility::Public),
+            );
             Some(Channel {
                 id: id?,
                 name: name?,
-                visibility: visibility?,
+                visibility,
+                capabilities,
             })
         })
         .collect();
@@ -87,6 +132,7 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     responses((status = 201, description = "Created Channel; a private Channel includes its creator as a Member", body = Channel),
         (status = 400, description = "Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
+        (status = 403, description = "forbidden: Guests cannot create Channels", body = ErrorBody),
         (status = 409, description = "Channel name already exists", body = ErrorBody),
         (status = 413, description = "Channel creation request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Channel creation requires an application/json content type", body = ErrorBody),
@@ -109,18 +155,12 @@ pub async fn create_channel(
     }
     let organization_id = auth.identity.organization.organization_id;
     let mut tx = state.pool.begin().await?;
-    let sql = format!("SELECT id FROM ({}) u", auth::current_member_sql(true));
-    if sqlx::query_scalar::<_, Uuid>(&sql)
-        .bind(organization_id)
-        .bind(auth.identity.member.id)
-        .bind(auth.membership_revision)
-        .fetch_optional(&mut *tx)
-        .await?
-        .is_none()
-    {
-        return Err(ApiError::organization_unavailable());
-    }
-    let channel = match sqlx::query_as::<_, Channel>(
+    let actor = auth::members::current_actor(&mut tx, &auth, Action::CreateChannel).await?;
+    let role = match actor {
+        Actor::Member { role, .. } => role,
+        _ => return Err(ApiError::forbidden()),
+    };
+    let channel = match sqlx::query_as::<_, (Uuid, String, ChannelVisibility)>(
         "INSERT INTO channels (organization_id, id, name, visibility) \
          VALUES ($1, $2, $3, $4) RETURNING id, name, visibility",
     )
@@ -150,6 +190,16 @@ pub async fn create_channel(
         }
         Err(error) => return Err(error.into()),
     };
+    let channel = Channel {
+        id: channel.0,
+        name: channel.1,
+        capabilities: ChannelCapabilities::for_visible(
+            organization_id,
+            role,
+            matches!(channel.2, ChannelVisibility::Public),
+        ),
+        visibility: channel.2,
+    };
     if matches!(channel.visibility, ChannelVisibility::Private) {
         sqlx::query(
             "INSERT INTO channel_members (organization_id, channel_id, member_id, membership_revision) \
@@ -172,15 +222,22 @@ pub async fn create_channel(
 }
 
 // All Channel authorization paths share the same grant predicate (aliases c and u).
-const VISIBLE_CHANNEL_SQL: &str = "c.visibility = 'public' OR EXISTS (SELECT 1 FROM channel_members cm \
+fn visible_channel_sql() -> String {
+    let public_roles = auth::authorization::channel_roles_sql(false);
+    let explicit_roles = auth::authorization::channel_roles_sql(true);
+    format!(
+        "(c.visibility = 'public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND EXISTS (SELECT 1 FROM channel_members cm \
     WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
-    AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision)";
+    AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision))"
+    )
+}
 
 fn visibility_sql(member_sql: &str, channel_parameter: &str) -> String {
+    let visible = visible_channel_sql();
     format!(
         "SELECT u.id, u.membership_revision, EXISTS (SELECT 1 FROM channels c \
          WHERE c.organization_id = $1 AND c.id = {channel_parameter} \
-         AND ({VISIBLE_CHANNEL_SQL})) AS visible FROM ({member_sql}) u"
+         AND ({visible})) AS visible FROM ({member_sql}) u"
     )
 }
 
