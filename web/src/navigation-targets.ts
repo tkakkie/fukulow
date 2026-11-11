@@ -15,14 +15,16 @@ export function createNavigationTargets(reads: Reads) {
   let generation = 0
   let key = ''
   let closed = false
-  const timers = new Set<ReturnType<typeof setTimeout>>()
+  const pending = new Set<() => void>()
   const listeners = new Set<() => void>()
   const publish = () => listeners.forEach(listener => listener())
   function bounded<T>(read: Promise<Result<T>>): Promise<Result<T>> {
     return new Promise(resolve => {
-      const timer = setTimeout(() => { timers.delete(timer); resolve({ ok: false, kind: 'network' }) }, 10_000)
-      timers.add(timer)
-      void read.then(result => { clearTimeout(timer); timers.delete(timer); resolve(result) })
+      const finish = (result: Result<T>) => { clearTimeout(timer); pending.delete(cancel); resolve(result) }
+      const cancel = () => finish({ ok: false, kind: 'network' })
+      const timer = setTimeout(cancel, 10_000)
+      pending.add(cancel)
+      void read.then(finish)
     })
   }
   async function load(target: NavigationTarget, retry = false) {
@@ -52,6 +54,6 @@ export function createNavigationTargets(reads: Reads) {
     get: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     load,
-    close() { closed = true; generation++; timers.forEach(clearTimeout); timers.clear(); listeners.clear() },
+    close() { closed = true; generation++; pending.forEach(cancel => cancel()); listeners.clear() },
   }
 }

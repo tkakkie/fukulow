@@ -67,3 +67,33 @@ it('turns a stalled URL hint into a retryable error after ten seconds and fences
     resolver.close()
   } finally { vi.useRealTimers() }
 })
+
+it('close settles every stalled Topic and Reply load without publishing or Channel denial', async () => {
+  vi.useFakeTimers()
+  try {
+    const finish: ((result: Result<never>) => void)[] = []
+    const stalled = () => new Promise<Result<never>>(resolve => { finish.push(resolve) })
+    const channelUnavailable = vi.fn()
+    const resolver = createNavigationTargets({ topic: stalled, reply: stalled, channelUnavailable })
+    const publish = vi.fn()
+    resolver.subscribe(publish)
+    const first = resolver.load(target)
+    const second = resolver.load({ ...target, topicId: 'other', panel: 'reply:other' })
+    expect(finish).toHaveLength(4)
+    expect(vi.getTimerCount()).toBe(4)
+    const snapshot = resolver.get()
+    publish.mockClear()
+    resolver.close()
+    // No timers or fetch completions are needed to release either caller.
+    expect(vi.getTimerCount()).toBe(0)
+    let settled = false
+    void Promise.all([first, second]).then(() => { settled = true })
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+    expect(settled).toBe(true)
+    finish.forEach(resolve => resolve(failure('channel not found')))
+    await Promise.all([first, second])
+    expect(resolver.get()).toBe(snapshot)
+    expect(publish).not.toHaveBeenCalled()
+    expect(channelUnavailable).not.toHaveBeenCalled()
+  } finally { vi.useRealTimers() }
+})

@@ -60,6 +60,24 @@ it.each(['untouched', 'typed then cleared', 'new text'] as const)(
   },
 )
 
+it('an admission refusal cannot restore a draft after the Account Session store was cleared', async () => {
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts: drafts.scope(),
+    newId: () => { void sync.channelUnavailable('A'); return 'refused' },
+  })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  const pending = a.submit()
+  drafts.clear()
+  expect(await pending).toBe(false)
+  expect(drafts.hasDrafts()).toBe(false)
+  expect(drafts.scope().get({ organizationId: 'o', channelId: 'A' })).toBe('')
+  await sync.close()
+})
+
 it('timeline delegates preserve pending across selection and settle history before retry', async () => {
   vi.useFakeTimers()
   const sendMessage = vi.fn().mockResolvedValue({ ok: false, kind: 'network' })

@@ -73,7 +73,7 @@ export function createAuth(deps: AuthDeps = defaults) {
       return
     }
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts)
+    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope())
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return

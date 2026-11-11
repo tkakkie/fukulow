@@ -5,6 +5,7 @@ import { createSession } from './session'
 import { createInviteAcceptance } from './members'
 import { inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter } from './sync.svelte'
+import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
 
 beforeEach(() => vi.useFakeTimers())
@@ -22,6 +23,7 @@ function stack(over: Partial<AuthDeps> = {}) {
   const nets: FakeNetwork[] = []
   const ended: (() => void)[] = []
   const closes: ReturnType<typeof vi.fn>[] = []
+  const stores: DraftStore[] = []
   let signedIn = 'owner'
   const deps: AuthDeps = {
     restore: vi.fn(async () => ({ screen: 'signin' as const })),
@@ -30,6 +32,7 @@ function stack(over: Partial<AuthDeps> = {}) {
     signOut: vi.fn(async () => true),
     getOrganization: vi.fn(async () => ok(member(signedIn))),
     openSession(selfId, onEnded, organizationId, drafts): SessionModel {
+      if (drafts) stores.push(drafts)
       const net = fakeNetwork()
       nets.push(net)
       ended.push(onEnded)
@@ -41,7 +44,7 @@ function stack(over: Partial<AuthDeps> = {}) {
     },
     ...over,
   }
-  return { auth: createAuth(deps), deps, nets, ended, closes }
+  return { auth: createAuth(deps), deps, nets, ended, closes, stores }
 }
 type Stack = ReturnType<typeof stack>
 
@@ -484,6 +487,93 @@ it('sign-out, expiry, 401 and Account replacement drop every Organization draft'
     expect(s.auth.session!.sync.channel('A').timeline.draft, end).toBe('')
     await s.auth.selectOrganization('other')
     expect(s.auth.session!.sync.channel('A').timeline.draft, end).toBe('')
+    await s.auth.signOut()
+  }
+})
+
+it.each(['sign-out', '4001', '401', 'Account change'] as const)(
+  'late send completions and old draft intents cannot repopulate drafts after %s', async end => {
+    for (const outcome of ['refusal', 'ACK'] as const) {
+      const s = stack()
+      await signInAs(s, 'm1')
+      const net = await openChannelA(s)
+      const old = s.auth.session!.sync.channel('A')
+      old.setDraft('送信する本文')
+      const pending = old.submit()
+      const send = net.sends[0]
+      expect(old.timeline.pending).toHaveLength(1)
+      if (end === 'sign-out') await s.auth.signOut()
+      else if (end === '4001') net.socket.onClose(4001)
+      else if (end === '401') {
+        void old.send('別の送信')
+        net.sends[1].resolve({ ok: false, kind: 'http', status: 401 })
+      } else await signInAs(s, 'm2')
+      await settle()
+      expect(s.auth.hasUnsavedChanges()).toBe(false)
+      send.resolve(outcome === 'refusal' ? { ok: false, kind: 'http', status: 400 }
+        : ok(sentBy('m1', 101, send.body.client_message_id, send.body.body)))
+      await pending
+      await settle()
+      expect(s.stores[0].hasDrafts()).toBe(false)
+      expect(s.auth.hasUnsavedChanges()).toBe(false)
+      if (end !== 'Account change') await signInAs(s, 'm1')
+      const current = s.auth.session!.sync.channel('A')
+      expect(current.timeline.draft).toBe('')
+      // Retained old adapters must not restore, insert or erase the new Session's drafts.
+      expect(old.restore(send.body.client_message_id)).toBe(false)
+      old.setDraft('古いセッションの下書き')
+      expect(s.auth.hasUnsavedChanges()).toBe(false)
+      current.setDraft('新しいセッションの下書き')
+      old.setDraft('')
+      expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe('新しいセッションの下書き')
+      await s.auth.selectOrganization('o')
+      expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('新しいセッションの下書き')
+      await s.auth.signOut()
+    }
+  },
+)
+
+it('a late refusal after an Organization switch restores only its unedited draft and leaves the selected Organization alone', async () => {
+  for (const edit of ['untouched', 'typed then cleared', 'new text', 'reopened then cleared', 'settled', 'Channel access lost'] as const) {
+    const s = stack()
+    await signInAs(s, 'm1')
+    const net = await openChannelA(s)
+    const a = s.auth.session!.sync.channel('A')
+    a.setDraft('送信する本文')
+    const pending = a.submit()
+    const send = net.sends[0]
+    if (edit === 'typed then cleared' || edit === 'new text') a.setDraft('編集中の下書き')
+    if (edit === 'typed then cleared') a.setDraft('')
+    if (edit === 'settled') {
+      net.event({ type: 'message', message: sentBy('m1', 101, send.body.client_message_id, send.body.body) })
+      await settle()
+      expect(a.timeline.pending).toHaveLength(0)
+    }
+    if (edit === 'Channel access lost') {
+      net.event({ type: 'channel_access_lost', channel_id: 'A' })
+      await settle()
+      expect(a.timeline.status).toBe('unavailable')
+    }
+    await s.auth.selectOrganization('other')
+    const b = s.auth.session!.sync.channel('A')
+    b.setDraft('組織Bの下書き')
+    if (edit === 'reopened then cleared') {
+      await s.auth.selectOrganization('o')
+      const reopened = s.auth.session!.sync.channel('A')
+      reopened.setDraft('新しく編集した下書き')
+      reopened.setDraft('')
+      await s.auth.selectOrganization('other')
+    }
+    send.resolve({ ok: false, kind: 'http', status: 400 })
+    await pending
+    await settle()
+    const expected = edit === 'untouched' ? '送信する本文' : edit === 'new text' ? '編集中の下書き' : ''
+    expect(s.stores[0].get({ organizationId: 'o', channelId: 'A' }), edit).toBe(expected)
+    expect(s.stores.at(-1)!.get({ organizationId: 'other', channelId: 'A' }), edit).toBe('組織Bの下書き')
+    expect(s.auth.session!.sync.channel('A').timeline.draft, edit).toBe('組織Bの下書き')
+    await s.auth.selectOrganization('o')
+    expect(s.auth.session!.sync.channel('A').timeline.draft, edit).toBe(expected)
+    expect(s.auth.hasUnsavedChanges()).toBe(true)
     await s.auth.signOut()
   }
 })
