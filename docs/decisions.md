@@ -215,6 +215,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #242 draft-store epochs fence ended Account Sessions; target revisions protect edits across Organization controllers. Observe detached sends only to restore definite refusals after a switch: the old failed Message UI is gone; ACKs and unknown outcomes never restore text.
 - #200 skips `@axe-core/playwright` and checks WCAG 2.2 AA token contrast, token-only component styles and single polite status-region structure in vitest (`ui-tokens.test.ts`), avoiding a new dependency while running in fast CI.
 - Sprint 1 web acceptance: `npm --prefix web run e2e:compose` against `docker compose --profile caddy up` from an empty database (#19).
+- #211: Compose browser acceptance runs on main pushes and manual dispatch, never PRs, keeping image/browser costs off PR feedback. #150 Sprint 2 requires a successful manual dispatch on the release candidate. Use Caddy for HTTPS/WSS; ci.yml covers both proxies.
+- #211/#254: upload only allowlisted report.json on failure (3 days). No traces, ARIA snapshots or raw requests; screenshots can expose the setup token, and unfiltered sqlx errors prevent certifying Compose logs as secret-free.
 
 ## Load testing and measurement
 - #20 load scaffold: `npm --prefix load ci && npm --prefix load run check && npm --prefix load test`; `make load` signs in to a disposable test Organization (`LOAD_EMAIL`, `LOAD_PASSWORD`; `LOAD_BOOTSTRAP=1` only for an empty DB). CI runs 5 sockets for 10 s.

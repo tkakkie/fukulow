@@ -1,0 +1,86 @@
+name: e2e-compose
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+
+# #150 Sprint 2 gate: dispatch this workflow on the release candidate and require
+# a successful run. Keep expensive Compose acceptance outside PR feedback.
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: fukulow-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      # Caddy is the deployment default and provides the HTTPS/WSS this suite tests.
+      # ci.yml already checks both proxy profiles; nginx alone is HTTP-only.
+      COMPOSE_PROFILES: caddy
+      POSTGRES_PASSWORD: ci-compose-only
+      POSTGRES_APP_PASSWORD: ci-compose-app-only
+      FUKULOW_SETUP_TOKEN: ci-compose-setup-only
+      FUKULOW_COOKIE_SECURE: 'true'
+      FUKULOW_DOMAIN: localhost
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm --prefix web ci
+      - run: npm --prefix web exec -- playwright install --with-deps chromium
+      - name: Isolate images, networks, volumes and dynamically allocated loopback ports
+        # Ignore any deployment .env in every Compose command. Project-scoped named
+        # volumes start empty, including Caddy's CA; no host DB port is published.
+        run: |
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/compose.yml:$RUNNER_TEMP/compose-e2e.yml" >> "$GITHUB_ENV"
+          node --input-type=module -e 'import { randomInt } from "node:crypto"; console.log(`FUKULOW_EDGE_PREFIX=10.${randomInt(192, 256)}.${randomInt(256)}`)' >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/compose-e2e.yml" <<'YAML'
+          services:
+            app:
+              image: ${COMPOSE_PROJECT_NAME}-app
+            migrate:
+              image: ${COMPOSE_PROJECT_NAME}-app
+            caddy:
+              ports: !override
+                - "127.0.0.1::443"
+          YAML
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Expose GitHub Actions cache credentials to buildx bake
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const url = process.env.ACTIONS_RESULTS_URL;
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            if (!url || !token) { throw new Error("Actions cache credentials are not available"); }
+            core.exportVariable("ACTIONS_RESULTS_URL", url);
+            core.exportVariable("ACTIONS_RUNTIME_TOKEN", token);
+      - name: Build isolated image with existing CI layer cache
+        run: docker buildx bake --load --file compose.yml --file "$RUNNER_TEMP/compose-e2e.yml" --set "app.cache-from=type=gha,scope=docker" --set "app.cache-to=type=gha,scope=docker,mode=max"
+      - name: Start fresh stack and wait for HTTPS health
+        run: |
+          docker compose --env-file /dev/null -p "$COMPOSE_PROJECT_NAME" up -d --no-build --wait --wait-timeout 120
+          address=$(docker compose --env-file /dev/null -p "$COMPOSE_PROJECT_NAME" port caddy 443)
+          # Keep localhost as TLS SNI/Host to match Caddy's configured domain.
+          url="https://localhost:${address##*:}"
+          echo "E2E_BASE_URL=$url" >> "$GITHUB_ENV"
+          test "$(curl --insecure --retry 20 --retry-connrefused --retry-delay 1 --max-time 5 -fsS "$url/api/v1/health")" = ok
+      - name: Browser acceptance including Owner setup through the token flow
+        # main.rs requires the supplied env token; it never generates/logs one.
+        # The test enters that same disposable value in the setup UI.
+        env:
+          E2E_SETUP_TOKEN: ${{ env.FUKULOW_SETUP_TOKEN }}
+        run: npm --prefix web run e2e:compose
+      - name: Upload restricted Compose E2E failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-compose-failure-diagnostics
+          path: web/test-results/ci-diagnostics/report.json
+          retention-days: 3
+          if-no-files-found: ignore
+      # #254 supersedes #211's traces/screenshots request. No screenshots: the
+      # setup form can contain the token. No Compose logs: auth.rs logs unfiltered
+      # sqlx errors, so database diagnostics cannot be certified secret-free.
+      - name: Remove stack and all disposable volumes
+        if: always()
+        run: docker compose --env-file /dev/null -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans
