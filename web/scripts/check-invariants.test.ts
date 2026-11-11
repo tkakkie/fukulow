@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
 import { checkDecisions, MAX_DECISION_LENGTH, checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -209,6 +209,86 @@ describe('reference checking against a fixture repository', () => {
   })
 })
 
+describe('split invariants', () => {
+  const table = (rule: string, ref = 'server/tests/a.rs::ok_test') =>
+    `| Rule | Test |\n|---|---|\n| ${rule} | \`${ref}\` |\n`
+  const fixture = () => {
+    const root = mkdtempSync(join(tmpdir(), 'inv-split-'))
+    const put = (path: string, text: string) => {
+      mkdirSync(join(root, path, '..'), { recursive: true })
+      writeFileSync(join(root, path), text)
+    }
+    put('docs/invariants.md', '[a](invariants/a.md)\n[b](invariants/b.md)\n')
+    put('docs/invariants/a.md', table('first'))
+    put('docs/invariants/b.md', table('second'))
+    put('server/tests/a.rs', '#[test]\nfn ok_test() {}\n#[test]\nfn other_test() {}\n')
+    put('web/x.test.ts', "it.skip('skipped', () => {})\n")
+    return { root, put }
+  }
+
+  it('accepts 160 code points in the second part and valid cross-references', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/b.md', table('𠮷'.repeat(160)) + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name from the row in that part.\n\n- [a](a.md): `ok_test`\n')
+    expect(checkInvariants(root)).toEqual([])
+  })
+
+  const cases: [string, (put: (path: string, text: string) => void, root: string) => void, string][] = [
+    ['unlinked part', (put) => put('docs/invariants.md', '[a](invariants/a.md)\n'),
+      'docs/invariants/b.md: line 1: part is not linked from docs/invariants.md'],
+    ['missing index target', (put) => put('docs/invariants.md', '[a](invariants/a.md)\n[b](invariants/b.md)\n[c](invariants/c.md)\n'),
+      'docs/invariants.md: line 3: unknown part: c.md'],
+    ['non-md entry', (put) => put('docs/invariants/c.txt', 'hidden'),
+      'docs/invariants/c.txt: line 1: expected a regular *.md part file'],
+    ['subdirectory', (_put, root) => mkdirSync(join(root, 'docs/invariants/c.md')),
+      'docs/invariants/c.md: line 1: expected a regular *.md part file'],
+    ['missing directory', (put, root) => { rmSync(join(root, 'docs/invariants'), { recursive: true }); put('docs/invariants.md', '# Index\n') },
+      'docs/invariants/: line 1: missing parts directory'],
+    ['zero parts', (put, root) => { rmSync(join(root, 'docs/invariants'), { recursive: true }); mkdirSync(join(root, 'docs/invariants')); put('docs/invariants.md', '# Index\n') },
+      'docs/invariants/: line 1: no parts found'],
+    ['index table row', (put) => put('docs/invariants.md', '[a](invariants/a.md)\n[b](invariants/b.md)\n| hidden | (todo) |\n'),
+      'docs/invariants.md: line 3: tables belong in parts, not the index'],
+    ['empty part', (put) => put('docs/invariants/b.md', '# Empty\n'),
+      'docs/invariants/b.md: line 1: no rows found'],
+    ['161 code points in second part', (put) => put('docs/invariants/b.md', table('𠮷'.repeat(161))),
+      `docs/invariants/b.md: line 3: Rule cell is 161 characters (max 160): ${'𠮷'.repeat(40)}`],
+    ['missing test in second part', (put) => put('docs/invariants/b.md', table('second', 'server/tests/a.rs::missing')),
+      'docs/invariants/b.md: line 3: `server/tests/a.rs::missing` is not a test definition at that path (rule: second)'],
+    ['skipped test in second part', (put) => put('docs/invariants/b.md', table('second', 'web/x.test.ts::skipped')),
+      'docs/invariants/b.md: line 3: `web/x.test.ts::skipped` does not count: skipped (skip/fixme/todo, or inside a skipped describe) (rule: second)'],
+    ['malformed reference in second part', (put) => put('docs/invariants/b.md', table('second', 'ok_test')),
+      'docs/invariants/b.md: line 3: `ok_test` is not in path::test_name form, e.g. server/tests/auth.rs::some_test (rule: second)'],
+    ['duplicate Rule', (put) => put('docs/invariants/b.md', table('first')),
+      'docs/invariants/b.md: line 3: duplicate Rule text (first at docs/invariants/a.md: line 3): first'],
+  ]
+  it.each(cases)('rejects %s (negative)', (_label, change, error) => {
+    const { root, put } = fixture()
+    change(put, root)
+    expect(checkInvariants(root)).toEqual([error])
+  })
+
+  it('rejects cargo omission only in second part (negative)', () => {
+    const { root, put } = fixture()
+    put('docs/invariants/b.md', table('second', 'server/tests/a.rs::other_test'))
+    expect(checkInvariants(root, [{ binary: 'tests/a.rs', name: 'ok_test' }])).toEqual([
+      'docs/invariants/b.md: line 3: `server/tests/a.rs::other_test` does not count: is not in `cargo test -- --list` of tests/a.rs as `other_test` (cfg-excluded or not compiled) (rule: second)',
+    ])
+  })
+
+  it.each([
+    ['unknown part', '- [c](c.md): `ok_test`', 'unknown part: c.md'],
+    ['self link', '- [b](b.md): `ok_test`', 'cross-reference must link to another part'],
+    ['dangling name', '- [a](a.md): `other_test`', 'test name not found in a.md: other_test'],
+    ['malformed line', 'not a bullet', 'expected a Rows in other parts bullet'],
+    ['malformed bullet', '- [a](a.md): `ok_test`, other_test', 'expected a Rows in other parts bullet'],
+    ['mismatched label', '- [wrong](a.md): `ok_test`', 'expected a Rows in other parts bullet'],
+    ['repeated prose', 'Rows that also govern this area, listed by a test name from the row in that part.', 'expected a Rows in other parts bullet'],
+  ])('rejects cross-reference %s (negative)', (_label, bullet, reason) => {
+    const { root, put } = fixture()
+    put('docs/invariants/b.md', table('second') + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name from the row in that part.\n\n' + bullet + '\n')
+    expect(checkInvariants(root)).toEqual(['docs/invariants/b.md: line 9: ' + reason])
+  })
+})
+
 describe('the real docs/invariants.md', () => {
   it('names only existing, executable tests (static scan; the CLI also reconciles with cargo)', () => {
     expect(checkInvariants(resolve(import.meta.dirname, '../..'))).toEqual([])
@@ -254,11 +334,12 @@ describe('checkDecisions continuation lines', () => {
 describe('checkInvariants also checks docs/decisions.md', () => {
   const fixture = (decisions: string) => {
     const root = mkdtempSync(join(tmpdir(), 'inv-dec-'))
-    mkdirSync(join(root, 'docs'), { recursive: true })
+    mkdirSync(join(root, 'docs/invariants'), { recursive: true })
     mkdirSync(join(root, 'server/tests'), { recursive: true })
     mkdirSync(join(root, 'web'), { recursive: true })
     writeFileSync(join(root, 'server/tests/a.rs'), '#[test]\nfn ok_test() {}\n')
-    writeFileSync(join(root, 'docs/invariants.md'), '| Rule | Test |\n|---|---|\n| r | \`server/tests/a.rs::ok_test\` |\n')
+    writeFileSync(join(root, 'docs/invariants.md'), '[a](invariants/a.md)\n')
+    writeFileSync(join(root, 'docs/invariants/a.md'), '| Rule | Test |\n|---|---|\n| r | \`server/tests/a.rs::ok_test\` |\n')
     writeFileSync(join(root, 'docs/decisions.md'), decisions)
     return root
   }
@@ -275,7 +356,7 @@ describe('checkInvariants also checks docs/decisions.md', () => {
 
   it('keeps reporting invariants reference errors unchanged alongside decision errors', () => {
     const root = fixture(`- ${'a'.repeat(301)}\n`)
-    writeFileSync(join(root, 'docs/invariants.md'), '| Rule | Test |\n|---|---|\n| r | \`server/tests/a.rs::missing\` |\n')
+    writeFileSync(join(root, 'docs/invariants/a.md'), '| Rule | Test |\n|---|---|\n| r | \`server/tests/a.rs::missing\` |\n')
     const errors = checkInvariants(root)
     expect(errors).toHaveLength(2)
     expect(errors[0]).toContain('not a test definition')

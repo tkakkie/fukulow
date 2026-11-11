@@ -1,0 +1,27 @@
+# Invariants: deployment
+
+Server platform: database, startup, config, shutdown, schema guard, OpenAPI contract. Writing rules and the other parts: [index](../invariants.md).
+
+| Rule | Test |
+|---|---|
+| Read-only Ok/Err reuses a clean backend; cancellation or BEGIN/ROLLBACK failure discards it; subsequent writes are read-write | `server/src/database/tests/read_only.rs::successful_read_only_reuses_clean_connection`, `server/src/database/tests/read_only.rs::read_only_body_error_reuses_clean_connection`, `server/src/database/tests/read_only.rs::cancelled_read_only_begin_discards_connection_before_next_write`, `server/src/database/tests/read_only.rs::cancelled_read_only_body_discards_connection_before_next_write`, `server/src/database/tests/read_only.rs::failed_rollback_keeps_body_error_and_discards_connection` |
+| App startup reads history only; missing/extra/different versions, checksum mismatch or failed state prevents listening | `server/src/database/tests.rs::application_requires_migration_history_without_creating_it`, `server/src/database/tests.rs::application_rejects_migration_version_checksum_failed_missing_and_extra_rows` |
+| Roles command fails before connecting without a nonempty password; unknown subcommands fail | `server/tests/config.rs::roles_command_requires_password_before_connecting_and_rejects_unknown_commands` |
+| One-shot migrations bound advisory and DDL lock waits to 5 s; failure releases locks and allows a clean retry | `server/src/database/tests.rs::startup_migrations_timeout_on_advisory_lock_and_can_retry`, `server/src/database/tests.rs::startup_migrations_timeout_on_ddl_lock_and_can_retry_without_partial_changes` |
+| The shutdown watch wakes 10,000 waiters concurrently; their simulated one-second waits overlap | `server/src/shutdown.rs::shutdown_watch_wakes_ten_thousand_waiters_concurrently` |
+| Shutdown rejects every API operation and static request with 503 ErrorBody shutting_down, Retry-After 1-5 s and no-store; every API operation documents it | `server/tests/api_contract.rs::shutdown_rejects_every_api_operation_and_static_requests_with_retry_contract`, `server/tests/api_contract.rs::every_api_operation_documents_shutdown_retry_contract` |
+| Generated REST/WebSocket OpenAPI matches the committed contract, including discriminator mappings, nullability, required fields, security and response headers | `server/tests/api_contract.rs::generated_openapi_matches_committed_contract` |
+| Every generated and committed OpenAPI Response Object (incl. reusable, callback, webhook) has a string description non-empty after `str::trim()`; 162 in total | `server/tests/api_contract.rs::openapi_response_objects_require_descriptions`, `server/tests/api_contract.rs::response_description_check_rejects_removed_descriptions`, `server/tests/api_contract.rs::response_description_check_covers_reusable_and_nested_responses`, `server/tests/api_contract.rs::response_description_check_ignores_path_item_metadata`, `server/tests/api_contract.rs::response_description_count_rejects_changed_contract` |
+| 500s and upgrade 400 use ErrorBody with OpenAPI descriptions; auth/handler DB failures give only a generic internal error; bad upgrade, valid cookie+Origin: 400 | `server/tests/api_contract.rs::added_error_responses_have_error_body_and_meaningful_descriptions`, `server/tests/auth.rs::auth_extractor_database_failures_return_generic_500_on_all_protected_endpoints`, `server/tests/auth.rs::public_endpoint_database_failures_return_generic_500`, `server/tests/auth.rs::sign_out_database_failure_returns_generic_500_and_preserves_session`, `server/src/channels/tests.rs::channel_list_database_failure_returns_generic_500`, `server/src/messages/tests.rs::message_list_database_failure_returns_generic_500`, `server/src/realtime/tests.rs::invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_returns_400` |
+| App responses, including errors/fallbacks, carry strict CSP, nosniff and Referrer-Policy; CSP Host reflection cannot inject directives | `server/src/lib.rs::security_headers_cover_success_errors_and_fallbacks`, `server/src/lib.rs::csp_websocket_source_rejects_injected_or_ambiguous_hosts` |
+| Only Vite manifest assets get immutable caching; HTML/fallback/unhashed files revalidate; API remains no-store | `server/src/lib.rs::html_and_unhashed_files_revalidate_and_hashed_assets_are_immutable`, `server/src/lib.rs::security_headers_cover_success_errors_and_fallbacks` |
+| Membership routes/Capabilities are generated; list records omit email/credentials and loss-event data is channel_id only | `server/tests/api_contract.rs::channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated` |
+
+## Rows in other parts
+
+Rows that also govern this area, listed by a test name from the row in that part.
+
+- [auth](auth.md): `startup_requires_setup_token_regardless_of_cookie_security`, `proxy_cidrs_match_only_peers_in_the_configured_networks`
+- [topics](topics.md): `topic_openapi_contract_includes_all_shapes_and_discriminators`
+- [replies](replies.md): `validates running Reply delivery labels and pages`
+- [realtime](realtime.md): `sigint_drains_and_closes_idle_sockets_normally`, `sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work`, `work_counts_unpolled_and_cancelled_tasks_and_nested_notification`, `delivery_contract_rejects_incorrect_unread_counts_and_positions`
