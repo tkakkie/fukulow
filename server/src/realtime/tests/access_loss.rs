@@ -260,6 +260,55 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
 }
 
 #[sqlx::test]
+async fn ungranted_guest_cannot_join_existing_public_topic_but_explicit_grant_permits_it(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let (guest, token) = member(&pool, f.organization).await;
+    sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
+        .bind(f.organization)
+        .bind(guest)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let root = topics::topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    let mut observer = f.server.connect(&f.token).await;
+    subscribe(&mut observer, f.channel, 1).await;
+    ready(&mut observer, f.channel, 1).await;
+    let input = json!({"client_message_id":Uuid::new_v4(),"body":"Join existing Topic","topic_name":"Release"});
+    let path = format!("/api/v1/channels/{}/messages", f.channel);
+    let response = request(&f.app, "POST", &path, &token, input.clone()).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let error: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+    assert_eq!(error, json!({"error":"channel not found"}));
+    let persisted: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM messages WHERE organization_id=$1 AND channel_id=$2),
+         (SELECT count(*) FROM topics WHERE organization_id=$1 AND channel_id=$2),
+         (SELECT seq FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2),
+         message_count,last_seq FROM topics WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(f.organization)
+    .bind(f.channel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted, (1, 1, 1, 1, 1));
+    f.state.message_delivery.flush().await;
+    silent(&mut observer).await;
+    grant(&pool, f.organization, f.channel, guest).await;
+    let response = request(&f.app, "POST", &path, &token, input).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let joined: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+    assert_eq!(joined["topic_id"], root["topic_id"]);
+    assert_eq!(joined["seq"], 2);
+    assert_eq!(event(&mut observer).await["message"], joined);
+    f.state.message_delivery.flush().await;
+    silent(&mut observer).await;
+}
+
+#[sqlx::test]
 async fn effective_loss_http_denial_matrix_including_guest_mark_read_has_positive_controls(
     pool: PgPool,
 ) {

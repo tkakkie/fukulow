@@ -140,6 +140,53 @@ async fn reply_live_replay_cross_organization_and_private_nonmember_denials_have
 }
 
 #[sqlx::test]
+async fn reply_live_replay_ungranted_guest_denials_have_explicit_grant_positive_controls(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let (guest, token) = member(&pool, f.organization).await;
+    sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
+        .bind(f.organization)
+        .bind(guest)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let root = topics::topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    let mut observer = f.server.connect(&f.token).await;
+    subscribe(&mut observer, f.channel, 1).await;
+    ready(&mut observer, f.channel, 1).await;
+    let mut live = f.server.connect(&token).await;
+    subscribe(&mut live, f.channel, 1).await;
+    denied(&mut live, f.channel).await;
+    let first = reply_send(&f, &f.token, f.channel, Uuid::new_v4(), &root).await;
+    assert_eq!(event(&mut observer).await["message"], first);
+    f.state.message_delivery.flush().await;
+    silent(&mut live).await;
+    let mut replay = f.server.connect(&token).await;
+    subscribe(&mut replay, f.channel, 0).await;
+    denied(&mut replay, f.channel).await;
+    silent(&mut replay).await;
+    sqlx::query(
+        "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
+    )
+    .bind(f.organization)
+    .bind(f.channel)
+    .bind(guest)
+    .execute(&pool)
+    .await
+    .unwrap();
+    subscribe(&mut replay, f.channel, 0).await;
+    assert_eq!(event(&mut replay).await["message"], root);
+    assert_eq!(event(&mut replay).await["message"], first);
+    ready(&mut replay, f.channel, 2).await;
+    let second = reply_send(&f, &f.token, f.channel, Uuid::new_v4(), &first).await;
+    assert_eq!(event(&mut replay).await["message"], second);
+    f.state.message_delivery.flush().await;
+    silent(&mut live).await;
+    silent(&mut replay).await;
+}
+
+#[sqlx::test]
 async fn reply_live_replay_member_revision_and_removed_grant_denials_have_positive_controls(
     pool: PgPool,
 ) {
