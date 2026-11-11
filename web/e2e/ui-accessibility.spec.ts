@@ -1,6 +1,6 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test'
 import type { components } from '../src/api-schema.d.ts'
-import { createChannel, owner, signInOwner } from './helpers.ts'
+import { secretSafe, createChannel, owner, signInOwner } from './helpers.ts'
 
 // No locator.click/fill/focus in these flows: even at narrow widths, controls must
 // be reachable by the browser's real sequential keyboard navigation.
@@ -119,7 +119,7 @@ for (const { name, width, doubleText } of [
     const channel = await createChannel(page.request, org, `a11y-${crypto.randomUUID().slice(0, 8)}`)
     const longBody = `long-${'abcdefghij'.repeat(24)} https://example.invalid/${'0123456789'.repeat(24)}`
     const seed: components['schemas']['SendMessageRequest'] = { client_message_id: crypto.randomUUID(), body: longBody }
-    expect((await page.request.post(`/api/v1/orgs/${org}/channels/${channel.id}/messages`, { data: seed })).status()).toBe(201)
+    expect((await secretSafe(() => page.request.post(`/api/v1/orgs/${org}/channels/${channel.id}/messages`, { data: seed }))).status()).toBe(201)
 
     const rootSize = await keyboardSignIn(page, org, doubleText)
 
@@ -210,7 +210,7 @@ async function freezeTime(page: Page) {
 
 async function postMessage(request: APIRequestContext, org: string, channel: string, body: string) {
   const data: components['schemas']['SendMessageRequest'] = { client_message_id: crypto.randomUUID(), body }
-  const response = await request.post(`/api/v1/orgs/${org}/channels/${channel}/messages`, { data })
+  const response = await secretSafe(() => request.post(`/api/v1/orgs/${org}/channels/${channel}/messages`, { data }))
   expect(response.status()).toBe(201)
 }
 
@@ -221,12 +221,12 @@ async function announcementFixture(page: Page, other: APIRequestContext) {
   const email = `a11y-${crypto.randomUUID()}@example.invalid`
   const password = 'correct horse announcements'
   const inviteRequest: components['schemas']['CreateInviteRequest'] = { email, role: 'member' }
-  const invited = await page.request.post(`/api/v1/orgs/${org}/invites`, { data: inviteRequest })
+  const invited = await secretSafe(() => page.request.post(`/api/v1/orgs/${org}/invites`, { data: inviteRequest }))
   expect(invited.ok()).toBe(true)
-  const invite = await invited.json() as components['schemas']['InviteResponse']
+  const invite = await secretSafe(() => invited.json()) as components['schemas']['InviteResponse']
   const acceptRequest: components['schemas']['AcceptInviteRequest'] = { token: invite.token, email, password, name: '通知メンバー' }
-  expect((await other.post(`/api/v1/orgs/${org}/invites/accept`, { data: acceptRequest })).ok()).toBe(true)
-  expect((await other.post('/api/v1/session', { data: { email, password } })).ok()).toBe(true)
+  expect((await secretSafe(() => other.post(`/api/v1/orgs/${org}/invites/accept`, { data: acceptRequest }))).ok()).toBe(true)
+  expect((await secretSafe(() => other.post('/api/v1/session', { data: { email, password } }))).ok()).toBe(true)
   // A history entry proves that mounting the page is not a live announcement.
   await postMessage(other, org, channel.id, 'Initial history must stay silent')
   const membersLoaded = page.waitForResponse(res => res.request().method() === 'GET' && res.url().endsWith(`/orgs/${org}/members`))
