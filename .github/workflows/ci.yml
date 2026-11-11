@@ -74,11 +74,15 @@ jobs:
         with: { name: web-dist, path: web/dist }
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with: { tool: cargo-nextest@0.9.151 }
+      # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
+      - run: cargo nextest run --no-fail-fast
+      - run: cargo test --doc # nextest does not run doctests
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: npm --prefix web ci # the invariants check imports typescript
-      - run: node web/scripts/check-invariants.ts # reuses the test build of `cargo test` above (no extra cold build); fails if cargo is missing
+      - run: node web/scripts/check-invariants.ts # reuses the test build of `cargo nextest run` above (no extra cold build); fails if cargo is missing
   checks:
     needs: web
     runs-on: ubuntu-latest
