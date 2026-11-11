@@ -31,7 +31,7 @@
       name,
       email,
       password,
-      setup_token: setupToken || null,
+      setup_token: setupToken,
     })
     if (moved) clearSecrets()
   }
@@ -203,11 +203,12 @@
             bind:value={password}
           />
           <Input
-            label="セットアップトークン（任意）"
+            label="セットアップトークン"
             name="setup_token"
             type="password"
+            required
             autocomplete="off"
-            hint="設定されている場合は、管理者から受け取ったトークンが必要です。"
+            hint="管理者から受け取ったトークンを入力してください。"
             bind:value={setupToken}
           />
           {#if auth.error}

@@ -7,7 +7,7 @@ import { initialState, step, type Input, type State } from './protocol'
 
 export const scenarios: ClientScenario[] = readdirSync(join(defaultDir, 'client')).filter(n => n.endsWith('.json')).sort()
   .flatMap(n => (JSON.parse(readFileSync(join(defaultDir, 'client', n), 'utf8')) as { scenarios: ClientScenario[] }).scenarios)
-export const message = (m: ResolvedInput['message'], channel: string): Message => ({ ...m!, channel_id: channel, topic_id: m?.topic ?? null, reply_to: null, reply_root_id: null })
+export const message = (m: ResolvedInput['message'], channel: string): Message => ({ ...m!, channel_id: channel, topic_id: m?.topic ?? null, reply_to: m?.reply_to ?? null, reply_root_id: m?.reply_root_id ?? null })
 export const record = (seq: number, channel = 'A'): Message => ({ channel_id: channel, seq, body: `m${seq}`, id: `id${seq}`,
   sender: 'other', client_message_id: `auto-${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null, reply_to: null, reply_root_id: null })
 export function observe(state: State): Observed {

@@ -15,6 +15,7 @@ export default defineConfig({
     env: {
       FUKULOW_ADDR: `127.0.0.1:${port}`,
       FUKULOW_COOKIE_SECURE: 'false',
+      FUKULOW_SETUP_TOKEN: process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only',
     },
     reuseExistingServer: false,
     timeout: 30_000,
