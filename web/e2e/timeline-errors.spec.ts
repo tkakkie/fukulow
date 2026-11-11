@@ -63,6 +63,30 @@ const errorJson = (error: string): { contentType: string; body: string } => ({
   body: JSON.stringify({ error } satisfies ErrorBody),
 })
 
+async function sendConfirmedMessage(page: Page, channelId: string, body: string): Promise<void> {
+  const timeline = page.getByRole('region', { name: 'タイムライン' })
+  const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
+  const sendButton = timeline.getByRole('button', { name: '送信' })
+  const sent = page.waitForResponse(
+    res => new URL(res.url()).pathname.endsWith(`/channels/${channelId}/messages`) && res.request().method() === 'POST',
+  )
+  await composer.fill(body)
+  await sendButton.click()
+  const res = await sent
+  expect(res.status()).toBe(201)
+  await expect(timeline.getByText('送信中…')).toHaveCount(0)
+  await expect(timeline.getByText(body)).toBeVisible()
+  await expect(composer).toHaveValue('')
+}
+
+async function reselectChannel(page: Page, viaName: string, targetName: string): Promise<void> {
+  const nav = page.getByRole('navigation', { name: 'チャンネル' })
+  await nav.getByRole('button', { name: viaName }).click()
+  await expect(page.getByRole('heading', { name: viaName })).toBeVisible()
+  await nav.getByRole('button', { name: targetName }).click()
+  await expect(page.getByRole('heading', { name: targetName })).toBeVisible()
+}
+
 test('keeps loaded Messages and the unsent draft visible in error and unavailable states', async ({ page }) => {
   let clientSocket: WebSocketRoute | undefined
   await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
@@ -80,26 +104,20 @@ test('keeps loaded Messages and the unsent draft visible in error and unavailabl
 
   const timeline = page.getByRole('region', { name: 'タイムライン' })
   const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
-  const sendButton = timeline.getByRole('button', { name: '送信' })
 
   const loadedMessage = `loaded-message-${Date.now()}`
-  await composer.fill(loadedMessage)
-  await sendButton.click()
-  await expect(timeline.getByText(loadedMessage)).toBeVisible()
-  await expect(composer).toHaveValue('')
+  await sendConfirmedMessage(page, target.id, loadedMessage)
 
   const unsentDraft = `unsent-draft-${Date.now()}`
   await composer.fill(unsentDraft)
 
-  // Remount Timeline through a Channel switch so the visible draft must come from adapter state.
-  await nav.getByRole('button', { name: other.name }).click()
-  await expect(page.getByRole('heading', { name: other.name })).toBeVisible()
-  await nav.getByRole('button', { name: target.name }).click()
+  // Remount Timeline through a Channel switch so the visible Message and draft come from adapter state.
+  await reselectChannel(page, other.name, target.name)
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
   await expect(timeline.getByText(loadedMessage)).toBeVisible()
   await expect(composer).toHaveValue(unsentDraft)
 
-  // 1. Enter `unavailable` (C9 subscription error) while Messages and draft are already present.
+  // 1. Enter `unavailable` (C9 subscription error) while settled Messages and draft are present; recover by reselection.
   const refusal: ServerEvent = { type: 'error', channel_id: target.id, code: 'channel_not_found' }
   clientSocket!.send(JSON.stringify(refusal))
 
@@ -108,10 +126,19 @@ test('keeps loaded Messages and the unsent draft visible in error and unavailabl
   await expect(composer).toBeVisible()
   await expect(composer).toHaveValue(unsentDraft)
 
-  // 2. Retry `loadLatest` and fail with 503 -> `error` state; loaded Messages and draft stay visible.
+  await reselectChannel(page, other.name, target.name)
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+  await expect(timeline.getByRole('alert')).toHaveCount(0)
+  await expect(timeline.getByText(loadedMessage)).toBeVisible()
+  await expect(composer).toHaveValue(unsentDraft)
+
+  // 2. Drive retryable 503 (`error`) and 404 (`unavailable`) history states without retrying from `unavailable`.
+  const existingIds = new Set([target.id, other.id])
   let latestOutcome: 'server_error' | 'not_found' | 'pass' = 'server_error'
-  await page.route(`**/api/v1/orgs/*/channels/${target.id}/messages*`, async route => {
+  await page.route('**/api/v1/orgs/*/channels/*/messages*', async route => {
     if (route.request().method() !== 'GET') return route.continue()
+    const channelId = /\/channels\/([^/]+)\/messages/.exec(new URL(route.request().url()).pathname)?.[1]
+    if (!channelId || existingIds.has(channelId)) return route.continue()
     if (latestOutcome === 'server_error') {
       return route.fulfill({ status: 503, ...errorJson('internal_error') })
     }
@@ -121,27 +148,38 @@ test('keeps loaded Messages and the unsent draft visible in error and unavailabl
     return route.continue()
   })
 
-  await timeline.getByRole('button', { name: '再試行' }).click()
+  const historyTarget = await createChannel(page, nextChannelName('history-errors'))
   await expect(timeline.getByRole('alert').filter({ hasText: 'メッセージを読み込めませんでした。' })).toBeVisible()
-  await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toHaveCount(0)
-  await expect(timeline.getByText(loadedMessage)).toBeVisible()
-  await expect(composer).toBeVisible()
-  await expect(composer).toHaveValue(unsentDraft)
 
-  // 3. Retry `loadLatest` and fail with HTTP 404 -> `unavailable` again; loaded Messages and draft stay visible.
+  const confirmedInError = `confirmed-in-error-${Date.now()}`
+  await sendConfirmedMessage(page, historyTarget.id, confirmedInError)
+
+  const historyDraft = `history-draft-${Date.now()}`
+  await composer.fill(historyDraft)
+
+  // Re-selecting with no established cursor re-fetches `latest` (503 -> `error`); settled Message and draft stay visible.
+  await reselectChannel(page, other.name, historyTarget.name)
+  await expect(timeline.getByRole('alert').filter({ hasText: 'メッセージを読み込めませんでした。' })).toBeVisible()
+  await expect(timeline.getByText(confirmedInError)).toBeVisible()
+  await expect(composer).toBeVisible()
+  await expect(composer).toHaveValue(historyDraft)
+
+  // 3. `再試行` from retryable `error` fails with HTTP 404 -> `unavailable`; settled Message and draft stay visible.
   latestOutcome = 'not_found'
   await timeline.getByRole('button', { name: '再試行' }).click()
   await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
-  await expect(timeline.getByText(loadedMessage)).toBeVisible()
+  await expect(timeline.getByRole('alert').filter({ hasText: 'メッセージを読み込めませんでした。' })).toHaveCount(0)
+  await expect(timeline.getByText(confirmedInError)).toBeVisible()
   await expect(composer).toBeVisible()
-  await expect(composer).toHaveValue(unsentDraft)
+  await expect(composer).toHaveValue(historyDraft)
 
-  // 4. Explicit retry succeeds against the real server and clears the error banner.
+  // 4. Recovery from `unavailable` via Channel reselection succeeds against the real server and clears the alert.
   latestOutcome = 'pass'
-  await timeline.getByRole('button', { name: '再試行' }).click()
+  await reselectChannel(page, other.name, historyTarget.name)
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
   await expect(timeline.getByRole('alert')).toHaveCount(0)
-  await expect(timeline.getByText(loadedMessage)).toBeVisible()
-  await expect(composer).toHaveValue(unsentDraft)
+  await expect(timeline.getByText(confirmedInError)).toBeVisible()
+  await expect(composer).toHaveValue(historyDraft)
 })
 
 test('disables the Composer when the Channel is unavailable', async ({ page }) => {
@@ -153,6 +191,8 @@ test('disables the Composer when the Channel is unavailable', async ({ page }) =
 
   await signIn(page)
   const target = await createChannel(page, nextChannelName('composer-disabled'))
+  const other = await createChannel(page, nextChannelName('composer-other'))
+  await page.getByRole('navigation', { name: 'チャンネル' }).getByRole('button', { name: target.name }).click()
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
 
   const timeline = page.getByRole('region', { name: 'タイムライン' })
@@ -170,18 +210,28 @@ test('disables the Composer when the Channel is unavailable', async ({ page }) =
   await expect(composer).toBeDisabled()
   await expect(sendButton).toBeDisabled()
 
-  // In retryable `error`, Composer becomes enabled again; in `ready`, it stays enabled.
+  // Reselecting recovers the unavailable Channel and re-enables the Composer.
+  await reselectChannel(page, other.name, target.name)
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+  await expect(timeline.getByRole('alert')).toHaveCount(0)
+  await expect(composer).toBeEnabled()
+  await expect(sendButton).toBeEnabled()
+
+  // Retryable `error` keeps the Composer enabled, and `再試行` from `error` clears it.
+  const existingIds = new Set([target.id, other.id])
   let failOnce = true
-  await page.route(`**/api/v1/orgs/*/channels/${target.id}/messages*`, async route => {
-    if (route.request().method() === 'GET' && failOnce) {
+  await page.route('**/api/v1/orgs/*/channels/*/messages*', async route => {
+    const channelId = /\/channels\/([^/]+)\/messages/.exec(new URL(route.request().url()).pathname)?.[1]
+    if (route.request().method() === 'GET' && channelId && !existingIds.has(channelId) && failOnce) {
       failOnce = false
       return route.fulfill({ status: 503, ...errorJson('internal_error') })
     }
     return route.continue()
   })
 
-  await timeline.getByRole('button', { name: '再試行' }).click()
+  await createChannel(page, nextChannelName('composer-retryable'))
   await expect(timeline.getByRole('alert').filter({ hasText: 'メッセージを読み込めませんでした。' })).toBeVisible()
+  await composer.fill('draft during retryable error')
   await expect(composer).toBeEnabled()
   await expect(sendButton).toBeEnabled()
 
@@ -223,7 +273,12 @@ test('shows 編集 on a definite failed send and restores the text into the Comp
   await expect(editButton).toHaveCount(0)
   await expect(timeline.getByRole('alert')).toHaveCount(0)
 
+  const confirmed = page.waitForResponse(
+    res => new URL(res.url()).pathname.endsWith(`/channels/${target.id}/messages`) && res.request().method() === 'POST',
+  )
   await sendButton.click()
+  expect((await confirmed).status()).toBe(201)
+  await expect(timeline.getByText('送信中…')).toHaveCount(0)
   await expect(composer).toHaveValue('')
   await expect(timeline.getByText(body)).toBeVisible()
   await expect(timeline.getByRole('alert')).toHaveCount(0)
