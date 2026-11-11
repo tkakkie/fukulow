@@ -5869,4 +5869,217 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     sessionModel.close()
   })
 
+  it('keeps following the bottom instead of jumping back to first Unread when a live Message arrives while hidden behind a phone panel', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    // 6 main messages (seq 1..6, read_seq = 2 -> first Unread m3 at row index 2, top = 100px)
+    const mainMsgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メインメッセージ${seq}`,
+    }))
+    // 6 Topic t1 messages (seq 7..12, read_seq = 8 -> first Unread t1m3 at row index 2, top = 100px)
+    const topicMsgs = [7, 8, 9, 10, 11, 12].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      topic_id: 't1',
+      body: `トピックメッセージ${seq}`,
+    }))
+    const t1Summary = {
+      id: 't1',
+      name: 'トピックA',
+      first_seq: 7,
+      last_seq: 12,
+      message_count: 6,
+      latest_message: topicMsgs[5],
+      read_seq: 8,
+      unread_count: 4,
+    }
+
+    net.pages.c1 = ok({ messages: [...mainMsgs, ...topicMsgs], has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 12,
+      has_more: false,
+      items: [
+        ...mainMsgs.map((message) => ({ kind: 'message' as const, message })),
+        { kind: 'topic' as const, topic: t1Summary },
+      ],
+    })
+    net.topicLists.c1 = ok({ as_of_seq: 12, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 12, topic: t1Summary })
+    net.topicMessages['c1:t1'] = ok({ messages: topicMsgs, has_more: false })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 12,
+      read_seq: 2,
+      unread_count: 8,
+      main_unread_count: 4,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 12)
+    await settle()
+
+    testWin.innerWidth = 375
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 375,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 300
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    // 1. Main Timeline enters with Unread -> positions at first Unread (m3 at row index 2 = 100px)
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(scrollEl.scrollTop).toBe(100)
+    expect(host.querySelector(`#main-content [data-message-id="${mainMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+
+    // 2. User scrolls to the bottom (pinned), presenting m5 and m6 along the way
+    scrollEl.scrollTop = 200
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    scrollEl.scrollTop = 250
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    await settle()
+
+    // 3. User opens phone panel -> main view is hidden (data-mobile-level="panel")
+    host.querySelector('#main-content button[aria-label="パネルを開く(⌘.)"]')!.click()
+    flushSync()
+    await settle()
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('panel')
+    expect(scrollEl.isRenderedVisible()).toBe(false)
+
+    // 4. Live Message arrives on main Timeline while hidden
+    const m7 = { ...record(13, 'c1'), sender: 'other', body: 'メイン新着7' }
+    net.unreadChannels.c1.as_of_seq = 13
+    net.topicLists.c1 = ok({ as_of_seq: 13, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 13, topic: t1Summary })
+    scrollEl.scrollHeight = 350
+    net.event({ type: 'message', message: m7 })
+    await settle()
+    flushSync()
+
+    // 5. User closes phone panel -> stays following the bottom (350px), not jumping back to first Unread (100px)
+    host.querySelector('#panel-content button[aria-label="パネルを閉じる(Esc)"]')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(scrollEl.isRenderedVisible()).toBe(true)
+    expect(scrollEl.scrollTop).toBe(350)
+    expect(host.querySelector(`#main-content [data-message-id="${mainMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: null }, body: { read_seq: 13 } })
+
+    // 6. Same scenario in TopicView: open Topic t1 -> positions at first Unread (t1m3 at row index 2 = 100px)
+    host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!.click()
+    flushSync()
+    const topicScrollEl = host.querySelector('#main-content .topic-view__scroll')!
+    topicScrollEl.clientHeight = 100
+    topicScrollEl.scrollHeight = 250
+    topicScrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    expect(topicScrollEl.scrollTop).toBe(100)
+    expect(sessionModel.unread('c1').state.entry?.boundary).toBe(8)
+    expect(host.querySelector(`#main-content [data-message-id="${topicMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+
+    // 7. Scroll TopicView to the bottom, open phone panel, receive live Topic Message, close panel -> follows bottom (300px)
+    topicScrollEl.scrollTop = 200
+    topicScrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    topicScrollEl.scrollTop = 250
+    topicScrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    await settle()
+
+    host.querySelector('#main-content button[aria-label="パネルを開く(⌘.)"]')!.click()
+    flushSync()
+    await settle()
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('panel')
+    expect(topicScrollEl.isRenderedVisible()).toBe(false)
+
+    const t1m7 = { ...record(14, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック新着7' }
+    net.unreadChannels.c1.as_of_seq = 14
+    net.topicLists.c1 = ok({ as_of_seq: 14, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 14, topic: t1Summary })
+    topicScrollEl.scrollHeight = 300
+    net.event({ type: 'message', message: t1m7 })
+    await settle()
+    flushSync()
+
+    host.querySelector('#panel-content button[aria-label="パネルを閉じる(Esc)"]')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(topicScrollEl.isRenderedVisible()).toBe(true)
+    expect(topicScrollEl.scrollTop).toBe(300)
+    expect(host.querySelector(`#main-content [data-message-id="${topicMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: 't1' }, body: { read_seq: 14 } })
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
 })

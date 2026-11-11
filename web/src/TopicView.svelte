@@ -76,14 +76,16 @@
     onswitchorganization?: () => void
   } = $props()
 
+  const currentChannelId = $derived(channelId)
+  const currentTopicId = $derived(topicId)
   const s = $derived(channel.timeline)
-  const tc = $derived(channel.topic(topicId))
+  const tc = $derived(channel.topic(currentTopicId))
   const composerState = $derived(tc.composer)
   const tState = $derived(topics.state)
   const rState = $derived(replies ? replies.state : null)
   const uState = $derived(unread ? unread.state : null)
-  const view = $derived(tState.topic(topicId))
-  const entry = $derived(uState?.entry?.scope.topicId === topicId ? uState.entry : null)
+  const view = $derived(tState.topic(currentTopicId))
+  const entry = $derived(uState?.entry?.scope.topicId === currentTopicId ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
   const entryId = $derived(entry?.id ?? null)
   const hasFirstUnreadInView = $derived(
@@ -115,7 +117,7 @@
   const targetUnavailable = $derived(
     organizationUnavailable || channelUnavailable || topicUnavailable,
   )
-  const topicScope = $derived(uState?.topics[topicId] ?? null)
+  const topicScope = $derived(uState?.topics[currentTopicId] ?? null)
   const awaitingEntryBoundary = $derived(
     Boolean(
       unread &&
@@ -152,6 +154,7 @@
   let requestedHistoryFor = ''
   let initialScrollApplied = false
   let scrolledFirstUnreadId: string | null = null
+  let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
   let currentVisitId: symbol | undefined
@@ -223,8 +226,8 @@
 
   $effect(() => {
     const u = unread
-    const id = channelId
-    const tId = topicId
+    const id = currentChannelId
+    const tId = currentTopicId
     const active = !targetUnavailable
     if (!u || !id || !tId || !active) return
     return () => {
@@ -239,8 +242,8 @@
 
   $effect(() => {
     const u = unread
-    const id = channelId
-    const tId = topicId
+    const id = currentChannelId
+    const tId = currentTopicId
     const active = !targetUnavailable
     const generation = uGeneration
     const currentEntryId = entryId
@@ -289,15 +292,16 @@
   })
 
   $effect(() => {
-    const key = `${channelId}:${topicId}:${tState.generation}`
+    const tId = currentTopicId
+    const key = `${currentChannelId}:${tId}:${tState.generation}`
     if (targetUnavailable || s.status === 'loading') return
-    const hasBaseline = tState.topics.some((t) => t.topicId === topicId && t.baseline !== null)
+    const hasBaseline = tState.topics.some((t) => t.topicId === tId && t.baseline !== null)
     if (!hasBaseline && view.summaryError === null) {
-      void topics.ensureSummary(topicId)
+      void topics.ensureSummary(tId)
     }
     if (!view.initialized && view.hasMore && !view.loading && !view.error && requestedHistoryFor !== key) {
       requestedHistoryFor = key
-      void topics.loadTopic(topicId)
+      void topics.loadTopic(tId)
     }
   })
 
@@ -320,7 +324,7 @@
   )
 
   $effect(() => {
-    const scopeKey = `${channelId}/${topicId}`
+    const scopeKey = `${currentChannelId}/${currentTopicId}`
     const currentEntryId = entryId
     if (
       scopeKey !== lastScrollScopeKey ||
@@ -330,6 +334,7 @@
       lastScrollEntryId = currentEntryId
       initialScrollApplied = false
       scrolledFirstUnreadId = null
+      pendingScrollAction = null
     }
     const displayed = isTimelineDisplayed(scrollEl, viewSelected)
     const messages = view.messages
@@ -350,32 +355,39 @@
       awaitingFirstUnread,
     })
     if (action !== 'none') {
-      void tick().then(() => {
-        if (!isTimelineDisplayed(scrollEl, viewSelected)) {
-          if (action === 'scroll_bottom' || action === 'scroll_first_unread') {
-            scrollController.resetInitialScroll()
-          }
-          return
+      pendingScrollAction = { action, anchor }
+    }
+    void tick().then(() => {
+      if (!isTimelineDisplayed(scrollEl, viewSelected)) {
+        if (
+          !initialScrollApplied &&
+          pendingScrollAction &&
+          (pendingScrollAction.action === 'scroll_bottom' ||
+            pendingScrollAction.action === 'scroll_first_unread')
+        ) {
+          pendingScrollAction = null
+          scrollController.resetInitialScroll()
         }
-        applyScrollAction(action, anchor, targetFirstUnreadId)
-        if (action === 'scroll_first_unread' && targetFirstUnreadId) {
+        return
+      }
+      if (pendingScrollAction) {
+        const deferred = pendingScrollAction
+        pendingScrollAction = null
+        applyScrollAction(deferred.action, deferred.anchor, targetFirstUnreadId)
+        if (deferred.action === 'scroll_first_unread' && targetFirstUnreadId) {
           scrolledFirstUnreadId = targetFirstUnreadId
         }
-        if (action === 'scroll_bottom' || action === 'scroll_first_unread') {
+        if (deferred.action === 'scroll_bottom' || deferred.action === 'scroll_first_unread') {
           initialScrollApplied = true
         }
-        reportPresented()
-      })
-    } else {
-      void tick().then(() => {
-        if (!isTimelineDisplayed(scrollEl, viewSelected)) return
+      } else {
         captureCurrentAnchor()
         if (status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
           initialScrollApplied = true
         }
-        reportPresented()
-      })
-    }
+      }
+      reportPresented()
+    })
   })
 
   $effect(() => {
