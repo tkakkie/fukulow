@@ -504,7 +504,11 @@ it('retains a visit boundary while positions advance and takes a new boundary on
   expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { seq: 1 }, needsOlder: false })
   c.unread.presented(id, [1]); await flush(); await c.unread.refresh()
   expect(c.unread.get('A').entry?.boundary).toBe(0); expect(c.unread.get('A').main.position).toBe(1)
-  await c.enter(); expect(c.unread.get('A').entry).toMatchObject({ boundary: 1, unreadAtEntry: 0, firstUnread: null })
+  // The stale list is below the confirmed position; the next visit waits for recovery.
+  await c.enter(); expect(c.unread.get('A').entry).toMatchObject({ boundary: null, unreadAtEntry: null })
+  c.rows[0] = row({ read_seq: 1, main_unread_count: 0, unread_count: 2 })
+  await c.unread.refresh()
+  expect(c.unread.get('A').entry).toMatchObject({ boundary: 1, unreadAtEntry: 0, firstUnread: null })
   await c.sync.close()
 })
 it('requires older projection coverage for first Unread and never marks across a window gap', async () => {

@@ -19,9 +19,9 @@ export const unreadApi = (org: string): UnreadApi => ({
   markRead: (s, body) => s.topicId === null ? api.markChannelRead(org, s.channel, body) : api.markTopicRead(org, s.channel, s.topicId, body),
   getTopicSummary: (c, t) => api.getTopicSummary(org, c, t),
 })
-type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: number; prunedThrough: number; stopped: boolean; error: boolean;
+type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: number; stopped: boolean; error: boolean;
   operation?: symbol; intent?: MarkReadRequest; queued?: MarkReadRequest; timer?: ReturnType<typeof setTimeout>; attempt: number }
-const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, prunedThrough: 0, stopped: false, error: false, attempt: 0 })
+const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
   records: new Map<number, Message>(), aggregate: undefined as UnreadChannel | undefined, accepted: 0, requiredAfter: 0, requiredBase: 0,
   heldPositions: new Map<string, number>(), stopped: false, error: false,
@@ -63,16 +63,11 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     return needsUnreadRecord(m.seq, s?.baseline, aggregateAfter, visitAfter)
   }
   // Stream events only filter their input; rescan retained rows at baseline refreshes/visit changes.
-  function dropped(c: Channel, m: Message) {
-    const s = getScope(c, m.topic_id)
-    s.prunedThrough = Math.max(s.prunedThrough, m.seq)
-  }
   function prune(c: Channel) {
-    for (const [seq, m] of c.records) if (!needed(c, m)) { dropped(c, m); c.records.delete(seq) }
+    for (const [seq, m] of c.records) if (!needed(c, m)) c.records.delete(seq)
   }
   function collectRecord(c: Channel, m: Message) {
     if (needed(c, m)) c.records.set(m.seq, m)
-    else dropped(c, m)
   }
   const active = () => !closed && sync.get().running && sync.get().organization === 'available'
   const watched = (id: string) => active() && sync.get().channels[id]?.watched === true && sync.get().channels[id]?.state !== 'unavailable' && !getChannel(id).stopped
@@ -119,11 +114,11 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   const retryable = (r: Result<unknown>) => !r.ok && (r.kind === 'network' || r.status >= 500)
   function acceptScope(s: Scope, b: ScopeBaseline) {
     s.baseline = chooseBaseline(s.baseline, b)
-    // Positions learned remotely are used only together with their winning fresh count baseline.
+    // Accepted baselines and successful mark-read responses supply persisted positions.
     s.position = Math.max(s.position, s.baseline.readSeq)
-    // A newer W can carry an older readSeq. Never subtract missing rows: refetch after
-    // this already-persisted position, so recovery needs no discarded history.
-    if (s.baseline.readSeq < s.prunedThrough && s.position > s.baseline.readSeq) {
+    // A newer W can carry an older readSeq, even when no Messages were observed.
+    // Refetch through the persisted position rather than subtract a possibly missing prefix.
+    if (s.position > s.baseline.readSeq) {
       s.requiredPosition = Math.max(s.requiredPosition, s.position)
     }
     s.error = s.baseline.readSeq < s.requiredPosition

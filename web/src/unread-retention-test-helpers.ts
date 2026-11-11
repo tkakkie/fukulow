@@ -59,12 +59,12 @@ export function retentionClient() {
       channelRow = row({ as_of_seq: asOfSeq, read_seq: readSeq, main_unread_count: mainCount, unread_count: count })
       await unread.refresh()
     },
-    async boot() {
+    async boot(messages: Message[] = [msg(1)]) {
       for (const id of ['T', 'U']) baselines.set(id, { asOfSeq: 0, summary: summary(id, 0, 0, 0) })
       state = { ...state, running: true, connected: true, channels: { A: { state: 'ready', watched: true, cursor: 0,
         messages: [], advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 } } }
       capture(() => listeners.forEach(l => l())); await flush()
-      feed([msg(1)]); await flush()
+      feed(messages); await flush()
     },
     async enter(topicId: string | null = null) {
       unread.visibility(true)

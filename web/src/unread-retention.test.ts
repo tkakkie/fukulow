@@ -94,6 +94,39 @@ async function withMode<T>(prune: boolean, run: () => Promise<T>): Promise<T> {
   return run()
 }
 
+it.each([
+  { name: 'main', topicId: null },
+  { name: 'Topic', topicId: 'T' },
+])('recovers a backward $name baseline without ever observing Messages', async ({ topicId }) => {
+  vi.useFakeTimers()
+  const c = retentionClient(); await c.boot([])
+  await c.baseline(3, 3, 0, 0)
+  if (topicId !== null) c.topic(topicId, 3, 3, 0)
+  const scope = () => topicId === null ? c.unread.get('A').main : c.unread.get('A').topics[topicId]
+  expect(scope()).toMatchObject({ position: 3, unreadCount: 0 })
+  expect(c.records.size).toBe(0)
+  let requests = 0
+  if (topicId === null) {
+    c.setList(async () => ok({ channels: [row({ as_of_seq: 4, read_seq: ++requests === 1 ? 0 : 3,
+      main_unread_count: requests === 1 ? 4 : 1, unread_count: requests === 1 ? 4 : 1 })] }))
+    await c.unread.refresh()
+  } else {
+    c.api.getTopicSummary = async () => ok({ as_of_seq: 4,
+      topic: summary(topicId, 4, ++requests === 1 ? 0 : 3, requests === 1 ? 4 : 1) })
+    c.topic(topicId, 4, 0, 4)
+    await flush()
+  }
+  expect(scope()).toMatchObject({ position: 3, unreadCount: null, error: true })
+  if (topicId === null) expect(c.unread.get('A').unreadCount).toBeNull()
+  await vi.advanceTimersByTimeAsync(499); expect(requests).toBe(1)
+  await vi.advanceTimersByTimeAsync(1); expect(requests).toBe(2)
+  expect(scope()).toMatchObject({ position: 3, unreadCount: 1, error: false })
+  if (topicId === null) expect(c.unread.get('A').unreadCount).toBe(1)
+  expect(c.records.size).toBe(0)
+  await vi.advanceTimersByTimeAsync(30_000); expect(requests).toBe(2)
+  c.close(); expect(vi.getTimerCount()).toBe(0)
+})
+
 it('leaves a backward winning Topic baseline unresolved until a post-position summary recovers it', async () => {
   const c = retentionClient(); await c.boot()
   c.feed([msg(1, 'T'), msg(2, 'T'), msg(3, 'T')])
@@ -117,18 +150,24 @@ it('leaves a backward winning Topic baseline unresolved until a post-position su
 it('filters available sync rows after merging a replacement Topic baseline', async () => {
   const c = retentionClient(); await c.boot()
   await c.baseline(3, 3, 0, 0); c.topic('T', 3, 3, 0)
+  const fresh = held<TopicSummaryResponse>()
+  c.api.getTopicSummary = () => fresh.promise
   c.topic('T', 4, 0, 2, false)
   c.feed([msg(2, 'T'), msg(3, 'T')])
   expect([...c.records.keys()]).toEqual([2, 3])
+  // Even available rows cannot make a baseline below the persisted position authoritative.
+  expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
+  fresh.resolve(ok({ as_of_seq: 4, topic: summary('T', 4, 3, 0) })); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
+  expect(c.records.size).toBe(0)
   c.close()
 })
 
-it('records collect-time drops and backs off a stale recovery response before converging', async () => {
+it('backs off a stale Topic recovery response after rejecting old sync rows', async () => {
   vi.useFakeTimers()
   const c = retentionClient(); await c.boot()
   await c.baseline(3, 3, 0, 0); c.topic('T', 3, 3, 0)
-  // These were never retained: collect-time rejection must advance the floor too.
+  // History below the accepted readSeq does not need to be retained.
   c.feed([msg(2, 'T'), msg(3, 'T')]); c.feed([])
   let requests = 0
   c.api.getTopicSummary = async () => {
@@ -211,16 +250,10 @@ it('also holds main and aggregate counts unresolved and refetches after a backwa
 
 it.each([1, 73, 272])('matches an unpruned controller after every seeded event (seed %s)', async seed => {
   const clients = [retentionClient(), retentionClient()]
-  const run = async (action: (c: RetentionClient, index: number) => Promise<unknown> | void, unresolvedTopic?: string) => {
+  const run = async (action: (c: RetentionClient, index: number) => Promise<unknown> | void) => {
     for (const [i, c] of clients.entries()) await withMode(i === 0, async () => { await action(c, i); await flush() })
-    let pruned = clients[0].snapshot()
+    const pruned = clients[0].snapshot()
     const reference = clients[1].snapshot()
-    if (unresolvedTopic && pruned.topics[unresolvedTopic].unreadCount === null) {
-      expect(reference.topics[unresolvedTopic].unreadCount).not.toBeNull()
-      // Only the affected count/error may be unresolved; every non-null count must match.
-      pruned = { ...pruned, topics: { ...pruned.topics, [unresolvedTopic]: { ...pruned.topics[unresolvedTopic],
-        unreadCount: reference.topics[unresolvedTopic].unreadCount, error: reference.topics[unresolvedTopic].error } } }
-    }
     expect(pruned).toEqual(reference)
     expect(clients[0].marks).toEqual(clients[1].marks)
   }
@@ -257,7 +290,9 @@ it.each([1, 73, 272])('matches an unpruned controller after every seeded event (
         clients.forEach((c, i) => { c.api.getTopicSummary = () => recoveries[i].promise })
         const beforeRead = history.filter(m => m.topic_id === 'T' && m.sender !== 'me').length
         // Then the higher-W response captured before that read lowers baseline readSeq.
-        await run(c => c.topic('T', seq, 0, beforeRead), 'T')
+        await run(c => c.topic('T', seq, 0, beforeRead))
+        // Recovery depends on persisted positions, so both retention modes stay unresolved.
+        clients.forEach(c => expect(c.unread.get('A').topics.T.unreadCount).toBeNull())
         await run(async (_c, i) => {
           recoveries[i].resolve(ok({ as_of_seq: seq, topic: summary('T', seq, seq, 0) })); await flush()
         })
