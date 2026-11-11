@@ -23,7 +23,7 @@
       name,
       email,
       password,
-      setup_token: setupToken || null,
+      setup_token: setupToken,
     })
     if (moved) clearSecrets()
   }
@@ -55,9 +55,9 @@
       <label>パスワード（12文字以上）
         <input name="password" type="password" required minlength="12" bind:value={password} autocomplete="new-password" />
       </label>
-      <label>セットアップトークン（任意）
-        <input name="setup_token" type="password" bind:value={setupToken} autocomplete="off" />
-        <small>設定されている場合は、管理者から受け取ったトークンが必要です。</small>
+      <label>セットアップトークン
+        <input name="setup_token" type="password" required bind:value={setupToken} autocomplete="off" />
+        <small>管理者から受け取ったトークンを入力してください。</small>
       </label>
       {#if auth.error}<p role="alert">{auth.error}</p>{/if}
       <button type="submit" disabled={auth.busy}>セットアップして開始</button>

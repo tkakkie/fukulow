@@ -46,7 +46,7 @@ describe('restore', () => {
   })
 })
 
-const req = { organization_name: 'Org', name: 'A', email: 'a@example.com', password: 'passwordpassword' }
+const req = { organization_name: 'Org', name: 'A', email: 'a@example.com', password: 'passwordpassword', setup_token: 'tok' }
 
 describe('setupAndSignIn', () => {
   it('signs in right after setup 201', async () => {
@@ -56,7 +56,7 @@ describe('setupAndSignIn', () => {
     })
     expect(await setupAndSignIn(req, f)).toEqual({ state: { screen: 'app', identity } })
   })
-  it('sends setup_token when given and omits organization_id on sign-in', async () => {
+  it('sends the required setup_token and omits organization_id on sign-in', async () => {
     const f = route({
       'POST /api/v1/setup': () => j({}, 201),
       'POST /api/v1/session': () => j({ expires_in: 1, identity }),

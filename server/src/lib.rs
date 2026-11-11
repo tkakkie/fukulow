@@ -57,7 +57,7 @@ pub struct AppState {
     pub pool: sqlx::PgPool,
     pub shutdown: shutdown::Shutdown,
     pub cookie_secure: bool,
-    pub setup_token: Option<String>,
+    pub setup_token: String,
     pub sign_in_throttle: auth::SignInThrottle,
     pub message_delivery: messages::Delivery,
     pub session_changes: auth::SessionChanges,
@@ -71,7 +71,7 @@ impl AppState {
         Self {
             pool,
             cookie_secure: true,
-            setup_token: None,
+            setup_token: "setup-token-test-only".into(),
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
@@ -337,7 +337,7 @@ mod tests {
         app(AppState {
             pool,
             cookie_secure: true,
-            setup_token: None,
+            setup_token: "setup-token-test-only".into(),
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),

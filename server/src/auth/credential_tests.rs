@@ -12,7 +12,7 @@ async fn fixture(pool: sqlx::PgPool) -> AppState {
     setup_with_workers(
         state.clone(),
         SetupRequest {
-            setup_token: None,
+            setup_token: Some("setup-token-test-only".into()),
             organization_name: "Entropy test".into(),
             name: "Owner".into(),
             email: "owner@example.com".into(),

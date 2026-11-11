@@ -22,7 +22,7 @@ fn router_with_cookie_security(pool: &PgPool, cookie_secure: bool) -> Router {
     app(AppState {
         pool: pool.clone(),
         cookie_secure,
-        setup_token: None,
+        setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
@@ -60,7 +60,7 @@ async fn body(response: Response) -> Value {
 }
 
 fn setup_input() -> Value {
-    json!({"organization_name": "Organization A", "name": "Owner A", "email": "Owner@Example.com", "password": PASSWORD})
+    json!({"setup_token": "setup-token-test-only", "organization_name": "Organization A", "name": "Owner A", "email": "Owner@Example.com", "password": PASSWORD})
 }
 
 async fn setup(app: &Router) -> Value {
@@ -235,7 +235,10 @@ async fn two_organizations(pool: &PgPool, app: &Router) -> (Value, Uuid) {
 }
 
 async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
-    for setup_token in [None, Some("setup-status-test-only".into())] {
+    for setup_token in [
+        "setup-status-test-only".into(),
+        "another-status-test-only".into(),
+    ] {
         let app = app(AppState {
             pool: pool.clone(),
             cookie_secure: true,
@@ -342,7 +345,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
         let app = app(AppState {
             pool: pool.clone(),
             cookie_secure: true,
-            setup_token: setup_token.map(str::to_owned),
+            setup_token: setup_token.unwrap_or("setup-token-test-only").to_owned(),
             sign_in_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
@@ -437,7 +440,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
     let app = app(AppState {
         pool: pool.clone(),
         cookie_secure: true,
-        setup_token: Some(setup_token.into()),
+        setup_token: setup_token.into(),
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
@@ -457,6 +460,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
             Some(json!("setup-token-test-only\u{200b}")),
         ] {
             let mut input = setup_input();
+            input.as_object_mut().unwrap().remove("setup_token");
             if let Some(token) = token {
                 input["setup_token"] = token;
             }
@@ -485,7 +489,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
 }
 
 #[sqlx::test]
-async fn setup_with_unconfigured_token_ignores_supplied_token(pool: PgPool) {
+async fn setup_rejects_wrong_token_with_default_test_configuration(pool: PgPool) {
     let app = router(&pool);
     let mut input = setup_input();
     input["setup_token"] = json!("client-supplied-test-only");
@@ -493,7 +497,7 @@ async fn setup_with_unconfigured_token_ignores_supplied_token(pool: PgPool) {
         request(&app, "POST", "/api/v1/setup", input, &[])
             .await
             .status(),
-        StatusCode::CREATED
+        StatusCode::UNAUTHORIZED
     );
 }
 
@@ -505,7 +509,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
     let app = app(AppState {
         pool,
         cookie_secure: true,
-        setup_token: Some("setup-token-test-only".into()),
+        setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
@@ -515,6 +519,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
     });
     for token in [None, Some(""), Some("wrong-token-test-only")] {
         let mut input = setup_input();
+        input.as_object_mut().unwrap().remove("setup_token");
         input["email"] = json!("invalid");
         input["password"] = json!("short");
         if let Some(token) = token {
@@ -1209,97 +1214,99 @@ async fn failed_sign_ins_throttle_ip_and_ignore_spoofed_forwarded_header_by_defa
 async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_account_budget(
     pool: PgPool,
 ) {
-    let app = app(AppState {
-        pool: pool.clone(),
-        cookie_secure: true,
-        setup_token: None,
-        sign_in_throttle: fukulow_server::auth::SignInThrottle::with_proxy_config(
-            Some("192.0.2.1"),
-            Some("x-forwarded-for"),
-        )
-        .unwrap(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-    });
-    let first = setup(&app).await;
-    let organization: Uuid = first["organization"]["organization_id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    for n in 1..=20 {
-        assert_eq!(
-            sign_in_from(
-                &app,
-                "192.0.2.1:1234",
-                Some(organization),
-                &format!("unknown{n}@example.com"),
-                "incorrect password",
-                Some("spoofed, 198.51.100.1")
+    let first = setup(&router(&pool)).await;
+    for peers in ["192.0.2.1", "192.0.2.0/24", "2001:db8::/32, 192.0.2.0/24"] {
+        let app = app(AppState {
+            pool: pool.clone(),
+            cookie_secure: true,
+            setup_token: "setup-token-test-only".into(),
+            sign_in_throttle: fukulow_server::auth::SignInThrottle::with_proxy_config(
+                Some(peers),
+                Some("x-forwarded-for"),
             )
-            .await
-            .status(),
-            StatusCode::UNAUTHORIZED
-        );
-    }
-    assert_throttled(
-        sign_in_from(
-            &app,
-            "192.0.2.1:1234",
-            None,
-            "owner@example.com",
-            PASSWORD,
-            Some("198.51.100.99, 198.51.100.1"),
-        )
-        .await,
-    )
-    .await;
-    // The second real client behind the same proxy remains unaffected.
-    for _ in 0..6 {
-        assert_eq!(
+            .unwrap(),
+            message_delivery: Default::default(),
+            session_changes: Default::default(),
+            session_cleanup: Default::default(),
+            shutdown: Default::default(),
+            ws_allowed_origins: Default::default(),
+        });
+        let organization: Uuid = first["organization"]["organization_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        for n in 1..=20 {
+            assert_eq!(
+                sign_in_from(
+                    &app,
+                    "192.0.2.1:1234",
+                    Some(organization),
+                    &format!("unknown{n}@example.com"),
+                    "incorrect password",
+                    Some("spoofed, 198.51.100.1")
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_throttled(
             sign_in_from(
                 &app,
                 "192.0.2.1:1234",
                 None,
                 "owner@example.com",
                 PASSWORD,
-                Some("198.51.100.2")
+                Some("198.51.100.99, 198.51.100.1"),
             )
-            .await
-            .status(),
-            StatusCode::OK
-        );
-    }
-    for n in 1..=5 {
-        assert_eq!(
+            .await,
+        )
+        .await;
+        // The second real client behind the same proxy remains unaffected.
+        for _ in 0..6 {
+            assert_eq!(
+                sign_in_from(
+                    &app,
+                    "192.0.2.1:1234",
+                    None,
+                    "owner@example.com",
+                    PASSWORD,
+                    Some("198.51.100.2")
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        }
+        for n in 1..=5 {
+            assert_eq!(
+                sign_in_from(
+                    &app,
+                    "192.0.2.1:1234",
+                    if n % 2 == 0 { Some(organization) } else { None },
+                    " Owner@Example.com ",
+                    "incorrect password",
+                    Some("198.51.100.2")
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_throttled(
             sign_in_from(
                 &app,
                 "192.0.2.1:1234",
-                if n % 2 == 0 { Some(organization) } else { None },
-                " Owner@Example.com ",
-                "incorrect password",
-                Some("198.51.100.2")
+                Some(organization),
+                "owner@example.com",
+                PASSWORD,
+                Some("198.51.100.3"),
             )
-            .await
-            .status(),
-            StatusCode::UNAUTHORIZED
-        );
-    }
-    assert_throttled(
-        sign_in_from(
-            &app,
-            "192.0.2.1:1234",
-            Some(organization),
-            "owner@example.com",
-            PASSWORD,
-            Some("198.51.100.3"),
+            .await,
         )
-        .await,
-    )
-    .await;
+        .await;
+    }
 }
 
 async fn advance_cleanup_interval_and_expire_throttle_window() {

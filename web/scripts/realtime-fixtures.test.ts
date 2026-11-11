@@ -234,15 +234,15 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => { f.client.scenarios[0].steps[1].input = { type: 'main_timeline_result', respond_to: 'f0', as_of_seq: 10, items: [], has_more: false } })).toContain('planned vocabulary')
   })
 
-  it('allows implemented Topic vocabulary only at the controller layer and keeps Reply rules proposed', () => {
+  it('allows Topic and Reply vocabulary only at the controller layer and keeps Unread proposed', () => {
     const topic = (f: any) => {
       f.client.scenarios[0].layer = 'controller'
-      f.client.scenarios[0].covers = ['P1', 'P2', 'P3', 'P4', 'P5']
+      f.client.scenarios[0].covers = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7']
       f.client.scenarios[0].steps[1].input.messages = [{ seq: 1, topic: 'T' }]
     }
     expect(problemsOf(topic)).toBe('')
     expect(problemsOf(f => { topic(f); delete f.client.scenarios[0].layer })).toContain('planned vocabulary')
-    expect(problemsOf(f => { topic(f); f.client.scenarios[0].covers = ['P6'] })).toContain('covers is planned vocabulary')
+    expect(problemsOf(f => { topic(f); f.client.scenarios[0].covers = ['P8'] })).toContain('covers is planned vocabulary')
   })
 
   it('rejects dangling references in delivery scenarios', () => {
@@ -552,7 +552,7 @@ describe('realtime fixtures: runner semantics', () => {
   })
 })
 
-it('validates running Reply delivery labels and pages without enabling client projections', () => {
+it('validates running Reply delivery labels and pages', () => {
   const replies = (f: any) => {
     f.delivery.scenarios[0].covers = ['P1', 'P6', 'P7']
     f.delivery.scenarios[0].steps.push(
@@ -567,4 +567,25 @@ it('validates running Reply delivery labels and pages without enabling client pr
   expect(problemsOf(f => { replies(f).at(-1).anchor = 'missing' })).toContain('anchor missing is not a label of an earlier post')
   expect(problemsOf(f => { replies(f).at(-1).expect.root = 'missing' })).toContain('root missing is not a label of an earlier post')
   expect(problemsOf(f => { replies(f).at(-1).expect.seqs.reverse() })).toContain('strictly ascending')
+})
+
+it('validates Reply response binding and rejects unordered or duplicate chain observations', () => {
+  const replies = (f: any) => {
+    const s = f.client.scenarios[0]
+    s.layer = 'controller'; s.covers = ['P1', 'P6', 'P7']
+    s.steps = [
+      { input: { type: 'open_reply_chain', channel: 'A', message: { seq: 1 } },
+        effects: { required: [{ type: 'fetch_reply_chain', channel: 'A', anchor: 'id1', after_seq: 0, as: 'r0' }] } },
+      { input: { type: 'reply_chain_result', respond_to: 'r0', root_id: 'id1', has_more: false,
+        messages: [{ seq: 1 }, { seq: 3, reply_to: 'id1', reply_root_id: 'id1' }] },
+        observe: { channels: { A: { reply_chain: { root_id: 'id1', visible: [1, 3], has_more: false } } } } },
+    ]
+    return s
+  }
+  expect(problemsOf(replies)).toBe('')
+  expect(problemsOf(f => { replies(f).steps[1].input.respond_to = 'missing' })).toContain('respond_to missing')
+  expect(problemsOf(f => { replies(f).steps[0].effects.required[0].type = 'fetch_history' })).toContain('fetch_reply_chain')
+  expect(problemsOf(f => { replies(f).steps[1].observe.channels.A.reply_chain.visible = [3, 1] })).toContain('strictly ascending')
+  expect(problemsOf(f => { replies(f).steps[1].observe.channels.A.reply_chain.visible = [1, 1] })).toContain('strictly ascending')
+  expect(problemsOf(f => { delete replies(f).layer })).toContain('planned vocabulary')
 })
