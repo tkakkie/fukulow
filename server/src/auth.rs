@@ -159,8 +159,9 @@ pub struct AccountIdentity {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetupRequest {
-    /// Required when FUKULOW_SETUP_TOKEN is configured on the server.
-    #[schema(format = Password)]
+    /// Must match the server's required FUKULOW_SETUP_TOKEN.
+    // Preserve generic 401 responses for absent/null tokens after body extraction.
+    #[schema(format = Password, required = true, nullable = false)]
     pub setup_token: Option<String>,
     #[schema(min_length = 1, max_length = 200)]
     pub organization_name: String,
@@ -278,17 +279,15 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
     input: SetupRequest,
     hash_password: impl FnOnce(String) -> Hash,
 ) -> Result<Response, ApiError> {
-    if let Some(expected) = &state.setup_token {
-        let supplied = input
-            .setup_token
-            .as_deref()
-            .ok_or_else(ApiError::unauthorized)?;
-        // Compare fixed-size digests so equality never exits on token length or prefix.
-        if !bool::from(
-            Sha256::digest(expected.as_bytes()).ct_eq(&Sha256::digest(supplied.as_bytes())),
-        ) {
-            return Err(ApiError::unauthorized());
-        }
+    let supplied = input
+        .setup_token
+        .as_deref()
+        .ok_or_else(ApiError::unauthorized)?;
+    // Compare fixed-size digests so equality never exits on token length or prefix.
+    if !bool::from(
+        Sha256::digest(state.setup_token.as_bytes()).ct_eq(&Sha256::digest(supplied.as_bytes())),
+    ) {
+        return Err(ApiError::unauthorized());
     }
     let email = email(&input.email)?;
     let organization_name = input.organization_name.trim();
@@ -897,6 +896,7 @@ mod tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
                     json!({
+                        "setup_token": "setup-token-test-only",
                         "organization_name": "Entropy test", "name": "Owner",
                         "email": "owner@example.com", "password": "correct horse battery staple"
                     })
@@ -926,7 +926,7 @@ mod tests {
         let response = setup_with_workers(
             AppState::for_test(pool),
             SetupRequest {
-                setup_token: None,
+                setup_token: Some("setup-token-test-only".into()),
                 organization_name: "Entropy test".into(),
                 name: "Owner".into(),
                 email: "owner@example.com".into(),
@@ -1107,7 +1107,10 @@ mod tests {
             .await
             .unwrap();
 
-        for setup_token in [None, Some("test-only-token".to_owned())] {
+        for setup_token in [
+            "setup-token-test-only".to_owned(),
+            "another-test-only-token".to_owned(),
+        ] {
             let app = app_with_workers(
                 AppState {
                     setup_token: setup_token.clone(),

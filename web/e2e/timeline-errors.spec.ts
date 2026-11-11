@@ -31,6 +31,7 @@ async function signIn(page: Page): Promise<string> {
     await page.getByLabel('オーナーの名前').fill('Alice')
     await page.getByLabel('メールアドレス').fill(owner.email)
     await page.getByLabel('パスワード（12文字以上）').fill(owner.password)
+    await page.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN ?? 'playwright-setup-test-only')
     await page.getByRole('button', { name: 'セットアップして開始' }).click()
   } else {
     await page.getByLabel('メールアドレス').fill(owner.email)

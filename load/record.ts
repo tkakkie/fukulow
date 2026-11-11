@@ -18,6 +18,7 @@ const inherited = { ...process.env };
 delete inherited.LOAD_ORGANIZATION_ID;
 delete inherited.LOAD_SETUP_TOKEN;
 const env = { ...inherited, LOAD_PROJECT: project, LOAD_PORT: port, LOAD_DB_PASSWORD: randomUUID(),
+  LOAD_SETUP_TOKEN: randomUUID(),
   LOAD_CONTAINER_NAME: `${project}-generator`,
   LOAD_DOCKER_NETWORK: process.env.LOAD_DIRECT_NETWORK === '1' ? `${project}_default` : 'bridge',
   BASE_URL: process.env.LOAD_DIRECT_NETWORK === '1' ? 'http://app:8080' : `http://host.docker.internal:${port}`, LOAD_BOOTSTRAP: '1',

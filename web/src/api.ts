@@ -127,3 +127,9 @@ export const getTopicSummary = (organizationId: string, channelId: string, topic
 
 export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch) =>
   call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store' }, true)
+
+export type ReplyChainPage = components['schemas']['ReplyChainPage']
+export type ReplyChainQuery = NonNullable<import('./api-schema').operations['reply_chain']['parameters']['query']>
+
+export const listReplyChain = (organizationId: string, channelId: string, anchor: string, query: ReplyChainQuery = {}, f: typeof fetch = fetch) =>
+  call<ReplyChainPage>(f, `${channelPath(organizationId, channelId)}/messages/${encodeURIComponent(anchor)}/chain${querySuffix(query)}`, { cache: 'no-store' }, true)

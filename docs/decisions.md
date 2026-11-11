@@ -63,9 +63,10 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Auth resolves the Account Session and optional active Member in one LEFT JOIN (no Session: 401; no Member: 404). Member SQL stays in `auth` as composable scoped fragments (#146 review).
 - Sign-in throttle, process-local 60 s windows: 20 failures per IPv4 or IPv6 /64 (IPv4-mapped shares IPv4), 5 per normalized email; in-flight attempts reserve capacity before Argon2; only failed credentials persist.
 - Throttle maps hold at most 10,000 keys: idle IP buckets are evicted oldest first (admitting new clients over keeping history); active reservations never; a map full of reservations, or a full email map, refuses with 429 + Retry-After.
-- Forwarded client IPs are ignored unless both an exact proxy-peer allowlist and the header are configured; then the rightmost IP appended by Caddy/nginx is used, else the socket peer.
+- #194: forwarded IPs require a trusted exact IP/CIDR peer and configured header. One field uses its rightmost IP; repeated fields or invalid rightmost IP use the socket peer. This preserves Caddy/nginx append semantics without trusting earlier hops.
 - Accepted throttle tradeoffs: the per-email budget lets anyone lock a known Account for up to one window (limits guesses across IPs); fixed windows allow up to twice the budget across a boundary; restarts reset limits.
-- Optional `FUKULOW_SETUP_TOKEN` gates setup with a constant-time digest compare and generic 401; set it before public exposure. Unset keeps bootstrap; an empty value fails startup.
+- #194: require a nonblank FUKULOW_SETUP_TOKEN in every mode and reject the former public example; ship an empty template. Cookie transport never exempts it. Constant-time digest compare and generic 401 gate setup. Never generate/log it, preventing public instance claims before the Owner arrives.
+- #194: Compose separates proxy/app edge from app/DB backend, publishes only proxies and trusts the fixed proxy IP. EDGE_PREFIX derives subnet, gateway and proxy IP together; gateway/subnet trust would permit host-path spoofing. No dependency added for CIDR masks.
 - Setup body extraction stays before token verification: extraction errors are generic and reveal neither the token nor bootstrap state; documented and tested instead of rewriting the handler.
 - Setup checks Organization existence without a lock before Argon2 work (after token and validation); the locked transactional check stays authoritative for concurrent bootstrap.
 - `GET /api/v1/setup` is public and read-only, returning only `setup_required` with `no-store`, sharing POST setup's single `SELECT EXISTS`, so the web can choose setup or sign-in.
@@ -199,7 +200,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #137 paging gate met with mixed Messages and concurrent sends: release recent/deep p95 32.342/32.235 ms at 210k Channel Messages, four readers; send p95 11.249/6.345 ms. Keep prefix aggregation/index; proportional 100 ms crossing ~649k Messages needs remeasurement. Conditions: measurements.md.
 - topics.last_seq/message_count are a write-only cache retained for #142/#143; immutable Message aggregates supply W-relative summaries, because current cached values cannot reconstruct an older W (#137).
 
-## Replies (#139)
+## Replies (#139, #140)
 - Replies store a committed parent id and stable root, inherit its Topic, and share send admission/barrier/transaction/publication. Scoped parent/root FKs and a self-parent CHECK protect references; committed immutable parents prevent cycles.
 - Retry identity compares reply_to before parent lookup; inherited Topic is not client intent. Same-key retries stay canonical and changed parents conflict without an existence leak.
 - Chain reads union an indexed root lookup and limited reply_root_id/seq range, including the null-root Message without recursion. Resolve ambiguous COMMIT, then authorize/read a fresh snapshot; no cross-page W or depth cap.
@@ -207,3 +208,5 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #139 accepts deploy-time locks/scans for plain indexes and validated FKs/CHECKs on messages at current scale, like #63; migration lock timeout bounds waiting, not scan time. The chain index excludes non-Replies to reduce write/storage cost.
 - reply_root_id consistency is application-enforced: each Reply stores its parent's root (or the parent if it is a root), whose reply_root_id is null. Future chain-moving writers (#141) and repairs must preserve this; scoped FKs alone do not.
 - #138: opt-in Topic composition bootstraps sync with the real Message at W from the initial timeline; later projection pages stay outside sync. Reason: preserve the existing unfiltered cursor/gap protocol and avoid component conflicts during the UI follow-up.
+- #140 keeps one opt-in chain per Channel, merged by Message id and stable reply_root_id. Page continuation uses only the last page seq; live appends cannot skip unpaged siblings or enter sync cursor/gap evidence.
+- #140 composes over sync (or Topic sync) and sends confirmed-parent Replies through its existing pending/retry path. Preserve reply_to with the id/body so retries cannot change intent; projection reads settle C5 with session/read fencing before teardown.
