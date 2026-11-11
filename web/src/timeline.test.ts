@@ -7,28 +7,58 @@ import { record } from './protocol-test-helpers'
 
 afterEach(() => vi.useRealTimers())
 it('a send ACK, refusal and late refusal after settlement preserve text typed after submit in the Account Session store', async () => {
-  for (const outcome of ['ACK', 'refusal', 'late refusal'] as const) {
+  for (const edit of ['untouched', 'typed then cleared', 'new text'] as const) {
+    for (const outcome of ['ACK', 'refusal', 'late refusal'] as const) {
+      const drafts = createDraftStore()
+      const net = fakeNetwork()
+      const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+      await sync.start()
+      await sync.watch('A')
+      const a = sync.getTimeline('A')
+      a.setDraft('送信する本文')
+      const sending = a.submit()
+      expect(a.get().draft).toBe('')
+      if (edit !== 'untouched') a.setDraft('送信後の新しい下書き')
+      if (edit === 'typed then cleared') a.setDraft('')
+      const message = sentBy('me', 1, net.sends[0].body.client_message_id, '送信する本文')
+      if (outcome === 'late refusal') await sync.settleHistory('A', [message])
+      net.sends[0].resolve(outcome === 'ACK' ? ok(message) : { ok: false, kind: 'http', status: 400 })
+      expect(await sending).toBe(true)
+      await settle()
+      const expected = edit === 'new text' ? '送信後の新しい下書き' : ''
+      expect(a.get().draft, outcome).toBe(expected)
+      expect(drafts.get({ organizationId: 'o', channelId: 'A' }), outcome).toBe(expected)
+      expect(drafts.hasDrafts(), outcome).toBe(expected !== '')
+      expect(a.get().pending, outcome).toHaveLength(outcome === 'refusal' ? 1 : 0)
+      await sync.close()
+    }
+  }
+})
+
+it.each(['untouched', 'typed then cleared', 'new text'] as const)(
+  'a refused submit restores only an unedited draft: %s', async edit => {
     const drafts = createDraftStore()
     const net = fakeNetwork()
-    const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+    const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts,
+      // Refuse admission between submit's availability check and user_send.
+      newId: () => { void sync.channelUnavailable('A'); return 'refused' },
+    })
     await sync.start()
     await sync.watch('A')
     const a = sync.getTimeline('A')
     a.setDraft('送信する本文')
     const sending = a.submit()
-    expect(a.get().draft).toBe('')
-    a.setDraft('送信後の新しい下書き')
-    const message = sentBy('me', 1, net.sends[0].body.client_message_id, '送信する本文')
-    if (outcome === 'late refusal') await sync.settleHistory('A', [message])
-    net.sends[0].resolve(outcome === 'ACK' ? ok(message) : { ok: false, kind: 'http', status: 400 })
-    expect(await sending).toBe(true)
-    await settle()
-    expect(a.get().draft, outcome).toBe('送信後の新しい下書き')
-    expect(drafts.get({ organizationId: 'o', channelId: 'A' }), outcome).toBe('送信後の新しい下書き')
-    expect(a.get().pending, outcome).toHaveLength(outcome === 'refusal' ? 1 : 0)
+    if (edit !== 'untouched') a.setDraft('送信後の新しい下書き')
+    if (edit === 'typed then cleared') a.setDraft('')
+    expect(await sending).toBe(false)
+    const expected = edit === 'untouched' ? '送信する本文' : edit === 'new text' ? '送信後の新しい下書き' : ''
+    expect(a.get().draft).toBe(expected)
+    expect(drafts.get({ organizationId: 'o', channelId: 'A' })).toBe(expected)
+    expect(drafts.hasDrafts()).toBe(expected !== '')
+    expect(net.sends).toHaveLength(0)
     await sync.close()
-  }
-})
+  },
+)
 
 it('timeline delegates preserve pending across selection and settle history before retry', async () => {
   vi.useFakeTimers()

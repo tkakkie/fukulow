@@ -273,6 +273,8 @@ export function createSync(options: SyncOptions) {
   }
 
   function timeline(channel: string) {
+    // An empty draft can still have been edited since submit.
+    let draftRevision = 0
     let snapshot: TimelineState
     let last: ChannelState | undefined | null = null
     let lastExtra: ChannelExtra | null = null
@@ -314,6 +316,7 @@ export function createSync(options: SyncOptions) {
       loadOlder: () => dispatch({ type: 'load_older', channel }),
       setDraft(draft: string) {
         if (draft === getExtra(channel).draft) return
+        draftRevision++
         setExtra(channel, { draft, composerError: null })
       },
       async submit() {
@@ -327,9 +330,10 @@ export function createSync(options: SyncOptions) {
         if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
           return false
         }
+        const revision = draftRevision
         putExtra(channel, { draft: '', composerError: null })
         const accepted = await send(text)
-        if (!accepted && getExtra(channel).draft === '') setExtra(channel, { draft: text })
+        if (!accepted && draftRevision === revision && getExtra(channel).draft === '') setExtra(channel, { draft: text })
         return accepted
       },
       send,
@@ -339,6 +343,7 @@ export function createSync(options: SyncOptions) {
         const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
         if (p?.state !== 'failed') return false
         const current = getExtra(channel).draft
+        draftRevision++
         putExtra(channel, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
         void dispatch({ type: 'user_discard', channel, clientMessageId })
         return true
