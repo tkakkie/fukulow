@@ -14,7 +14,7 @@
         "owner": [
           "#143"
         ],
-        "note": "Unread client merge state is not implemented. Server snapshot and reconnect baseline inputs are covered by messages/tests/unread/baseline.rs; validate and skip this client scenario until #143."
+        "note": "Executed against the test-only P8 reference merge in web/scripts/realtime-fixtures.test.ts, including broken-rule checks. Remains proposed for the production web client until #143 implements Unread."
       },
       "steps": [
         {"input":{"type":"session_start"}},
@@ -36,7 +36,10 @@
         {"input":{"type":"connection_ready"}},
         {"input":{"type":"message","channel":"A","message":{"seq":1}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}}
+        {"input":{"type":"message","channel":"A","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"load_unread","channel":"B"},"effects":{"required":[{"type":"fetch_unread","channel":"B","as":"baselineB"}]}},
+        {"input":{"type":"unread_result","channel":"B","respond_to":"baselineB","baseline":{"as_of_seq":0,"read_seq":0,"main_unread_count":0,"unread_count":0}}},
+        {"input":{"type":"message","channel":"B","message":{"seq":4}},"observe":{"channels":{"A":{"unread":{"as_of_seq":1,"read_seq":0,"main_unread_count":3,"unread_count":3}},"B":{"unread":{"as_of_seq":0,"read_seq":0,"main_unread_count":1,"unread_count":1}}}}}
       ]
     },
     {
@@ -51,7 +54,7 @@
         "owner": [
           "#143"
         ],
-        "note": "Unread client merge state is not implemented. Server snapshot and reconnect baseline inputs are covered by messages/tests/unread/baseline.rs; validate and skip this client scenario until #143."
+        "note": "Executed against the test-only P8 reference merge in web/scripts/realtime-fixtures.test.ts, including broken-rule checks. Remains proposed for the production web client until #143 implements Unread."
       },
       "steps": [
         {"input":{"type":"session_start"}},
@@ -64,13 +67,15 @@
         {"input":{"type":"timer_elapsed","respond_to":"retry"}},
         {"input":{"type":"connection_ready"}},
         {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"newer"}]}},
-        {"input":{"type":"unread_result","channel":"A","respond_to":"newer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}}}}},
-        {"input":{"type":"unread_result","channel":"A","respond_to":"old","baseline":{"as_of_seq":2,"read_seq":0,"main_unread_count":2,"unread_count":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":5}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"newer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":4,"unread_count":4}}}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"old","baseline":{"as_of_seq":2,"read_seq":0,"main_unread_count":2,"unread_count":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":4,"unread_count":4}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":4,"unread_count":4}}}}},
         {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"equalOld"}]}},
         {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"equalNew"}]}},
-        {"input":{"type":"unread_result","channel":"A","respond_to":"equalNew","baseline":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}}}}},
-        {"input":{"type":"unread_result","channel":"A","respond_to":"equalOld","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}}}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"equalNew","baseline":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
+        {"input":{"type":"unread_result","channel":"A","respond_to":"equalOld","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
+        {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":5}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":5}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}}
       ]

@@ -107,7 +107,16 @@ async fn unread_denials_have_positive_controls_and_never_change_positions(pool: 
                 json!({"error":"organization_unavailable"})
             );
         } else {
-            assert_eq!(channels(&app, &viewer).await["channels"], json!([]));
+            let listed = channels(&app, &viewer).await;
+            assert_eq!(
+                listed["channels"],
+                json!([]),
+                "{denial}: no UnreadChannel entry, including no as_of_seq"
+            );
+            assert_eq!(
+                channels(&app, &owner).await["channels"][0]["id"],
+                json!(channel)
+            );
         }
         let after: Vec<(Uuid,Uuid,i64)> = sqlx::query_as("SELECT channel_id,member_id,read_seq FROM channel_read_positions ORDER BY organization_id,channel_id,member_id").fetch_all(&pool).await.unwrap();
         assert_eq!(before, after);

@@ -11,6 +11,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import type { UnreadChannel } from '../src/api-schema.d.ts'
 
 export const defaultDir = resolve(import.meta.dirname, '../../contract/realtime')
 
@@ -457,6 +458,7 @@ export type Message = { seq: number; id: string; sender: string; client_message_
 /** The fixture input with respond_to replaced by the effect (as the client emitted it) it answers, and messages expanded. */
 export type ResolvedInput = { type: string; respond_to?: Effect; message?: Message; messages?: Message[]; [field: string]: unknown }
 export type ObservedChannel = {
+  unread?: Pick<UnreadChannel, 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count'>
   state?: string
   cursor: number | null
   messages: Message[]
@@ -606,6 +608,9 @@ function checkObservation(expected: NonNullable<ClientStep['observe']>, actual: 
   for (const [name, want] of Object.entries(expected.channels ?? {})) {
     const got = actual.channels[name] ?? { cursor: null, messages: [], pending: [] }
     const where = `${at}: channel ${name}`
+    if (want.unread !== undefined && !isDeepStrictEqual(got.unread, want.unread)) {
+      failures.push(`${where} unread is ${JSON.stringify(got.unread)}, expected ${JSON.stringify(want.unread)}`)
+    }
     if (want.state !== undefined && got.state !== want.state) failures.push(`${where} state is ${String(got.state)}, expected ${String(want.state)}`)
     if (want.cursor !== undefined && got.cursor !== want.cursor) failures.push(`${where} cursor is ${String(got.cursor)}, expected ${String(want.cursor)}`)
     if (want.visible !== undefined) {
