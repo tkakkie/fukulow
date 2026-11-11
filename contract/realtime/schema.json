@@ -738,7 +738,7 @@
           "$comment": "Planned (P2, P4, P5). Every main-timeline line the client holds, in order: one per held Message without Topic (from any page or the stream), one per Topic known from a summary or a Message, at its merged position with its merged count (P4).",
           "$ref": "#/$defs/TopicLines"
         },
-        "reply_chain": { "$comment": "Controller-only P6: open chain root, inherited Topic, ascending visible seqs and server page continuation flag.", "type":"object","properties":{"root_id":{"$ref":"#/$defs/Label"},"topic":{"$ref":"#/$defs/Label"},"visible":{"$ref":"#/$defs/SeqList"},"has_more":{"type":"boolean"}},"additionalProperties":false},
+        "reply_chain": { "$comment": "Controller-only P6: open chain root, inherited Topic, ascending visible seqs, server page continuation flag and retryable read error.", "type":"object","properties":{"root_id":{"$ref":"#/$defs/Label"},"topic":{"$ref":"#/$defs/Label"},"visible":{"$ref":"#/$defs/SeqList"},"has_more":{"type":"boolean"},"error":{"type":"boolean"}},"additionalProperties":false},
         "topics": {
           "$comment": "Planned (P1). Per Topic label: visible = the Topic's Messages the Topic view holds, ascending.",
           "type": "object",

@@ -76,7 +76,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         if (replies) {
           const chain = replies.get(channel)
           c.reply_chain = { root_id: chain.rootId, topic: chain.topicId ?? undefined,
-            visible: chain.messages.map(m => m.seq), has_more: chain.hasMore }
+            visible: chain.messages.map(m => m.seq), has_more: chain.hasMore, error: chain.error }
         }
         const projection = topics.get(channel)
         c.main_timeline = projection.lines.map(l => l.kind === 'message' ? { seq: l.message.seq }
@@ -112,7 +112,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
           : { ok: false, kind: 'network' }); break
         case 'history_failed': case 'send_failed': resolve(typeof i.status === 'number'
           ? { ok: false, kind: 'http', status: i.status } : { ok: false, kind: 'network' }); break
-        case 'open_reply_chain': void replies!.open(message(i.message, channel)); break
+        case 'open_reply_chain': void replies!.open(channel, message(i.message, channel)); break
         case 'load_reply_chain': void replies!.loadMore(channel); break
         case 'reply_chain_result': resolve({ ok: true, data: { root_id: i.root_id,
           messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break

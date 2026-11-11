@@ -8,12 +8,31 @@ const projections = scenarios.filter(s => s.id.startsWith('reply-chain-'))
 const { running, proposed } = partitionScenarios(projections)
 it.skip.each(proposed)('proposed: $id', () => {})
 it('runs all shared Reply projections through createReplySync', async () => {
-  expect(running).toHaveLength(4)
+  expect(running).toHaveLength(9)
   for (const scenario of running) {
     const client = controllerClient({}, false, true)
     expect(await runClientScenarioAsync(scenario, client), scenario.id).toEqual([])
     client.topics.close(); await client.sync.close()
     expect(vi.getTimerCount()).toBe(0)
+  }
+})
+
+it('rejects incorrect chain errors and Channel or Organization denial scope', async () => {
+  for (const change of ['chain error', 'Channel A', 'Channel B', 'Organization'] as const) {
+    const client = controllerClient({}, false, true), observe = client.observe
+    client.observe = () => {
+      const result = observe()
+      if (change === 'chain error' && result.channels.A?.reply_chain?.error) result.channels.A.reply_chain.error = false
+      if (change === 'Channel A' && result.channels.A?.state === 'unavailable') result.channels.A.state = 'ready'
+      if (change === 'Channel B' && result.channels.A?.state === 'unavailable') result.channels.B.state = 'unavailable'
+      if (change === 'Organization' && result.organization === 'unavailable') result.organization = 'available'
+      return result
+    }
+    const id = change === 'chain error' ? 'reply-chain-anchor-not-found'
+      : change === 'Organization' ? 'reply-chain-organization-denial' : 'reply-chain-channel-denial-403'
+    const scenario = projections.find(s => s.id === id)!
+    expect(await runClientScenarioAsync(scenario, client), change).not.toEqual([])
+    client.topics.close(); await client.sync.close()
   }
 })
 

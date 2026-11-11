@@ -460,7 +460,7 @@ export type ObservedChannel = {
   pending: { client_message_id: string; state: string }[]
   main_timeline?: ({ seq: number } | { topic: string; position: number; message_count: number | null })[]
   topics?: Record<string, { visible: number[] }>
-  reply_chain?: { root_id: string | null; topic?: string; visible: number[]; has_more: boolean }
+  reply_chain?: { root_id: string | null; topic?: string; visible: number[]; has_more: boolean; error?: boolean }
 }
 export type Observed = { session?: string; organization?: string; channels: Record<string, ObservedChannel> }
 /** What a client must provide to run fixtures. */

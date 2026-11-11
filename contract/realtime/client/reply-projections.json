@@ -26,7 +26,7 @@
     },
     {
       "id": "reply-chain-descendant-in-topic",
-      "title": "Reply chain paging includes siblings and live Messages from any anchor without cursor evidence",
+      "title": "A Topic descendant opens its root and siblings while filtered pages leave the Channel cursor unchanged",
       "covers": ["P1","P6","C1","C2","C3"],
       "layer": "controller",
       "never": [{"type":"fetch_history","page":"after"},{"type":"wait","purpose":"reorder_grace"}],
@@ -81,6 +81,110 @@
         {"input":{"type":"send_failed","respond_to":"send0","status":"network"},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
         {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","reply_to":"id1","as":"send1"}]}},
         {"input":{"type":"ack","respond_to":"send1","message":{"seq":2,"reply_to":"id1","reply_root_id":"id1","sender":"me","client_message_id":"c1","body":"canonical"}},"observe":{"channels":{"A":{"pending":[],"reply_chain":{"root_id":"id1","visible":[1,2]}}}}}
+      ]
+    },
+    {
+      "id": "reply-chain-channel-denial-403",
+      "title": "A current chain 403 denial stops only its Channel until user selection",
+      "covers": ["P6","C9"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"fA"}]}},
+        {"input":{"type":"history_result","respond_to":"fA","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"sA"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"sA","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"fB"}]}},
+        {"input":{"type":"history_result","respond_to":"fB","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":1,"as":"sB"}]}},
+        {"input":{"type":"subscribed","channel":"B","respond_to":"sB","caught_up_seq":1},"observe":{"channels":{"B":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"reply_chain_failed","respond_to":"r0","status":403},"observe":{"organization":"available","channels":{"A":{"state":"unavailable","reply_chain":{"visible":[]}},"B":{"state":"ready"}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"forbidden":[{"type":"fetch_reply_chain"},{"type":"subscribe"},{"type":"send"}]}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"forbidden":[{"type":"fetch_reply_chain"},{"type":"subscribe"},{"type":"send"}]}},
+        {"input":{"type":"open_reply_chain","channel":"B","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"B","anchor":"id1","as":"rB"}]}},
+        {"input":{"type":"reply_chain_result","respond_to":"rB","root_id":"id1","messages":[{"seq":1}],"has_more":false},"observe":{"channels":{"B":{"state":"ready","reply_chain":{"visible":[1],"error":false}}}}}
+      ]
+    },
+    {
+      "id": "reply-chain-channel-denial-404",
+      "title": "A current chain 404 denial stops only its Channel until user selection",
+      "covers": ["P6","C9"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"fA"}]}},
+        {"input":{"type":"history_result","respond_to":"fA","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"sA"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"sA","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"fB"}]}},
+        {"input":{"type":"history_result","respond_to":"fB","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":1,"as":"sB"}]}},
+        {"input":{"type":"subscribed","channel":"B","respond_to":"sB","caught_up_seq":1},"observe":{"channels":{"B":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"reply_chain_failed","respond_to":"r0","status":404,"error":"channel not found"},"observe":{"organization":"available","channels":{"A":{"state":"unavailable","reply_chain":{"visible":[]}},"B":{"state":"ready"}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"forbidden":[{"type":"fetch_reply_chain"},{"type":"subscribe"},{"type":"send"}]}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"forbidden":[{"type":"fetch_reply_chain"},{"type":"subscribe"},{"type":"send"}]}},
+        {"input":{"type":"open_reply_chain","channel":"B","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"B","anchor":"id1","as":"rB"}]}},
+        {"input":{"type":"reply_chain_result","respond_to":"rB","root_id":"id1","messages":[{"seq":1}],"has_more":false},"observe":{"channels":{"B":{"state":"ready","reply_chain":{"visible":[1],"error":false}}}}}
+      ]
+    },
+    {
+      "id": "reply-chain-anchor-not-found",
+      "title": "A missing chain anchor fails only the projection and permits an explicit retry",
+      "covers": ["P6","C9"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"fA"}]}},
+        {"input":{"type":"history_result","respond_to":"fA","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"sA"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"sA","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"fB"}]}},
+        {"input":{"type":"history_result","respond_to":"fB","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":1,"as":"sB"}]}},
+        {"input":{"type":"subscribed","channel":"B","respond_to":"sB","caught_up_seq":1},"observe":{"channels":{"B":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"reply_chain_failed","respond_to":"r0","status":404,"error":"reply_chain_not_found"},"observe":{"organization":"available","channels":{"A":{"state":"ready","reply_chain":{"root_id":"id1","visible":[1],"error":true}},"B":{"state":"ready"}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","after_seq":0,"as":"retry"}]}},
+        {"input":{"type":"reply_chain_result","respond_to":"retry","root_id":"id1","messages":[{"seq":1}],"has_more":false},"observe":{"channels":{"A":{"state":"ready","reply_chain":{"visible":[1],"error":false}}}}}
+      ]
+    },
+    {
+      "id": "reply-chain-organization-denial",
+      "title": "Organization loss from a chain read terminates all its Channels without retrying",
+      "covers": ["P6","C10"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"fA"}]}},
+        {"input":{"type":"history_result","respond_to":"fA","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"sA"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"sA","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"fB"}]}},
+        {"input":{"type":"history_result","respond_to":"fB","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":1,"as":"sB"}]}},
+        {"input":{"type":"subscribed","channel":"B","respond_to":"sB","caught_up_seq":1},"observe":{"channels":{"B":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"reply_chain_failed","respond_to":"r0","status":404,"error":"organization_unavailable"},"observe":{"organization":"unavailable","session":"signed_in","channels":{"A":{"state":"unavailable","reply_chain":{"visible":[]}},"B":{"state":"unavailable"}}}},
+        {"input":{"type":"load_reply_chain","channel":"A"},"effects":{"forbidden":[{"type":"fetch_reply_chain"},{"type":"subscribe"},{"type":"connect"},{"type":"send"}]}},
+        {"input":{"type":"open_reply_chain","channel":"B","message":{"seq":1}},"effects":{"forbidden":[{"type":"fetch_reply_chain"},{"type":"subscribe"},{"type":"connect"},{"type":"send"}]}}
+      ]
+    },
+    {
+      "id": "reply-chain-superseded-channel-denial",
+      "title": "A superseded chain read cannot make its Channel unavailable",
+      "covers": ["P6","C9"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"fA"}]}},
+        {"input":{"type":"history_result","respond_to":"fA","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"sA"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"sA","caught_up_seq":1},"observe":{"channels":{"A":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"fB"}]}},
+        {"input":{"type":"history_result","respond_to":"fB","messages":[{"seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":1,"as":"sB"}]}},
+        {"input":{"type":"subscribed","channel":"B","respond_to":"sB","caught_up_seq":1},"observe":{"channels":{"B":{"state":"ready","cursor":1}}}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":1}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id1","after_seq":0,"as":"r0"}]}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"seq":9}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","anchor":"id9","as":"fresh"}]}},
+        {"input":{"type":"reply_chain_failed","respond_to":"r0","status":404,"error":"channel not found"},"observe":{"organization":"available","channels":{"A":{"state":"ready","reply_chain":{"root_id":"id9","visible":[9],"error":false}},"B":{"state":"ready"}}}},
+        {"input":{"type":"reply_chain_result","respond_to":"fresh","root_id":"id9","messages":[{"seq":9}],"has_more":false},"observe":{"channels":{"A":{"state":"ready","reply_chain":{"root_id":"id9","visible":[9],"has_more":false,"error":false}}}}}
       ]
     }
   ]

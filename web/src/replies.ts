@@ -23,26 +23,48 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   let closed = false
   let sessionToken = 0
   let previous = sync.get()
-  const notify = () => { snapshots.clear(); listeners.forEach(l => l()) }
+  const notify = (channels?: Set<string>) => {
+    if (channels) channels.forEach(id => snapshots.delete(id))
+    else snapshots.clear()
+    listeners.forEach(l => l())
+  }
   const cancelReads = () => {
     deadlines.forEach((resolve, timer) => { clearTimeout(timer); resolve() })
     deadlines.clear()
   }
   const belongs = (w: Chain, m: Message) => m.id === w.rootId || m.reply_root_id === w.rootId
+  const pending = (w: Chain, c: ReturnType<Sync['get']>['channels'][string] | undefined) =>
+    (c?.pending ?? []).filter(p => p.reply_to && (p.reply_to === w.rootId || w.messages.has(p.reply_to)))
   const mergeStream = (channel: string, w: Chain) => {
-    for (const m of sync.get().channels[channel]?.messages ?? []) if (belongs(w, m)) w.messages.set(m.id, m)
+    let changed = false
+    for (const m of sync.get().channels[channel]?.messages ?? []) if (belongs(w, m) && w.messages.get(m.id) !== m) {
+      w.messages.set(m.id, m); changed = true
+    }
+    return changed
   }
   const unsubscribe = sync.subscribe(() => {
     const next = sync.get()
-    for (const [id, w] of chains) {
+    const changed = new Set<string>()
+    for (const id of new Set([...chains.keys(), ...snapshots.keys()])) {
       const before = previous.channels[id], after = next.channels[id]
-      if (!next.running || next.organization === 'unavailable' || !after?.watched || after.state === 'unavailable' ||
-        (before?.cursor != null && after.cursor === null)) chains.delete(id)
-      else mergeStream(id, w)
+      const w = chains.get(id)
+      if (w) {
+        if (!next.running || next.organization === 'unavailable' || !after?.watched || after.state === 'unavailable' ||
+          (before?.cursor != null && after.cursor === null)) { chains.delete(id); changed.add(id) }
+        else {
+          const oldPending = pending(w, before)
+          if (before?.messages !== after.messages && mergeStream(id, w)) changed.add(id)
+          if (before?.pending !== after.pending || changed.has(id)) {
+            const newPending = pending(w, after)
+            if (oldPending.length !== newPending.length || oldPending.some((p, i) => p !== newPending[i])) changed.add(id)
+          }
+        }
+      }
+      if ((before?.state === 'unavailable') !== (after?.state === 'unavailable') || previous.organization !== next.organization) changed.add(id)
     }
     if (!next.running || next.organization === 'unavailable') cancelReads()
     previous = next
-    notify()
+    if (changed.size) notify(changed)
   })
   const current = (channel: string, w: Chain) => !closed && sync.get().running &&
     sync.get().organization === 'available' && chains.get(channel) === w &&
@@ -63,16 +85,13 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       if (!r.ok && r.kind === 'http' && r.status === 401) { void sync.close(); options.onSessionEnded?.() }
       else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
     })
-    try {
-      const result = await Promise.race([operation, new Promise<Result<ReplyChainPage>>(resolve => {
-        timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
-        deadlines.set(timer, () => resolve({ ok: false, kind: 'network' }))
-      })])
+    const apply = operation.then(result => {
       if (!isCurrent()) return
       w.loading = false
       if (!result.ok) {
         w.error = true
-        if (!api.isOrganizationUnavailable(result) && result.kind === 'http' && [403, 404].includes(result.status)) {
+        if (!api.isOrganizationUnavailable(result) && result.kind === 'http' && [403, 404].includes(result.status) &&
+          result.error !== 'reply_chain_not_found') {
           void sync.channelUnavailable(channel)
         }
       } else if (result.data.root_id !== w.rootId) {
@@ -86,6 +105,16 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         mergeStream(channel, w)
       }
       notify()
+    })
+    try {
+      await Promise.race([apply, new Promise<void>(resolve => {
+        timer = setTimeout(() => {
+          // Expiry ends this read's authority, not the underlying HTTP operation.
+          if (isCurrent()) { w.read = Symbol(); w.loading = false; w.error = true; notify() }
+          resolve()
+        }, options.requestTimeoutMs ?? 30_000)
+        deadlines.set(timer, resolve)
+      })])
     } finally {
       if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) }
     }
@@ -95,7 +124,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     const c = closed ? undefined : sync.get().channels[channel]
     return { anchor: w?.anchor ?? null, rootId: w?.rootId ?? null, topicId: w?.anchor.topic_id ?? null,
       messages: w ? [...w.messages.values()].sort((a, b) => a.seq - b.seq) : [],
-      pending: w ? (c?.pending ?? []).filter(p => p.reply_to && (p.reply_to === w.rootId || w.messages.has(p.reply_to))) : [],
+      pending: w ? pending(w, c) : [],
       loading: w?.loading ?? false, error: w?.error ?? false, hasMore: w?.hasMore ?? false,
       unavailable: c?.state === 'unavailable' || sync.get().organization === 'unavailable' }
   }
@@ -106,9 +135,8 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       if (!value) snapshots.set(channel, value = snapshot(channel))
       return value
     },
-    async open(anchor: Message) {
-      const channel = anchor.channel_id
-      if (closed || !sync.get().running || sync.get().organization !== 'available' ||
+    async open(channel: string, anchor: Message) {
+      if (anchor.channel_id !== channel || closed || !sync.get().running || sync.get().organization !== 'available' ||
         !sync.get().channels[channel]?.watched || sync.get().channels[channel]?.state === 'unavailable') return
       const w = chain(anchor)
       chains.set(channel, w); mergeStream(channel, w); notify()

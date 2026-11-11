@@ -1,10 +1,26 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { repliesAdapter } from './replies.svelte'
-import { reply, replyClient, root } from './reply-test-helpers'
+import { ok, reply, replyClient, root } from './reply-test-helpers'
 import { mount, settle } from './adapter-test-helpers.svelte'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
+
+it('opens only anchors from the adapter Channel and preserves both chains on a mismatch', async () => {
+  const c = replyClient(); await c.boot(); await c.sync.watch('B')
+  const a = repliesAdapter(c.replies, 'A'), b = repliesAdapter(c.replies, 'B')
+  await a.open(root())
+  const bRoot = { ...root(), channel_id: 'B' }
+  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: bRoot.id, messages: [bRoot], has_more: false }))
+  await b.open(bRoot)
+  const beforeA = a.state, beforeB = b.state
+  const requests = c.listReplyChain.mock.calls.length
+  await a.open({ ...reply(2), channel_id: 'B' })
+  expect(c.listReplyChain).toHaveBeenCalledTimes(requests)
+  expect(a.state).toBe(beforeA)
+  expect(b.state).toBe(beforeB)
+  await c.sync.close()
+})
 
 it('memoizes chain adapter snapshots while observed and unobserved and forwards intents', async () => {
   const c = replyClient(); await c.boot()

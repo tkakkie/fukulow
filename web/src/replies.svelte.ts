@@ -7,7 +7,7 @@ export function repliesAdapter(replies: Replies, channel: string) {
   const subscribe = createSubscriber(update => replies.subscribe(update))
   return {
     get state() { subscribe(); return replies.get(channel) },
-    open: (anchor: Message) => replies.open(anchor),
+    open: (anchor: Message) => replies.open(channel, anchor),
     loadMore: () => replies.loadMore(channel),
     dismiss: () => replies.dismiss(channel),
     send: (body: string, parentId?: string) => replies.send(channel, body, parentId),
