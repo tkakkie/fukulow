@@ -1,6 +1,7 @@
 # Disposable measurement environment; never shares production/E2E images, ports or volumes.
 services:
   app:
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     image: ${LOAD_APP_IMAGE:-${LOAD_PROJECT:?Set LOAD_PROJECT}-app}
     build:
       context: ${LOAD_SERVER_SOURCE:-..}
@@ -18,7 +19,8 @@ services:
       db:
         condition: service_healthy
   db:
-    image: postgres:18.6
+    image: postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=all"]
     environment:
       POSTGRES_USER: fukulow

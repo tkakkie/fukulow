@@ -5,6 +5,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 ## Product, stack and delivery
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.
 - Reverse proxy is optional: the app speaks plain HTTP; Caddy (default) or nginx via compose profile. Reason: Caddy gave trouble in ribbitto and may limit performance.
+- #194 C: use UID/GID 10001 and root-owned runtime files; the app needs only network/DB access. Pin external images by tag + multi-platform digest for reproducibility; weekly Docker/Compose Dependabot updates retain reviewed upgrades. Bound local logs to 10m x 3 per container.
+- #194 C: no init wrapper or STOPSIGNAL override: the server spawns no child processes to reap, and #195 registers SIGTERM/SIGINT before serving and drains work. Exec-form CMD keeps the binary as PID 1; SIGTERM is already Docker's default.
 - OpenAPI generated from Rust, committed, diff-checked in CI. Reason: future native clients (Kotlin).
 - `organization_id` on every table from day one. Reason: multi-organization later without retrofit.
 - Public repo. Reason: free CI minutes.

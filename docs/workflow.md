@@ -94,7 +94,7 @@ Cloud session (no `$FUKULOW_RUN_AS`, Codex or Antigravity): a Claude Code cloud 
 | Needs a token, secret or denied permission | `status:needs-decision` with the exact request; continue other items |
 
 ## 8. Dependency updates and versions
-- Dependabot (weekly, grouped) opens PRs for Cargo, npm, GitHub Actions, Docker. Pin exact patch versions; Rust = `rust-toolchain.toml`, Node = `.node-version` and `web/package.json` `engines`.
+- Dependabot (weekly, grouped) opens PRs for Cargo, npm, GitHub Actions, Dockerfile and Docker Compose (`/` and `/load`). Preserve tag + digest pins; resolve new digests with `docker buildx imagetools inspect <tag>`, then build and verify proxy startup. PostgreSQL major upgrades remain manual. Pin exact patch versions; Rust = `rust-toolchain.toml`, Node = `.node-version` and `web/package.json` `engines`.
 - An AI reads the changelog for breaking changes, runs Commands, comments the result, then follows the PR rows of section 2: `status:human-review` (asks the maintainer to merge) only with CI green on the current head and the required review/fix cycle and Copilot (when applicable, section 5) completed.
 - Rust toolchain bump: also re-verify the module-direction checker (`rustc_private`); a bump that breaks it is not merged until the checker is updated. k6 (`K6_IMAGE` in Makefile) is bumped by hand.
 - Security updates are a GitHub setting (Dependabot alerts/security updates); do not claim they work until a security PR is seen.
@@ -128,7 +128,7 @@ Merges; Issue approvals ("OK"); token/secret changes; adding a language, depende
 
 ### Backup and custody
 
-Use deployment `.env` (0600), pinned Node, Docker Compose and deployment `COMPOSE_PROJECT_NAME`. Scripts resolve root via `import.meta.url`; manual commands require checkout root. Backup requires PostgreSQL 18 in `db`. Update Compose db image and `DRILL_POSTGRES_IMAGE` together (checked by `backup.test.ts`). Scripts ignore `DATABASE_URL`/suppress diagnostics. Never use `set -x`, print environment/`docker compose config`, save raw errors or put credentials/URLs in cron/arguments/logs. Keep records private.
+Use deployment `.env` (0600), pinned Node, Docker Compose and deployment `COMPOSE_PROJECT_NAME`. Scripts resolve root via `import.meta.url`; manual commands require checkout root. Backup requires PostgreSQL 18 in `db`. The drill reads the literal pinned `services.db.image` directly from tracked `compose.yml` without invoking Compose or loading secrets; update that single definition. Scripts ignore `DATABASE_URL`/suppress diagnostics. Never use `set -x`, print environment/`docker compose config`, save raw errors or put credentials/URLs in cron/arguments/logs. Keep records private.
 
 ```sh
 umask 077

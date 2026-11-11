@@ -101,15 +101,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version }
       - name: Versions agree (rust-toolchain.toml, .node-version, engines, Dockerfile)
         run: |
-          set -euo pipefail
-          rust=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
-          node=$(tr -d '[:space:]' < .node-version)
-          grep -q "^FROM rust:${rust}-slim " Dockerfile
-          grep -q "^FROM node:${node}-slim " Dockerfile
-          [ "$(node -p "require('./web/package.json').engines.node")" = "$node" ]
-          [ "$(node -p "require('./load/package.json').engines.node")" = "$node" ]
+          node --test scripts/check-versions.test.ts
+          node scripts/check-versions.ts
   docker:
     runs-on: ubuntu-latest
     env:
