@@ -40,6 +40,13 @@ test('Playwright image rejects version drift, floating tags and a different Ubun
   assert.throws(() => checkVersions({ ...files, e2e: `${files.e2e}\n      PLAYWRIGHT_IMAGE: duplicate` }), /exactly one PLAYWRIGHT_IMAGE/)
 })
 
+test('Playwright image requires a valid sha256 digest', () => {
+  for (const digest of ['', '@sha256:bad', `@sha256:${'a'.repeat(63)}`, `@sha256:${'a'.repeat(65)}`, `@sha256:${'g'.repeat(64)}`, `@sha512:${'a'.repeat(64)}`]) {
+    assert.throws(() => checkVersions({ ...files,
+      e2e: files.e2e.replace(/mcr\.microsoft\.com\/playwright:\S+/, `mcr.microsoft.com/playwright:v${files.playwright}-noble${digest}`) }), /Playwright image digest must/)
+  }
+})
+
 test('Playwright manifest and installed lockfile versions cannot drift', () => {
   const lock = JSON.parse(files.webLock)
   lock.packages[''].devDependencies['@playwright/test'] = '0.0.0'

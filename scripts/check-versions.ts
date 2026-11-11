@@ -26,7 +26,9 @@ export function checkVersions(files: {
   }
   const images = [...files.e2e.matchAll(/^\s+PLAYWRIGHT_IMAGE: (\S+)\s*$/gm)]
   assert.equal(images.length, 1, 'E2E must have exactly one PLAYWRIGHT_IMAGE')
-  assert.equal(images[0][1], `mcr.microsoft.com/playwright:v${files.playwright}-noble`, 'Playwright image must agree with package.json and use Noble')
+  const playwrightImage = images[0][1]
+  assert.equal(playwrightImage.split('@')[0], `mcr.microsoft.com/playwright:v${files.playwright}-noble`, 'Playwright image must agree with package.json and use Noble')
+  assert.match(playwrightImage, /^[^@]+@sha256:[a-f0-9]{64}$/, 'Playwright image digest must be sha256 with 64 hex digits')
 }
 
 if (import.meta.main) {
