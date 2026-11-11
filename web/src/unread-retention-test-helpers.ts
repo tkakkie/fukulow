@@ -47,9 +47,9 @@ export function retentionClient() {
     state = { ...state, channels: { A: { ...state.channels.A, messages, cursor: through } } }
     capture(() => listeners.forEach(l => l()))
   }
-  function topic(topicId: string, asOfSeq: number, readSeq: number, count: number) {
+  function topic(topicId: string, asOfSeq: number, readSeq: number, count: number, notify = true) {
     baselines.set(topicId, { asOfSeq, summary: summary(topicId, asOfSeq, readSeq, count) })
-    capture(() => topicListeners.forEach(l => l()))
+    if (notify) capture(() => topicListeners.forEach(l => l()))
   }
   return { unread, api, marks, feed, topic, projectionRows,
     get records() { return records },
