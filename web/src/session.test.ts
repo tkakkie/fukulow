@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createSession } from './session'
+import * as api from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 
 function open() {
@@ -151,4 +152,37 @@ it('explicitly selecting the current C9 Channel reattempts it while another Orga
   expect(controls(a.net).filter(c => c === 'subscribe:A')).toHaveLength(2)
   a.net.subscribed('A', 100); await settle(); expect(a.session.sync.get().channels.A.state).toBe('ready')
   a.session.close(); b.session.close()
+})
+
+it('a Member panel created during C9 recovers on explicit Channel re-selection', async () => {
+  const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({
+    members: [{ id: 'me', name: '本人', role: 'admin' }],
+  }))
+  const { net, session } = open()
+  try {
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+
+    const panel = session.channelMembers('A')
+    expect(panel.get()).toMatchObject({ unavailable: true, loading: false })
+    await panel.load()
+    expect(list).not.toHaveBeenCalled()
+
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('ready')
+    expect(panel.get()).toMatchObject({ unavailable: false, loading: false,
+      members: [{ id: 'me', name: '本人', role: 'admin' }] })
+    expect(list).toHaveBeenCalledExactlyOnceWith('', 'A')
+  } finally {
+    session.close()
+    list.mockRestore()
+  }
 })

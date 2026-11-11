@@ -757,10 +757,10 @@ it('controller clears olderError in the same dispatch when a non-stale before fe
   await client.sync.close()
 })
 
-it('ambiguous access-loss events during pending subscribe rewatch or retirement reconnect with backoff', async () => {
-  for (const phase of ['pending', 'rewatch', 'retired']) {
+it('ambiguous access-loss events during pending subscribe or rewatch reconnect with backoff', async () => {
+  for (const phase of ['pending', 'rewatch']) {
     const client = controllerClient()
-    if (phase !== 'pending') { await ready(client); await client.sync.unwatch('A'); if (phase === 'rewatch') await client.sync.watch('A') }
+    if (phase === 'rewatch') { await ready(client); await client.sync.unwatch('A'); await client.sync.watch('A') }
     else {
       await client.feed({ type: 'session_start' }); await client.feed({ type: 'connection_ready' })
       const first = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
@@ -771,5 +771,35 @@ it('ambiguous access-loss events during pending subscribe rewatch or retirement 
     expect(effects).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff' }))
     expect(old.closed).toBe(true); expect(client.sync.get().channels.A.state).not.toBe('unavailable')
     await client.sync.close()
+  }
+})
+
+it('ignores access loss after unwatch without reconnecting', async () => {
+  for (const phase of ['confirmed', 'pending']) {
+    const client = controllerClient()
+    try {
+      await ready(client)
+      const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
+      await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+      await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+      await client.sync.unwatch('A')
+      if (phase === 'pending') {
+        await client.sync.watch('A')
+        await client.sync.unwatch('A')
+      }
+      const socket = client.sockets[0]
+      const before = client.sync.get()
+      expect(before.channels.A).toMatchObject({ watched: false, subscription: undefined })
+
+      expect(await client.feed({ type: 'channel_access_lost', channel: 'A' })).toEqual([])
+      expect(client.sync.get()).toBe(before)
+      expect(socket.closed).toBe(false)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(client.sockets).toHaveLength(1)
+      await client.feed({ type: 'message', channel: 'B', message: record(2, 'B') })
+      expect(client.sync.get().channels.B).toMatchObject({ state: 'ready', cursor: 2 })
+    } finally {
+      await client.sync.close()
+    }
   }
 })

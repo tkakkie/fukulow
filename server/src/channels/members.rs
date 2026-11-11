@@ -17,7 +17,7 @@ pub async fn list(
     auth: Auth,
     path: Result<Path<(Uuid, Uuid)>, axum::extract::rejection::PathRejection>,
 ) -> Result<Response, ApiError> {
-    let Path((org, channel)) = path.map_err(|_| ApiError::bad_request())?;
+    let Path((_, channel)) = path.map_err(|_| ApiError::bad_request())?;
     let mut tx = state
         .pool
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -28,7 +28,7 @@ pub async fn list(
         auth::members::ACTIVE_SCOPED_MEMBERS_SQL
     );
     let rows: Vec<(Uuid, String, Role)> = sqlx::query_as(&sql)
-        .bind(org)
+        .bind(auth.identity.organization.organization_id)
         .bind(channel)
         .fetch_all(&mut *tx)
         .await?;
