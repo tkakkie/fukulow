@@ -98,9 +98,12 @@ export function createSession(options: SessionOptions) {
       createChannel: body => observe(source.createChannel(body)),
     },
     id => {
-      if (!closed && !unavailable && id === watched && sync.get().organization === 'available' &&
-        sync.get().channels[id]?.state === 'unavailable') {
-        void sync.watch(id)
+      if (!closed && !unavailable && id === watched && sync.get().organization === 'available') {
+        if (sync.get().channels[id]?.state === 'unavailable') {
+          void sync.watch(id)
+        } else if (unread.get(id).stopped || unread.get(id).main.stopped) {
+          void unread.enter({ channel: id, topicId: null })
+        }
       }
     },
   )

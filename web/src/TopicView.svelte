@@ -16,6 +16,7 @@
     applyTimelineScrollAction,
     createTimelineScrollController,
     handleTimelineContainerScroll,
+    isTimelineDisplayed,
     measureTimelineItems,
     measureVisibleConfirmedSeqs,
     type ScrollAction,
@@ -152,7 +153,10 @@
   let initialScrollApplied = false
   let scrolledFirstUnreadId: string | null = null
   let lastScrollScopeKey = ''
+  let lastScrollEntryId: symbol | null = null
   let currentVisitId: symbol | undefined
+  let enteredTarget = false
+  const topicStopped = $derived(Boolean(uState?.stopped || topicScope?.stopped))
   const focusableMessageIds = $derived(view.messages.map((m) => m.id))
   const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds, activeRowId))
 
@@ -162,7 +166,7 @@
   }
 
   function reportPresented() {
-    if (!unread || !scrollEl || !viewSelected || targetUnavailable) return
+    if (!unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
     if (!isDocumentVisible()) return
     const currentEntry = uState?.entry
     if (!currentEntry || currentEntry.scope.topicId !== topicId) return
@@ -172,7 +176,7 @@
     } else if (!initialScrollApplied) {
       return
     }
-    const seqs = measureVisibleConfirmedSeqs(scrollEl)
+    const seqs = measureVisibleConfirmedSeqs(scrollEl!)
     if (seqs.length > 0) {
       unread.presented(currentEntry.id, seqs)
     }
@@ -224,6 +228,7 @@
     const active = !targetUnavailable
     if (!u || !id || !tId || !active) return
     return () => {
+      enteredTarget = false
       const vid =
         currentVisitId ??
         untrack(() => (u.state.entry?.scope.topicId === tId ? u.state.entry.id : undefined))
@@ -239,16 +244,30 @@
     const active = !targetUnavailable
     const generation = uGeneration
     const currentEntryId = entryId
+    const stopped = topicStopped
     if (!u || !id || !tId || !active || !generation) return
     if (currentEntryId) {
+      enteredTarget = true
       currentVisitId = currentEntryId
       return
     }
+    if (enteredTarget && stopped) return
     let cancelled = false
     u.visibility(isDocumentVisible())
-    void u.enter(tId).then((vid) => {
+    const promise = u.enter(tId)
+    const syncVid = untrack(() =>
+      u.state.entry?.scope.topicId === tId ? u.state.entry.id : undefined,
+    )
+    if (syncVid) {
+      enteredTarget = true
+      currentVisitId = syncVid
+    }
+    void promise.then((vid) => {
       if (cancelled) return
-      if (vid) currentVisitId = vid
+      if (vid) {
+        enteredTarget = true
+        currentVisitId = vid
+      }
     })
     return () => {
       cancelled = true
@@ -302,11 +321,17 @@
 
   $effect(() => {
     const scopeKey = `${channelId}/${topicId}`
-    if (scopeKey !== lastScrollScopeKey) {
+    const currentEntryId = entryId
+    if (
+      scopeKey !== lastScrollScopeKey ||
+      (currentEntryId !== null && currentEntryId !== lastScrollEntryId)
+    ) {
       lastScrollScopeKey = scopeKey
+      lastScrollEntryId = currentEntryId
       initialScrollApplied = false
       scrolledFirstUnreadId = null
     }
+    const displayed = isTimelineDisplayed(scrollEl, viewSelected)
     const messages = view.messages
     const pendingIds = pending.map((p) => p.clientMessageId)
     const status = effectiveStatus
@@ -315,6 +340,8 @@
       awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error)
     const { action, anchor } = scrollController.sync({
       channelId: scopeKey,
+      visitId: currentEntryId,
+      displayed,
       status,
       messages,
       pendingIds,
@@ -324,6 +351,12 @@
     })
     if (action !== 'none') {
       void tick().then(() => {
+        if (!isTimelineDisplayed(scrollEl, viewSelected)) {
+          if (action === 'scroll_bottom' || action === 'scroll_first_unread') {
+            scrollController.resetInitialScroll()
+          }
+          return
+        }
         applyScrollAction(action, anchor, targetFirstUnreadId)
         if (action === 'scroll_first_unread' && targetFirstUnreadId) {
           scrolledFirstUnreadId = targetFirstUnreadId
@@ -335,6 +368,7 @@
       })
     } else {
       void tick().then(() => {
+        if (!isTimelineDisplayed(scrollEl, viewSelected)) return
         captureCurrentAnchor()
         if (status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
           initialScrollApplied = true

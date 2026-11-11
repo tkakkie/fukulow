@@ -1,6 +1,7 @@
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ReadPosition, Result } from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
@@ -563,10 +564,10 @@ class MiniElement extends MiniNode {
   isRenderedVisible(): boolean {
     if (!this.isConnected || !this.ownerDocument) return false
     if (this.closest('[hidden], [inert], [aria-hidden="true"]')) return false
+    const width = this.ownerDocument.defaultView?.innerWidth ?? 1280
     const channelColumn = this.closest('.channel-column')
     if (channelColumn) {
       const workspace = channelColumn.closest('.workspace')
-      const width = this.ownerDocument.defaultView?.innerWidth ?? 1280
       if (workspace) {
         if (width >= 600 && width < 960 && workspace.getAttribute('data-drawer-open') !== 'true') {
           return false
@@ -574,6 +575,20 @@ class MiniElement extends MiniNode {
         if (width < 600 && workspace.getAttribute('data-mobile-level') !== 'channels') {
           return false
         }
+      }
+    }
+    const mainCard = this.closest('.main-card')
+    if (mainCard) {
+      const workspace = mainCard.closest('.workspace')
+      if (workspace && width < 600 && workspace.getAttribute('data-mobile-level') !== 'view') {
+        return false
+      }
+    }
+    const rightPanelSlot = this.closest('.right-panel-slot')
+    if (rightPanelSlot) {
+      const workspace = rightPanelSlot.closest('.workspace')
+      if (workspace && width < 600 && workspace.getAttribute('data-mobile-level') !== 'panel') {
+        return false
       }
     }
     return true
@@ -5370,6 +5385,484 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     expect(enterSpy).toHaveBeenLastCalledWith({ channel: 'c1', topicId: 't1' })
     expect(host.querySelector('[data-read-marker="true"]')).toBeNull()
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('stops automatic Unread re-entry on Channel or Topic 404 while sync remains ready, recovers on C8 clamp, and restarts on explicit user selection', async () => {
+    const net = fakeNetwork()
+    let markReadResponses: Array<Result<ReadPosition>> = [
+      { ok: false, kind: 'http', status: 404, error: 'channel_not_found' },
+      { ok: false, kind: 'http', status: 404, error: 'channel_not_found' },
+    ]
+    const baseOptions = net.options('me')
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...baseOptions,
+      sync: {
+        ...baseOptions.sync,
+        schedule: (fn) => {
+          fn()
+          return 0
+        },
+      },
+      unreadApi: {
+        ...baseOptions.unreadApi!,
+        markRead: async (scope, body) => {
+          net.markReads.push({ scope, body })
+          const next = markReadResponses.shift()
+          if (next) return next
+          return ok({ read_seq: body.read_seq })
+        },
+      },
+    })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const m1 = { ...record(1, 'c1'), sender: 'other', body: '未読メッセージ1' }
+    const t1m1 = { ...record(2, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック未読1' }
+    const t1Summary = {
+      id: 't1',
+      name: 'トピックA',
+      first_seq: 2,
+      last_seq: 2,
+      message_count: 1,
+      latest_message: t1m1,
+      read_seq: 0,
+      unread_count: 1,
+    }
+
+    net.pages.c1 = ok({ messages: [m1, t1m1], has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 2,
+      has_more: false,
+      items: [
+        { kind: 'message', message: m1 },
+        { kind: 'topic', topic: t1Summary },
+      ],
+    })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 2, topic: t1Summary })
+    net.topicMessages['c1:t1'] = ok({ messages: [t1m1], has_more: false })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 2,
+      read_seq: 0,
+      unread_count: 2,
+      main_unread_count: 1,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 2)
+    await settle()
+
+    const enterSpy = vi.spyOn(rawSession.unread, 'enter')
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 100
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+    await settle()
+    flushSync()
+
+    // 1. Two 404s queued, but the 1st 404 stops automatic Unread work while sync stays ready (only 1 enter & 1 markRead, never 3)
+    expect(sessionModel.sync.channel('c1').timeline.status).toBe('ready')
+    expect(enterSpy).toHaveBeenCalledTimes(1)
+    expect(net.markReads).toHaveLength(1)
+    expect(sessionModel.unread('c1').state.stopped).toBe(true)
+
+    const selectChannelBtn = () =>
+      host.querySelectorAll('#channel-content button').find((b) => b.textContent.includes('general'))!
+    const selectTopicBtn = () =>
+      host.querySelectorAll('#channel-content button').find((b) => b.textContent.includes('トピックA'))!
+
+    // 2. Explicit user selection of Channel c1 restarts Unread work once, consumes the 2nd 404, and stops again without looping
+    selectChannelBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(2)
+    expect(net.markReads).toHaveLength(2)
+    expect(sessionModel.unread('c1').state.stopped).toBe(true)
+
+    // 3. Explicit user selection when server allows markRead recovers and marks read
+    selectChannelBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(3)
+    expect(net.markReads).toHaveLength(3)
+    expect(sessionModel.unread('c1').state.stopped).toBe(false)
+    expect(sessionModel.unread('c1').state.main.unreadCount).toBe(0)
+
+    // 4. C8 clamp (reconnect with caught_up_seq < cursor -> resetHistory) automatically creates a new visit for the new generation
+    const visitBeforeC8 = sessionModel.unread('c1').state.entry?.id
+    net.socket.onClose(1006)
+    await settle()
+    net.socket.onReady()
+    await settle()
+    net.subscribed('c1', 0)
+    await settle()
+    await settle()
+    flushSync()
+    expect(sessionModel.unread('c1').state.entry?.id).toBeDefined()
+    expect(sessionModel.unread('c1').state.entry?.id).not.toBe(visitBeforeC8)
+    expect(net.markReads).toHaveLength(4)
+
+    // 5. Open Topic t1 where markRead returns a Topic 404 (topic_not_found) and then a Channel 404: stops until explicit selection
+    markReadResponses = [
+      { ok: false, kind: 'http', status: 404, error: 'topic_not_found' },
+      { ok: false, kind: 'http', status: 404, error: 'channel_not_found' },
+    ]
+    host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!.click()
+    flushSync()
+    const topicScrollEl = host.querySelector('#main-content .topic-view__scroll')!
+    topicScrollEl.clientHeight = 100
+    topicScrollEl.scrollHeight = 100
+    topicScrollEl.layoutRowHeight = 50
+    await settle()
+    await settle()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(enterSpy).toHaveBeenCalledTimes(4)
+    expect(net.markReads).toHaveLength(5)
+    expect(sessionModel.unread('c1').state.topics.t1?.stopped).toBe(true)
+
+    // Explicit user selection of Topic t1 in sidebar restarts once, hits Channel 404, and stops without looping
+    selectTopicBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(5)
+    expect(net.markReads).toHaveLength(6)
+    expect(sessionModel.unread('c1').state.stopped).toBe(true)
+
+    // Explicit user selection of Topic t1 again when server allows markRead succeeds
+    selectTopicBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(6)
+    expect(net.markReads).toHaveLength(7)
+    expect(sessionModel.unread('c1').state.stopped).toBe(false)
+    expect(sessionModel.unread('c1').state.topics.t1?.unreadCount).toBe(0)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('defers first-Unread positioning on phone while a panel (?panel=topics) hides main, and scrolls to first Unread when the panel closes', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    // 6 messages (m1..m6), read_seq = 4 so first Unread is at row index 4 (5th row, top = 200px at rowHeight = 50)
+    const msgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メッセージ${seq}`,
+    }))
+    net.pages.c1 = ok({ messages: msgs, has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 6,
+      has_more: false,
+      items: msgs.map((message) => ({ kind: 'message' as const, message })),
+    })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 6,
+      read_seq: 4,
+      unread_count: 2,
+      main_unread_count: 2,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 6)
+    await settle()
+
+    testWin.innerWidth = 375
+    let href = '/o/org-1/c/c1?panel=topics'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 375,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 300
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    // While ?panel=topics is open on phone, main is display: none (data-mobile-level="panel"): positioning and markRead are deferred
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('panel')
+    expect(scrollEl.isRenderedVisible()).toBe(false)
+    expect(scrollEl.scrollTop).toBe(0)
+    expect(net.markReads).toEqual([])
+
+    // Closing the panel displays main (data-mobile-level="view") and positions scrollTop at row index 4 (200px)
+    host.querySelector('#panel-content button[aria-label="パネルを閉じる(Esc)"]')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(scrollEl.isRenderedVisible()).toBe(true)
+    expect(scrollEl.scrollTop).toBe(200)
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 6 } }])
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('resets initial scroll state on a new visit after same-Channel C9 recovery with zero Unread', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const msgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メッセージ${seq}`,
+    }))
+    net.pages.c1 = ok({ messages: msgs, has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 6,
+      has_more: false,
+      items: msgs.map((message) => ({ kind: 'message' as const, message })),
+    })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 6,
+      read_seq: 6,
+      unread_count: 0,
+      main_unread_count: 0,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 6)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 300
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    // 1. Initial visit with 0 Unread pins to bottom (scrollTop = 300)
+    const firstVisitId = sessionModel.unread('c1').state.entry?.id
+    expect(firstVisitId).toBeDefined()
+    expect(scrollEl.scrollTop).toBe(300)
+
+    // 2. User scrolls upward to top (unpinned at scrollTop = 0)
+    scrollEl.scrollTop = 0
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    expect(scrollEl.scrollTop).toBe(0)
+
+    // 3. Lose Channel access via C9
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'c1' })
+    await settle()
+    flushSync()
+    expect(sessionModel.sync.channel('c1').timeline.status).toBe('unavailable')
+
+    // 4. Access returns with boundary 20 and 0 Unread (unchanged rows); user explicitly reselects Channel c1
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 20,
+      read_seq: 20,
+      unread_count: 0,
+      main_unread_count: 0,
+    }
+    host
+      .querySelectorAll('#channel-content button')
+      .find((b) => b.textContent.includes('general'))!
+      .click()
+    flushSync()
+    await settle()
+    net.subscribed('c1', 20)
+    await settle()
+    await settle()
+    flushSync()
+
+    // New visit (new entry id, boundary 20, 0 Unread) resets scroll state and pins to bottom (300) instead of staying at 0
+    const secondVisitId = sessionModel.unread('c1').state.entry?.id
+    expect(secondVisitId).toBeDefined()
+    expect(secondVisitId).not.toBe(firstVisitId)
+    expect(sessionModel.unread('c1').state.entry?.boundary).toBe(20)
+    expect(scrollEl.scrollTop).toBe(300)
 
     navigation.destroy()
     await unmount(instance)

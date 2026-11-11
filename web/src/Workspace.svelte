@@ -399,17 +399,31 @@
 
   function handleSelectChannel(id: string) {
     const navigated = nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
-    if (id === s.selectedId || navigated === false) channels.select(id)
+    if (id === s.selectedId || navigated === false) {
+      channels.select(id)
+      if (
+        navigated === false &&
+        typeof currentUnread !== 'undefined' &&
+        currentUnread &&
+        (currentUnread.state.stopped || currentUnread.state.main.stopped)
+      ) {
+        void currentUnread.enter(null)
+      }
+    }
     drawerOpen = false
   }
 
   function handleSelectTopic(topicId: string) {
     if (!selected || !currentOrganizationId) return
+    const wasSameTopic = route?.topicId === topicId
     nav.navigate({
       type: 'topic',
       topicId,
       phone: viewportWidth < MOBILE_BREAKPOINT_PX,
     })
+    if (wasSameTopic && currentUnread && (currentUnread.state.stopped || currentUnread.state.topics[topicId]?.stopped)) {
+      void currentUnread.enter(topicId)
+    }
     drawerOpen = false
   }
 

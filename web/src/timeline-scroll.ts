@@ -24,6 +24,7 @@ export type ScrollAction = 'none' | 'scroll_bottom' | 'preserve_anchor' | 'scrol
 
 export type TimelineScrollState = {
   channelId: string
+  visitId?: symbol | null
   initialized: boolean
   pinned: boolean
   belowCount: number
@@ -41,6 +42,8 @@ export type TimelineScrollInput =
   | {
       type: 'sync'
       channelId: string
+      visitId?: symbol | null
+      displayed?: boolean
       status: 'loading' | 'ready' | 'unavailable' | 'error'
       messages: readonly { id: string; seq: number; sender: string }[]
       pendingIds: readonly string[]
@@ -148,9 +151,18 @@ export function stepTimelineScroll(
       const targetUnreadId = input.firstUnreadMessageId ?? null
       const hasTargetUnread =
         targetUnreadId !== null && input.messages.some((m) => m.id === targetUnreadId)
+      const displayed = input.displayed !== false
       const awaitingUnread =
-        Boolean(input.awaitingFirstUnread) || (targetUnreadId !== null && !hasTargetUnread)
-      const channelChanged = input.channelId !== prev.channelId
+        !displayed ||
+        Boolean(input.awaitingFirstUnread) ||
+        (targetUnreadId !== null && !hasTargetUnread)
+      const prevVisitId = prev.visitId ?? null
+      const nextVisitId = input.visitId ?? null
+      const channelChanged =
+        input.channelId !== prev.channelId ||
+        (nextVisitId !== null && nextVisitId !== prevVisitId)
+      const resolvedVisitId =
+        input.channelId !== prev.channelId ? nextVisitId : (nextVisitId ?? prevVisitId)
       const prevScrolledUnreadId = channelChanged ? null : (prev.firstUnreadScrolledId ?? null)
 
       if (channelChanged || !prev.initialized) {
@@ -164,13 +176,15 @@ export function stepTimelineScroll(
             maxSeq === prev.maxSeq &&
             sameItems(prev.seenSeqs, messageSeqs) &&
             sameItems(prev.pendingIds, input.pendingIds) &&
-            prevScrolledUnreadId === null
+            prevScrolledUnreadId === null &&
+            resolvedVisitId === prevVisitId
           ) {
             return { state: prev, action: 'none' }
           }
           return {
             state: {
               channelId: input.channelId,
+              ...(resolvedVisitId !== null ? { visitId: resolvedVisitId } : {}),
               initialized: false,
               pinned: true,
               belowCount: 0,
@@ -194,13 +208,15 @@ export function stepTimelineScroll(
           maxSeq === prev.maxSeq &&
           sameItems(prev.seenSeqs, messageSeqs) &&
           sameItems(prev.pendingIds, input.pendingIds) &&
-          nextScrolledUnreadId === prevScrolledUnreadId
+          nextScrolledUnreadId === prevScrolledUnreadId &&
+          resolvedVisitId === prevVisitId
         ) {
           return { state: prev, action: 'none' }
         }
         return {
           state: {
             channelId: input.channelId,
+            ...(resolvedVisitId !== null ? { visitId: resolvedVisitId } : {}),
             initialized,
             pinned: true,
             belowCount: 0,
@@ -214,7 +230,7 @@ export function stepTimelineScroll(
         }
       }
 
-      if (hasTargetUnread && targetUnreadId !== prevScrolledUnreadId) {
+      if (displayed && hasTargetUnread && targetUnreadId !== prevScrolledUnreadId) {
         return {
           state: {
             ...prev,
@@ -425,6 +441,16 @@ export function createTimelineScrollController(options: TimelineScrollController
       notifyIfViewChanged()
       return next.action
     },
+    resetInitialScroll(): void {
+      state = {
+        ...state,
+        initialized: false,
+        pinned: true,
+        belowCount: 0,
+        firstUnreadScrolledId: null,
+      }
+      notifyIfViewChanged()
+    },
     resetLoadingTimeout(): void {
       lastStatus = null
       clearLoadingTimer()
@@ -452,6 +478,13 @@ export function measureTimelineItems(container: HTMLElement): ItemRect[] {
     items.push({ id, top: r.top - cRect.top, bottom: r.bottom - cRect.top })
   }
   return items
+}
+
+/** True when the view is selected and its scroll container has non-zero rendered geometry (`docs/ui.md` §3, §8). */
+export function isTimelineDisplayed(container: HTMLElement | null, viewSelected = true): boolean {
+  if (!viewSelected || !container) return false
+  const cRect = container.getBoundingClientRect()
+  return cRect.width > 0 && cRect.height > 0
 }
 
 /**
