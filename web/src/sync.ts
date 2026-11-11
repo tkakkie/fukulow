@@ -591,6 +591,20 @@ export function createSync(options: SyncOptions) {
           void dispatch({ type: 'user_discard', channel, clientMessageId })
           return true
         },
+        migrateDraftFrom(fromReplyRootId: string, fromTopicId: string | null = null): void {
+          if (fromReplyRootId === replyRootId && fromTopicId === topicId) return
+          const tempDraft = getReplyExtra(channel, fromReplyRootId, fromTopicId).draft
+          if (!tempDraft) return
+          const existing = getReplyExtra(channel, replyRootId, topicId).draft
+          const fromComposer = replyComposers.get(replyKey(channel, fromReplyRootId, fromTopicId))
+          if (fromComposer) fromComposer.setDraft('')
+          else putReplyExtra(channel, fromReplyRootId, fromTopicId, { draft: '', composerError: null })
+          replyDraftRevision++
+          setReplyExtra(channel, replyRootId, topicId, {
+            draft: existing ? `${existing}\n${tempDraft}` : tempDraft,
+            composerError: null,
+          })
+        },
       }
     }
     return {

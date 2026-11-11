@@ -147,23 +147,11 @@
     organizationUnavailable || channelUnavailable || replyNotFound,
   )
   const rc = $derived(channel.reply(effectiveRootId, effectiveTopicId))
-  const tempRc = $derived(channel.reply(anchorMessageId, null))
   const composerState = $derived(rc.composer)
-  const pendingMigrationDraft = $derived(
-    isTargetResolved && (effectiveRootId !== anchorMessageId || effectiveTopicId !== null)
-      ? tempRc.composer.draft
-      : '',
-  )
-  const displayedDraft = $derived(composerState.draft || pendingMigrationDraft)
 
   $effect(() => {
     if (!isTargetResolved) return
-    if (effectiveRootId === anchorMessageId && effectiveTopicId === null) return
-    const tempDraft = tempRc.composer.draft
-    if (!tempDraft) return
-    const existing = rc.composer.draft
-    tempRc.setDraft('')
-    rc.setDraft(existing ? `${existing}\n${tempDraft}` : tempDraft)
+    rc.migrateDraftFrom(anchorMessageId, null)
   })
 
   const canSendReply = $derived(!targetUnavailable && isCurrentAnchor)
@@ -256,7 +244,7 @@
   }
 
   function handleRestoreRequest(clientMessageId: string) {
-    const decision = decideEditAndResend(clientMessageId, displayedDraft)
+    const decision = decideEditAndResend(clientMessageId, composerState.draft)
     if (decision.action === 'restore_now') {
       if (rc.restore(clientMessageId)) {
         focusTarget(composerRef)
@@ -275,7 +263,7 @@
     )
     confirmReplaceDraftWithFailedSend(
       id,
-      displayedDraft,
+      composerState.draft,
       canRestore,
       (d) => rc.setDraft(d),
       (targetId) => rc.restore(targetId),
@@ -293,10 +281,7 @@
 
   async function handleSubmit(): Promise<boolean> {
     if (!canSendReply) return false
-    const replyTo = rState.messages.some((m) => m.id === anchorMessageId)
-      ? anchorMessageId
-      : (rState.anchor?.id ?? effectiveRootId)
-    const ok = await rc.submit(replyTo)
+    const ok = await rc.submit(anchorMessageId)
     if (!ok) return false
     const action = scrollController.onUserSubmit()
     applyScrollAction(action, null)
@@ -440,7 +425,7 @@
     <Composer
       bind:textareaRef={composerRef}
       placeholder="返信を入力"
-      value={displayedDraft}
+      value={composerState.draft}
       error={composerState.composerError}
       disabled={targetUnavailable}
       submitDisabled={!canSendReply}

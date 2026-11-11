@@ -121,3 +121,41 @@ it('channel.reply(replyRootId) manages per-chain drafts, hasUnsavedChanges, subm
   expect(rc.composer.draft).toBe('失敗する返信')
   await c.sync.close()
 })
+
+it('reply.migrateDraftFrom moves temporary (anchor, null) drafts into resolved (root, topic) with newline merge, idempotency and empty no-op', async () => {
+  const c = replyClient(); await c.boot()
+  const syncModel = syncAdapter(c.sync)
+  const channel = syncModel.channel('A')
+
+  const temp = channel.reply('desc-anchor', null)
+  const resolved = channel.reply('root-1', 'topic-1')
+
+  // 1. Empty temp draft is a no-op (and does not disturb an existing destination draft)
+  resolved.setDraft('既存の下書き')
+  resolved.migrateDraftFrom('desc-anchor', null)
+  expect(resolved.composer.draft).toBe('既存の下書き')
+  expect(temp.composer.draft).toBe('')
+
+  // 2. Destination already has a draft: merges with a newline and clears the temporary draft
+  temp.setDraft('解決中に入力した下書き')
+  resolved.migrateDraftFrom('desc-anchor', null)
+  expect(resolved.composer.draft).toBe('既存の下書き\n解決中に入力した下書き')
+  expect(temp.composer.draft).toBe('')
+
+  // 3. Repeated resolution does not duplicate
+  resolved.migrateDraftFrom('desc-anchor', null)
+  expect(resolved.composer.draft).toBe('既存の下書き\n解決中に入力した下書き')
+  expect(temp.composer.draft).toBe('')
+
+  // 4. Destination has no draft: moves temp draft directly, and self-migration is a no-op
+  const freshResolved = channel.reply('root-2', null)
+  const freshTemp = channel.reply('desc-anchor-2', null)
+  freshTemp.setDraft('新規の返信下書き')
+  freshResolved.migrateDraftFrom('desc-anchor-2', null)
+  expect(freshResolved.composer.draft).toBe('新規の返信下書き')
+  expect(freshTemp.composer.draft).toBe('')
+  freshResolved.migrateDraftFrom('root-2', null)
+  expect(freshResolved.composer.draft).toBe('新規の返信下書き')
+
+  await c.sync.close()
+})

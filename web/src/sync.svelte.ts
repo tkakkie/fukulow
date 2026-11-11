@@ -48,6 +48,8 @@ function channelAdapter(sync: Sync, channel: string) {
       setDraft: (draft: string) => rc.setDraft(draft),
       submit: (replyTo?: string) => rc.submit(replyTo),
       restore: (clientMessageId: string) => rc.restore(clientMessageId),
+      migrateDraftFrom: (fromReplyRootId: string, fromTopicId?: string | null) =>
+        rc.migrateDraftFrom(fromReplyRootId, fromTopicId),
     }
   }
   return {

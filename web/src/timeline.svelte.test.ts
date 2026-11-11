@@ -4121,7 +4121,23 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const panel = host.querySelector('#panel-content')!
     expect(panel.textContent).toContain('未ロードのルートメッセージ')
     expect(panel.textContent).toContain('未ロードの子孫返信1')
+    expect(panel.textContent).not.toContain('未ロードの子孫返信2')
     expect(buttonsByText(panel, 'さらに返信を読み込む')).toHaveLength(1)
+
+    // Send a reply BEFORE paging in rDesc2: reply_to must be the requested descendant (rDesc2.id), not the root
+    const replyTextarea = panel.querySelector('textarea')!
+    replyTextarea.value = 'ページング前の子孫URLからの返信'
+    replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    expect(buttonsByText(panel, '送信')[0].disabled).toBe(false)
+    buttonsByText(panel, '送信')[0].click()
+    flushSync()
+    await settle()
+    expect(net.sends).toHaveLength(1)
+    expect(net.sends[0].body).toMatchObject({
+      body: 'ページング前の子孫URLからの返信',
+      reply_to: rDesc2.id,
+    })
 
     // Page in rDesc2 with さらに返信を読み込む
     buttonsByText(panel, 'さらに返信を読み込む')[0].click()
@@ -4131,8 +4147,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(panel.textContent).toContain('未ロードの子孫返信2')
     expect(buttonsByText(panel, 'さらに返信を読み込む')).toHaveLength(0)
 
-    // Send a reply from the cold descendant panel
-    const replyTextarea = panel.querySelector('textarea')!
+    // Send another reply after paging in rDesc2: reply_to remains rDesc2.id
     replyTextarea.value = '子孫URLからの返信'
     replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
     flushSync()
@@ -4140,8 +4155,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     buttonsByText(panel, '送信')[0].click()
     flushSync()
     await settle()
-    expect(net.sends).toHaveLength(1)
-    expect(net.sends[0].body).toMatchObject({
+    expect(net.sends).toHaveLength(2)
+    expect(net.sends[1].body).toMatchObject({
       body: '子孫URLからの返信',
       reply_to: rDesc2.id,
     })
