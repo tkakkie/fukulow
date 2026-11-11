@@ -8,6 +8,7 @@ mod model;
 mod negative;
 mod replies;
 mod timeline;
+mod unread;
 use assertions::{Assertion, Failure};
 use model::*;
 
@@ -193,6 +194,30 @@ impl Runner {
                 }
             }
             Step::Post(spec) => self.posts(spec).await,
+            Step::MarkRead {
+                member,
+                channel,
+                topic_name,
+                read_seq,
+                expect_read_seq,
+            } => {
+                self.mark_read(
+                    index,
+                    &member,
+                    channel,
+                    topic_name,
+                    read_seq,
+                    expect_read_seq,
+                )
+                .await?;
+            }
+            Step::Unread {
+                member,
+                channel,
+                expect,
+            } => {
+                self.unread(index, &member, channel, expect).await?;
+            }
             Step::HoldReplay { channel } => {
                 for label in channel.labels() {
                     let id = self.channels[&label];

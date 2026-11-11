@@ -42,24 +42,12 @@ pub struct CreateChannelRequest {
     pub visibility: ChannelVisibility,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ChannelList {
-    pub channels: Vec<Channel>,
-}
-
-/// List public channels of the caller's organization and private channels they belong to.
-#[utoipa::path(get, path = "/api/v1/orgs/{org}/channels",
-    params(("org" = Uuid, Path, description = "Organization id")),
-    security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, description = "Public Channels and private Channels the Member belongs to in their Organization", body = ChannelList),
-        (status = 400, description = "Malformed Organization id", body = ErrorBody),
-        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
-        (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
-        (status = 500, description = "Database failure while resolving the session or listing visible Channels", body = ErrorBody)))]
-pub async fn list_channels(
-    State(state): State<AppState>,
-    auth: Auth,
-) -> Result<Response, ApiError> {
+// The caller can compose the visible list with Messages-owned Unread data in
+// one snapshot without querying Channel tables outside their owning module.
+pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    auth: &Auth,
+) -> Result<Vec<Channel>, ApiError> {
     // The LEFT JOIN retains one empty row for an active Member with no visible Channels.
     let sql = format!(
         "SELECT c.id, c.name, c.visibility FROM ({}) u \
@@ -72,7 +60,7 @@ pub async fn list_channels(
         .bind(auth.identity.organization.organization_id)
         .bind(auth.identity.member.id)
         .bind(auth.membership_revision)
-        .fetch_all(&state.pool)
+        .fetch_all(executor)
         .await?;
     if rows.is_empty() {
         return Err(ApiError::organization_unavailable());
@@ -87,11 +75,7 @@ pub async fn list_channels(
             })
         })
         .collect();
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(ChannelList { channels }),
-    )
-        .into_response())
+    Ok(channels)
 }
 
 /// Create a public or private channel with an organization-unique name.

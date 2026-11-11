@@ -99,7 +99,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
         .route(
             "/api/v1/orgs/{org}/channels",
-            get(channels::list_channels).post(channels::create_channel),
+            get(messages::list_channels).post(channels::create_channel),
         )
         .route(
             "/api/v1/orgs/{org}/channels/{id}/messages",
@@ -107,6 +107,14 @@ pub fn app(state: AppState) -> Router {
                 .post(messages::send_message)
                 // 4000 control characters escape to 6 bytes each in JSON, so the global 16 KiB would reject valid bodies.
                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/read",
+            axum::routing::put(messages::mark_channel_read),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/read",
+            axum::routing::put(messages::mark_topic_read),
         )
         .route(
             "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain",

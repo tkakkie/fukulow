@@ -1,0 +1,35 @@
+{
+  "kind": "delivery",
+  "scenarios": [
+    {
+      "id": "unread-positions-are-independent-and-monotonic",
+      "title": "Main-timeline viewing leaves hidden Topic Unread; own sends move no position, stale devices cannot rewind, and reconnect refetch sees persisted maxima",
+      "covers": ["P8"],
+      "rust": {"existing_tests":["unread_main_timeline_and_topics_are_independent_monotonic_and_exclude_own_sends"],"note":"Exercises independent scopes, own sends, clamping, stale-device updates and reconnect refetch through real HTTP and WebSocket."},
+      "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"},{"id":"bob","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
+      "steps": [
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"post","as":"alice","channel":"general","topic_name":"Hidden"},
+        {"do":"post","as":"bob","channel":"general"},
+        {"do":"post","as":"bob","channel":"general","topic_name":"Hidden"},
+        {"do":"post","as":"alice","channel":"general","topic_name":"Hidden"},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":5,"read_seq":0,"main_unread_count":1,"unread_count":3,"topic_counts":{"Hidden":{"read_seq":0,"unread_count":2}}}},
+        {"do":"mark_read","as":"bob","channel":"general","read_seq":999,"expect_read_seq":5},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":5,"read_seq":5,"main_unread_count":0,"unread_count":2,"topic_counts":{"Hidden":{"read_seq":0,"unread_count":2}}}},
+        {"do":"mark_read","as":"bob","channel":"general","read_seq":1,"expect_read_seq":5},
+        {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":2,"expect_read_seq":2},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":5,"read_seq":5,"main_unread_count":0,"unread_count":1,"topic_counts":{"Hidden":{"read_seq":2,"unread_count":1}}}},
+        {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":5,"expect_read_seq":5},
+        {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":1,"expect_read_seq":5},
+        {"do":"connect","socket":"device","as":"bob"},
+        {"do":"close_socket","socket":"device"},
+        {"do":"post","as":"alice","channel":"general"},
+        {"do":"post","as":"alice","channel":"general","topic_name":"Hidden"},
+        {"do":"connect","socket":"device","as":"bob"},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":7,"read_seq":5,"main_unread_count":1,"unread_count":2,"topic_counts":{"Hidden":{"read_seq":5,"unread_count":1}}}},
+        {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":7,"expect_read_seq":7},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":7,"read_seq":5,"main_unread_count":1,"unread_count":1,"topic_counts":{"Hidden":{"read_seq":7,"unread_count":0}}}}
+      ]
+    }
+  ]
+}

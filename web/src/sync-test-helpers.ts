@@ -127,7 +127,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
             items: items.map(item => {
               if (item.kind === 'message') return { kind: 'message', message: message(expandMessage(item.message, channel)[0], channel) }
               const t = item.topic
-              const summary: TopicSummary = { ...t, id: t.name, first_seq: 1,
+              const summary: TopicSummary = { ...t, id: t.name, first_seq: 1, read_seq: 0, unread_count: 0,
                 latest_message: { ...record(t.last_seq, channel), topic_id: t.name } }
               return { kind: 'topic', topic: summary }
             }) }
