@@ -4,6 +4,7 @@ Rules that must always hold. Each one lists the test that guards it as `path::te
 
 | Rule | Test |
 |---|---|
+| Read-only Ok/Err reuses a clean backend; cancellation or BEGIN/ROLLBACK failure discards it; subsequent writes are read-write | `server/src/database/tests/read_only.rs::successful_read_only_reuses_clean_connection`, `server/src/database/tests/read_only.rs::read_only_body_error_reuses_clean_connection`, `server/src/database/tests/read_only.rs::cancelled_read_only_begin_discards_connection_before_next_write`, `server/src/database/tests/read_only.rs::cancelled_read_only_body_discards_connection_before_next_write`, `server/src/database/tests/read_only.rs::failed_rollback_keeps_body_error_and_discards_connection` |
 | App startup reads history only; missing/extra/different versions, checksum mismatch or failed state prevents listening | `server/src/database/tests.rs::application_requires_migration_history_without_creating_it`, `server/src/database/tests.rs::application_rejects_migration_version_checksum_failed_missing_and_extra_rows` |
 | App role owns nothing, has no memberships in either direction or elevated/DDL/TRUNCATE/trigger rights; updates/future grants preserve Member/tenant denials | `server/tests/auth.rs::app_role_denies_ddl_and_both_memberships_and_preserves_member_and_tenant_protection` |
 | Roles command fails before connecting without a nonempty password; unknown subcommands fail | `server/tests/config.rs::roles_command_requires_password_before_connecting_and_rejects_unknown_commands` |

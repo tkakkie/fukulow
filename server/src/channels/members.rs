@@ -18,31 +18,29 @@ pub async fn list(
     path: Result<Path<(Uuid, Uuid)>, axum::extract::rejection::PathRejection>,
 ) -> Result<Response, ApiError> {
     let Path((_, channel)) = path.map_err(|_| ApiError::bad_request())?;
-    let mut tx = state
-        .pool
-        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .await?;
-    require_visible(&mut tx, &auth, channel, false).await?;
-    let sql = format!(
-        "SELECT u.id,u.name,u.role FROM channel_members cm JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=$2 ORDER BY u.name,u.id",
-        auth::members::ACTIVE_SCOPED_MEMBERS_SQL
-    );
-    let rows: Vec<(Uuid, String, Role)> = sqlx::query_as(&sql)
-        .bind(auth.identity.organization.organization_id)
-        .bind(channel)
-        .fetch_all(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(auth::members::MemberList {
-            members: rows
-                .into_iter()
-                .map(|(id, name, role)| auth::Member { id, name, role })
-                .collect(),
-        }),
-    )
-        .into_response())
+    crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
+        require_visible(&mut *tx, &auth, channel, false).await?;
+        let sql = format!(
+            "SELECT u.id,u.name,u.role FROM channel_members cm JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=$2 ORDER BY u.name,u.id",
+            auth::members::ACTIVE_SCOPED_MEMBERS_SQL
+        );
+        let rows: Vec<(Uuid, String, Role)> = sqlx::query_as(&sql)
+            .bind(auth.identity.organization.organization_id)
+            .bind(channel)
+            .fetch_all(&mut *tx)
+            .await?;
+        Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(auth::members::MemberList {
+                members: rows
+                    .into_iter()
+                    .map(|(id, name, role)| auth::Member { id, name, role })
+                    .collect(),
+            }),
+        )
+            .into_response())
+    })
+    .await
 }
 
 #[utoipa::path(post, path="/api/v1/orgs/{org}/channels/{id}/members",request_body=AddChannelMemberRequest,

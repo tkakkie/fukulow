@@ -164,58 +164,56 @@ pub async fn topic_history(
     )
     .await?;
     let w = watermark(&state, organization, channel).await?;
-    let mut tx = state
-        .pool
-        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .await?;
-    require_visible(
-        &mut *tx,
-        organization,
-        (auth.identity.member.id, auth.membership_revision),
-        channel,
-    )
-    .await?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
-        .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
-    if !exists {
-        return Err(MessageError::TopicNotFound);
-    }
-    let ascending = query.after_seq.is_some();
-    let (comparison, order, cursor) = if ascending {
-        (">", "ASC", query.after_seq.unwrap_or(0))
-    } else {
-        (
-            "<=",
-            "DESC",
-            query.before_seq.map(|s| s - 1).unwrap_or(i64::MAX),
+    crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
+        require_visible(
+            &mut *tx,
+            organization,
+            (auth.identity.member.id, auth.membership_revision),
+            channel,
         )
-    };
-    let sql = format!(
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-        FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
-        ORDER BY seq {order} LIMIT $5"
-    );
-    let mut messages = sqlx::query_as::<_, Message>(&sql)
-        .bind(organization)
-        .bind(channel)
-        .bind(topic)
-        .bind(cursor)
-        .bind(i64::from(limit) + 1)
-        .bind(w)
-        .fetch_all(&mut *tx)
         .await?;
-    tx.commit().await?;
-    let has_more = messages.len() > usize::from(limit);
-    messages.truncate(usize::from(limit));
-    if !ascending {
-        messages.reverse()
-    }
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(MessagePage { messages, has_more }),
-    )
-        .into_response())
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
+            .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
+        if !exists {
+            return Err(MessageError::TopicNotFound);
+        }
+        let ascending = query.after_seq.is_some();
+        let (comparison, order, cursor) = if ascending {
+            (">", "ASC", query.after_seq.unwrap_or(0))
+        } else {
+            (
+                "<=",
+                "DESC",
+                query.before_seq.map(|s| s - 1).unwrap_or(i64::MAX),
+            )
+        };
+        let sql = format!(
+            "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+            FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
+            ORDER BY seq {order} LIMIT $5"
+        );
+        let mut messages = sqlx::query_as::<_, Message>(&sql)
+            .bind(organization)
+            .bind(channel)
+            .bind(topic)
+            .bind(cursor)
+            .bind(i64::from(limit) + 1)
+            .bind(w)
+            .fetch_all(&mut *tx)
+            .await?;
+        let has_more = messages.len() > usize::from(limit);
+        messages.truncate(usize::from(limit));
+        if !ascending {
+            messages.reverse()
+        }
+        Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(MessagePage { messages, has_more }),
+        )
+            .into_response())
+    })
+    .await
 }
 
 // Keep HTTP admission rejection distinct from database/barrier work timeouts.
