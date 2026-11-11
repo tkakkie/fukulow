@@ -90,7 +90,7 @@ async fn create(app: &Router, token: &str, name: &str, visibility: &str) -> Valu
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let channel = body(response).await;
     assert!(Uuid::parse_str(channel["id"].as_str().unwrap()).is_ok());
-    assert_eq!(channel.as_object().unwrap().len(), 3);
+    assert_eq!(channel.as_object().unwrap().len(), 4);
     assert_eq!(channel["name"], name);
     assert_eq!(channel["visibility"], visibility);
     channel

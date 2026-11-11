@@ -84,7 +84,7 @@ States look the same everywhere (board A2-2):
 | Error, retryable | message + `再試行` | network/5xx/1011; keeps what is already shown |
 | Error, not retryable | message + where to go | no retry button |
 | チャンネル unavailable (C9) | `このチャンネルは利用できません` + `チャンネル一覧へ` | Composer disabled; never retried in a loop; reselecting tries again |
-| 組織 unavailable (C10) | `この組織は利用できません` + `組織を切り替える` (no チャンネル retry/list action) | terminal: no reconnect, resubscribe or send retry for that 組織; loaded Messages and drafts stay visible; other 組織 unaffected. Copy says access was lost and pending Messages could not be confirmed, never that they were not sent |
+| 組織 unavailable (C10) | `この組織は利用できません` + `メンバー資格を再確認` / `組織を切り替える` (no チャンネル retry/list action) | terminal until explicit re-selection: no automatic reconnect, resubscribe or send retry for that 組織; loaded Messages and drafts stay visible until re-selection; other 組織 unaffected. Copy says access was lost and pending Messages could not be confirmed, never that they were not sent |
 | Reconnecting | StatusBanner `再接続しています…` (visual only, no live role; the page status region announces it, §6) | content stays; banner only after 2 s offline; send behaviour unchanged (presentation only) |
 | Sending | Message with `送信中…` in `--text2` | resolved by C5 |
 | Send outcome unknown | `送信を確認できませんでした。` + `再送する` / `破棄` | network error, timeout, lost ack, retryable 503: `再送する` resends with the same `client_message_id` (C6); no `編集` (a new key could duplicate a committed Message) |

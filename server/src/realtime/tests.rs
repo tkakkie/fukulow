@@ -1032,4 +1032,6 @@ mod measurement;
 mod shutdown;
 mod topics;
 
+mod roles;
+
 mod replies;

@@ -9,6 +9,8 @@
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import CreateChannelForm from './CreateChannelForm.svelte'
   import { focusAfterPanelClose, focusTarget } from './focus-management'
+  import Members from './MemberList.svelte'
+  import type { membersAdapter } from './members.svelte'
   import Timeline from './Timeline.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
@@ -19,6 +21,8 @@
   // The session's controllers outlive this component: unmounting it never closes the connection.
   let {
     session,
+    canCreateChannels = true,
+    members = null,
     organization = null,
     organizations = [],
     selectedOrganizationId = '',
@@ -30,6 +34,8 @@
     onannounce,
   }: {
     session: SessionModel
+    canCreateChannels?: boolean
+    members?: ReturnType<typeof membersAdapter> | null
     organization?: Identity | null
     organizations?: Organization[]
     selectedOrganizationId?: string
@@ -49,7 +55,8 @@
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
   const organizationUnavailable = $derived(session.sync.unavailable)
-  const otherOrg = $derived(organizations.find((o) => o.organization_id !== selectedOrganizationId))
+  const currentOrganizationId = $derived(selectedOrganizationId || organization?.organization.organization_id || '')
+  const otherOrg = $derived(organizations.find((o) => o.organization_id !== currentOrganizationId))
 
   const announcementController = createAnnouncementController({
     onAnnounce: (msg) => onannounce?.(msg),
@@ -237,7 +244,7 @@
           <span class="org-switcher__label">組織</span>
           <select
             class="org-switcher__select"
-            value={selectedOrganizationId}
+            value={currentOrganizationId}
             onchange={(e) => onselectorganization(e.currentTarget.value)}
           >
             {#each organizations as org (org.organization_id)}
@@ -269,8 +276,19 @@
       {/if}
 
       <ChannelList channels={s.channels} selectedId={s.selectedId} onselect={handleSelectChannel} />
-      {#if !organizationUnavailable}
+      {#if !organizationUnavailable && canCreateChannels}
         <CreateChannelForm oncreate={handleCreateChannel} />
+      {/if}
+      {#if !organizationUnavailable && members && organization}
+        <Members
+          model={members}
+          identity={organization}
+          onchanged={(id) => {
+            if (id === organization.member.id && currentOrganizationId) {
+              onselectorganization?.(currentOrganizationId)
+            }
+          }}
+        />
       {/if}
     </div>
 
@@ -323,6 +341,7 @@
             reconnecting={announcementView.reconnecting}
             bind:composerRef={mainComposerRef}
             ongoToChannelList={goToChannelList}
+            onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
             onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
           />
         {/key}
@@ -350,8 +369,10 @@
           role="alert"
           message="この組織は利用できません。"
           detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-          actionLabel={otherOrg && onselectorganization ? '組織を切り替える' : undefined}
-          onaction={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+          actionLabel={onselectorganization && currentOrganizationId ? 'メンバー資格を再確認' : undefined}
+          onaction={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
+          secondaryActionLabel={otherOrg && onselectorganization ? '組織を切り替える' : undefined}
+          onsecondaryaction={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
         />
       </div>
     {:else if s.status === 'ready'}

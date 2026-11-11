@@ -188,14 +188,19 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
 
   it('keeps the live session mounted on C10 organization_unavailable while preserving loaded Messages, drafts and discardable pending sends', async () => {
     const net = fakeNetwork()
+    const capabilities = {
+      can_invite: { allowed: true },
+      can_manage_roles: { allowed: true },
+      can_create_channels: { allowed: true },
+    }
     const auth = createAuth({
       restore: vi.fn(async () => ({
         screen: 'app' as const,
         identity: {
           account: { id: 'acc-1', email: 'm1@example.com' },
           organizations: [
-            { organization_id: 'o', name: 'Org 1' },
-            { organization_id: 'other', name: 'Org 2' },
+            { organization_id: 'o', name: 'Org 1', capabilities },
+            { organization_id: 'other', name: 'Org 2', capabilities },
           ],
         },
       })),
@@ -205,9 +210,10 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
       getOrganization: vi.fn(async (id: string) =>
         ok({
           member: { id: 'm1', name: 'm1', role: 'owner' as const },
-          organization: { organization_id: id, name: id },
+          organization: { organization_id: id, name: id, capabilities },
         }),
       ),
+      openMembers: undefined,
       openSession(selfId, onEnded, organizationId) {
         const session = createSession({ selfId, onEnded, organizationId, ...net.options(selfId) })
         return {
@@ -328,12 +334,17 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     expect(appSrc).toContain('{#if session && organization}')
     expect(appSrc).not.toContain("auth.organizationStatus !== 'unavailable' && auth.organizationStatus !== 'error'")
     expect(appSrc).toContain('{#key pageAnnouncement.id}')
+    expect(appSrc).toContain('actionLabel="メンバー資格を再確認"')
+    expect(appSrc).toContain('<InviteAccept')
 
     const timelineSrc = readFileSync(join(webDir, 'src/Timeline.svelte'), 'utf8')
-    expect(timelineSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?この組織は利用できません。[\s\S]*?\{:else if s\.status === 'unavailable'\}/)
+    expect(timelineSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?この組織は利用できません。[\s\S]*?メンバー資格を再確認[\s\S]*?\{:else if s\.status === 'unavailable'\}/)
 
     const workspaceSrc = readFileSync(join(webDir, 'src/Workspace.svelte'), 'utf8')
     expect(workspaceSrc).toContain('session.sync.hasUnsavedChanges()')
+    expect(workspaceSrc).toContain('{#if !organizationUnavailable && canCreateChannels}')
+    expect(workspaceSrc).toContain('<Members')
+    expect(workspaceSrc).toContain('メンバー資格を再確認')
   })
 })
 

@@ -11,6 +11,7 @@ async function fixture(
   options: { withChannel?: boolean; upgradeDelayMs?: number } = {},
 ) {
   let upgrades = 0, memberChecks = 0
+  const capabilities = { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } }
   const dist = resolve(import.meta.dirname, '../dist')
   const server = createServer(async (req, res) => {
     const path = new URL(req.url!, 'http://localhost').pathname
@@ -19,7 +20,7 @@ async function fixture(
       res.end(JSON.stringify(body))
     }
     if (path === '/api/v1/me') return json({ account: { id: 'account', email: 'a@example.com' },
-      organizations: [{ organization_id: 'o', name: 'Org' }] })
+      organizations: [{ organization_id: 'o', name: 'Org', capabilities }] })
     if (path === '/api/v1/orgs/o/me') {
       memberChecks++
       if (memberChecks > 1) {
@@ -27,8 +28,9 @@ async function fixture(
         if (mode === 'network') { req.socket.destroy(); return }
         return json({ error: 'internal_error' }, 503)
       }
-      return json({ organization: { organization_id: 'o', name: 'Org' }, member: { id: 'm', name: 'Alice', role: 'owner' } })
+      return json({ organization: { organization_id: 'o', name: 'Org', capabilities }, member: { id: 'm', name: 'Alice', role: 'owner' } })
     }
+    if (path === '/api/v1/orgs/o/members') return json({ members: [] })
     if (path === '/api/v1/orgs/o/channels') {
       return json({
         channels: options.withChannel
@@ -109,6 +111,7 @@ test('C10 organization_unavailable keeps Workspace and Timeline mounted with loa
     await expect(
       page.getByText('この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。'),
     ).toBeVisible()
+    await expect(page.getByRole('button', { name: 'メンバー資格を再確認' })).toBeVisible()
     await expect(page.getByRole('list', { name: 'メッセージ一覧' }).getByText('保持されるメッセージ')).toBeVisible()
     await expect(composer).toHaveValue('保持される下書き')
     await expect(composer).toBeDisabled()

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAuth, type AuthDeps, type SessionModel } from './auth.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
+import { createInviteAcceptance } from './members'
+import { inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter } from './sync.svelte'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
 
@@ -10,10 +12,10 @@ afterEach(() => vi.useRealTimers())
 
 const member = (id: string) => ({
   member: { id, name: id, role: 'owner' as const },
-  organization: { organization_id: 'o', name: 'Org' },
+  organization: { organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } },
 })
 
-const identity = (id: string) => ({ account: { id, email: `${id}@example.com` }, organizations: [{ organization_id: 'o', name: 'Org' }] })
+const identity = (id: string) => ({ account: { id, email: `${id}@example.com` }, organizations: [{ organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } }] })
 
 /** Real controllers on fake transports; each opened session gets its own network, like a real page would. */
 function stack(over: Partial<AuthDeps> = {}) {
@@ -338,9 +340,18 @@ describe('Organization selection fences data within one Account Session', () => 
     await s.auth.selectOrganization('other')
     expect(s.auth.organizationStatus).toBe('ready')
     expect(s.nets).toHaveLength(2)
+    vi.mocked(s.deps.getOrganization).mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
     await s.auth.selectOrganization('o')
     expect(s.auth.organizationStatus).toBe('unavailable')
     expect(s.nets).toHaveLength(2)
+    const calls = vi.mocked(s.deps.getOrganization).mock.calls.length
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(s.deps.getOrganization).toHaveBeenCalledTimes(calls)
+    // Re-invited Membership is checked only after explicit user action; start fresh sync state.
+    await s.auth.selectOrganization('o')
+    expect(s.auth.organizationStatus).toBe('ready')
+    expect(s.nets).toHaveLength(3)
+    expect(s.auth.session!.sync.channel('A').timeline.messages).toEqual([])
   })
 })
 
@@ -351,7 +362,7 @@ it('a late Organization identity response is fenced after switching, but its sam
   await signInAs(s, 'm1')
   const old = s.auth.selectOrganization('held')
   await s.auth.selectOrganization('other')
-  resolve(ok({ ...member('old'), organization: { organization_id: 'held', name: 'Old' } }))
+  resolve(ok({ ...member('old'), organization: { ...member('old').organization, organization_id: 'held', name: 'Old' } }))
   await old
   expect(s.auth.selectedOrganizationId).toBe('other')
   expect(s.auth.organization!.member.id).toBe('m1')
@@ -410,4 +421,23 @@ it('a new Account with no Organizations clears the previous unavailable Organiza
   expect(s.auth.organization).toBeNull()
   expect(s.auth.selectedOrganizationId).toBe('')
   expect(s.auth.session).toBeNull()
+})
+
+it('accepting an Invite rechecks Membership in the current Account Session; replaced-Account acceptance is fenced', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  s.nets[0].socket.onClose(4003)
+  await settle()
+  const invitation = inviteAcceptanceAdapter(createInviteAcceptance({ organizationId: 'o', token: 'a'.repeat(64) }, vi.fn(async () => ok(member('m1')))))
+  await s.auth.acceptInvitation(invitation, { email: 'm1@example.com', name: 'Member', password: null })
+  expect(s.auth.organizationStatus).toBe('ready')
+  expect(s.nets).toHaveLength(2)
+  let finish!: (result: Awaited<ReturnType<AuthDeps['getOrganization']>>) => void
+  const late = inviteAcceptanceAdapter(createInviteAcceptance({ organizationId: 'old', token: 'b'.repeat(64) }, () => new Promise(r => { finish = r })))
+  const accepting = s.auth.acceptInvitation(late, { email: 'm1@example.com', name: 'Member', password: null })
+  await signInAs(s, 'm2')
+  finish(ok(member('m1')))
+  await accepting
+  expect(s.auth.organization!.member.id).toBe('m2')
+  expect(s.nets).toHaveLength(3)
 })

@@ -31,6 +31,7 @@
     reconnecting = false,
     composerRef = $bindable(null),
     ongoToChannelList,
+    onrecheckmembership,
     onswitchorganization,
   }: {
     channel: ChannelSync
@@ -40,6 +41,7 @@
     reconnecting?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     ongoToChannelList?: () => void
+    onrecheckmembership?: () => void
     onswitchorganization?: () => void
   } = $props()
 
@@ -198,8 +200,10 @@
         role="alert"
         message="この組織は利用できません。"
         detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-        actionLabel={onswitchorganization ? '組織を切り替える' : undefined}
-        onaction={onswitchorganization}
+        actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
+        onaction={onrecheckmembership}
+        secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
+        onsecondaryaction={onswitchorganization}
       />
     </div>
   {:else if s.status === 'unavailable'}

@@ -161,6 +161,10 @@ pub(super) async fn fixture(pool: &PgPool) -> (AppState, Auth) {
         organization: super::super::Organization {
             organization_id: organization,
             name: "Organization".into(),
+            capabilities: super::super::OrganizationCapabilities::for_member(
+                organization,
+                super::super::Role::Member,
+            ),
         },
         member: super::super::Member {
             id: member,

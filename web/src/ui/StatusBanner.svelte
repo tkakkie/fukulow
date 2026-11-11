@@ -10,6 +10,8 @@
     detail,
     actionLabel,
     onaction,
+    secondaryActionLabel,
+    onsecondaryaction,
   }: {
     tone?: StatusBannerTone
     /** Visual only by default (`docs/ui.md` §5, §6); set `'alert'` only for errors that need action. */
@@ -18,6 +20,8 @@
     detail?: string
     actionLabel?: string
     onaction?: () => void
+    secondaryActionLabel?: string
+    onsecondaryaction?: () => void
   } = $props()
 </script>
 
@@ -28,9 +32,14 @@
       <p class="ui-status-banner__detail">{detail}</p>
     {/if}
   </div>
-  {#if actionLabel && onaction}
+  {#if (actionLabel && onaction) || (secondaryActionLabel && onsecondaryaction)}
     <div class="ui-status-banner__action">
-      <Button variant="secondary" onclick={onaction}>{actionLabel}</Button>
+      {#if actionLabel && onaction}
+        <Button variant="secondary" onclick={onaction}>{actionLabel}</Button>
+      {/if}
+      {#if secondaryActionLabel && onsecondaryaction}
+        <Button variant="secondary" onclick={onsecondaryaction}>{secondaryActionLabel}</Button>
+      {/if}
     </div>
   {/if}
 </div>
@@ -78,6 +87,10 @@
   }
 
   .ui-status-banner__action {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-8);
     flex-shrink: 0;
   }
 </style>

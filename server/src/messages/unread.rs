@@ -68,8 +68,11 @@ CROSS JOIN LATERAL (
 ) topic
 "#;
 
+/// List visible Channels with the current Member's read positions and Unread counts.
+///
+/// Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels",
-    params(("org" = Uuid, Path)),
+    params(("org" = Uuid, Path, description = "Organization id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Visible Channels with current Member positions and Unread counts; refetch on reconnect", body = ChannelList),
         (status = 400, description = "Malformed Organization id", body = ErrorBody),

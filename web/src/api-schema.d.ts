@@ -59,6 +59,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * List visible Channels with the current Member's read positions and Unread counts.
+         * @description Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.
+         */
         get: operations["list_channels"];
         put?: never;
         /**
@@ -226,6 +230,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/invites": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/invites/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["accept_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/me": {
         parameters: {
             query?: never;
@@ -240,6 +276,38 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_members"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/members/{id}/role": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["change_role"];
         trace?: never;
     };
     "/api/v1/orgs/{org}/ws": {
@@ -321,6 +389,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AcceptInviteRequest: {
+            email: string;
+            name: string;
+            /**
+             * Format: password
+             * @description Required only for a new Account. Existing Accounts must sign in instead.
+             */
+            password?: string | null;
+            token: string;
+        };
         Account: {
             email: string;
             /** Format: uuid */
@@ -330,12 +408,23 @@ export interface components {
             account: components["schemas"]["Account"];
             organizations: components["schemas"]["Organization"][];
         };
+        Capability: {
+            allowed: boolean;
+            reason?: string | null;
+        };
+        ChangeRoleRequest: {
+            role: components["schemas"]["Role"];
+        };
         Channel: {
+            capabilities: components["schemas"]["ChannelCapabilities"];
             /** Format: uuid */
             id: string;
             /** @description At most 128 Unicode scalar values. */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
+        };
+        ChannelCapabilities: {
+            can_add_members: components["schemas"]["Capability"];
         };
         ChannelList: {
             channels: components["schemas"]["UnreadChannel"][];
@@ -354,6 +443,10 @@ export interface components {
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
         };
+        CreateInviteRequest: {
+            email: string;
+            role: components["schemas"]["Role"];
+        };
         ErrorBody: {
             error: string;
         };
@@ -370,6 +463,15 @@ export interface components {
         Identity: {
             member: components["schemas"]["Member"];
             organization: components["schemas"]["Organization"];
+        };
+        InviteResponse: {
+            expires_at: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            organization_id: string;
+            /** @description Shown once. Send in a URL fragment; never place in a URL path or query. */
+            token: string;
         };
         /** @description Use after_seq XOR before_seq, or neither for the latest page. Cursors are exclusive. */
         ListMessagesQuery: {
@@ -416,6 +518,9 @@ export interface components {
             id: string;
             name: string;
             role: components["schemas"]["Role"];
+        };
+        MemberList: {
+            members: components["schemas"]["Member"][];
         };
         Message: {
             body: string;
@@ -477,9 +582,15 @@ export interface components {
             token: string;
         };
         Organization: {
+            capabilities: components["schemas"]["OrganizationCapabilities"];
             name: string;
             /** Format: uuid */
             organization_id: string;
+        };
+        OrganizationCapabilities: {
+            can_create_channels: components["schemas"]["Capability"];
+            can_invite: components["schemas"]["Capability"];
+            can_manage_roles: components["schemas"]["Capability"];
         };
         ReadPosition: {
             /** Format: int64 */
@@ -686,25 +797,33 @@ export interface components {
     headers: never;
     pathItems: never;
 }
+export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
 export type Account = components['schemas']['Account'];
 export type AccountIdentity = components['schemas']['AccountIdentity'];
+export type Capability = components['schemas']['Capability'];
+export type ChangeRoleRequest = components['schemas']['ChangeRoleRequest'];
 export type Channel = components['schemas']['Channel'];
+export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
 export type ChannelList = components['schemas']['ChannelList'];
 export type ChannelVisibility = components['schemas']['ChannelVisibility'];
 export type ClientMessage = components['schemas']['ClientMessage'];
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest'];
+export type CreateInviteRequest = components['schemas']['CreateInviteRequest'];
 export type ErrorBody = components['schemas']['ErrorBody'];
 export type ErrorEvent = components['schemas']['ErrorEvent'];
 export type Identity = components['schemas']['Identity'];
+export type InviteResponse = components['schemas']['InviteResponse'];
 export type ListMessagesQuery = components['schemas']['ListMessagesQuery'];
 export type ListProjectionQuery = components['schemas']['ListProjectionQuery'];
 export type MarkReadRequest = components['schemas']['MarkReadRequest'];
 export type Member = components['schemas']['Member'];
+export type MemberList = components['schemas']['MemberList'];
 export type Message = components['schemas']['Message'];
 export type MessageEvent = components['schemas']['MessageEvent'];
 export type MessagePage = components['schemas']['MessagePage'];
 export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
 export type Organization = components['schemas']['Organization'];
+export type OrganizationCapabilities = components['schemas']['OrganizationCapabilities'];
 export type ReadPosition = components['schemas']['ReadPosition'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
 export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
@@ -910,6 +1029,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Organization id */
                 org: string;
             };
             cookie?: never;
@@ -1012,6 +1132,15 @@ export interface operations {
             };
             /** @description Missing, invalid, expired, or revoked Account Session credential */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: Guests cannot create Channels */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1843,6 +1972,221 @@ export interface operations {
             };
         };
     };
+    create_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInviteRequest"];
+            };
+        };
+        responses: {
+            /** @description Single-use Invite, valid for seven days; token returned once */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InviteResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: only Owner/Admin can invite; only Owner can invite Owner */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or random generation failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    accept_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Invited Organization id */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptInviteRequest"];
+            };
+        };
+        responses: {
+            /** @description Invite consumed; Member added or reactivated. Existing Account must be signed in and match Invite email. New Account must sign in afterward */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Identity"];
+                };
+            };
+            /** @description Invalid input or password supplied while signed in */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Invalid supplied Account Session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invite_account_mismatch: signed-in Account does not match the invited Account; invite_issuer_unauthorized: issuer is inactive or their current Role cannot issue this Invite */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invite_unavailable: unknown, expired, used, foreign Organization or wrong email */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invite_sign_in_required for an existing Account; member_already_active for an active Member */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or password hashing failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     organization_me: {
         parameters: {
             query?: never;
@@ -1884,6 +2228,192 @@ export interface operations {
             };
             /** @description Non-Member, unknown Organization or deactivated Member: organization_unavailable */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active Members; no Account emails or credentials */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberList"];
+                };
+            };
+            /** @description Invalid Organization id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    change_role: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+                /** @description Member id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangeRoleRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated active Member; only Owners can change Roles */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Member"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: caller is not an Owner */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or member_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description last_owner: the last active Owner cannot be demoted */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };

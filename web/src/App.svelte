@@ -5,6 +5,9 @@
     type LiveAnnouncementItem,
   } from './announcements'
   import { createAuth } from './auth.svelte'
+  import InviteAccept from './InviteAccept.svelte'
+  import { inviteFromLocation } from './members'
+  import { inviteAcceptanceAdapter } from './members.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Input from './ui/Input.svelte'
@@ -12,6 +15,7 @@
   import StatusBanner from './ui/StatusBanner.svelte'
   import Workspace from './Workspace.svelte'
 
+  const invitation = inviteAcceptanceAdapter(inviteFromLocation())
   const auth = createAuth()
   void auth.load()
 
@@ -25,6 +29,7 @@
   let pageAnnouncement = $state<LiveAnnouncementItem>(announcementQueue.current)
   let loadingTimedOut = $state(false)
   let lastSigninNotice = ''
+  let lastInviteAcceptedNotice = false
 
   function announce(msg: string) {
     pageAnnouncement = announcementQueue.enqueue(msg)
@@ -81,6 +86,17 @@
       lastSigninNotice = ''
     }
   })
+
+  // Announce invite-accepted notice through the single page role="status" region (docs/ui.md §6)
+  $effect(() => {
+    const accepted = invitation.state.accepted && auth.view.screen !== 'app'
+    if (accepted && !lastInviteAcceptedNotice) {
+      lastInviteAcceptedNotice = true
+      announce('招待を受けました。ログインしてください。')
+    } else if (!accepted) {
+      lastInviteAcceptedNotice = false
+    }
+  })
 </script>
 
 {#if auth.view.screen === 'app'}
@@ -100,81 +116,95 @@
   {@const organization = auth.organization}
   {@const otherOrg = identity.organizations.find((o) => o.organization_id !== auth.selectedOrganizationId)}
 
-  {#if session && organization}
-    {#key session}
-      <Workspace
-        {session}
-        {organization}
-        organizations={identity.organizations}
-        selectedOrganizationId={auth.selectedOrganizationId}
-        busy={auth.busy}
-        authError={auth.error}
-        onselectorganization={(id) => void auth.selectOrganization(id)}
-        onsignout={doSignOut}
-        onannounce={announce}
-      />
-    {/key}
-  {:else}
-    <div class="app-fallback">
-      <nav class="app-fallback__rail" aria-label="メインナビゲーション">
-        <div class="app-fallback__logo" aria-hidden="true">🦉</div>
-        <Button variant="icon" ariaLabel="ログアウト" disabled={auth.busy} onclick={doSignOut}>⇥</Button>
-      </nav>
-      <main id="main-content" class="app-fallback__main">
-        <header class="app-fallback__header">
-          <h1 class="app-fallback__title">{organization?.organization.name ?? 'fukulow'}</h1>
-          {#if identity.organizations.length > 1}
-            <label class="app-fallback__org-switcher">
-              <span class="app-fallback__org-label">組織</span>
-              <select
-                class="app-fallback__org-select"
-                value={auth.selectedOrganizationId}
-                onchange={(e) => void auth.selectOrganization(e.currentTarget.value)}
-              >
-                {#each identity.organizations as org (org.organization_id)}
-                  <option value={org.organization_id}>{org.name}</option>
-                {/each}
-              </select>
-            </label>
+  <div class="app-shell">
+    <InviteAccept
+      model={invitation}
+      signedIn={true}
+      accept={(input) => auth.acceptInvitation(invitation, input)}
+    />
+
+    {#if session && organization}
+      <div class="app-shell__body">
+        {#key session}
+          <Workspace
+            {session}
+            canCreateChannels={organization.organization.capabilities.can_create_channels.allowed}
+            members={auth.members}
+            {organization}
+            organizations={identity.organizations}
+            selectedOrganizationId={auth.selectedOrganizationId}
+            busy={auth.busy}
+            authError={auth.error}
+            onselectorganization={(id) => void auth.selectOrganization(id)}
+            onsignout={doSignOut}
+            onannounce={announce}
+          />
+        {/key}
+      </div>
+    {:else}
+      <div class="app-fallback">
+        <nav class="app-fallback__rail" aria-label="メインナビゲーション">
+          <div class="app-fallback__logo" aria-hidden="true">🦉</div>
+          <Button variant="icon" ariaLabel="ログアウト" disabled={auth.busy} onclick={doSignOut}>⇥</Button>
+        </nav>
+        <main id="main-content" class="app-fallback__main">
+          <header class="app-fallback__header">
+            <h1 class="app-fallback__title">{organization?.organization.name ?? 'fukulow'}</h1>
+            {#if identity.organizations.length > 1}
+              <label class="app-fallback__org-switcher">
+                <span class="app-fallback__org-label">組織</span>
+                <select
+                  class="app-fallback__org-select"
+                  value={auth.selectedOrganizationId}
+                  onchange={(e) => void auth.selectOrganization(e.currentTarget.value)}
+                >
+                  {#each identity.organizations as org (org.organization_id)}
+                    <option value={org.organization_id}>{org.name}</option>
+                  {/each}
+                </select>
+              </label>
+            {/if}
+          </header>
+
+          {#if auth.organizationStatus === 'unavailable'}
+            <StatusBanner
+              tone="danger"
+              role="alert"
+              message="この組織は利用できません。"
+              detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
+              actionLabel="メンバー資格を再確認"
+              onaction={() => void auth.selectOrganization(auth.selectedOrganizationId)}
+              secondaryActionLabel={otherOrg ? '組織を切り替える' : undefined}
+              onsecondaryaction={otherOrg ? () => void auth.selectOrganization(otherOrg.organization_id) : undefined}
+            />
+          {:else if auth.organizationStatus === 'error' || loadingTimedOut}
+            <StatusBanner
+              tone="danger"
+              role="alert"
+              message="サーバーに接続できません。"
+              detail="通信状況を確認して、もう一度お試しください。"
+              actionLabel="再試行"
+              onaction={() => {
+                loadingTimedOut = false
+                void auth.selectOrganization(auth.selectedOrganizationId)
+              }}
+            />
+          {:else if identity.organizations.length === 0}
+            <EmptyState
+              title="利用できる組織がありません。"
+              description="招待を受けるか、別のアカウントでログインしてください。"
+            />
+          {:else}
+            <Skeleton rows={3} label="組織を読み込み中" />
           {/if}
-        </header>
 
-        {#if auth.organizationStatus === 'unavailable'}
-          <StatusBanner
-            tone="danger"
-            role="alert"
-            message="この組織は利用できません。"
-            detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-            actionLabel={otherOrg ? '組織を切り替える' : undefined}
-            onaction={otherOrg ? () => void auth.selectOrganization(otherOrg.organization_id) : undefined}
-          />
-        {:else if auth.organizationStatus === 'error' || loadingTimedOut}
-          <StatusBanner
-            tone="danger"
-            role="alert"
-            message="サーバーに接続できません。"
-            detail="通信状況を確認して、もう一度お試しください。"
-            actionLabel="再試行"
-            onaction={() => {
-              loadingTimedOut = false
-              void auth.selectOrganization(auth.selectedOrganizationId)
-            }}
-          />
-        {:else if identity.organizations.length === 0}
-          <EmptyState
-            title="利用できる組織がありません。"
-            description="招待を受けるか、別のアカウントでログインしてください。"
-          />
-        {:else}
-          <Skeleton rows={3} label="組織を読み込み中" />
-        {/if}
-
-        {#if auth.error}
-          <StatusBanner tone="danger" role="alert" message={auth.error} />
-        {/if}
-      </main>
-    </div>
-  {/if}
+          {#if auth.error}
+            <StatusBanner tone="danger" role="alert" message={auth.error} />
+          {/if}
+        </main>
+      </div>
+    {/if}
+  </div>
 {:else}
   <main id="main-content" class="auth-shell">
     <div class="auth-card">
@@ -182,6 +212,14 @@
         <span class="auth-card__logo" aria-hidden="true">🦉</span>
         <span class="auth-card__name">fukulow</span>
       </div>
+
+      {#if auth.view.screen === 'signin' || auth.view.screen === 'setup'}
+        <InviteAccept
+          model={invitation}
+          signedIn={false}
+          accept={(input) => auth.acceptInvitation(invitation, input)}
+        />
+      {/if}
 
       {#if auth.view.screen === 'loading' && !loadingTimedOut}
         <h1 class="auth-card__title">fukulow</h1>
@@ -268,6 +306,21 @@
 {/if}
 
 <style>
+  .app-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    background-color: var(--app);
+  }
+
+  .app-shell__body {
+    flex: 1 1 0%;
+    min-height: 0;
+    min-width: 0;
+  }
+
   .auth-shell {
     height: 100%;
     overflow-y: auto;
@@ -328,10 +381,12 @@
   }
 
   .app-fallback {
+    flex: 1 1 0%;
     display: grid;
     grid-template-columns: var(--rail-width) minmax(0, 1fr);
     gap: var(--region-gap);
     height: 100%;
+    min-height: 0;
     padding: var(--space-8);
     background-color: var(--app);
     min-width: 0;
