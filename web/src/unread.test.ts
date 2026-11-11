@@ -36,6 +36,70 @@ it('keeps smaller same-W same-position Channel counts when a stale response arri
   expect(c.unread.get('A').main.unreadCount).toBe(0)
   await c.sync.close()
 })
+it('serializes Channel-list refreshes across reconnect with only one queued fetch', async () => {
+  const c = unreadClient(); await c.boot()
+  const old = deferred<Result<ChannelList>>(), next = deferred<Result<ChannelList>>()
+  c.unreadApi.listChannels.mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise)
+  const n = c.unreadApi.listChannels.mock.calls.length
+  const pending = c.unread.refresh(); await flush()
+  await c.unread.refresh(); await c.unread.refresh()
+  c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250)
+  c.handlers.at(-1)!.onReady(); await flush()
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  old.resolve(ok({ channels: [row({ as_of_seq: 4 })] })); await pending; await flush()
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
+  next.resolve(ok({ channels: [row({ as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 })] })); await flush()
+  expect(c.unread.get('A')).toMatchObject({ asOfSeq: 4, unreadCount: 0, main: { position: 4, unreadCount: 0 } })
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
+  await c.sync.close()
+})
+it.each([
+  { rule: 'larger as_of_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }),
+    stale: row({ as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 }) },
+  { rule: 'larger read_seq at equal as_of_seq', fresh: row({ as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 }),
+    stale: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }) },
+  { rule: 'smaller main counts at equal as_of_seq and read_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 1 }),
+    stale: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }) },
+  { rule: 'smaller Topic counts at equal as_of_seq and read_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 1 }),
+    stale: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 3 }) },
+])('selects $rule through production refresh in both serial freshness orders', async ({ fresh, stale }) => {
+  // These are later-issued stale snapshots, not overlapping requests completing in reverse order.
+  for (const responses of [[fresh, stale], [stale, fresh]]) {
+    const c = unreadClient(); await c.boot(); c.event(msg(5)); await flush()
+    const n = c.unreadApi.listChannels.mock.calls.length
+    for (const response of responses) {
+      c.unreadApi.listChannels.mockResolvedValueOnce(ok({ channels: [response] })); await c.unread.refresh()
+    }
+    expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
+    expect(c.unread.get('A')).toMatchObject({ asOfSeq: fresh.as_of_seq, unreadCount: fresh.unread_count + 1,
+      main: { position: fresh.read_seq, unreadCount: fresh.main_unread_count + 1 } })
+    await c.sync.close()
+  }
+})
+it('fences a timed-out Channel list when its older response arrives after the retry baseline', async () => {
+  const c = unreadClient(); await c.boot(); c.event(msg(5)); await flush()
+  const old = deferred<Result<ChannelList>>(), retry = deferred<Result<ChannelList>>()
+  c.unreadApi.listChannels.mockReturnValueOnce(old.promise).mockReturnValueOnce(retry.promise)
+  const n = c.unreadApi.listChannels.mock.calls.length
+  const pending = c.unread.refresh(); await flush()
+  await vi.advanceTimersByTimeAsync(999)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  await vi.advanceTimersByTimeAsync(1); await pending
+  expect(c.unread.get('A').unreadCount).toBeNull()
+  await vi.advanceTimersByTimeAsync(499)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
+  retry.resolve(ok({ channels: [row({ as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 })] })); await flush()
+  const fresh = c.unread.get('A')
+  expect(fresh).toMatchObject({ asOfSeq: 4, unreadCount: 1, main: { position: 4, unreadCount: 1 } })
+  old.resolve(ok({ channels: [row({ as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 })] })); await flush()
+  expect(c.unread.get('A')).toEqual(fresh)
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
 it('deduplicates baseline live echo replay and paging by Channel seq while leaving the protocol unchanged', async () => {
   const c = unreadClient(); await c.boot()
   const cursor = c.sync.get().channels.A.cursor
@@ -59,6 +123,20 @@ it('leaves live-only Topics unresolved until their W-relative summary is loaded'
   await c.topics.loadSummary('A', 'New'); await flush()
   expect(c.unread.get('A').topics.New.unreadCount).toBe(1)
   expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  await c.sync.close()
+})
+it('collects Topic-list baselines outside the loaded main timeline without marking or entering them', async () => {
+  const c = unreadClient()
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 3, has_more: true,
+    items: [{ kind: 'topic', topic: summary('U', 3) }] }))
+  await c.boot()
+  expect(c.unread.get('A').topics.T).toBeUndefined()
+  await c.topics.loadList('A'); await flush()
+  expect(c.topics.get('A').lines.map(l => l.kind === 'topic' ? l.topicId : null)).toEqual(['U'])
+  expect(c.topics.get('A').topics.map(t => t.topicId)).toEqual(['T', 'U'])
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 0, unreadCount: 1 })
+  expect(c.unread.get('A').topics.U.unreadCount).toBe(1)
+  expect(c.unread.get('A').entry).toBeNull(); expect(c.unreadApi.markRead).not.toHaveBeenCalled()
   await c.sync.close()
 })
 it('marks only presented main rows and keeps hidden Topic Messages Unread', async () => {
@@ -118,6 +196,44 @@ it('times out and fences reversed mark responses while merging positions by max'
   old.resolve(ok({ read_seq: 1 })); await flush()
   expect(c.unread.get('A').main.position).toBe(4)
   await c.sync.close()
+})
+it('merges a delayed successful mark by max after a fresh REST baseline advances the position', async () => {
+  const c = unreadClient(); await c.boot()
+  const mark = deferred<Result<ReadPosition>>(); c.unreadApi.markRead.mockReturnValueOnce(mark.promise)
+  await c.present([1])
+  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { read_seq: 1 })
+  c.rows[0] = row({ as_of_seq: 10, read_seq: 10, main_unread_count: 0, unread_count: 2 })
+  await c.unread.refresh(); expect(c.unread.get('A').main.position).toBe(10)
+  mark.resolve(ok({ read_seq: 1 })); await flush()
+  expect(c.unread.get('A').main.position).toBe(10)
+  expect(c.unread.get('A').main.unreadCount).toBe(0)
+  await c.sync.close()
+})
+it('queues a fresh Topic summary behind reconnect and stays unresolved until its baseline supports the concurrent position', async () => {
+  const c = unreadClient(); await c.boot()
+  const mark = deferred<Result<ReadPosition>>(), old = deferred<Result<TopicSummaryResponse>>(), fresh = deferred<Result<TopicSummaryResponse>>()
+  c.unreadApi.markRead.mockReturnValueOnce(mark.promise)
+  await c.present([2], 'T')
+  c.unreadApi.getTopicSummary.mockReturnValueOnce(old.promise).mockResolvedValueOnce(ok({ as_of_seq: 3, topic: summary('U', 3) }))
+    .mockReturnValueOnce(fresh.promise)
+  c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
+  const n = c.unreadApi.getTopicSummary.mock.calls.length
+  mark.resolve(ok({ read_seq: 20 })); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 20, unreadCount: null })
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(n)
+  const observed: (number | null)[] = []
+  const release = c.unread.subscribe(() => { observed.push(c.unread.get('A').topics.T.unreadCount) })
+  old.resolve(ok({ as_of_seq: 20, topic: summary('T', 20, 1, 18) })); await flush()
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(n + 1)
+  expect(c.unreadApi.getTopicSummary).toHaveBeenLastCalledWith('A', 'T')
+  expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
+  fresh.resolve(ok({ as_of_seq: 20, topic: summary('T', 20, 2, 18) })); await flush()
+  expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
+  expect(observed.every(count => count === null)).toBe(true)
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 20, topic: summary('T', 20, 20, 0) }))
+  await vi.advanceTimersByTimeAsync(500); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 20, unreadCount: 0, error: false })
+  release(); await c.sync.close()
 })
 it('accepts a server clamp without repeated subtraction and stays zero after a fresh baseline', async () => {
   const c = unreadClient(); await c.boot(); c.event(msg(4))
@@ -395,6 +511,46 @@ it('Channel-list network failures retry once per backoff and close cancels their
   expect(c.unread.get('A').unreadCount).toBe(3)
   c.unreadApi.listChannels.mockResolvedValueOnce({ ok: false, kind: 'network' }); await c.unread.refresh(); await c.sync.close()
   expect(vi.getTimerCount()).toBe(0)
+})
+it.each(['navigation', 'unwatch'] as const)('fences Channel-list failures and retries after %s', async reason => {
+  const c = unreadClient(); await c.boot(); await c.enter()
+  const list = deferred<Result<ChannelList>>(); c.unreadApi.listChannels.mockReturnValueOnce(list.promise)
+  const pending = c.unread.refresh(); await flush()
+  if (reason === 'navigation') c.unread.leave(); else await c.sync.unwatch('A')
+  const retained = c.unread.get('A'), n = c.unreadApi.listChannels.mock.calls.length
+  expect(retained.unreadCount).toBe(3)
+  list.resolve({ ok: false, kind: 'network' }); await pending
+  expect(c.unread.get('A')).toEqual(retained)
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n)
+  expect(c.unread.get('A')).toEqual(retained)
+  await c.sync.close()
+})
+it('retries a failed Channel list only for unaffected Channel generations', async () => {
+  const c = unreadClient(); c.rows.push(row({ id: 'B' })); await c.boot(); await c.sync.watch('B'); await flush()
+  const list = deferred<Result<ChannelList>>(); c.unreadApi.listChannels.mockReturnValueOnce(list.promise)
+  const pending = c.unread.refresh(); await flush(); await c.sync.unwatch('A')
+  const retained = c.unread.get('A'), n = c.unreadApi.listChannels.mock.calls.length
+  list.resolve({ ok: false, kind: 'network' }); await pending
+  expect(c.unread.get('A')).toEqual(retained); expect(c.unread.get('B').unreadCount).toBeNull()
+  c.rows[0] = row({ as_of_seq: 30, unread_count: 30 })
+  c.unreadApi.listChannels.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  await vi.advanceTimersByTimeAsync(500)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  expect(c.unread.get('A')).toEqual(retained); expect(c.unread.get('B').unreadCount).toBeNull()
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
+  expect(c.unread.get('A')).toEqual(retained); expect(c.unread.get('B').unreadCount).toBe(3)
+  await c.sync.close()
+})
+it('rechecks Channel generation eligibility before a scheduled list retry', async () => {
+  const c = unreadClient(); await c.boot()
+  c.unreadApi.listChannels.mockResolvedValueOnce({ ok: false, kind: 'network' }); await c.unread.refresh()
+  const n = c.unreadApi.listChannels.mock.calls.length
+  await c.sync.unwatch('A')
+  await vi.advanceTimersByTimeAsync(500)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n)
+  await c.sync.close()
 })
 it('visibility change cancels an already queued mark retry and fences its old row visit', async () => {
   const c = unreadClient(); await c.boot(); c.unreadApi.markRead.mockResolvedValueOnce({ ok: false, kind: 'network' })

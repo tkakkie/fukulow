@@ -47,24 +47,30 @@
         "C4"
       ],
       "layer": "controller",
+      "proposed": {
+        "owner": [
+          "#143"
+        ],
+        "note": "Not executed by the production web controller: it serializes Channel-list fetches, so these overlapping requests cannot run unchanged. Executed against the independent P8 reference merge in web/scripts/realtime-fixtures.test.ts with broken-rule checks. Production serialization, stale-baseline selection and timeout/retry with the older response last are tested separately in web/src/unread.test.ts (#143)."
+      },
       "steps": [
         {"input":{"type":"session_start"}},
         {"input":{"type":"connection_ready"}},
         {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
         {"input":{"type":"history_result","respond_to":"initial","messages":[],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":0,"as":"sub"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":0,"respond_to":"sub"}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"old"}]}},
         {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"retry"}]}},
         {"input":{"type":"timer_elapsed","respond_to":"retry"}},
         {"input":{"type":"connection_ready"}},
         {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"newer"}]}},
         {"input":{"type":"message","channel":"A","message":{"seq":5}}},
         {"input":{"type":"unread_result","channel":"A","respond_to":"newer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":4,"unread_count":4}}}}},
-        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"old"}]}},
         {"input":{"type":"unread_result","channel":"A","respond_to":"old","baseline":{"as_of_seq":2,"read_seq":0,"main_unread_count":2,"unread_count":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":4,"unread_count":4}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":4,"unread_count":4}}}}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"equalOld"}]}},
         {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"equalNew"}]}},
         {"input":{"type":"unread_result","channel":"A","respond_to":"equalNew","baseline":{"as_of_seq":4,"read_seq":4,"main_unread_count":0,"unread_count":0}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
-        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"equalOld"}]}},
         {"input":{"type":"unread_result","channel":"A","respond_to":"equalOld","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":3,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":2}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
         {"input":{"type":"message","channel":"A","message":{"seq":5}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":4,"main_unread_count":1,"unread_count":1}}}}},
@@ -78,16 +84,22 @@
         "P8"
       ],
       "layer": "controller",
+      "proposed": {
+        "owner": [
+          "#143"
+        ],
+        "note": "Not executed by the production web controller: it serializes Channel-list fetches, so these overlapping requests cannot run unchanged. Executed against the independent P8 reference merge in web/scripts/realtime-fixtures.test.ts with broken-rule checks. Production serialization, stale-baseline selection and timeout/retry with the older response last are tested separately in web/src/unread.test.ts (#143)."
+      },
       "steps": [
         {"input":{"type":"session_start"}},
         {"input":{"type":"connection_ready"}},
+        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"Astale"}]}},
         {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"Anewer"}]}},
         {"input":{"type":"unread_result","channel":"A","respond_to":"Anewer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}}}}},
-        {"input":{"type":"load_unread","channel":"A"},"effects":{"required":[{"type":"fetch_unread","channel":"A","as":"Astale"}]}},
         {"input":{"type":"unread_result","channel":"A","respond_to":"Astale","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}},"observe":{"channels":{"A":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}}}}},
         {"input":{"type":"load_unread","channel":"B"},"effects":{"required":[{"type":"fetch_unread","channel":"B","as":"Bstale"}]}},
-        {"input":{"type":"unread_result","channel":"B","respond_to":"Bstale","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}},"observe":{"channels":{"B":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}}}}},
         {"input":{"type":"load_unread","channel":"B"},"effects":{"required":[{"type":"fetch_unread","channel":"B","as":"Bnewer"}]}},
+        {"input":{"type":"unread_result","channel":"B","respond_to":"Bstale","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}},"observe":{"channels":{"B":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":3}}}}},
         {"input":{"type":"unread_result","channel":"B","respond_to":"Bnewer","baseline":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}},"observe":{"channels":{"B":{"unread":{"as_of_seq":4,"read_seq":1,"main_unread_count":1,"unread_count":1}}}}}
       ]
     }

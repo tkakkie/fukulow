@@ -311,6 +311,10 @@ describe('realtime fixtures: the CI entry point fails on an invalid fixture', ()
     const result = run()
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('realtime fixtures OK')
+    expect(result.stdout).toContain('proposed (not executed by production runners)')
+    for (const id of ['unread-reconnect-larger-baseline-then-read-position-wins', 'unread-topic-only-mark-read-equal-baseline-both-orders']) {
+      expect(result.stdout).toContain(`proposed ${id} (owner #143): Not executed by the production web controller`)
+    }
   })
 
   it('exits 1 and names the file for a malformed, a schema-invalid and a dangling fixture', () => {

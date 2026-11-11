@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { unreadAdapter } from './unread.svelte'
-import { flush, msg, unreadClient } from './unread-test-helpers'
+import { flush, msg, ok, unreadClient } from './unread-test-helpers'
 import { mount, settle } from './adapter-test-helpers.svelte'
+import { createReplySync } from './reply-sync'
+import { createUnreadSync } from './unread-sync'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -34,13 +36,40 @@ it('forwards view presentation visibility refresh and exit intents with fixed vi
   a.presented(topicVisit, [2]); await flush(); expect(a.state.topics.T.position).toBe(2)
   await c.sync.close()
 })
-it('composition replacement and close clear observed Unread state before sync notifications', async () => {
-  const c = unreadClient(); await c.boot(); const a = unreadAdapter(c.unread, 'A')
+it.each(['Topics', 'Topics and Replies'] as const)('%s composition clears Unread synchronously before replacement and close sync notifications', async composition => {
+  const base = unreadClient(); await base.boot()
+  const reply = composition === 'Topics and Replies' ? createReplySync({ selfId: 'me', repliesApi: {
+    listReplyChain: async () => ok({ root_id: msg(1).id, messages: [msg(1)], has_more: false }),
+  } }, base.sync) : undefined
+  const source = reply?.sync ?? base.sync
+  const seen: { position: number | null; unreadCount: number | null; entry: unknown; topicCount: number }[] = []
+  let a: ReturnType<typeof unreadAdapter>
+  // Subscribe before Unread so its own sync reconciliation cannot mask teardown ordering.
+  const release = source.subscribe(() => {
+    if (!a) return
+    const state = a.state
+    seen.push({ position: state.main.position, unreadCount: state.unreadCount, entry: state.entry, topicCount: Object.keys(state.topics).length })
+  })
+  const c = createUnreadSync({ selfId: 'me', unreadApi: base.unreadApi }, { sync: source, topics: base.topics })
+  await flush()
+  a = unreadAdapter(c.unread, 'A')
   const view = await mount(() => a.state)
   expect(view.last.unreadCount).toBe(3)
-  await a.enter(); await c.sync.replaceSession('next'); await settle()
+  await a.enter()
+  if (reply) await reply.replies.open('A', msg(1))
+  seen.length = 0
+  const cleared = { position: null, unreadCount: null, entry: null, topicCount: 0 }
+  await c.sync.replaceSession('next')
+  expect(seen.length).toBeGreaterThan(0); expect(seen).toEqual(seen.map(() => cleared))
+  await settle()
   expect(view.last.unreadCount).toBeNull(); expect(view.last.entry).toBeNull()
-  await c.sync.watch('A'); await flush(); await c.sync.close(); await settle()
+  await c.sync.watch('A'); await flush(); await a.enter()
+  expect(a.state.unreadCount).toBe(3); expect(a.state.entry).not.toBeNull()
+  if (reply) await reply.replies.open('A', msg(1))
+  seen.length = 0
+  await c.sync.close()
+  expect(seen.length).toBeGreaterThan(0); expect(seen).toEqual(seen.map(() => cleared))
+  await settle()
   expect(view.last.main.position).toBeNull(); expect(vi.getTimerCount()).toBe(0)
-  await view.unmount()
+  release(); await view.unmount()
 })

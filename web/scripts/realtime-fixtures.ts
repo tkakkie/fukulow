@@ -484,7 +484,7 @@ type ClientStep = {
 export type Proposed = { owner: string[]; note?: string }
 export type ClientScenario = { id: string; proposed?: Proposed; layer?: 'controller'; never?: Pattern[]; steps: ClientStep[] }
 
-/** Scenarios to run, and proposed ones (validated, skipped by runners until their owner implements them). */
+/** Production scenarios and proposed ones (validated; independent reference tests may still execute them). */
 export function partitionScenarios<T extends { proposed?: Proposed }>(all: T[]): { running: T[]; proposed: T[] } {
   return { running: all.filter((s) => s.proposed === undefined), proposed: all.filter((s) => s.proposed !== undefined) }
 }
@@ -681,7 +681,7 @@ if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
     const all = readdirSync(join(dir, kind)).filter((n) => n.endsWith('.json'))
       .flatMap((n) => (JSON.parse(readFileSync(join(dir, kind, n), 'utf8')) as { scenarios: { id: string; proposed?: Proposed }[] }).scenarios)
     const { running, proposed } = partitionScenarios(all)
-    console.log(`  ${kind}: ${running.length} running, ${proposed.length} proposed (skipped by runners)`)
-    for (const s of proposed) console.log(`    proposed ${s.id} (owner ${s.proposed!.owner.join(', ')})`)
+    console.log(`  ${kind}: ${running.length} running, ${proposed.length} proposed (not executed by production runners)`)
+    for (const s of proposed) console.log(`    proposed ${s.id} (owner ${s.proposed!.owner.join(', ')})${s.proposed!.note ? `: ${s.proposed!.note}` : ''}`)
   }
 }
