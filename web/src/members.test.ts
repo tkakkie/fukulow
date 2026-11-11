@@ -47,6 +47,18 @@ describe('Members controller', () => {
     expect(ended).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled()
     expect(c.get().inviteLink).toBe('')
   })
+  it('explains last-Channel-manager Role denial in Japanese and preserves the Member', async () => {
+    const c = createMembers(org, vi.fn(), vi.fn(), {
+      listMembers: async () => ok({ members: [member] }),
+      changeRole: async () => ({ ok: false, kind: 'http', status: 409, error: 'last_channel_manager' }),
+      createInvite: vi.fn(), baseUrl: () => '',
+    })
+    await c.load()
+    expect(await c.role('m', 'guest')).toBe(false)
+    expect(c.get().members).toEqual([member])
+    expect(c.get().error).toBe('チャンネルの管理者がいなくなるため、ロールを変更できません。先に別のオーナーまたは管理者を追加してください。')
+    expect(c.get().busy).toBe(false)
+  })
 })
 
 it('takes an Invite from the URL fragment and removes it from browser history immediately', () => {

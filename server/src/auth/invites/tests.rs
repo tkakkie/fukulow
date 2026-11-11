@@ -947,7 +947,7 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
         .await
         .unwrap_err();
         assert_eq!(error.into_response().status(), status);
-        let error = members::change_role(
+        let error = members::change_role::<ActorRecheckGuard>(
             State(state.clone()),
             role_auth,
             Ok(Path((org, target))),
@@ -965,6 +965,24 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
     .await
     .unwrap();
     assert_eq!(denied, 0);
+}
+
+// This direct-handler test isolates auth reauthorization. HTTP tests exercise
+// the production Channel guard supplied by the composition root.
+struct ActorRecheckGuard;
+impl members::RoleChangeGuard for ActorRecheckGuard {
+    async fn lock(_: &mut sqlx::PgConnection, _: Uuid, _: Uuid) -> Result<Self, ApiError> {
+        Ok(Self)
+    }
+    async fn check(
+        &self,
+        _: &mut sqlx::PgConnection,
+        _: Uuid,
+        _: Uuid,
+        _: Role,
+    ) -> Result<(), ApiError> {
+        panic!("unauthorized actor reached Role-change protection")
+    }
 }
 
 #[sqlx::test]

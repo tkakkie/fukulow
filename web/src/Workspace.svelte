@@ -4,7 +4,7 @@
   import { navigationAdapter } from './navigation.svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import { createAnnouncementController } from './announcements'
-  import type { Identity } from './api'
+  import type { Channel, Identity } from './api'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
   import ChannelList from './ChannelList.svelte'
@@ -17,6 +17,8 @@
     type SkipLinkTargetId,
   } from './focus-management'
   import Members from './MemberList.svelte'
+  import ChannelMembers from './ChannelMembers.svelte'
+  import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
   import Timeline from './Timeline.svelte'
   import Button from './ui/Button.svelte'
@@ -66,7 +68,10 @@
   const nav = navigationAdapter(() => navigation)
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
-  const selected = $derived(s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? { id: routeChannelId, name: 'チャンネル', visibility: 'public' } : undefined))
+  const selected = $derived<Channel | undefined>(s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
+    id: routeChannelId, name: 'チャンネル', visibility: 'public',
+    capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: false } },
+  } : undefined))
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
@@ -100,6 +105,12 @@
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
 
+  const channelMemberController = $derived(panelOpen && activePanelTab === 'members' && selected ? session.channelMembers?.(selected.id) : undefined)
+  const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
+  $effect(() => {
+    const controller = channelMemberController
+    return () => controller?.close()
+  })
   let lastViewId = ''
 
   function resolveSender(senderId: string): string {
@@ -500,9 +511,11 @@
             description={selected ? `# ${selected.name}（${selected.visibility === 'private' ? 'プライベート' : 'パブリック'}）` : undefined}
           />
         {:else}
-          <EmptyState
-            title="メンバー一覧は準備中です。"
-          />
+          {#if channelMemberModel && selected && organization}
+            <ChannelMembers model={channelMemberModel} channel={selected} self={organization.member.id} candidates={members?.state.members ?? []} />
+          {:else}
+            <EmptyState title="チャンネルを選んでください。" />
+          {/if}
         {/if}
       </Panel>
     </div>

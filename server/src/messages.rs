@@ -446,6 +446,8 @@ async fn persist_admitted(
         Some(false) => return Err(MessageError::NotFound),
         None => return Err(MessageError::OrganizationUnavailable),
     }
+    #[cfg(test)]
+    tests::removal::pause(input.client_message_id).await;
     let sender = sender.0;
     if let Some(message) = existing(
         tx.connection()?,
@@ -580,3 +582,52 @@ pub(crate) async fn replay_page(
 
 #[cfg(test)]
 mod tests;
+
+// A replay page snapshots authorization and Messages together, just like REST
+// history. A separate check before this query cannot authorize its later data.
+pub(crate) async fn authorized_replay_page(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: (Uuid, i64),
+    channel: Uuid,
+    after: i64,
+    through: i64,
+) -> Result<Vec<Message>, MessageError> {
+    use sqlx::{FromRow, Row};
+    let sql = format!(
+        r#"WITH access AS MATERIALIZED (SELECT ({}) AS visible)
+        SELECT access.visible,m.* FROM access LEFT JOIN LATERAL (
+            SELECT id,channel_id,seq,client_message_id,sender,body,topic_id,reply_to_id AS reply_to,reply_root_id,
+                to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
+            FROM messages WHERE organization_id=$1 AND channel_id=$4 AND seq>$5 AND seq<=$6 AND access.visible
+            ORDER BY seq LIMIT $7
+        ) m ON true ORDER BY m.seq"#,
+        channels::member_visibility_sql(false)
+    );
+    let rows = sqlx::query(&sql)
+        .bind(organization)
+        .bind(member.0)
+        .bind(member.1)
+        .bind(channel)
+        .bind(after)
+        .bind(through)
+        .bind(REPLAY_PAGE_SIZE)
+        .fetch_all(pool)
+        .await?;
+    match rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .try_get::<Option<bool>, _>("visible")?
+    {
+        None => return Err(MessageError::OrganizationUnavailable),
+        Some(false) => return Err(MessageError::NotFound),
+        Some(true) => {}
+    }
+    let mut messages = Vec::new();
+    for row in rows {
+        if row.try_get::<Option<Uuid>, _>("id")?.is_some() {
+            messages.push(Message::from_row(&row)?);
+        }
+    }
+    Ok(messages)
+}

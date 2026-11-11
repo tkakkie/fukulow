@@ -271,6 +271,9 @@ pub(super) struct UnreadTopic {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Event {
+    ChannelAccessLost {
+        channel: ChannelRef,
+    },
     Message {
         channel: ChannelRef,
         seqs: Option<Vec<Seq>>,

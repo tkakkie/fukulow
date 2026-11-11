@@ -14,11 +14,13 @@ impl SessionChanges {
             let pool = pool.clone();
             let interval = self.interval;
             let timeout = self.timeout;
+            let subscriptions = self.subscriptions.clone();
             let worker = tokio::spawn(run(
                 sessions.clone(),
                 pool.clone(),
                 interval,
                 timeout,
+                subscriptions,
                 #[cfg(test)]
                 self.gate.clone(),
             ));
@@ -75,6 +77,7 @@ async fn run(
     pool: PgPool,
     interval: Duration,
     timeout: Duration,
+    subscriptions: Arc<Mutex<Option<Arc<dyn SubscriptionRecheck>>>>,
     #[cfg(test)] gate: Arc<Mutex<Option<Arc<super::tests::Gate>>>>,
 ) {
     let mut ticks = tokio::time::interval_at(Instant::now() + interval, interval);
@@ -100,6 +103,26 @@ async fn run(
             &gate,
         )
         .await;
+        let check = subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(check) = check
+            && (!matches!(
+                tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All)).await,
+                Ok(Ok(()))
+            ) || Instant::now() >= bound)
+        {
+            check.failed(SubscriptionScope::All);
+            for signal in sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entries
+                .values()
+            {
+                signal.send_modify(|status| status.failed = true);
+            }
+        }
         if closed {
             return;
         }

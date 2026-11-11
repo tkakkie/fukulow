@@ -174,20 +174,21 @@ export function createSync(options: SyncOptions) {
           const transport = connect({
             onReady: () => { opened = true; void dispatch({ type: 'connection_ready', connection: effect.id }) },
             onEvent: event => {
-              const isReply = event.type === 'subscribed' || (event.type === 'error' &&
+              const isReply = event.type === 'subscribed' || event.type === 'channel_access_lost' || (event.type === 'error' &&
                 (event.code === 'channel_not_found' || event.code === 'subscription_limit'))
               let subscription: number | undefined
               if (isReply && event.channel_id) {
                 const channel = event.channel_id
                 const pending = subscriptions.get(channel)
-                if (event.type === 'error' && event.code === 'channel_not_found') {
+                if (event.type === 'channel_access_lost' || (event.type === 'error' && event.code === 'channel_not_found')) {
                   // With no pending control this belongs to the confirmed generation, even after unwatch.
                   // With no prior confirmation, ordered replies pair with queued subscribe generations.
                   // A prior confirmed subscription plus a pending subscribe is ambiguous: the wire has
                   // no generation id, so this could be an old async error or the new refusal. Do not
                   // consume a reply or invalidate either generation; reconnect to establish a wire fence.
                   // The server serializes controls/live delivery: a new subscribed handoff ends that ambiguity.
-                  if (confirmed.has(channel) && pending?.length) {
+                  // Unwatched Channels consume late replies without reconnecting.
+                  if (state.channels[channel]?.watched && ((confirmed.has(channel) && pending?.length) || (event.type === 'channel_access_lost' && (pending?.length || !confirmed.has(channel) || confirmed.get(channel) !== state.channels[channel]?.subscription?.id) && state.channels[channel]?.state !== 'unavailable'))) {
                     if (state.connection === effect.id && state.connected) {
                       const own = socket?.transport
                       void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })

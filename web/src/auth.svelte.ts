@@ -3,6 +3,7 @@ import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { errorMessage, restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
 import { getOrganizationMe, isOrganizationUnavailable, type Identity, type AcceptInviteRequest } from './api'
+import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createMembers } from './members'
@@ -10,7 +11,7 @@ import { membersAdapter, type inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; close(): void }
+export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -25,7 +26,7 @@ const defaults: AuthDeps = {
   openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
   openSession(selfId, onEnded, organizationId, drafts) {
     const session = createSession({ selfId, onEnded, organizationId, sync: { drafts } })
-    return { navigationTargets: navigationTargetsAdapter(session.navigationTargets), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), close: session.close }
+    return { navigationTargets: navigationTargetsAdapter(session.navigationTargets), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), channelMembers: session.channelMembers, close: session.close }
   },
 }
 const sessionEndedNotice = 'セッションが終了しました。もう一度ログインしてください。'

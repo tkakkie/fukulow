@@ -222,6 +222,8 @@ async fn mark_inner(
         Some(false) => return Err(MessageError::NotFound),
         Some(true) => {}
     }
+    #[cfg(test)]
+    tests::removal::pause(member.0).await;
     // Serialize positions with revocation's cascading delete/reset. If access
     // is lost while waiting, the deleted position itself makes this return 404.
     let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")

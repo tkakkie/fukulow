@@ -413,7 +413,8 @@ impl Runner {
             self.delivery.flush().await;
         }
         match &expected {
-            Event::Message { channel, .. }
+            Event::ChannelAccessLost { channel }
+            | Event::Message { channel, .. }
             | Event::Subscribed { channel, .. }
             | Event::Error {
                 channel: Some(channel),
@@ -440,6 +441,16 @@ impl Runner {
             } => {
                 for label in channel.labels() {
                     assertions::json(client, json!({"type":"subscribed","channel_id":self.channels[&label],"caught_up_seq":caught_up_seq}), Assertion::Subscribed).await?;
+                }
+            }
+            Event::ChannelAccessLost { channel } => {
+                for label in channel.labels() {
+                    assertions::json(
+                        client,
+                        json!({"type":"channel_access_lost","channel_id":self.channels[&label]}),
+                        Assertion::Error,
+                    )
+                    .await?;
                 }
             }
             Event::Error { channel, code } => {

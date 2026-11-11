@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createSession } from './session'
+import * as api from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 
 function open() {
@@ -268,4 +269,104 @@ it.each(['C10', 'close', '4001', '401'] as const)('an explicit C9 reselect after
     expect(controls(net)).toEqual(sent)
     expect(vi.getTimerCount()).toBe(0)
   } finally { session.close(); vi.useRealTimers() }
+})
+
+it('explicitly selecting the current C9 Channel reattempts it while another Organization stays ready', async () => {
+  const a = open(), b = open()
+  for (const c of [a, b]) {
+    c.net.pages.A = ok({ messages: [record(100)], has_more: false })
+    c.net.lists[0].resolve(ok({ channels: [channel('A')] })); await settle(); c.net.subscribed('A', 100)
+  }
+  a.net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+  await settle(); expect(a.session.sync.get().channels.A.state).toBe('unavailable')
+  expect(b.session.sync.get().channels.A.state).toBe('ready')
+  a.session.channels.select('A'); await settle()
+  expect(controls(a.net).filter(c => c === 'subscribe:A')).toHaveLength(2)
+  a.net.subscribed('A', 100); await settle(); expect(a.session.sync.get().channels.A.state).toBe('ready')
+  a.session.close(); b.session.close()
+})
+
+it('a Member panel created during C9 recovers on explicit Channel re-selection', async () => {
+  const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({
+    members: [{ id: 'me', name: '本人', role: 'admin' }],
+  }))
+  const { net, session } = open()
+  try {
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+
+    const panel = session.channelMembers('A')
+    expect(panel.get()).toMatchObject({ unavailable: true, loading: false })
+    await panel.load()
+    expect(list).not.toHaveBeenCalled()
+
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('ready')
+    expect(panel.get()).toMatchObject({ unavailable: false, loading: false,
+      members: [{ id: 'me', name: '本人', role: 'admin' }] })
+    expect(list).toHaveBeenCalledExactlyOnceWith('', 'A')
+  } finally {
+    session.close()
+    list.mockRestore()
+  }
+})
+
+it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without another watch until explicit selection', async status => {
+  vi.useFakeTimers()
+  const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue({ ok: false, kind: 'http', status })
+  const { net, session } = open()
+  const watch = vi.spyOn(session.sync, 'watch')
+  try {
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    session.sync.getTimeline('A').setDraft('失わない下書き')
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    const panel = session.channelMembers('A')
+
+    session.channels.select('A')
+    await settle()
+    expect(watch).toHaveBeenCalledTimes(2)
+    expect(list).toHaveBeenCalledOnce()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    expect(panel.get().unavailable).toBe(true)
+    // The denied attempt's subscription handoff may arrive after the Member response.
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    session.channels.selectHint('A')
+    void session.channels.load()
+    net.lists[1].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(watch).toHaveBeenCalledTimes(2)
+    expect(list).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(session.sync.getTimeline('A').get().draft).toBe('失わない下書き')
+
+    list.mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin' }] }))
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(watch).toHaveBeenCalledTimes(3)
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(session.sync.get().channels.A.state).toBe('ready')
+    expect(panel.get().unavailable).toBe(false)
+    expect(session.sync.getTimeline('A').get().draft).toBe('失わない下書き')
+  } finally {
+    session.close()
+    list.mockRestore()
+    vi.useRealTimers()
+  }
 })
