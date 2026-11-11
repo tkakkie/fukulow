@@ -127,6 +127,8 @@ pub(super) async fn mutate(
     // -> #142 -> shared #135. Role changes lock all affected private Channels
     // in ascending id before Members; deactivation starts at Organization and
     // never acquires Channels after Members (#237 owns its manager protection).
+    // Private creation takes Organization NO KEY UPDATE before creator Member
+    // and new rows, keeping the Role guard's Channel set stable through COMMIT.
     // Sends take Member -> grant -> exclusive #135; their FK KEY SHARE locks
     // permit Organization/Channel NO KEY UPDATE, so cannot invert that order.
     // Mark-read releases #135 before Member/grant/position locks; neither path
@@ -227,7 +229,7 @@ impl auth::members::RoleChangeGuard for RoleChangeGuard {
         organization: Uuid,
         target: Uuid,
     ) -> Result<Self, ApiError> {
-        // Organization serialization keeps this set stable through the update;
+        // Private creation and grant mutations share Organization serialization;
         // lock before current_actor takes its Member lock, even for self changes.
         let channels = sqlx::query_scalar("SELECT c.id FROM channels c WHERE c.organization_id=$1 AND c.visibility='private' AND EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=$2) ORDER BY c.id FOR NO KEY UPDATE OF c")
             .bind(organization).bind(target).fetch_all(connection).await?;

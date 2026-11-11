@@ -225,6 +225,58 @@ async fn wait_for_lock(pool: &PgPool, pattern: &str, count: i64) {
 }
 
 #[sqlx::test]
+async fn private_creation_racing_creator_demotion_preserves_its_manager(pool: PgPool) {
+    for role in ["member", "guest"] {
+        let app = router(&pool);
+        let org = organization(&pool).await;
+        let ot = member(&pool, org, Uuid::new_v4(), "owner").await;
+        let creator = Uuid::new_v4();
+        let ct = member(&pool, org, creator, "owner").await;
+        let mut blocker = pool.begin().await.unwrap();
+        // Pause the real creation after current_actor's Member SHARE lock,
+        // while the new Channel and creator grant are not yet committed.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 142))")
+            .bind(org.to_string())
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let creating = {
+            let app = app.clone();
+            tokio::spawn(async move { private(&app, &ct, "Creation in progress").await })
+        };
+        wait_for_lock(&pool, "INSERT INTO channels%", 1).await;
+        let demoting = {
+            let app = app.clone();
+            tokio::spawn(async move { change(&app, &ot, creator, role).await })
+        };
+        // With serialization, demotion waits at Organization. Without it, the
+        // guard misses the uncommitted Channel and UPDATE waits on the creator.
+        wait_for_lock(&pool, "%WHERE organization_id=$1%", 1).await;
+        assert!(!demoting.is_finished());
+        blocker.commit().await.unwrap();
+        let channel = tokio::time::timeout(Duration::from_secs(5), creating)
+            .await
+            .unwrap()
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), demoting)
+            .await
+            .unwrap()
+            .unwrap();
+        let managers: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members cm JOIN users u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=$2 AND u.deactivated_at IS NULL AND u.role IN ('owner','admin')")
+            .bind(org).bind(channel).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            managers, 1,
+            "concurrent demotion orphaned the private Channel"
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body(response).await,
+            json!({"error":"last_channel_manager"})
+        );
+    }
+}
+
+#[sqlx::test]
 async fn role_demotion_races_with_demotion_removal_and_leave_preserve_a_manager(pool: PgPool) {
     for operation in ["demote", "remove", "leave"] {
         for role_first in [false, true] {
