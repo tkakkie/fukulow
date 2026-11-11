@@ -202,7 +202,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #137 paging gate met with mixed Messages and concurrent sends: release recent/deep p95 32.342/32.235 ms at 210k Channel Messages, four readers; send p95 11.249/6.345 ms. Keep prefix aggregation/index; proportional 100 ms crossing ~649k Messages needs remeasurement. Conditions: measurements.md.
 - topics.last_seq/message_count are a write-only cache retained for #142/#143; immutable Message aggregates supply W-relative summaries, because current cached values cannot reconstruct an older W (#137).
 
-## Replies (#139)
+## Replies (#139, #140)
 - Replies store a committed parent id and stable root, inherit its Topic, and share send admission/barrier/transaction/publication. Scoped parent/root FKs and a self-parent CHECK protect references; committed immutable parents prevent cycles.
 - Retry identity compares reply_to before parent lookup; inherited Topic is not client intent. Same-key retries stay canonical and changed parents conflict without an existence leak.
 - Chain reads union an indexed root lookup and limited reply_root_id/seq range, including the null-root Message without recursion. Resolve ambiguous COMMIT, then authorize/read a fresh snapshot; no cross-page W or depth cap.
@@ -210,3 +210,5 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #139 accepts deploy-time locks/scans for plain indexes and validated FKs/CHECKs on messages at current scale, like #63; migration lock timeout bounds waiting, not scan time. The chain index excludes non-Replies to reduce write/storage cost.
 - reply_root_id consistency is application-enforced: each Reply stores its parent's root (or the parent if it is a root), whose reply_root_id is null. Future chain-moving writers (#141) and repairs must preserve this; scoped FKs alone do not.
 - #138: opt-in Topic composition bootstraps sync with the real Message at W from the initial timeline; later projection pages stay outside sync. Reason: preserve the existing unfiltered cursor/gap protocol and avoid component conflicts during the UI follow-up.
+- #140 keeps one opt-in chain per Channel, merged by Message id and stable reply_root_id. Page continuation uses only the last page seq; live appends cannot skip unpaged siblings or enter sync cursor/gap evidence.
+- #140 composes over sync (or Topic sync) and sends confirmed-parent Replies through its existing pending/retry path. Preserve reply_to with the id/body so retries cannot change intent; projection reads settle C5 with session/read fencing before teardown.
