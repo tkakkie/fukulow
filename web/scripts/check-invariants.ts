@@ -1,4 +1,5 @@
-// Verifies that every test named in docs/invariants.md is a real test that CI actually runs.
+// Checks the docs/invariants.md index and every docs/invariants/*.md part.
+// Verifies that every named test is a real test that CI actually runs.
 // Also checks that every docs/decisions.md entry stays within MAX_DECISION_LENGTH (docs/decisions.md header).
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
 //
@@ -210,10 +211,10 @@ export function tsTests(src: string, fileName = 'x.ts'): TsTest[] {
 
 export type Row = { line: number; rule: string; names: string[]; todo: boolean }
 
-/** Maximum Rule cell length in Unicode code points, markup included (docs/invariants.md header). */
+/** Maximum Rule cell length in Unicode code points, markup included (docs/invariants.md index and part headers). */
 export const MAX_RULE_LENGTH = 160
 
-/** Parses the table in docs/invariants.md. Returns rows, or errors for malformed ones. */
+/** Parses a docs/invariants/*.md part table (docs/invariants.md is the index). Returns rows, or errors for malformed ones. */
 export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
   const rows: Row[] = []
   const errors: string[] = []
@@ -460,12 +461,77 @@ export function checkDecisions(md: string): string[] {
 
 /** Static scan only, or reconciled with the real cargo list when `listed` is given. Also checks docs/decisions.md when present. */
 export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
-  const { rows, errors } = parseInvariants(readFileSync(join(root, 'docs/invariants.md'), 'utf8'))
-  if (rows.length === 0) errors.push('docs/invariants.md: no rows found')
-  const known = collectKnownTests(root)
+  const errors: string[] = []
+  const index = readFileSync(join(root, 'docs/invariants.md'), 'utf8')
+  const dir = join(root, 'docs/invariants')
+  const parts = new Map<string, { md: string; rows: Row[] }>()
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) errors.push('docs/invariants/: line 1: missing parts directory')
+  else {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = 'docs/invariants/' + entry.name
+      if (!entry.isFile() || !entry.name.endsWith('.md')) {
+        errors.push(file + ': line 1: expected a regular *.md part file')
+        continue
+      }
+      const md = readFileSync(join(dir, entry.name), 'utf8')
+      const parsed = parseInvariants(md)
+      errors.push(...parsed.errors.map((e) => file + ': ' + e))
+      if (parsed.rows.length === 0) errors.push(file + ': line 1: no rows found')
+      parts.set(entry.name, { md, rows: parsed.rows })
+    }
+    if (parts.size === 0) errors.push('docs/invariants/: line 1: no parts found')
+  }
+  const linked = new Set<string>()
+  index.split('\n').forEach((text, idx) => {
+    const at = 'docs/invariants.md: line ' + (idx + 1) + ': '
+    if (text.startsWith('|')) errors.push(at + 'tables belong in parts, not the index')
+    for (const m of text.matchAll(/\(invariants\/([^()]+\.md)\)/g)) {
+      linked.add(m[1])
+      if (!parts.has(m[1])) errors.push(at + 'unknown part: ' + m[1])
+    }
+  })
+  const collected = collectKnownTests(root)
+  const known = listed ? reconcileWithCargoList(collected, listed) : collected
+  const rules = new Map<string, string>()
+  for (const [name, { md, rows }] of parts) {
+    const file = 'docs/invariants/' + name
+    if (!linked.has(name)) errors.push(file + ': line 1: part is not linked from docs/invariants.md')
+    errors.push(...checkRows(rows, known).map((e) => file + ': ' + e))
+    for (const row of rows) {
+      const at = file + ': line ' + row.line
+      const previous = rules.get(row.rule)
+      if (previous) errors.push(at + ': duplicate Rule text (first at ' + previous + '): ' + row.rule)
+      else rules.set(row.rule, at)
+    }
+    let inOtherParts = false
+    let proseSeen = false
+    md.split('\n').forEach((text, idx) => {
+      if (/^#{1,2} /.test(text)) {
+        inOtherParts = text === '## Rows in other parts'
+        return
+      }
+      if (!inOtherParts || text.trim() === '') return
+      if (!proseSeen && text === 'Rows that also govern this area, listed by a test name from the row in that part.') {
+        proseSeen = true
+        return
+      }
+      const at = file + ': line ' + (idx + 1) + ': '
+      const bullet = /^- \[([^\[\]\/]+)\]\(\1\.md\): (`[^`]+`(?:, `[^`]+`)*)$/.exec(text)
+      if (!bullet) return void errors.push(at + 'expected a Rows in other parts bullet')
+      const target = bullet[1] + '.md'
+      const part = parts.get(target)
+      if (!part) errors.push(at + 'unknown part: ' + target)
+      else if (target === name) errors.push(at + 'cross-reference must link to another part')
+      else {
+        const names = new Set(part.rows.flatMap((r) => r.names.map((ref) => ref.slice(ref.lastIndexOf('::') + 2))))
+        for (const m of bullet[2].matchAll(/`([^`]+)`/g))
+          if (!names.has(m[1])) errors.push(at + 'test name not found in ' + target + ': ' + m[1])
+      }
+    })
+  }
   const decisions = join(root, 'docs/decisions.md')
   const decisionErrors = existsSync(decisions) ? checkDecisions(readFileSync(decisions, 'utf8')).map((e) => `docs/decisions.md: ${e}`) : []
-  return [...errors, ...checkRows(rows, listed ? reconcileWithCargoList(known, listed) : known), ...decisionErrors]
+  return [...errors, ...decisionErrors]
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
@@ -478,7 +544,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
     process.exit(1)
   }
   const errors = checkInvariants(root, listed)
-  for (const e of errors) console.error(e.startsWith('docs/decisions.md: ') ? e : `${relative(process.cwd(), join(root, 'docs/invariants.md'))}: ${e}`)
+  for (const e of errors) console.error(e)
   if (errors.length > 0) process.exit(1)
-  console.log('invariants: every named test exists and runs in CI; decisions entries are within the length limit')
+  console.log('invariants: index and parts checked; every named test exists and runs in CI; decisions entries are within the length limit')
 }
