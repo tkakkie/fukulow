@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte'
+  import { tick, type Snippet } from 'svelte'
+  import { stepTabListKey } from '../composer-keys'
   import Button from './Button.svelte'
 
   export type PanelTabId = 'topics' | 'overview' | 'members'
@@ -9,6 +10,7 @@
     { id: 'overview', label: '概要' },
     { id: 'members', label: 'メンバー' },
   ]
+  const TAB_IDS: readonly PanelTabId[] = TABS.map((t) => t.id)
 
   let {
     title,
@@ -33,6 +35,18 @@
     onclose?: () => void
     children?: Snippet
   } = $props()
+
+  let tablistEl = $state<HTMLElement | null>(null)
+
+  function handleTabKeydown(e: KeyboardEvent) {
+    const nextTab = stepTabListKey(TAB_IDS, activeTab, e)
+    if (!nextTab) return
+    e.preventDefault()
+    onselecttab?.(nextTab)
+    void tick().then(() => {
+      tablistEl?.querySelector<HTMLButtonElement>(`#panel-tab-${nextTab}`)?.focus()
+    })
+  }
 </script>
 
 <aside class="ui-panel" aria-label={ariaLabel}>
@@ -49,15 +63,19 @@
   </header>
 
   {#if mode === 'tabs'}
-    <div class="ui-panel__tabs" role="tablist" aria-label="パネル表示切り替え">
+    <div bind:this={tablistEl} class="ui-panel__tabs" role="tablist" aria-label="パネル表示切り替え">
       {#each TABS as tab (tab.id)}
         <button
+          id={`panel-tab-${tab.id}`}
           type="button"
           role="tab"
           class="ui-panel__tab"
           class:ui-panel__tab--active={activeTab === tab.id}
           aria-selected={activeTab === tab.id}
+          aria-controls={`panel-tabpanel-${tab.id}`}
+          tabindex={activeTab === tab.id ? 0 : -1}
           onclick={() => onselecttab?.(tab.id)}
+          onkeydown={handleTabKeydown}
         >
           {tab.label}
         </button>
@@ -65,11 +83,24 @@
     </div>
   {/if}
 
-  <div class="ui-panel__body">
-    {#if children}
-      {@render children()}
-    {/if}
-  </div>
+  {#if mode === 'tabs'}
+    <div
+      class="ui-panel__body"
+      role="tabpanel"
+      id={`panel-tabpanel-${activeTab}`}
+      aria-labelledby={`panel-tab-${activeTab}`}
+    >
+      {#if children}
+        {@render children()}
+      {/if}
+    </div>
+  {:else}
+    <div class="ui-panel__body">
+      {#if children}
+        {@render children()}
+      {/if}
+    </div>
+  {/if}
 </aside>
 
 <style>

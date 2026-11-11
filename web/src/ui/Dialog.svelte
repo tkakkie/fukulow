@@ -1,7 +1,16 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte'
-  import { shouldCloseOnEscape } from '../composer-keys'
+  import { tick, type Snippet } from 'svelte'
+  import { isImeComposing, shouldCloseOnEscape } from '../composer-keys'
+  import {
+    focusDialogOnOpen,
+    restoreFocusAfterDialogClose,
+    stepDialogTab,
+    type FocusableTarget,
+  } from '../focus-management'
   import Button from './Button.svelte'
+
+  const FOCUSABLE_SELECTOR =
+    'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
 
   let {
     open = false,
@@ -9,6 +18,7 @@
     description,
     confirmLabel,
     cancelLabel = 'キャンセル',
+    returnFocusFallback = null,
     onconfirm,
     oncancel,
     children,
@@ -18,28 +28,73 @@
     description?: string
     confirmLabel?: string
     cancelLabel?: string
+    returnFocusFallback?: FocusableTarget | null
     onconfirm?: () => void
     oncancel?: () => void
     children?: Snippet
   } = $props()
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (open && shouldCloseOnEscape(e)) {
+  let dialogEl = $state<HTMLElement | null>(null)
+  let wasOpen = false
+  let openerEl: FocusableTarget | null = null
+
+  function getFocusableControls(): HTMLElement[] {
+    if (!dialogEl) return []
+    return Array.from(dialogEl.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+  }
+
+  $effect(() => {
+    if (open && !wasOpen) {
+      wasOpen = true
+      const active = typeof document !== 'undefined' ? document.activeElement : null
+      openerEl = active instanceof HTMLElement ? active : null
+      void tick().then(() => {
+        if (!open || !dialogEl) return
+        focusDialogOnOpen(getFocusableControls(), dialogEl)
+      })
+    } else if (!open && wasOpen) {
+      wasOpen = false
+      const opener = openerEl
+      openerEl = null
+      void tick().then(() => {
+        const active = typeof document !== 'undefined' ? document.activeElement : null
+        const focusResetToBody = !active || active === document.body
+        if (focusResetToBody || (opener && 'isConnected' in opener && opener.isConnected === false)) {
+          restoreFocusAfterDialogClose(opener, returnFocusFallback)
+        }
+      })
+    }
+  })
+
+  function handleDialogKeydown(e: KeyboardEvent) {
+    if (!open) return
+    if (shouldCloseOnEscape(e)) {
       e.preventDefault()
+      e.stopPropagation()
       oncancel?.()
+      return
+    }
+    if (e.key === 'Tab' && !isImeComposing(e) && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      const active = typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null
+      stepDialogTab(getFocusableControls(), active, e.shiftKey, dialogEl)
     }
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
 {#if open}
   <div class="ui-dialog-backdrop">
     <div
+      bind:this={dialogEl}
       class="ui-dialog"
       role="dialog"
       aria-modal="true"
       aria-label={title}
+      tabindex="-1"
+      onkeydown={handleDialogKeydown}
     >
       <header class="ui-dialog__header">
         <h2 class="ui-dialog__title">{title}</h2>

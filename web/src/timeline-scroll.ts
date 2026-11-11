@@ -1,3 +1,5 @@
+import { LOADING_TIMEOUT_MS } from './announcements'
+
 /** Distance from the bottom within which the timeline counts as pinned (`docs/ui.md` §8). */
 export const PINNED_THRESHOLD_PX = 64
 
@@ -43,6 +45,27 @@ export type TimelineScrollInput =
       pendingIds: readonly string[]
       selfId: string
     }
+
+export type TimelineScrollView = {
+  pinned: boolean
+  belowCount: number
+  loadingTimedOut: boolean
+}
+
+export type TimelineScrollControllerOptions = {
+  channelId?: string
+  loadingTimeoutMs?: number
+  schedule?: (fn: () => void, ms: number) => unknown
+  cancel?: (handle: unknown) => void
+}
+
+function sameItems<T>(set: ReadonlySet<T>, list: readonly T[]): boolean {
+  if (set.size !== list.length) return false
+  for (const item of list) {
+    if (!set.has(item)) return false
+  }
+  return true
+}
 
 /** True when the scroll container is within `threshold` px of the bottom (`docs/ui.md` §8). */
 export function isPinnedToBottom(metrics: ScrollMetrics, threshold = PINNED_THRESHOLD_PX): boolean {
@@ -106,6 +129,9 @@ export function stepTimelineScroll(
     }
     case 'jump_to_bottom':
     case 'user_submit': {
+      if (prev.pinned && prev.belowCount === 0) {
+        return { state: prev, action: 'scroll_bottom' }
+      }
       return {
         state: { ...prev, pinned: true, belowCount: 0 },
         action: 'scroll_bottom',
@@ -114,12 +140,23 @@ export function stepTimelineScroll(
     case 'sync': {
       const minSeq = input.messages[0]?.seq ?? null
       const maxSeq = input.messages.at(-1)?.seq ?? null
-      const seenSeqs = new Set(input.messages.map((m) => m.seq))
-      const pendingIds = new Set(input.pendingIds)
+      const messageSeqs = input.messages.map((m) => m.seq)
       const hasContent = input.messages.length > 0 || input.pendingIds.length > 0
 
       if (input.channelId !== prev.channelId || !prev.initialized) {
         const initialized = hasContent || input.status === 'ready'
+        if (
+          input.channelId === prev.channelId &&
+          initialized === prev.initialized &&
+          prev.pinned &&
+          prev.belowCount === 0 &&
+          minSeq === prev.minSeq &&
+          maxSeq === prev.maxSeq &&
+          sameItems(prev.seenSeqs, messageSeqs) &&
+          sameItems(prev.pendingIds, input.pendingIds)
+        ) {
+          return { state: prev, action: 'none' }
+        }
         return {
           state: {
             channelId: input.channelId,
@@ -128,15 +165,24 @@ export function stepTimelineScroll(
             belowCount: 0,
             minSeq,
             maxSeq,
-            seenSeqs,
-            pendingIds,
+            seenSeqs: new Set(messageSeqs),
+            pendingIds: new Set(input.pendingIds),
           },
           action: hasContent ? 'scroll_bottom' : 'none',
         }
       }
 
-      const newPendingAdded = input.pendingIds.some((id) => !prev.pendingIds.has(id))
-      const addedMessages = input.messages.filter((m) => !prev.seenSeqs.has(m.seq))
+      const seqsUnchanged =
+        minSeq === prev.minSeq && maxSeq === prev.maxSeq && sameItems(prev.seenSeqs, messageSeqs)
+      const pendingUnchanged = sameItems(prev.pendingIds, input.pendingIds)
+      if (seqsUnchanged && pendingUnchanged) {
+        return { state: prev, action: 'none' }
+      }
+
+      const seenSeqs = seqsUnchanged ? prev.seenSeqs : new Set(messageSeqs)
+      const pendingIds = pendingUnchanged ? prev.pendingIds : new Set(input.pendingIds)
+      const newPendingAdded = !pendingUnchanged && input.pendingIds.some((id) => !prev.pendingIds.has(id))
+      const addedMessages = seqsUnchanged ? [] : input.messages.filter((m) => !prev.seenSeqs.has(m.seq))
       const insertedAboveTail = addedMessages.filter((m) => prev.maxSeq !== null && m.seq < prev.maxSeq)
       const appendedAtTail = addedMessages.filter((m) => prev.maxSeq === null || m.seq > prev.maxSeq)
       const ownSendAtTail =
@@ -210,5 +256,124 @@ export function stepTimelineScroll(
         action: 'none',
       }
     }
+  }
+}
+
+/**
+ * Layer-3 controller owning timeline scroll state, anchor preservation and the 10 s loading timeout
+ * (`docs/ui.md` §5, §8). Holds no `$state`; notifies subscribers only when `pinned`, `belowCount`
+ * or `loadingTimedOut` changes.
+ */
+export function createTimelineScrollController(options: TimelineScrollControllerOptions = {}) {
+  const timeoutMs = options.loadingTimeoutMs ?? LOADING_TIMEOUT_MS
+  const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms))
+  const cancel = options.cancel ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>))
+
+  let state = initialTimelineScrollState(options.channelId ?? '')
+  let savedAnchor: ScrollAnchor | null = null
+  let loadingTimedOut = false
+  let loadingTimer: unknown = null
+  let lastStatus: 'loading' | 'ready' | 'unavailable' | 'error' | null = null
+  let view: TimelineScrollView = {
+    pinned: state.pinned,
+    belowCount: state.belowCount,
+    loadingTimedOut,
+  }
+  const listeners = new Set<() => void>()
+
+  function notifyIfViewChanged() {
+    if (
+      view.pinned === state.pinned &&
+      view.belowCount === state.belowCount &&
+      view.loadingTimedOut === loadingTimedOut
+    ) {
+      return
+    }
+    view = {
+      pinned: state.pinned,
+      belowCount: state.belowCount,
+      loadingTimedOut,
+    }
+    listeners.forEach((l) => l())
+  }
+
+  function clearLoadingTimer() {
+    if (loadingTimer !== null) {
+      cancel(loadingTimer)
+      loadingTimer = null
+    }
+  }
+
+  function updateLoadingStatus(status: 'loading' | 'ready' | 'unavailable' | 'error') {
+    if (status === lastStatus) return
+    lastStatus = status
+    clearLoadingTimer()
+    if (status !== 'loading') {
+      loadingTimedOut = false
+      return
+    }
+    loadingTimedOut = false
+    loadingTimer = schedule(() => {
+      loadingTimer = null
+      loadingTimedOut = true
+      notifyIfViewChanged()
+    }, timeoutMs)
+  }
+
+  return {
+    get(): TimelineScrollView {
+      return view
+    },
+    getState(): TimelineScrollState {
+      return state
+    },
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    captureAnchor(items: readonly ItemRect[]): void {
+      savedAnchor = findFirstVisibleAnchor(items, 0)
+    },
+    onScroll(metrics: ScrollMetrics, items: readonly ItemRect[]): void {
+      savedAnchor = findFirstVisibleAnchor(items, 0)
+      const next = stepTimelineScroll(state, { type: 'scroll', metrics })
+      state = next.state
+      notifyIfViewChanged()
+    },
+    sync(input: Omit<Extract<TimelineScrollInput, { type: 'sync' }>, 'type'>): {
+      action: ScrollAction
+      anchor: ScrollAnchor | null
+    } {
+      updateLoadingStatus(input.status)
+      const anchor = savedAnchor
+      const next = stepTimelineScroll(state, { type: 'sync', ...input })
+      state = next.state
+      notifyIfViewChanged()
+      return { action: next.action, anchor }
+    },
+    jumpToBottom(): ScrollAction {
+      const next = stepTimelineScroll(state, { type: 'jump_to_bottom' })
+      state = next.state
+      notifyIfViewChanged()
+      return next.action
+    },
+    onUserSubmit(): ScrollAction {
+      const next = stepTimelineScroll(state, { type: 'user_submit' })
+      state = next.state
+      notifyIfViewChanged()
+      return next.action
+    },
+    resetLoadingTimeout(): void {
+      lastStatus = null
+      clearLoadingTimer()
+      loadingTimedOut = false
+      notifyIfViewChanged()
+    },
+    destroy(): void {
+      clearLoadingTimer()
+      listeners.clear()
+    },
   }
 }

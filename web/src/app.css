@@ -134,7 +134,7 @@
 }
 
 html {
-  font-size: 15px;
+  font-size: 93.75%;
   font-family: var(--font-sans);
   line-height: var(--line-height-base);
   color: var(--text);

@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   computeAnchoredScrollTop,
+  createTimelineScrollController,
   findFirstVisibleAnchor,
   initialTimelineScrollState,
   isPinnedToBottom,
@@ -16,6 +17,101 @@ describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.m
     expect(isPinnedToBottom({ scrollTop: 436, scrollHeight: 1000, clientHeight: 500 })).toBe(true)
     expect(isPinnedToBottom({ scrollTop: 500, scrollHeight: 1000, clientHeight: 500 })).toBe(true)
     expect(isPinnedToBottom({ scrollTop: 435, scrollHeight: 1000, clientHeight: 500 })).toBe(false)
+  })
+
+  it('returns the exact previous state reference when sync or scroll inputs are unchanged', () => {
+    const s0 = initialTimelineScrollState('c1')
+    // Repeated loading sync with no messages returns s0
+    const s0Again = stepTimelineScroll(s0, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'loading',
+      messages: [],
+      pendingIds: [],
+      selfId: 'me',
+    })
+    expect(s0Again.state).toBe(s0)
+
+    const s1 = stepTimelineScroll(s0, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2)],
+      pendingIds: ['p-1'],
+      selfId: 'me',
+    }).state
+
+    const s1Repeat = stepTimelineScroll(s1, {
+      type: 'sync',
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2)],
+      pendingIds: ['p-1'],
+      selfId: 'me',
+    })
+    expect(s1Repeat.state).toBe(s1)
+    expect(s1Repeat.action).toBe('none')
+
+    const jumpRepeat = stepTimelineScroll(s1, { type: 'jump_to_bottom' })
+    expect(jumpRepeat.state).toBe(s1)
+    expect(jumpRepeat.action).toBe('scroll_bottom')
+  })
+
+  it('createTimelineScrollController runs one step per sync and manages the 10 s loading timeout', () => {
+    let pendingTimer: (() => void) | null = null
+    const ctrl = createTimelineScrollController({
+      loadingTimeoutMs: 10_000,
+      schedule: (fn) => {
+        pendingTimer = fn
+        return 1
+      },
+      cancel: () => {
+        pendingTimer = null
+      },
+    })
+    const notifications = vi.fn()
+    const unsub = ctrl.subscribe(notifications)
+
+    // Loading state schedules 10s timeout
+    ctrl.sync({
+      channelId: 'c1',
+      status: 'loading',
+      messages: [],
+      pendingIds: [],
+      selfId: 'me',
+    })
+    expect(ctrl.get().loadingTimedOut).toBe(false)
+    expect(pendingTimer).not.toBeNull()
+
+    pendingTimer!()
+    expect(ctrl.get().loadingTimedOut).toBe(true)
+    expect(notifications).toHaveBeenCalledTimes(1)
+
+    // Transition to ready clears timeout and scrolls to bottom on initial content
+    const res = ctrl.sync({
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2)],
+      pendingIds: [],
+      selfId: 'me',
+    })
+    expect(res.action).toBe('scroll_bottom')
+    expect(ctrl.get().loadingTimedOut).toBe(false)
+    expect(notifications).toHaveBeenCalledTimes(2)
+
+    // Subsequent live messages while pinned do not fire redundant view notifications
+    const res2 = ctrl.sync({
+      channelId: 'c1',
+      status: 'ready',
+      messages: [msg(1), msg(2), msg(3)],
+      pendingIds: [],
+      selfId: 'me',
+    })
+    expect(res2.action).toBe('scroll_bottom')
+    expect(notifications).toHaveBeenCalledTimes(2)
+
+    unsub()
+    ctrl.destroy()
   })
 
   it('follows new Messages at the bottom when pinned, and stays put with 新着 n件 ↓ count when unpinned', () => {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte'
-  import { LOADING_TIMEOUT_MS } from './announcements'
+  import { createSubscriber } from 'svelte/reactivity'
   import Composer from './Composer.svelte'
   import {
     confirmReplaceDraftWithFailedSend,
@@ -11,9 +11,7 @@
   import type { ChannelSync } from './sync.svelte'
   import {
     computeAnchoredScrollTop,
-    findFirstVisibleAnchor,
-    initialTimelineScrollState,
-    stepTimelineScroll,
+    createTimelineScrollController,
     type ItemRect,
     type ScrollAnchor,
   } from './timeline-scroll'
@@ -46,14 +44,15 @@
   const s = $derived(channel.timeline)
   const targetUnavailable = $derived(s.status === 'unavailable' || organizationUnavailable)
 
-  let scrollEl = $state<HTMLElement | null>(null)
-  let scrollState = $state(initialTimelineScrollState())
-  let savedAnchor: ScrollAnchor | null = null
-  let loadingTimedOut = $state(false)
-  let confirmReplaceId = $state<string | null>(null)
-  let dismissedIds = $state<Set<string>>(new Set())
+  const scrollController = createTimelineScrollController()
+  const subscribeScroll = createSubscriber((update) => scrollController.subscribe(update))
+  const scrollView = $derived.by(() => {
+    subscribeScroll()
+    return scrollController.get()
+  })
 
-  const visiblePending = $derived(s.pending.filter((p) => !dismissedIds.has(p.clientMessageId)))
+  let scrollEl = $state<HTMLElement | null>(null)
+  let confirmReplaceId = $state<string | null>(null)
 
   function measureItems(container: HTMLElement): ItemRect[] {
     const cRect = container.getBoundingClientRect()
@@ -70,21 +69,19 @@
 
   function captureCurrentAnchor() {
     if (!scrollEl) return
-    savedAnchor = findFirstVisibleAnchor(measureItems(scrollEl), 0)
+    scrollController.captureAnchor(measureItems(scrollEl))
   }
 
   function handleScroll() {
     if (!scrollEl) return
-    captureCurrentAnchor()
-    const next = stepTimelineScroll(scrollState, {
-      type: 'scroll',
-      metrics: {
+    scrollController.onScroll(
+      {
         scrollTop: scrollEl.scrollTop,
         scrollHeight: scrollEl.scrollHeight,
         clientHeight: scrollEl.clientHeight,
       },
-    })
-    scrollState = next.state
+      measureItems(scrollEl),
+    )
   }
 
   function applyScrollAction(action: 'none' | 'scroll_bottom' | 'preserve_anchor', anchor: ScrollAnchor | null) {
@@ -106,9 +103,8 @@
   }
 
   function jumpToBottom() {
-    const next = stepTimelineScroll(scrollState, { type: 'jump_to_bottom' })
-    scrollState = next.state
-    applyScrollAction(next.action, null)
+    const action = scrollController.jumpToBottom()
+    applyScrollAction(action, null)
   }
 
   function loadOlderWithAnchor() {
@@ -116,36 +112,23 @@
     void channel.loadOlder()
   }
 
-  // 10 s loading timeout -> retryable error (docs/ui.md §5)
-  $effect(() => {
-    if (s.status !== 'loading') {
-      loadingTimedOut = false
-      return
-    }
-    const timer = setTimeout(() => {
-      loadingTimedOut = true
-    }, LOADING_TIMEOUT_MS)
-    return () => clearTimeout(timer)
-  })
+  $effect(() => () => scrollController.destroy())
 
-  // Keep scroll state and anchoring synchronized with timeline changes (docs/ui.md §8)
+  // Keep scroll state, anchor preservation and 10 s loading timeout synchronized with timeline changes (docs/ui.md §5, §8)
   $effect(() => {
     const messages = s.messages
-    const pendingIds = visiblePending.map((p) => p.clientMessageId)
+    const pendingIds = s.pending.map((p) => p.clientMessageId)
     const status = s.status
-    const anchorBefore = savedAnchor
-    const next = stepTimelineScroll(scrollState, {
-      type: 'sync',
+    const { action, anchor } = scrollController.sync({
       channelId,
       status,
       messages,
       pendingIds,
       selfId,
     })
-    scrollState = next.state
-    if (next.action !== 'none') {
+    if (action !== 'none') {
       void tick().then(() => {
-        applyScrollAction(next.action, anchorBefore)
+        applyScrollAction(action, anchor)
       })
     } else {
       void tick().then(() => {
@@ -155,9 +138,6 @@
   })
 
   function handleDiscard(clientMessageId: string) {
-    const nextDismissed = new Set(dismissedIds)
-    nextDismissed.add(clientMessageId)
-    dismissedIds = nextDismissed
     discardAndFocusComposer(clientMessageId, (id) => channel.discard(id), composerRef)
   }
 
@@ -176,8 +156,11 @@
     const id = confirmReplaceId
     confirmReplaceId = null
     if (!id) return
+    const canRestore = !targetUnavailable && s.pending.some((p) => p.clientMessageId === id && p.status === 'failed')
     confirmReplaceDraftWithFailedSend(
       id,
+      s.draft,
+      canRestore,
       (draft) => channel.setDraft(draft),
       (targetId) => channel.restore(targetId),
       composerRef,
@@ -186,17 +169,16 @@
 
   function handleCancelReplace() {
     confirmReplaceId = null
-    focusTarget(composerRef)
   }
 
   async function handleSubmit(): Promise<boolean> {
-    const next = stepTimelineScroll(scrollState, { type: 'user_submit' })
-    scrollState = next.state
     const ok = await channel.submit()
+    if (!ok) return false
+    const action = scrollController.onUserSubmit()
     void tick().then(() => {
-      applyScrollAction('scroll_bottom', null)
+      applyScrollAction(action, null)
     })
-    return ok
+    return true
   }
 </script>
 
@@ -218,7 +200,7 @@
         onaction={ongoToChannelList}
       />
     </div>
-  {:else if s.status === 'error' || (s.status === 'loading' && loadingTimedOut)}
+  {:else if s.status === 'error' || (s.status === 'loading' && scrollView.loadingTimedOut)}
     <div class="timeline-section__banner">
       <StatusBanner
         tone="danger"
@@ -226,7 +208,7 @@
         message="メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
         actionLabel="再試行"
         onaction={() => {
-          loadingTimedOut = false
+          scrollController.resetLoadingTimeout()
           void channel.loadLatest()
         }}
       />
@@ -234,7 +216,7 @@
   {/if}
 
   <div class="timeline-scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if s.status === 'loading' && !loadingTimedOut && s.messages.length === 0 && visiblePending.length === 0}
+    {#if s.status === 'loading' && !scrollView.loadingTimedOut && s.messages.length === 0 && s.pending.length === 0}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
 
@@ -255,14 +237,14 @@
       </div>
     {/if}
 
-    {#if s.messages.length > 0 || visiblePending.length > 0}
+    {#if s.messages.length > 0 || s.pending.length > 0}
       <ul class="timeline-list" aria-label="メッセージ一覧">
         {#each s.messages as m (m.id)}
           <li class="timeline-list__item" data-message-id={m.id}>
             <MessageRow createdAt={m.created_at} body={m.body} />
           </li>
         {/each}
-        {#each visiblePending as p (p.clientMessageId)}
+        {#each s.pending as p (p.clientMessageId)}
           <li class="timeline-list__item" data-status={p.status}>
             <MessageRow
               body={p.body}
@@ -284,10 +266,10 @@
     {/if}
   </div>
 
-  {#if !scrollState.pinned && scrollState.belowCount > 0}
+  {#if !scrollView.pinned && scrollView.belowCount > 0}
     <div class="timeline-new-below">
       <Button variant="primary" onclick={jumpToBottom}>
-        新着 {scrollState.belowCount}件 ↓
+        新着 {scrollView.belowCount}件 ↓
       </Button>
     </div>
   {/if}
@@ -309,6 +291,7 @@
     description="入力中の下書きを破棄して、送信できなかったメッセージを入力欄に戻します。"
     confirmLabel="置き換える"
     cancelLabel="キャンセル"
+    returnFocusFallback={composerRef}
     onconfirm={handleConfirmReplace}
     oncancel={handleCancelReplace}
   />

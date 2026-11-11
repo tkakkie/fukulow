@@ -68,7 +68,9 @@
   })
 </script>
 
-<a class="skip-link" href="#main-content">メッセージへ移動</a>
+{#if auth.view.screen === 'app'}
+  <a class="skip-link" href="#main-content">メッセージへ移動</a>
+{/if}
 <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">{pageAnnouncement}</div>
 
 {#if auth.view.screen === 'app'}
@@ -97,7 +99,7 @@
     <div class="app-fallback">
       <nav class="app-fallback__rail" aria-label="メインナビゲーション">
         <div class="app-fallback__logo" aria-hidden="true">🦉</div>
-        <Button variant="quiet" disabled={auth.busy} onclick={doSignOut}>ログアウト</Button>
+        <Button variant="icon" ariaLabel="ログアウト" disabled={auth.busy} onclick={doSignOut}>⇥</Button>
       </nav>
       <main id="main-content" class="app-fallback__main">
         <header class="app-fallback__header">

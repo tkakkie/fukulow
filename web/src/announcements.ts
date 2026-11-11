@@ -17,18 +17,10 @@ export type AnnounceableMessage = {
   body: string
 }
 
-export type MessageSource =
-  | 'auto'
-  | 'live'
-  | 'initial_history'
-  | 'older_page'
-  | 'gap_fill'
-  | 'replay'
-  | 'reorder'
-
 export type AnnouncementState = {
   viewId: string
   initialized: boolean
+  everLive: boolean
   wasLive: boolean
   minSeq: number | null
   maxSeq: number | null
@@ -57,7 +49,6 @@ export type AnnouncementInput =
       selfId: string
       nowMs: number
       resolveSenderName?: (senderId: string) => string
-      source?: MessageSource
     }
   | {
       type: 'offline_timer_elapsed'
@@ -68,6 +59,28 @@ export type AnnouncementInput =
       topicId: string
       lastSeq: number
     }
+
+export type AnnouncementControllerView = {
+  reconnecting: boolean
+  channelListTimedOut: boolean
+}
+
+export type AnnouncementControllerOptions = {
+  onAnnounce?: (message: string) => void
+  now?: () => number
+  reconnectDelayMs?: number
+  loadingTimeoutMs?: number
+  schedule?: (fn: () => void, ms: number) => unknown
+  cancel?: (handle: unknown) => void
+}
+
+function sameSeqs(set: ReadonlySet<number>, list: readonly number[]): boolean {
+  if (set.size !== list.length) return false
+  for (const seq of list) {
+    if (!set.has(seq)) return false
+  }
+  return true
+}
 
 /** Truncates a Message body to at most `maxScalars` Unicode scalar values with collapsed whitespace (`docs/ui.md` §6). */
 export function formatMessagePreview(body: string, maxScalars = LIVE_MESSAGE_PREVIEW_MAX): string {
@@ -91,6 +104,7 @@ export function initialAnnouncementState(): AnnouncementState {
   return {
     viewId: '',
     initialized: false,
+    everLive: false,
     wasLive: false,
     minSeq: null,
     maxSeq: null,
@@ -118,6 +132,7 @@ export function stepAnnouncements(
         state: {
           viewId: input.viewId,
           initialized: false,
+          everLive: false,
           wasLive: false,
           minSeq: null,
           maxSeq: null,
@@ -159,28 +174,44 @@ export function stepAnnouncements(
     case 'timeline_updated': {
       const minSeq = input.messages[0]?.seq ?? null
       const maxSeq = input.messages.at(-1)?.seq ?? null
-      const seenSeqs = new Set(input.messages.map((m) => m.seq))
-      const source = input.source ?? 'auto'
+      const seqList = input.messages.map((m) => m.seq)
 
       if (input.viewId !== prev.viewId || !prev.initialized) {
         const initialized = input.status === 'ready' || input.messages.length > 0
+        const everLive = input.live
+        if (
+          input.viewId === prev.viewId &&
+          initialized === prev.initialized &&
+          everLive === prev.everLive &&
+          input.live === prev.wasLive &&
+          minSeq === prev.minSeq &&
+          maxSeq === prev.maxSeq &&
+          sameSeqs(prev.seenSeqs, seqList) &&
+          prev.offlineSinceMs === null &&
+          !prev.reconnecting
+        ) {
+          return { state: prev, announcement: null }
+        }
+        const seenSeqs = new Set(seqList)
         return {
           state: {
             ...prev,
             viewId: input.viewId,
             initialized,
+            everLive,
             wasLive: input.live,
             minSeq,
             maxSeq,
             seenSeqs,
             announcedSeqs: new Set(seenSeqs),
-            offlineSinceMs: initialized && !input.live ? input.nowMs : null,
+            offlineSinceMs: null,
             reconnecting: false,
           },
           announcement: null,
         }
       }
 
+      const everLive = prev.everLive || input.live
       let offlineSinceMs = prev.offlineSinceMs
       let reconnecting = prev.reconnecting
       let connectionAnnouncement: string | null = null
@@ -191,7 +222,7 @@ export function stepAnnouncements(
         }
         offlineSinceMs = null
         reconnecting = false
-      } else if (input.status === 'ready') {
+      } else if (everLive && input.status === 'ready') {
         if (offlineSinceMs === null) {
           offlineSinceMs = input.nowMs
         }
@@ -200,41 +231,50 @@ export function stepAnnouncements(
         reconnecting = false
       }
 
-      const isSuppressedSource =
-        source === 'initial_history' ||
-        source === 'older_page' ||
-        source === 'gap_fill' ||
-        source === 'replay' ||
-        source === 'reorder'
+      const seqsUnchanged =
+        minSeq === prev.minSeq && maxSeq === prev.maxSeq && sameSeqs(prev.seenSeqs, seqList)
 
-      // Live messages can only be announced when the subscription was ALREADY live before this step and stays live.
-      const canAnnounceLive = !isSuppressedSource && prev.wasLive && input.live && input.status === 'ready'
+      if (
+        seqsUnchanged &&
+        everLive === prev.everLive &&
+        input.live === prev.wasLive &&
+        offlineSinceMs === prev.offlineSinceMs &&
+        reconnecting === prev.reconnecting &&
+        connectionAnnouncement === null
+      ) {
+        return { state: prev, announcement: null }
+      }
 
-      const added = input.messages.filter((m) => !prev.seenSeqs.has(m.seq))
+      const seenSeqs = seqsUnchanged ? prev.seenSeqs : new Set(seqList)
+      const added = seqsUnchanged ? [] : input.messages.filter((m) => !prev.seenSeqs.has(m.seq))
       const addedAtTail = added.filter((m) => prev.maxSeq === null || m.seq > prev.maxSeq)
       const addedBelowTail = added.filter((m) => prev.maxSeq !== null && m.seq <= prev.maxSeq)
 
-      // Under 'auto', a single contiguous message at the tail with no holes filled below is a live WebSocket event.
-      // Batch page merges (addedAtTail.length > 1) or non-contiguous jumps (seq > prev.maxSeq + 1) are history/gap-fill pages.
+      // Per spec S3, replay finishes before `subscribed` (`live`), and pages/fills either insert below `maxSeq`, arrive in batches, or jump non-contiguously.
       const isLiveTailDelivery =
-        source === 'live' ||
-        (source === 'auto' &&
-          addedBelowTail.length === 0 &&
-          addedAtTail.length === 1 &&
-          (prev.maxSeq === null || addedAtTail[0].seq === prev.maxSeq + 1))
+        prev.wasLive &&
+        input.live &&
+        input.status === 'ready' &&
+        addedBelowTail.length === 0 &&
+        addedAtTail.length === 1 &&
+        (prev.maxSeq === null || addedAtTail[0].seq === prev.maxSeq + 1)
 
-      const liveFromOthers =
-        canAnnounceLive && isLiveTailDelivery
-          ? addedAtTail.filter((m) => m.sender !== input.selfId && !prev.announcedSeqs.has(m.seq))
-          : []
+      const liveFromOthers = isLiveTailDelivery
+        ? addedAtTail.filter((m) => m.sender !== input.selfId && !prev.announcedSeqs.has(m.seq))
+        : []
 
-      const announcedSeqs = new Set(prev.announcedSeqs)
-      for (const s of seenSeqs) announcedSeqs.add(s)
+      let announcedSeqs = prev.announcedSeqs
+      if (!seqsUnchanged) {
+        const nextAnnounced = new Set(prev.announcedSeqs)
+        for (const s of seenSeqs) nextAnnounced.add(s)
+        announcedSeqs = nextAnnounced
+      }
 
       if (liveFromOthers.length === 0) {
         return {
           state: {
             ...prev,
+            everLive,
             wasLive: input.live,
             minSeq,
             maxSeq,
@@ -276,6 +316,7 @@ export function stepAnnouncements(
       return {
         state: {
           ...prev,
+          everLive,
           wasLive: input.live,
           minSeq,
           maxSeq,
@@ -290,5 +331,150 @@ export function stepAnnouncements(
         announcement: messageAnnouncement,
       }
     }
+  }
+}
+
+/**
+ * Layer-3 controller owning announcement stepping, the 2 s offline-reconnect timer and the 10 s
+ * Channel-list loading timeout (`docs/ui.md` §2, §5, §6). Holds no `$state`; notifies subscribers
+ * only when `reconnecting` or `channelListTimedOut` changes.
+ */
+export function createAnnouncementController(options: AnnouncementControllerOptions = {}) {
+  const now = options.now ?? (() => Date.now())
+  const reconnectDelayMs = options.reconnectDelayMs ?? RECONNECT_ANNOUNCE_DELAY_MS
+  const loadingTimeoutMs = options.loadingTimeoutMs ?? LOADING_TIMEOUT_MS
+  const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms))
+  const cancel = options.cancel ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>))
+
+  let state = initialAnnouncementState()
+  let offlineTimer: unknown = null
+  let offlineScheduledFor: number | null = null
+  let channelListTimedOut = false
+  let channelListTimer: unknown = null
+  let channelListLoadingActive = false
+  let view: AnnouncementControllerView = {
+    reconnecting: state.reconnecting,
+    channelListTimedOut,
+  }
+  const listeners = new Set<() => void>()
+
+  function notifyIfViewChanged() {
+    if (view.reconnecting === state.reconnecting && view.channelListTimedOut === channelListTimedOut) {
+      return
+    }
+    view = {
+      reconnecting: state.reconnecting,
+      channelListTimedOut,
+    }
+    listeners.forEach((l) => l())
+  }
+
+  function clearOfflineTimer() {
+    if (offlineTimer !== null) {
+      cancel(offlineTimer)
+      offlineTimer = null
+      offlineScheduledFor = null
+    }
+  }
+
+  function clearChannelListTimer() {
+    if (channelListTimer !== null) {
+      cancel(channelListTimer)
+      channelListTimer = null
+    }
+  }
+
+  function syncOfflineTimer() {
+    const offlineSince = state.offlineSinceMs
+    if (offlineSince === null || state.reconnecting) {
+      clearOfflineTimer()
+      return
+    }
+    if (offlineTimer !== null && offlineScheduledFor === offlineSince) {
+      return
+    }
+    clearOfflineTimer()
+    offlineScheduledFor = offlineSince
+    const elapsed = now() - offlineSince
+    const waitMs = Math.max(0, reconnectDelayMs - elapsed)
+    offlineTimer = schedule(() => {
+      offlineTimer = null
+      offlineScheduledFor = null
+      const res = stepAnnouncements(state, {
+        type: 'offline_timer_elapsed',
+        nowMs: now(),
+      })
+      state = res.state
+      if (res.announcement) options.onAnnounce?.(res.announcement)
+      notifyIfViewChanged()
+    }, waitMs)
+  }
+
+  return {
+    get(): AnnouncementControllerView {
+      return view
+    },
+    getState(): AnnouncementState {
+      return state
+    },
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    onViewChanged(input: { viewId: string; kind: 'channel' | 'topic'; name: string }): void {
+      const res = stepAnnouncements(state, { type: 'view_changed', ...input })
+      state = res.state
+      syncOfflineTimer()
+      if (res.announcement) options.onAnnounce?.(res.announcement)
+      notifyIfViewChanged()
+    },
+    onTimelineUpdated(input: {
+      viewId: string
+      status: 'loading' | 'ready' | 'unavailable' | 'error'
+      live: boolean
+      messages: readonly AnnounceableMessage[]
+      selfId: string
+      resolveSenderName?: (senderId: string) => string
+    }): void {
+      const res = stepAnnouncements(state, {
+        type: 'timeline_updated',
+        ...input,
+        nowMs: now(),
+      })
+      state = res.state
+      syncOfflineTimer()
+      if (res.announcement) options.onAnnounce?.(res.announcement)
+      notifyIfViewChanged()
+    },
+    syncChannelListLoading(isLoadingEmpty: boolean): void {
+      if (isLoadingEmpty === channelListLoadingActive) return
+      channelListLoadingActive = isLoadingEmpty
+      clearChannelListTimer()
+      if (!isLoadingEmpty) {
+        channelListTimedOut = false
+        notifyIfViewChanged()
+        return
+      }
+      channelListTimedOut = false
+      notifyIfViewChanged()
+      channelListTimer = schedule(() => {
+        channelListTimer = null
+        channelListTimedOut = true
+        notifyIfViewChanged()
+      }, loadingTimeoutMs)
+    },
+    resetChannelListTimeout(): void {
+      channelListLoadingActive = false
+      clearChannelListTimer()
+      channelListTimedOut = false
+      notifyIfViewChanged()
+    },
+    destroy(): void {
+      clearOfflineTimer()
+      clearChannelListTimer()
+      listeners.clear()
+    },
   }
 }

@@ -49,28 +49,112 @@ function parseAppThemes(css: string): { light: Record<string, string>; dark: Rec
   }
 }
 
+const CSS_NAMED_COLOURS = new Set([
+  'aliceblue', 'antiquewhite', 'aqua', 'aquamarine', 'azure', 'beige', 'bisque', 'black',
+  'blanchedalmond', 'blue', 'blueviolet', 'brown', 'burlywood', 'cadetblue', 'chartreuse',
+  'chocolate', 'coral', 'cornflowerblue', 'cornsilk', 'crimson', 'cyan', 'darkblue', 'darkcyan',
+  'darkgoldenrod', 'darkgray', 'darkgreen', 'darkgrey', 'darkkhaki', 'darkmagenta', 'darkolivegreen',
+  'darkorange', 'darkorchid', 'darkred', 'darksalmon', 'darkseagreen', 'darkslateblue', 'darkslategray',
+  'darkslategrey', 'darkturquoise', 'darkviolet', 'deeppink', 'deepskyblue', 'dimgray', 'dimgrey',
+  'dodgerblue', 'firebrick', 'floralwhite', 'forestgreen', 'fuchsia', 'gainsboro', 'ghostwhite',
+  'gold', 'goldenrod', 'gray', 'green', 'greenyellow', 'grey', 'honeydew', 'hotpink', 'indianred',
+  'indigo', 'ivory', 'khaki', 'lavender', 'lavenderblush', 'lawngreen', 'lemonchiffon', 'lightblue',
+  'lightcoral', 'lightcyan', 'lightgoldenrodyellow', 'lightgray', 'lightgreen', 'lightgrey', 'lightpink',
+  'lightsalmon', 'lightseagreen', 'lightskyblue', 'lightslategray', 'lightslategrey', 'lightsteelblue',
+  'lightyellow', 'lime', 'limegreen', 'linen', 'magenta', 'maroon', 'mediumaquamarine', 'mediumblue',
+  'mediumorchid', 'mediumpurple', 'mediumseagreen', 'mediumslateblue', 'mediumspringgreen',
+  'mediumturquoise', 'mediumvioletred', 'midnightblue', 'mintcream', 'mistyrose', 'moccasin',
+  'navajowhite', 'navy', 'oldlace', 'olive', 'olivedrab', 'orange', 'orangered', 'orchid',
+  'palegoldenrod', 'palegreen', 'paleturquoise', 'palevioletred', 'papayawhip', 'peachpuff', 'peru',
+  'pink', 'plum', 'powderblue', 'purple', 'rebeccapurple', 'red', 'rosybrown', 'royalblue',
+  'saddlebrown', 'salmon', 'sandybrown', 'seagreen', 'seashell', 'sienna', 'silver', 'skyblue',
+  'slateblue', 'slategray', 'slategrey', 'snow', 'springgreen', 'steelblue', 'tan', 'teal',
+  'thistle', 'tomato', 'turquoise', 'violet', 'wheat', 'white', 'whitesmoke', 'yellow', 'yellowgreen',
+])
+
+const STRICT_TOKEN_VAR = /^var\(--[a-z0-9-]+\)$/
+
+function extractTemplate(svelteSource: string): string {
+  return svelteSource
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+}
+
 export function scanComponentStyleViolations(svelteSource: string, file: string): string[] {
   const violations: string[] = []
-  const styleMatch = svelteSource.match(/<style[^>]*>([\s\S]*?)<\/style>/)
-  if (!styleMatch) return violations
-  const css = styleMatch[1].replace(/\/\*[\s\S]*?\*\//g, '')
 
-  for (const m of css.matchAll(/#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\s*\(/g)) {
-    violations.push(`${file}: literal colour "${m[0]}" in component style (use CSS tokens only)`)
+  // 1. Disallow inline style= attributes and style: directives in templates
+  const template = extractTemplate(svelteSource)
+  for (const m of template.matchAll(/\bstyle\s*=|\bstyle:[a-zA-Z-]+/g)) {
+    violations.push(`${file}: inline style "${m[0]}" in template (use component CSS tokens only)`)
   }
-  for (const m of css.matchAll(/font-size\s*:\s*([^;]+);/g)) {
-    const val = m[1].trim()
-    if (!val.startsWith('var(--')) {
-      violations.push(`${file}: literal font-size "${val}" in component style (use --font-size-* token)`)
+
+  // 2. Scan every <style> block in the component
+  for (const styleMatch of svelteSource.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)) {
+    const css = styleMatch[1].replace(/\/\*[\s\S]*?\*\//g, '')
+
+    // Hex colours and CSS colour functions (rgb/rgba/hsl/hsla/hwb/lab/lch/oklab/oklch/color/color-mix/light-dark)
+    for (const m of css.matchAll(
+      /#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color|color-mix|light-dark)\s*\(/gi,
+    )) {
+      violations.push(`${file}: literal colour "${m[0]}" in component style (use CSS tokens only)`)
+    }
+
+    // var(--token, fallback) fallbacks
+    for (const m of css.matchAll(/\bvar\(\s*--[a-zA-Z0-9-]+\s*,[^)]*\)/g)) {
+      violations.push(`${file}: var() fallback "${m[0]}" in component style (use defined token without fallback)`)
+    }
+
+    // Inspect property declarations for named colours, font shorthand, font-size, and border-radius / per-corner radii
+    for (const decl of css.matchAll(/([a-zA-Z-]+)\s*:\s*([^;{}]+);/g)) {
+      const prop = decl[1].toLowerCase()
+      const val = decl[2].trim()
+
+      // Named colours in any CSS declaration value
+      const withoutVars = val.replace(/var\([^)]*\)/g, '')
+      for (const word of withoutVars.matchAll(/\b([a-zA-Z]+)\b/g)) {
+        const lower = word[1].toLowerCase()
+        if (CSS_NAMED_COLOURS.has(lower)) {
+          violations.push(`${file}: named colour "${word[1]}" in "${prop}: ${val}" (use CSS tokens only)`)
+        }
+      }
+
+      if (prop === 'font') {
+        violations.push(`${file}: font shorthand "font: ${val}" in component style (use --font-* tokens)`)
+      }
+
+      if (prop === 'font-size' && !STRICT_TOKEN_VAR.test(val)) {
+        violations.push(`${file}: literal font-size "${val}" in component style (use --font-size-* token)`)
+      }
+
+      if (/^border(?:-(?:top|bottom)-(?:left|right)|-(?:start|end)-(?:start|end))?-radius$/.test(prop)) {
+        const parts = val.split(/\s+/).filter(Boolean)
+        if (parts.length === 0 || !parts.every((p) => STRICT_TOKEN_VAR.test(p))) {
+          violations.push(`${file}: literal ${prop} "${val}" in component style (use --radius-* token)`)
+        }
+      }
     }
   }
-  for (const m of css.matchAll(/border-radius\s*:\s*([^;]+);/g)) {
-    const val = m[1].trim()
-    if (!val.startsWith('var(--')) {
-      violations.push(`${file}: literal border-radius "${val}" in component style (use --radius-* token)`)
-    }
-  }
+
   return violations
+}
+
+export function scanLiveRegions(svelteSource: string, file: string): {
+  statusRoles: string[]
+  logRoles: string[]
+  ariaLive: string[]
+  outputElements: string[]
+} {
+  const template = extractTemplate(svelteSource)
+  const statusRoles = [
+    ...template.matchAll(/\brole\s*=\s*(?:"status"|'status'|\{[^}]*\bstatus\b[^}]*\})/g),
+  ].map((m) => `${file}:${m[0]}`)
+  const logRoles = [
+    ...template.matchAll(/\brole\s*=\s*(?:"log"|'log'|\{[^}]*\blog\b[^}]*\})/g),
+  ].map((m) => `${file}:${m[0]}`)
+  const ariaLive = [...template.matchAll(/\baria-live\b/g)].map((m) => `${file}:${m[0]}`)
+  const outputElements = [...template.matchAll(/<output\b/gi)].map((m) => `${file}:${m[0]}`)
+  return { statusRoles, logRoles, ariaLive, outputElements }
 }
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
@@ -207,30 +291,63 @@ describe('component token-only styles and accessibility structure (docs/ui.md §
   })
 
   it('detects literal colours, font-sizes and border-radius in component styles (negative)', () => {
-    const bad = `<style>
-      .x { color: #ff0000; background: rgb(0, 0, 0); font-size: 14px; border-radius: 8px; }
-    </style>`
+    const bad = `
+      <div style="color: var(--text)" style:padding="4px"></div>
+      <style>
+        .x {
+          color: #ff0000;
+          background: rgb(0, 0, 0);
+          border-color: red;
+          outline-color: oklch(0.7 0.1 180);
+          box-shadow: 0 0 4px color-mix(in srgb, var(--text), white);
+          font: 14px sans-serif;
+          font-size: 14px;
+          border-radius: 8px;
+          border-top-left-radius: 6px;
+        }
+      </style>
+      <style>
+        .second-block {
+          font-size: var(--font-size-14, 14px);
+          border-radius: var(--radius-8, 8px);
+          color: white;
+        }
+      </style>
+    `
     const violations = scanComponentStyleViolations(bad, 'src/Bad.svelte')
-    expect(violations).toHaveLength(4)
-    expect(violations[0]).toContain('#ff0000')
-    expect(violations[1]).toContain('rgb(')
-    expect(violations[2]).toContain('font-size')
-    expect(violations[3]).toContain('border-radius')
+    expect(violations.some((v) => v.includes('inline style "style="'))).toBe(true)
+    expect(violations.some((v) => v.includes('inline style "style:padding"'))).toBe(true)
+    expect(violations.some((v) => v.includes('#ff0000'))).toBe(true)
+    expect(violations.some((v) => v.includes('rgb('))).toBe(true)
+    expect(violations.some((v) => v.includes('named colour "red"'))).toBe(true)
+    expect(violations.some((v) => v.includes('oklch('))).toBe(true)
+    expect(violations.some((v) => v.includes('color-mix('))).toBe(true)
+    expect(violations.some((v) => v.includes('font shorthand'))).toBe(true)
+    expect(violations.some((v) => v.includes('literal font-size "14px"'))).toBe(true)
+    expect(violations.some((v) => v.includes('literal border-radius "8px"'))).toBe(true)
+    expect(violations.some((v) => v.includes('literal border-top-left-radius "6px"'))).toBe(true)
+    expect(violations.some((v) => v.includes('var() fallback "var(--font-size-14, 14px)"'))).toBe(true)
+    expect(violations.some((v) => v.includes('var() fallback "var(--radius-8, 8px)"'))).toBe(true)
+    expect(violations.some((v) => v.includes('named colour "white"'))).toBe(true)
   })
 
   it('enforces timeline non-live semantics and a single polite role="status" region across all components', () => {
-    const timelineSrc = readFileSync(join(webDir, 'src/Timeline.svelte'), 'utf8')
-    expect(timelineSrc).not.toContain('role="log"')
-    expect(timelineSrc).not.toContain('aria-live')
-
     const files = walkSvelte(join(webDir, 'src'))
-    const statusRegions = files.flatMap((f) => {
-      const template = readFileSync(f, 'utf8').replace(/<script[\s\S]*?<\/script>/g, '')
-      return [...template.matchAll(/role="status"/g)].map(() => relative(webDir, f))
-    })
-    expect(statusRegions).toEqual(['src/App.svelte'])
+    const allLive = files.map((f) => scanLiveRegions(readFileSync(f, 'utf8'), relative(webDir, f)))
 
-    const appSrc = readFileSync(join(webDir, 'src/App.svelte'), 'utf8')
-    expect(appSrc).toContain('メッセージへ移動')
+    expect(allLive.flatMap((x) => x.statusRoles)).toEqual(['src/App.svelte:role="status"'])
+    expect(allLive.flatMap((x) => x.ariaLive)).toEqual(['src/App.svelte:aria-live'])
+    expect(allLive.flatMap((x) => x.logRoles)).toEqual([])
+    expect(allLive.flatMap((x) => x.outputElements)).toEqual([])
+
+    // Negative check for dynamic role={'status'}, role="log", <output>, and aria-live
+    const badLive = scanLiveRegions(
+      `<div role={'status'} aria-live="polite"></div><ul role="log"></ul><output>ok</output>`,
+      'src/BadLive.svelte',
+    )
+    expect(badLive.statusRoles).toHaveLength(1)
+    expect(badLive.ariaLive).toHaveLength(1)
+    expect(badLive.logRoles).toHaveLength(1)
+    expect(badLive.outputElements).toHaveLength(1)
   })
 })

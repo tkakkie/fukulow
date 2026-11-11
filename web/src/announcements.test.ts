@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createAnnouncementController,
   formatLiveMessageAnnouncement,
   formatMessagePreview,
   initialAnnouncementState,
   stepAnnouncements,
-   type AnnounceableMessage,
+  type AnnounceableMessage,
 } from './announcements'
 
 const msg = (seq: number, sender: string, body: string): AnnounceableMessage => ({
@@ -344,5 +345,110 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
     })
     expect(res.state.reconnecting).toBe(false)
     expect(res.announcement).toBe('接続しました。')
+  })
+
+  it('does not treat a slow initial subscribe (> 2 s) as a reconnect before the subscription was ever live', () => {
+    let s = initialAnnouncementState()
+    s = stepAnnouncements(s, {
+      type: 'view_changed',
+      viewId: 'c1',
+      kind: 'channel',
+      name: 'general',
+    }).state
+
+    // Initial history ready at t = 1000ms, but WebSocket subscription not yet confirmed (live: false)
+    const init = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1',
+      status: 'ready',
+      live: false,
+      messages: [msg(1, 'tanaka', 'hello')],
+      selfId: 'me',
+      nowMs: 1_000,
+    })
+    s = init.state
+    expect(s.offlineSinceMs).toBeNull()
+    expect(s.reconnecting).toBe(false)
+
+    // Still not live at t = 4000ms (> 2 s later): still connecting for the first time, not reconnecting
+    const later = stepAnnouncements(s, {
+      type: 'timeline_updated',
+      viewId: 'c1',
+      status: 'ready',
+      live: false,
+      messages: [msg(1, 'tanaka', 'hello')],
+      selfId: 'me',
+      nowMs: 4_000,
+    })
+    expect(later.state).toBe(s)
+    expect(later.state.offlineSinceMs).toBeNull()
+    expect(later.state.reconnecting).toBe(false)
+
+    const timerCheck = stepAnnouncements(later.state, { type: 'offline_timer_elapsed', nowMs: 4_000 })
+    expect(timerCheck.state).toBe(s)
+    expect(timerCheck.announcement).toBeNull()
+  })
+
+  it('createAnnouncementController coordinates view announcements, sender names and timers without state loops', () => {
+    let nowMs = 1_000
+    const announced: string[] = []
+    let scheduledFn: (() => void) | null = null
+    const ctrl = createAnnouncementController({
+      now: () => nowMs,
+      onAnnounce: (m) => announced.push(m),
+      schedule: (fn) => {
+        scheduledFn = fn
+        return 1
+      },
+      cancel: () => {
+        scheduledFn = null
+      },
+    })
+
+    ctrl.onViewChanged({ viewId: 'c1', kind: 'channel', name: 'general' })
+    expect(announced).toEqual(['# general'])
+
+    // Initial ready + live
+    ctrl.onTimelineUpdated({
+      viewId: 'c1',
+      status: 'ready',
+      live: true,
+      messages: [msg(1, 'tanaka', '初期')],
+      selfId: 'me',
+      resolveSenderName: (id) => names[id] ?? 'メンバー',
+    })
+    expect(announced).toEqual(['# general'])
+
+    // Live message uses resolveSenderName
+    nowMs = 1_500
+    ctrl.onTimelineUpdated({
+      viewId: 'c1',
+      status: 'ready',
+      live: true,
+      messages: [msg(1, 'tanaka', '初期'), msg(2, 'tanaka', 'お疲れ様です')],
+      selfId: 'me',
+      resolveSenderName: (id) => names[id] ?? 'メンバー',
+    })
+    expect(announced).toEqual(['# general', '田中 美咲: お疲れ様です'])
+
+    // Disconnect schedules 2 s reconnect timer, then announces when elapsed
+    nowMs = 2_000
+    ctrl.onTimelineUpdated({
+      viewId: 'c1',
+      status: 'ready',
+      live: false,
+      messages: [msg(1, 'tanaka', '初期'), msg(2, 'tanaka', 'お疲れ様です')],
+      selfId: 'me',
+      resolveSenderName: (id) => names[id] ?? 'メンバー',
+    })
+    expect(ctrl.get().reconnecting).toBe(false)
+    expect(scheduledFn).not.toBeNull()
+
+    nowMs = 4_000
+    scheduledFn!()
+    expect(ctrl.get().reconnecting).toBe(true)
+    expect(announced.at(-1)).toBe('再接続しています…')
+
+    ctrl.destroy()
   })
 })

@@ -1,16 +1,12 @@
 <script lang="ts">
   import { tick } from 'svelte'
-  import {
-    initialAnnouncementState,
-    LOADING_TIMEOUT_MS,
-    RECONNECT_ANNOUNCE_DELAY_MS,
-    stepAnnouncements,
-  } from './announcements'
+  import { createSubscriber } from 'svelte/reactivity'
+  import { createAnnouncementController } from './announcements'
   import type { Identity } from './api'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
   import ChannelList from './ChannelList.svelte'
-  import { shouldCloseOnEscape } from './composer-keys'
+  import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import CreateChannelForm from './CreateChannelForm.svelte'
   import { focusAfterPanelClose, focusTarget } from './focus-management'
   import Timeline from './Timeline.svelte'
@@ -28,6 +24,7 @@
     selectedOrganizationId = '',
     busy = false,
     authError = '',
+    resolveSenderName,
     onselectorganization,
     onsignout,
     onannounce,
@@ -38,6 +35,7 @@
     selectedOrganizationId?: string
     busy?: boolean
     authError?: string
+    resolveSenderName?: (senderId: string) => string
     onselectorganization?: (id: string) => void
     onsignout?: () => void
     onannounce?: (message: string) => void
@@ -51,77 +49,71 @@
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
 
+  const announcementController = createAnnouncementController({
+    onAnnounce: (msg) => onannounce?.(msg),
+  })
+  const subscribeAnnouncements = createSubscriber((update) => announcementController.subscribe(update))
+  const announcementView = $derived.by(() => {
+    subscribeAnnouncements()
+    return announcementController.get()
+  })
+
   let drawerOpen = $state(false)
   let panelOpen = $state(false)
   let activePanelTab = $state<PanelTabId>('topics')
+  // Fallback to 'channels' when no Channel is selected so phone users can reach Channel creation and sign-out (docs/ui.md §3).
   let mobileLevel = $state<'channels' | 'view' | 'panel'>('view')
-  let channelListTimedOut = $state(false)
+  const effectiveMobileLevel = $derived(!selected && mobileLevel === 'view' ? 'channels' : mobileLevel)
 
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
 
-  let announceState = $state(initialAnnouncementState())
   let lastViewId = ''
+
+  function resolveSender(senderId: string): string {
+    if (resolveSenderName) return resolveSenderName(senderId)
+    if (organization?.member.id === senderId) return organization.member.name
+    return 'メンバー'
+  }
+
+  $effect(() => () => announcementController.destroy())
 
   // 10 s loading timeout for Channel list (docs/ui.md §5)
   $effect(() => {
-    if (s.status !== 'loading' || s.channels.length > 0) {
-      channelListTimedOut = false
-      return
-    }
-    const timer = setTimeout(() => {
-      channelListTimedOut = true
-    }, LOADING_TIMEOUT_MS)
-    return () => clearTimeout(timer)
+    announcementController.syncChannelListLoading(s.status === 'loading' && s.channels.length === 0)
   })
 
-  // Announce view changes once (docs/ui.md §2, §6)
+  // Announce view changes once and enter 'view' on phone when a Channel is first selected (docs/ui.md §2, §3, §6)
   $effect(() => {
-    if (!selected) return
+    if (!selected) {
+      lastViewId = ''
+      return
+    }
     if (selected.id === lastViewId) return
+    const wasEmpty = lastViewId === ''
     lastViewId = selected.id
-    const res = stepAnnouncements(announceState, {
-      type: 'view_changed',
+    if (wasEmpty && mobileLevel === 'channels') {
+      mobileLevel = 'view'
+    }
+    announcementController.onViewChanged({
       viewId: selected.id,
       kind: 'channel',
       name: selected.name,
     })
-    announceState = res.state
-    if (res.announcement) onannounce?.(res.announcement)
   })
 
   // Track timeline updates for live-message announcements and offline state (docs/ui.md §6)
   $effect(() => {
     if (!selected || !currentTimeline) return
-    const res = stepAnnouncements(announceState, {
-      type: 'timeline_updated',
+    announcementController.onTimelineUpdated({
       viewId: selected.id,
       status: currentTimeline.status,
       live: currentLive,
       messages: currentTimeline.messages,
       selfId: organization?.member.id ?? '',
-      nowMs: Date.now(),
+      resolveSenderName: resolveSender,
     })
-    announceState = res.state
-    if (res.announcement) onannounce?.(res.announcement)
-  })
-
-  // 2 s offline delay before showing reconnecting banner and announcing it (docs/ui.md §5, §6)
-  $effect(() => {
-    const offlineSince = announceState.offlineSinceMs
-    if (offlineSince === null || announceState.reconnecting) return
-    const elapsed = Date.now() - offlineSince
-    const waitMs = Math.max(0, RECONNECT_ANNOUNCE_DELAY_MS - elapsed)
-    const timer = setTimeout(() => {
-      const res = stepAnnouncements(announceState, {
-        type: 'offline_timer_elapsed',
-        nowMs: Date.now(),
-      })
-      announceState = res.state
-      if (res.announcement) onannounce?.(res.announcement)
-    }, waitMs)
-    return () => clearTimeout(timer)
   })
 
   function handleSelectChannel(id: string) {
@@ -131,6 +123,18 @@
     void tick().then(() => {
       focusTarget(mainComposerRef)
     })
+  }
+
+  async function handleCreateChannel(name: string, visibility: 'public' | 'private'): Promise<string | null> {
+    const err = await channels.create(name, visibility)
+    if (err === null) {
+      drawerOpen = false
+      mobileLevel = 'view'
+      void tick().then(() => {
+        focusTarget(mainComposerRef)
+      })
+    }
+    return err
   }
 
   function openPanel() {
@@ -162,6 +166,15 @@
   }
 
   function handleWindowKeydown(e: KeyboardEvent) {
+    // A modal dialog is the topmost layer and handles its own Escape / Tab (docs/ui.md §9).
+    if (typeof document !== 'undefined' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
+      return
+    }
+    if (shouldTogglePanelShortcut(e)) {
+      e.preventDefault()
+      togglePanel()
+      return
+    }
     if (!shouldCloseOnEscape(e)) return
     if (drawerOpen) {
       e.preventDefault()
@@ -174,6 +187,7 @@
     }
   }
 
+  // Best-effort prompt for the active Channel's unsent draft or pending sends (docs/ui.md §3).
   function handleBeforeUnload(e: BeforeUnloadEvent) {
     if (!currentTimeline) return
     if (currentTimeline.draft.length > 0 || currentTimeline.pending.length > 0) {
@@ -188,7 +202,7 @@
   class="workspace"
   data-panel-open={panelOpen}
   data-drawer-open={drawerOpen}
-  data-mobile-level={mobileLevel}
+  data-mobile-level={effectiveMobileLevel}
 >
   <nav class="rail" aria-label="メインナビゲーション">
     <div class="rail__top">
@@ -210,7 +224,7 @@
 
     <div class="rail__bottom">
       {#if onsignout}
-        <Button variant="quiet" disabled={busy} onclick={onsignout}>ログアウト</Button>
+        <Button variant="icon" ariaLabel="ログアウト" disabled={busy} onclick={onsignout}>⇥</Button>
       {/if}
     </div>
   </nav>
@@ -237,7 +251,7 @@
     </div>
 
     <div class="channel-column__scroll">
-      {#if s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && channelListTimedOut)}
+      {#if s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut)}
         <StatusBanner
           tone="danger"
           role="alert"
@@ -245,7 +259,7 @@
           detail="通信状況を確認して、もう一度お試しください。"
           actionLabel="再試行"
           onaction={() => {
-            channelListTimedOut = false
+            announcementController.resetChannelListTimeout()
             void channels.load()
           }}
         />
@@ -254,7 +268,7 @@
       {/if}
 
       <ChannelList channels={s.channels} selectedId={s.selectedId} onselect={handleSelectChannel} />
-      <CreateChannelForm oncreate={(name, visibility) => channels.create(name, visibility)} />
+      <CreateChannelForm oncreate={handleCreateChannel} />
     </div>
 
     {#if authError}
@@ -303,7 +317,7 @@
             channelId={selected.id}
             selfId={organization?.member.id ?? ''}
             organizationUnavailable={session.sync.unavailable}
-            reconnecting={announceState.reconnecting}
+            reconnecting={announcementView.reconnecting}
             bind:composerRef={mainComposerRef}
             ongoToChannelList={goToChannelList}
           />
@@ -312,18 +326,42 @@
     {:else if s.status === 'ready'}
       <header class="main-card__header">
         <div class="main-card__title-group">
+          <span class="mobile-only">
+            <Button
+              variant="icon"
+              ariaLabel="チャンネル一覧へ戻る"
+              onclick={() => {
+                mobileLevel = 'channels'
+              }}
+            >
+              ‹
+            </Button>
+          </span>
           <h1 class="main-card__title">チャンネル</h1>
         </div>
       </header>
       <div class="main-card__empty">
         <EmptyState
           title="チャンネルがありません。"
-          description="左のフォームから作成してください。"
+          description="チャンネル一覧から作成してください。"
+          actionLabel="チャンネル一覧へ"
+          onaction={goToChannelList}
         />
       </div>
     {:else}
       <header class="main-card__header">
         <div class="main-card__title-group">
+          <span class="mobile-only">
+            <Button
+              variant="icon"
+              ariaLabel="チャンネル一覧へ戻る"
+              onclick={() => {
+                mobileLevel = 'channels'
+              }}
+            >
+              ‹
+            </Button>
+          </span>
           <h1 class="main-card__title">fukulow</h1>
         </div>
       </header>
@@ -346,18 +384,17 @@
       >
         {#if activePanelTab === 'topics'}
           <EmptyState
-            title="トピックはまだありません。"
-            description="メッセージからトピックを開始するとここに表示されます。"
+            title="トピック一覧は準備中です。"
+            description="メインタイムラインからメッセージを閲覧・送信できます。"
           />
         {:else if activePanelTab === 'overview'}
           <EmptyState
-            title={selected ? `# ${selected.name}` : 'チャンネル概要'}
-            description="このチャンネルの概要を表示します。"
+            title="チャンネル概要は準備中です。"
+            description={selected ? `# ${selected.name}（${selected.visibility === 'private' ? 'プライベート' : 'パブリック'}）` : undefined}
           />
         {:else}
           <EmptyState
-            title="メンバー"
-            description="このチャンネルのメンバー一覧を表示します。"
+            title="メンバー一覧は準備中です。"
           />
         {/if}
       </Panel>
