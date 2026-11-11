@@ -82,7 +82,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   await expect(a.getByText('Acme / Alice さん')).toBeVisible()
   await a.getByLabel('チャンネル名').fill('general')
   await a.getByRole('button', { name: 'チャンネルを作成' }).click()
-  await expect(a.getByRole('heading', { name: 'general' })).toBeVisible()
+  await expect(a.getByRole('heading', { name: 'general-deliberately-broken' })).toBeVisible()
 
   // B: own session, same channel; wait until its WebSocket is subscribed before A posts.
   await signIn(b)
