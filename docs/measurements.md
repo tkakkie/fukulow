@@ -122,7 +122,7 @@ Limits/reproduction: raw per-run CPU peaks, p50/p99 and configs are captured by 
 
 #135 recovery-barrier measurement (2026-11-09 23:50 UTC, clean implementation ec265e8): the #57 command above with a separate `LOAD_RESULT_DIR`, same Apple M5/10 CPU/32 GiB, Docker VM 10 CPU/7.748 GiB, PostgreSQL 18 and k6 1.8.2; Docker is now 29.9.3 (baseline 29.9.2), so this is not a controlled performance comparison. Offered 600 sends/30.005 s = 19.9967/s; peak 20 connections, 3 concurrent publishes; 12,000 deliveries, zero missing/errors. Delivery mean/p95/p99 8.754/25/69.05 ms; HTTP 7.682/23/65.04 ms. DB: 7 top-level queries/send, 9 including transaction statements, 11.0017 including nested FK checks; the barrier accounts for exactly 600 additional statements. Fourteen docker stats samples: generator CPU mean/peak 5.94/7.53%, peak memory 25.67 MiB; app 3.72/5.04%, 66.05 MiB; DB 5.85/8.91%, 90.09 MiB. Raw metadata, SQL snapshots, resource samples and k6 output are in that artifact directory; the modest load and shared-host sampling limitations above still apply.
 
-## Watermark and send admission (#147, #156, #158)
+## Watermark and send admission (#147, #156, #158, #199)
 
 ### #147 before/after (2026-11-10 00:17/00:21 UTC)
 
@@ -158,6 +158,51 @@ Limits/reproduction: raw per-run CPU peaks, p50/p99 and configs are captured by 
 - Issue: #158. Decision: `docs/decisions.md` "Admission and timeouts (barrier timeouts)".
 
 #158 residue measurement (PostgreSQL 18.6, max_connections=100, client_connection_check_interval=0, Docker fukulow-pg-test): before the fix, three same-key sends on one Channel each failed after about 10.07 s, freed all app pool connections, but left one sleeping COMMIT backend with 19 locks; retries did not accumulate COMMIT backends on that Channel. Three more distinct Channels increased residue to four backends/69 locks after another 10.16 s. All production lock timeouts remained enabled; 36 unrelated Organization HTTP write/read/subscription probes passed. This reproduced cross-Channel accumulation, not max_connections exhaustion or an indefinitely running load. After the fix the same four rounds ended in 8.069/8.079/8.079/8.167 s with zero backend/lock/pool residue after every round and 28 unrelated probes passed. A separately abandoned sleeping COMMIT released its backend and all 19 locks after 8.018 s on the PostgreSQL clock, while reconnect waited for rollback; committed/rolled-back/unknown-result recovery tests still passed. These are local fault measurements, not throughput or capacity measurements.
+
+### #199 per-Channel watermark cap comparison (2026-11-11)
+
+- Issue: [#199](https://github.com/tkakkie/fukulow/issues/199).
+- Decision: `docs/decisions.md` "Admission and timeouts"; maintainer chose option 2 on 2026-11-11: measured, keep cap 4; do not merge the cap-2 change.
+
+Local macOS ARM64, release test binaries, same host and workloads, with only `CHANNEL_WATERMARK_CAP` differing. The probe was `server/src/realtime/tests/watermark_measurement.rs::measure_popular_channel_watermark_reconnects` on local, unpushed commit `0c78225` (`codex/watermark-cap-199`). It is not in main, which limits reproduction from main alone. No new measurement was run for this record.
+
+Method: a 20-connection pool and one popular Channel. Steady state uses 128 workers, each making 40 sequential TCP reconnect/subscribe attempts (5,120 total). Recovery first establishes 10,000 clients, drops all sockets, then retries with seeded jittered exponential backoff (initial 250–750 ms, base capped at 10 s, jitter 0.5–1.5, up to 20 attempts); recovered sockets stay connected and must all receive the canonical live Message. Subscribe p95/p99 measure successful subscribe latency, excluding TCP/authentication and backoff; phase successes/s and full recovery include those costs. Admission rejections are counted from logs separately from Close frames and handshake errors.
+
+First single pair, with another AI job overlapping near the end:
+
+| Scenario | Cap | Successes/s | Subscribe p95 / p99 (ms) | 1011 admission rejections | Handshake errors | Full recovery (s) |
+|---|---:|---:|---:|---:|---:|---:|
+| 128 workers, 5,120 subscribes | 4 | 1,271.7 | 105.1 / 107.0 | 0 | NR | — |
+| Same | 2 | 878.3 | 150.9 / 152.6 | 0 | NR | — |
+| 10,000 clients, backoff | 4 | 221.2 | 2,109.9 / 6,111.7 | 15,791 | 17,442 | 45.2 |
+| Same | 2 | 220.2 | 2,091.1 / 2,162.9 | 20,741 | 15,883 | 45.4 |
+
+Both caps recovered all 10,000 clients within 8 attempts and delivered the canonical live Message to all. Popular-Channel throughput fell 30.9% at cap 2 in this pair.
+
+Re-measurement on an idle host with no other AI job running: alternating cap order 4, 2, 2, 4, 4, 2, with 10 s gaps. Run numbers below are within each cap, in chronological order.
+
+| Steady-state cap | Run 1 successes/s | Run 2 successes/s | Run 3 successes/s | Subscribe p95 (ms) | Subscribe p99 (ms) | 1011 admission rejections | Handshake errors | Full recovery |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| 4 | 1,219 | 1,211 | 1,239 | 110–113 | 113–116 | 0 | NR | — |
+| 2 | 842 | 847 | 849 | 156–160 | 159–161 | 0 | NR | — |
+
+The source retains only p95/p99 ranges across the three steady-state runs, not each run's percentiles. Throughput spread is under 3%; cap 2 is about 31% slower with about 40% higher p99.
+
+| 10,000-client backoff cap | Run | Successes/s | Subscribe p95 / p99 (ms) | 1011 admission rejections | Handshake errors | Full recovery (s) |
+|---|---:|---|---:|---:|---:|---:|
+| 4 | 1 | NR | 7,634 / 7,784 | 13,924 | 18,564 | 46.0 |
+| 4 | 2 | NR | 2,027 / 5,106 | 13,170 | 18,894 | 45.4 |
+| 4 | 3 | NR | 6,897 / 6,987 | 13,800 | 18,752 | 45.8 |
+| 2 | 1 | NR | 2,388 / 7,628 | 19,325 | 16,311 | 44.9 |
+| 2 | 2 | NR | 2,236 / 7,142 | 20,148 | 16,153 | 45.4 |
+
+NR means not reported in the retained measurement data; — means not applicable. The third cap-2 recovery run failed during setup (initial connection before the outage) and is excluded, not a result. Ephemeral-port or listen-backlog exhaustion from the preceding run was suspected, not established.
+
+Prediction only, separate from measured results: at 4 ms per watermark, reducing cap 4 to 2 was expected to reduce popular-Channel throughput from ~1,000/s to ~500/s.
+
+The repeated measurements show about 45% more recovery-time 1011 admission rejections at cap 2, with no significant improvement in full recovery (about 45 s at either cap). Cap 2's steadier p95 did not establish a p99 benefit: repeated p99 values overlap, so the first single-run p99 difference did not hold up. This measured performance cost did not justify cap 2; it does not mean cross-tenant failure spread is solved. Two stuck Channels can still hold all 8 watermark slots and make another Organization's subscribe fail with 1011; #213 considers per-Organization watermark fairness only if that spread becomes a real problem.
+
+Limits: local measurement with host listen backlog 128 and more than 16k handshake errors at either cap in the re-measurement; recovery is bounded by handshake capacity. This does not guarantee 10,000-connection capacity in production. The first pair also shared the host with another AI job, the repeated recovery sample has only two valid cap-2 runs, and the probe code is not in main. Follow-up #212 covers handshake admission, listen backlog and accept pacing; client jitter is in #195.
 
 ## Session fallback pass (#157, #146)
 
@@ -375,6 +420,57 @@ During each timed window a fifth worker sends real HTTP Topic Messages to the sa
 | 210,000 | Deep, exclusive 190,000 | 400 | 28.619 / 32.235 / 38.311 | 59 | 4.776 / 6.345 / 8.638 | 2.924 / 20.177 |
 
 Both sizes/boundaries pass. The smaller Channel gained 74 Messages and the larger 118 over their two timed windows. A deliberately simple proportional projection from the larger point's worst read p95 crosses 100 ms at 210,000 ×100/32.342 ≈649,310 total Channel Messages (about 30,920 Topics, 618,390 pre-W mixed Messages at the same ratio). Treat ~649k as the planning stop-and-remeasure point; it is not a measured failure or safe capacity bound. Plan changes, heap visibility, cache pressure and contention can invalidate linear scaling; these single, short, warm-cache shared-host runs do not establish arbitrary-history, cold-cache or production performance. The smaller point is a scaling check, not a fitted capacity guarantee. No limits were added. Raw logs outside Git: `/private/tmp/topics-137-release-{5000,10000}.log`.
+
+## Reply chain indexed paging (#139, 2026-11-11)
+
+Target chosen before measuring: local warm full in-process HTTP p95 <100 ms for a 200-Message page, for both a 10,000-deep and a 10,000-wide Reply chain. Four response-paced readers, first/middle/final pages; no depth cap. Keep the stored root and indexed range approach: all six measured points pass.
+
+Reproduce: `DATABASE_URL` pointing at an isolated PostgreSQL 18.6 instance, then `cargo test --release -p fukulow-server --lib measure_reply_chain_pages -- --ignored --nocapture`. Probe: `server/src/messages/tests/replies/measurement.rs`; query: `server/src/messages/replies.rs`; migration: `202611110198_replies.sql`; base c20b436. Native optimized Rust 1.99.0, current-thread Tokio, 20-connection application pool, fresh SQLx database, Apple M5/10 logical CPUs/32 GiB, macOS 27.0.1 arm64, Docker PostgreSQL 18.6 over loopback port 55439 (trust-auth test container). No other test/build/load work launched by this task during timed requests; unrelated desktop/worktree activity was not isolated, and another Cargo build was observed near probe start.
+
+Dataset: one Organization/Member/public Channel, no Topic. Each chain has one root and 10,000 descendants, stored via SQL fixture setup. Deep: each Reply points to its predecessor (10,000 edges). Wide: every Reply points directly to the root. Ten unrelated non-Reply Messages follow each chain entry, so deep has 110,011 Channel Messages; wide is added in the same Channel for 220,022 total. All seq positions are populated. Roots have null reply_root_id; every descendant stores the root. Body is `measurement` (unrelated body `unrelated measurement`). ANALYZE only, no forced VACUUM or planner settings. A dense-only pilot chose the existing Channel/seq index; interleaving unrelated Messages tests the sparse-chain index path without forcing an index.
+
+Every request anchors at the deepest/last descendant, resolves its root by scoped id, and returns limit=200. First/middle/final requests pass after_seq = offset + 11k, where k=0/5000/9801 and offset=0 for deep, 110011 for wide. Ten sequential warm-ups per point, then four readers x100 requests (400 samples; 2,400 total). Each response verifies root, page length, exact first/last seq and has_more (true/true/false). Nearest-rank p95 = sorted sample 380/400. Timings include authentication, preauthorization, watermark admission/barrier, fresh snapshot authorization, anchor lookup, page query, serialization and response decoding; exclude fixture setup and TCP/proxy/TLS. No concurrent sends in this cost probe; correctness tests cover appends between pages.
+
+| Shape | Consumed chain entries k | Channel Messages | p50 ms | p95 ms | max ms | Target |
+|---|---:|---:|---:|---:|---:|---|
+| Deep | 0 | 110,011 | 5.188 | 8.490 | 14.694 | <100 ms: pass |
+| Deep | 5,000 | 110,011 | 4.841 | 6.243 | 13.886 | <100 ms: pass |
+| Deep | 9,801 | 110,011 | 5.066 | 8.103 | 12.161 | <100 ms: pass |
+| Wide | 0 | 220,022 | 4.989 | 9.503 | 29.957 | <100 ms: pass |
+| Wide | 5,000 | 220,022 | 4.852 | 7.164 | 11.944 | <100 ms: pass |
+| Wide | 9,801 | 220,022 | 4.897 | 7.788 | 14.620 | <100 ms: pass |
+
+EXPLAIN (ANALYZE, BUFFERS) after each point uses messages_channel_id for the root point lookup and messages_reply_chain_seq for the descendant range. The range emits only 200/201/200 rows, with zero filtered-out descendants; no recursive traversal. The page plan hits 13-16 shared buffers, reads zero blocks, and takes 0.106-0.148 ms. The separate anchor query uses the scoped unique id; it never follows parent links. These short, shared-host warm-cache runs support page-size work for the observed plans, not arbitrary history size, cold-cache/maximum-body performance, planner stability or production capacity. No truncation, expiry, depth cap or dependency was added. Raw logs outside Git: `/private/tmp/replies-139-measure-sparse.log`.
+
+### Final-source validation-precedence recheck (#139)
+
+After adding DeferredOrganizationAuth (same session query, with Organization denial deferred until validation), reran the identical committed probe on the same isolated PostgreSQL port and dataset. All six points still pass the preselected <100 ms target. No other suite/build was launched by this task during timed requests; shared-host background work remains uncontrolled, so the difference from the preceding run is not a controlled regression comparison or evidence of extractor cost.
+
+| Shape | Consumed chain entries k | p50 ms | p95 ms | max ms |
+|---|---:|---:|---:|---:|
+| Deep | 0 | 13.196 | 28.857 | 67.563 |
+| Deep | 5,000 | 11.881 | 29.778 | 47.911 |
+| Deep | 9,801 | 12.488 | 34.693 | 50.640 |
+| Wide | 0 | 9.297 | 17.585 | 28.329 |
+| Wide | 5,000 | 10.040 | 19.482 | 47.250 |
+| Wide | 9,801 | 8.945 | 14.606 | 25.853 |
+
+All six plans still use the scoped root index and messages_reply_chain_seq; the range emits at most 201 rows with no descendant filter removals. Same 400 samples per point, warm-ups, exact response assertions and limitations as above. Raw log: `/private/tmp/replies-139-measure-final.log`.
+
+### Partial-index review recheck (#139)
+
+After merging #207 and making messages_reply_chain_seq partial (WHERE reply_root_id IS NOT NULL), reran the same release probe and exact dataset above on a fresh isolated PostgreSQL 18.6 Docker instance, random loopback port 55413. Source: f535341 plus the origin/main d1d5aaf merge and review fixes. Same hardware/software, 20-connection pool, four readers, ten warm-ups and 400 samples per point. No other builds/tests/load probes from this task ran during timed requests; shared-host activity remains uncontrolled. Earlier records remain historical; this is not a controlled performance comparison.
+
+| Shape | Consumed chain entries k | p50 ms | p95 ms | max ms |
+|---|---:|---:|---:|---:|
+| Deep | 0 | 4.823 | 7.698 | 11.394 |
+| Deep | 5,000 | 4.824 | 7.749 | 13.957 |
+| Deep | 9,801 | 4.837 | 7.534 | 12.291 |
+| Wide | 0 | 4.906 | 8.483 | 14.684 |
+| Wide | 5,000 | 4.863 | 6.927 | 10.550 |
+| Wide | 9,801 | 5.069 | 7.819 | 16.759 |
+
+All six points pass the unchanged <100 ms target. EXPLAIN (ANALYZE, BUFFERS) confirms messages_org_channel_id_key for the root and the partial messages_reply_chain_seq for descendants at every point, without forcing the planner. Descendant ranges emit 200/201/200 rows with zero filter removals; page plans hit 12–17 shared buffers, read zero blocks and take 0.117–0.199 ms. Keep the partial index: it serves the chain query while excluding non-Replies. Same warm-cache and production-capacity limits as above. Raw log outside Git: /private/tmp/replies-139-review-measure.log.
 
 ## Graceful shutdown and reconnect storm (#195, 2026-11-11 JST)
 

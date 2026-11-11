@@ -334,9 +334,11 @@ export function createSync(options: SyncOptions) {
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),
     replaceSession: (selfId: string) => dispatch({ type: 'session_replaced', selfId }),
     watch: (channel: string) => dispatch({ type: 'watch', channel }),
+    channelUnavailable: (channel: string) => dispatch({ type: 'channel_unavailable', channel }),
     unwatch: (channel: string) => dispatch({ type: 'unwatch', channel }),
     close: () => dispatch({ type: 'stop' }),
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
+    settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     getTimeline(channel: string) {
       let t = timelines.get(channel)
       if (!t) { t = timeline(channel); timelines.set(channel, t) }
