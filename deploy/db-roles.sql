@@ -10,7 +10,8 @@ BEGIN
     -- Never reassign/drop existing objects or silently retain role memberships.
     IF EXISTS (SELECT FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass
                AND refobjid = 'fukulow_app'::regrole AND deptype = 'o')
-       OR EXISTS (SELECT FROM pg_auth_members WHERE member = 'fukulow_app'::regrole) THEN
+       OR EXISTS (SELECT FROM pg_auth_members
+                  WHERE member = 'fukulow_app'::regrole OR roleid = 'fukulow_app'::regrole) THEN
         RAISE EXCEPTION 'fukulow_app must own no objects and have no role memberships';
     END IF;
     ALTER ROLE fukulow_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE

@@ -28,6 +28,56 @@ async fn role_settings(owner: &PgPool) -> Vec<Option<String>> {
     .unwrap()
 }
 
+async fn check_membership_rejection(owner: &PgPool, app_is_member: bool) {
+    let other_role = format!("role_membership_test_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(&format!("CREATE ROLE {other_role}"))
+        .execute(owner)
+        .await
+        .unwrap();
+    // Memberships are cluster-global: clean up even if a rejection assertion panics.
+    let result = std::panic::AssertUnwindSafe(async {
+        let (granted, member) = if app_is_member {
+            (other_role.as_str(), "fukulow_app")
+        } else {
+            ("fukulow_app", other_role.as_str())
+        };
+        sqlx::raw_sql(&format!("GRANT {granted} TO {member}"))
+            .execute(owner)
+            .await
+            .unwrap();
+        let snapshot = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT jsonb_build_object('role', to_jsonb(r), 'memberships', \
+                 (SELECT jsonb_agg(to_jsonb(m) ORDER BY roleid, member) FROM pg_auth_members m \
+                  WHERE member = r.oid OR roleid = r.oid))::text \
+                 FROM pg_authid r WHERE rolname = 'fukulow_app'",
+            )
+            .fetch_one(owner)
+            .await
+            .unwrap()
+        };
+        let before = snapshot().await;
+        let error = roles(owner, "rejected-membership-test-only")
+            .await
+            .expect_err(&format!("roles accepted GRANT {granted} TO {member}"));
+        assert_eq!(
+            error.to_string(),
+            "Database roles update failed (diagnostics suppressed)"
+        );
+        // Include the password hash without printing it in assertion diagnostics.
+        assert!(before == snapshot().await, "role or memberships changed");
+    })
+    .catch_unwind()
+    .await;
+    sqlx::raw_sql(&format!("DROP ROLE {other_role}"))
+        .execute(owner)
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 pub(super) async fn check_app_role(owner: PgPool) {
     // Reuse one connection so leakage of transaction-local settings is observable.
     let owner = PgPoolOptions::new()
@@ -155,6 +205,8 @@ pub(super) async fn check_app_role(owner: PgPool) {
         );
     }
     assert!(roles(&owner, "").await.is_err());
+    check_membership_rejection(&owner, true).await;
+    check_membership_rejection(&owner, false).await;
     sqlx::query("ALTER TABLE future_role_test OWNER TO fukulow_app")
         .execute(&owner)
         .await

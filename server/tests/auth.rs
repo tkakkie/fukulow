@@ -2018,6 +2018,8 @@ async fn web_and_native_share_account_and_ip_failure_budgets(pool: PgPool) {
 mod database_roles;
 
 #[sqlx::test]
-async fn app_role_denies_ddl_and_preserves_member_and_tenant_protection(pool: PgPool) {
+async fn app_role_denies_ddl_and_both_memberships_and_preserves_member_and_tenant_protection(
+    pool: PgPool,
+) {
     database_roles::check_app_role(pool).await;
 }
