@@ -3,33 +3,44 @@
 use std::process::Command;
 
 #[test]
-fn startup_rejects_empty_setup_token_but_accepts_unset_or_nonempty() {
-    let mut database_errors = Vec::new();
-    for setup_token in [None, Some(""), Some("setup-token-test-only")] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
-        // An invalid URL makes reaching database configuration fail immediately.
-        command
-            .env("DATABASE_URL", "invalid-test-url")
-            .env("FUKULOW_COOKIE_SECURE", "true")
-            .env_remove("FUKULOW_SETUP_TOKEN");
-        if let Some(setup_token) = setup_token {
-            command.env("FUKULOW_SETUP_TOKEN", setup_token);
-        }
-        let output = command.output().unwrap();
-        assert!(!output.status.success());
-        let error = String::from_utf8(output.stderr).unwrap();
-        if setup_token == Some("") {
-            assert!(
-                error.contains("FUKULOW_SETUP_TOKEN must not be empty"),
-                "{error}"
-            );
-        } else {
-            assert!(!error.contains("FUKULOW_SETUP_TOKEN"), "{error}");
-            assert!(!error.is_empty());
-            database_errors.push(error);
+fn startup_requires_setup_token_regardless_of_cookie_security() {
+    for cookie_secure in [None, Some("true"), Some("false")] {
+        for setup_token in [
+            None,
+            Some(""),
+            Some(" \t\n"),
+            Some("\u{2003}"),
+            Some("setup-token-local-test-only"),
+            Some(" setup-token-local-test-only\t"),
+            Some("setup-token-test-only"),
+            Some(" custom-setup-token-test-only "),
+        ] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
+            command.env_clear().env("DATABASE_URL", "invalid-test-url");
+            if let Some(value) = cookie_secure {
+                command.env("FUKULOW_COOKIE_SECURE", value);
+            }
+            if let Some(value) = setup_token {
+                command.env("FUKULOW_SETUP_TOKEN", value);
+            }
+            let output = command.output().unwrap();
+            assert!(!output.status.success());
+            let error = String::from_utf8(output.stderr).unwrap();
+            if matches!(
+                setup_token,
+                Some("setup-token-test-only" | " custom-setup-token-test-only ")
+            ) {
+                assert!(!error.contains("FUKULOW_SETUP_TOKEN"), "{error}");
+                assert!(!error.is_empty());
+            } else {
+                assert!(error.contains("FUKULOW_SETUP_TOKEN must"), "{error}");
+            }
+            assert!(!error.contains("setup-token-test-only"));
+            assert!(!error.contains("setup-token-local-test-only"));
+            assert!(!error.contains("custom-setup-token-test-only"));
+            assert!(output.stdout.is_empty());
         }
     }
-    assert_eq!(database_errors[0], database_errors[1]);
 }
 
 #[test]
@@ -51,11 +62,32 @@ fn startup_rejects_partial_or_invalid_proxy_configuration_before_database_access
             Some("bad header"),
             "FUKULOW_CLIENT_IP_HEADER must be",
         ),
+        (
+            Some("192.0.2.0/33"),
+            Some("x-forwarded-for"),
+            "FUKULOW_TRUSTED_PROXIES must contain",
+        ),
+        (
+            Some("2001:db8::/129"),
+            Some("x-forwarded-for"),
+            "FUKULOW_TRUSTED_PROXIES must contain",
+        ),
+        (
+            Some("192.0.2.0/+24"),
+            Some("x-forwarded-for"),
+            "FUKULOW_TRUSTED_PROXIES must contain",
+        ),
+        (
+            Some("192.0.2.0/024"),
+            Some("x-forwarded-for"),
+            "FUKULOW_TRUSTED_PROXIES must contain",
+        ),
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
         command
+            .env_clear()
             .env("DATABASE_URL", "invalid-test-url")
-            .env_remove("FUKULOW_SETUP_TOKEN")
+            .env("FUKULOW_SETUP_TOKEN", "setup-token-test-only")
             .env_remove("FUKULOW_TRUSTED_PROXIES")
             .env_remove("FUKULOW_CLIENT_IP_HEADER");
         if let Some(peers) = peers {
@@ -80,8 +112,9 @@ fn startup_rejects_invalid_websocket_origins_before_database_access() {
         "https://chat.example:99999",
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+            .env_clear()
             .env("DATABASE_URL", "invalid-test-url")
-            .env_remove("FUKULOW_SETUP_TOKEN")
+            .env("FUKULOW_SETUP_TOKEN", "setup-token-test-only")
             .env("FUKULOW_WS_ALLOWED_ORIGINS", origins)
             .output()
             .unwrap();

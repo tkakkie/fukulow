@@ -651,9 +651,9 @@ export interface components {
             password: string;
             /**
              * Format: password
-             * @description Required when FUKULOW_SETUP_TOKEN is configured on the server.
+             * @description Must match the server's required FUKULOW_SETUP_TOKEN.
              */
-            setup_token?: string | null;
+            setup_token: string;
         };
         SetupStatus: {
             setup_required: boolean;
@@ -756,13 +756,24 @@ export interface components {
             topic: components["schemas"]["TopicSummary"];
         };
         UnreadChannel: components["schemas"]["Channel"] & {
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Latest committed Channel seq in the positions/counts snapshot; 0 if empty.
+             */
+            as_of_seq: number;
+            /**
+             * Format: int64
+             * @description Other senders' Messages without Topic above read_seq, bounded by as_of_seq.
+             */
             main_unread_count: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Current Member position for Messages without Topic; independent of as_of_seq.
+             */
             read_seq: number;
             /**
              * Format: int64
-             * @description Channel badge: main-timeline Unread plus all Topic Unread.
+             * @description Channel badge: main-timeline Unread plus all Topic Unread, bounded by as_of_seq.
              */
             unread_count: number;
         };

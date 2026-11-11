@@ -99,7 +99,7 @@ describe('auth adapter: screens', () => {
 
   it('setup goes to the app, or back to Sign in with the notice the auth layer chose', async () => {
     const s = stack({ setupAndSignIn: vi.fn(async () => ({ state: { screen: 'app' as const, identity: identity('owner') } })) })
-    const req = { organization_name: 'Org', name: 'A', email: 'a@example.com', password: 'x'.repeat(12), setup_token: null }
+    const req = { organization_name: 'Org', name: 'A', email: 'a@example.com', password: 'x'.repeat(12), setup_token: 'tok' }
     expect(await s.auth.submitSetup(req)).toBe(true)
     expect(s.auth.view.screen).toBe('app')
     const failed = stack({ setupAndSignIn: vi.fn(async () => ({ error: 'failed' })) })

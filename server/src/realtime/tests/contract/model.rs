@@ -254,6 +254,7 @@ pub(super) struct TimelineTopic {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UnreadExpectation {
+    pub as_of_seq: i64,
     pub read_seq: i64,
     pub main_unread_count: i64,
     pub unread_count: i64,

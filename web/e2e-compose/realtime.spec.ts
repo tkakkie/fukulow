@@ -75,6 +75,8 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   await a.getByLabel('オーナーの名前').fill('Alice')
   await a.getByLabel('メールアドレス').fill(owner.email)
   await a.getByLabel('パスワード（12文字以上）').fill(owner.password)
+  if (!process.env.E2E_SETUP_TOKEN) throw new Error('Set E2E_SETUP_TOKEN for the disposable stack')
+  await a.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN)
   await a.getByRole('button', { name: 'セットアップして開始' }).click()
   await expect(a.getByText('Acme / Alice さん')).toBeVisible()
   await a.getByLabel('チャンネル名').fill('general')

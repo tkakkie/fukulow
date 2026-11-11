@@ -232,7 +232,8 @@ export function createSync(options: SyncOptions) {
       }
       case 'send': {
         const result = await request(effect.id, () => transport.sendMessage(effect.channel,
-          { client_message_id: effect.client_message_id, body: effect.body }))
+          { client_message_id: effect.client_message_id, body: effect.body,
+            ...(effect.reply_to ? { reply_to: effect.reply_to } : {}) }))
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
           : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
         break
@@ -259,13 +260,13 @@ export function createSync(options: SyncOptions) {
     let lastExtra: ChannelExtra | null = null
     const listeners = new Set<() => void>()
     channelListeners.set(channel, listeners)
-    async function send(body: string) {
+    async function send(body: string, target: Pick<SendMessageRequest, 'reply_to'> = {}) {
       if (!body.trim() || messageBodyError(body) !== null || !state.running || state.organization === 'unavailable') {
         return false
       }
       const clientMessageId = newId()
       const before = state.channels[channel]?.pending
-      const completion = dispatch({ type: 'user_send', channel, clientMessageId, body })
+      const completion = dispatch({ type: 'user_send', channel, clientMessageId, body, ...target })
       const accepted = state.channels[channel]?.pending !== before
       await completion
       return accepted

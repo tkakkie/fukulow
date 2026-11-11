@@ -2,7 +2,7 @@ use super::*;
 
 #[sqlx::test]
 async fn delivery_contract_rejects_incorrect_unread_counts_and_positions(pool: PgPool) {
-    for change_count in [false, true] {
+    for wrong in 0..3 {
         let mut scenario = scenarios()
             .into_iter()
             .find(|s| s.id == "unread-positions-are-independent-and-monotonic")
@@ -10,14 +10,18 @@ async fn delivery_contract_rejects_incorrect_unread_counts_and_positions(pool: P
         let mut changed = None;
         for (step, item) in scenario.steps.iter_mut().enumerate() {
             match item {
-                Step::Unread { expect, .. } if change_count => {
-                    expect.unread_count += 1;
+                Step::Unread { expect, .. } if wrong != 0 => {
+                    if wrong == 1 {
+                        expect.unread_count += 1;
+                    } else {
+                        expect.as_of_seq += 1;
+                    }
                     changed = Some(step);
                     break;
                 }
                 Step::MarkRead {
                     expect_read_seq, ..
-                } if !change_count => {
+                } if wrong == 0 => {
                     *expect_read_seq += 1;
                     changed = Some(step);
                     break;

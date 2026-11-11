@@ -13,12 +13,12 @@
         {"do":"post","as":"bob","channel":"general"},
         {"do":"post","as":"bob","channel":"general","topic_name":"Hidden"},
         {"do":"post","as":"alice","channel":"general","topic_name":"Hidden"},
-        {"do":"unread","as":"bob","channel":"general","expect":{"read_seq":0,"main_unread_count":1,"unread_count":3,"topic_counts":{"Hidden":{"read_seq":0,"unread_count":2}}}},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":5,"read_seq":0,"main_unread_count":1,"unread_count":3,"topic_counts":{"Hidden":{"read_seq":0,"unread_count":2}}}},
         {"do":"mark_read","as":"bob","channel":"general","read_seq":999,"expect_read_seq":5},
-        {"do":"unread","as":"bob","channel":"general","expect":{"read_seq":5,"main_unread_count":0,"unread_count":2,"topic_counts":{"Hidden":{"read_seq":0,"unread_count":2}}}},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":5,"read_seq":5,"main_unread_count":0,"unread_count":2,"topic_counts":{"Hidden":{"read_seq":0,"unread_count":2}}}},
         {"do":"mark_read","as":"bob","channel":"general","read_seq":1,"expect_read_seq":5},
         {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":2,"expect_read_seq":2},
-        {"do":"unread","as":"bob","channel":"general","expect":{"read_seq":5,"main_unread_count":0,"unread_count":1,"topic_counts":{"Hidden":{"read_seq":2,"unread_count":1}}}},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":5,"read_seq":5,"main_unread_count":0,"unread_count":1,"topic_counts":{"Hidden":{"read_seq":2,"unread_count":1}}}},
         {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":5,"expect_read_seq":5},
         {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":1,"expect_read_seq":5},
         {"do":"connect","socket":"device","as":"bob"},
@@ -26,9 +26,9 @@
         {"do":"post","as":"alice","channel":"general"},
         {"do":"post","as":"alice","channel":"general","topic_name":"Hidden"},
         {"do":"connect","socket":"device","as":"bob"},
-        {"do":"unread","as":"bob","channel":"general","expect":{"read_seq":5,"main_unread_count":1,"unread_count":2,"topic_counts":{"Hidden":{"read_seq":5,"unread_count":1}}}},
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":7,"read_seq":5,"main_unread_count":1,"unread_count":2,"topic_counts":{"Hidden":{"read_seq":5,"unread_count":1}}}},
         {"do":"mark_read","as":"bob","channel":"general","topic_name":"Hidden","read_seq":7,"expect_read_seq":7},
-        {"do":"unread","as":"bob","channel":"general","expect":{"read_seq":5,"main_unread_count":1,"unread_count":1,"topic_counts":{"Hidden":{"read_seq":7,"unread_count":0}}}}
+        {"do":"unread","as":"bob","channel":"general","expect":{"as_of_seq":7,"read_seq":5,"main_unread_count":1,"unread_count":1,"topic_counts":{"Hidden":{"read_seq":7,"unread_count":0}}}}
       ]
     }
   ]

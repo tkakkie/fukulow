@@ -66,7 +66,8 @@ impl Runner {
             else {
                 return Err(Failure::Unread { step });
             };
-            if c["read_seq"] != expect.read_seq
+            if c["as_of_seq"] != expect.as_of_seq
+                || c["read_seq"] != expect.read_seq
                 || c["main_unread_count"] != expect.main_unread_count
                 || c["unread_count"] != expect.unread_count
             {

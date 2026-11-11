@@ -28,6 +28,22 @@ const HTTP_METHODS: [&str; 8] = [
 const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 162;
 
 #[test]
+fn setup_token_contract_is_required_and_non_nullable() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        let schema = &document["components"]["schemas"]["SetupRequest"];
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("setup_token"))
+        );
+        assert_eq!(schema["properties"]["setup_token"]["type"], json!("string"));
+    }
+}
+
+#[test]
 fn every_api_operation_documents_shutdown_retry_contract() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
@@ -102,7 +118,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
         pool,
         shutdown: Default::default(),
         cookie_secure: true,
-        setup_token: None,
+        setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
@@ -665,7 +681,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
     let router = app(AppState {
         pool,
         cookie_secure: true,
-        setup_token: None,
+        setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
@@ -855,6 +871,17 @@ fn unread_openapi_exposes_positions_counts_and_scoped_monotonic_updates() {
         0
     );
     assert_eq!(schemas["ReadPosition"]["required"], json!(["read_seq"]));
+    let channel = &schemas["UnreadChannel"]["allOf"][1];
+    for field in ["as_of_seq", "read_seq", "main_unread_count", "unread_count"] {
+        assert!(
+            channel["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field))
+        );
+        assert_eq!(channel["properties"][field]["type"], "integer");
+        assert_eq!(channel["properties"][field]["format"], "int64");
+    }
     for field in ["read_seq", "unread_count"] {
         assert!(
             schemas["TopicSummary"]["required"]
