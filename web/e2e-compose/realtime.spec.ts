@@ -1,5 +1,6 @@
 import { expect, test, type Page, type WebSocket as ObservedWebSocket } from '@playwright/test'
 import type { components, ServerEvent } from '../src/api-schema.d.ts'
+import { secretSafe } from '../e2e/helpers.ts'
 
 type Message = components['schemas']['Message']
 
@@ -62,12 +63,12 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   expect(headers['strict-transport-security']).toBe(loopback ? undefined : 'max-age=31536000')
   expect(headers['cache-control']).toBe('no-cache')
   for (const path of ['/index.html', '/channels/general', '/favicon.svg']) {
-    expect((await a.request.get(path)).headers()['cache-control']).toBe('no-cache')
+    expect((await secretSafe(() => a.request.get(path))).headers()['cache-control']).toBe('no-cache')
   }
   const files = await a.locator('script[src], link[rel="stylesheet"]').evaluateAll(elements => elements.map(element => element.getAttribute('src') ?? element.getAttribute('href')!))
   expect(files.length).toBeGreaterThan(0)
   for (const path of files) {
-    const response = await a.request.get(path, { headers: { 'Accept-Encoding': 'gzip' } })
+    const response = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'gzip' } }))
     expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
     expect(response.headers()['content-encoding']).toBe('gzip')
   }
@@ -76,7 +77,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   await a.getByLabel('メールアドレス').fill(owner.email)
   await a.getByLabel('パスワード（12文字以上）').fill(owner.password)
   if (!process.env.E2E_SETUP_TOKEN) throw new Error('Set E2E_SETUP_TOKEN for the disposable stack')
-  await a.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN)
+  await secretSafe(() => a.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN!))
   await a.getByRole('button', { name: 'セットアップして開始' }).click()
   await expect(a.getByText('Acme / Alice さん')).toBeVisible()
   await a.getByLabel('チャンネル名').fill('general')
@@ -98,7 +99,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   await expect(a.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
   const cookies = await a.context().cookies()
   const session = cookies.find(cookie => cookie.name === '__Host-fukulow_session')!
-  expect(session).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict', path: '/' })
+  await secretSafe(() => expect(session).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict', path: '/' }))
   expect(cookies.some(cookie => cookie.name === 'fukulow_session')).toBe(false)
 
   const historyAfterPost: string[] = []
