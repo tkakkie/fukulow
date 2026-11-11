@@ -652,3 +652,76 @@ it('controller skips unchanged Channels during olderError bookkeeping and keeps 
   expect(b.get()).toMatchObject({ olderError: false, draft: 'draft B' })
   await client.sync.close()
 })
+
+it('controller clears olderError in the same dispatch when a non-stale before fetch fails while unwatched', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+
+  const a = client.sync.getTimeline('A')
+  const b = client.sync.getTimeline('B')
+  const observed: { loadingOlder: boolean; olderError: boolean }[] = []
+  const aListener = vi.fn(() => {
+    const s = a.get()
+    observed.push({ loadingOlder: s.loadingOlder, olderError: s.olderError })
+  })
+  const bListener = vi.fn()
+  a.subscribe(aListener)
+  b.subscribe(bListener)
+
+  await client.feed({ type: 'unwatch', channel: 'A' })
+  const older = (await client.feed({ type: 'load_older', channel: 'A' }))
+    .find(e => e.type === 'fetch_history' && e.page === 'before')!
+  expect(a.get()).toMatchObject({ loadingOlder: true, olderError: false })
+
+  await client.feed({ type: 'history_failed', respond_to: older, status: 'network' })
+  expect(a.get()).toMatchObject({ status: 'ready', hasOlder: true, loadingOlder: false, olderError: false })
+  expect(aListener).toHaveBeenCalledTimes(3)
+  expect(observed).toEqual([
+    { loadingOlder: false, olderError: false },
+    { loadingOlder: true, olderError: false },
+    { loadingOlder: false, olderError: false },
+  ])
+  expect(bListener).not.toHaveBeenCalled()
+  await client.sync.close()
+})
+
+it('controller clears olderError in the same dispatch when a non-stale before fetch fails after refresh sets hasOlder false', async () => {
+  const client = controllerClient()
+  await ready(client)
+  const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
+  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+
+  const a = client.sync.getTimeline('A')
+  const b = client.sync.getTimeline('B')
+  const observed: { hasOlder: boolean; loadingOlder: boolean; olderError: boolean }[] = []
+  const aListener = vi.fn(() => {
+    const s = a.get()
+    observed.push({ hasOlder: s.hasOlder, loadingOlder: s.loadingOlder, olderError: s.olderError })
+  })
+  const bListener = vi.fn()
+  a.subscribe(aListener)
+  b.subscribe(bListener)
+
+  const older = (await client.feed({ type: 'load_older', channel: 'A' }))
+    .find(e => e.type === 'fetch_history' && e.page === 'before')!
+  const latest = (await client.feed({ type: 'refresh', channel: 'A' }))
+    .find(e => e.type === 'fetch_history' && e.page === 'latest')!
+  await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: false })
+  expect(a.get()).toMatchObject({ hasOlder: false, loadingOlder: true, olderError: false })
+
+  await client.feed({ type: 'history_failed', respond_to: older, status: 'network' })
+  expect(a.get()).toMatchObject({ status: 'ready', hasOlder: false, loadingOlder: false, olderError: false })
+  expect(aListener).toHaveBeenCalledTimes(4)
+  expect(observed).toEqual([
+    { hasOlder: true, loadingOlder: true, olderError: false },
+    { hasOlder: true, loadingOlder: true, olderError: false },
+    { hasOlder: false, loadingOlder: true, olderError: false },
+    { hasOlder: false, loadingOlder: false, olderError: false },
+  ])
+  expect(bListener).not.toHaveBeenCalled()
+  await client.sync.close()
+})

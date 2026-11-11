@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { createSync, putExtra, type ChannelExtra } from './sync'
+import { createSync } from './sync'
 import type { Message, MessagePage, Result } from './api'
 import { record } from './protocol-test-helpers'
 
@@ -152,50 +152,52 @@ it('reports loadOlder failures in olderError and clears olderError on retry', as
   await sync.close()
 })
 
-it('putExtra returns early without allocating and keeps ChannelExtra object identity on a no-op patch', () => {
-  let spreads = 0
-  let reads: (string | symbol)[] = []
-  const initial = new Proxy(
-    { olderError: true, draft: 'hello', composerError: 'err' } satisfies ChannelExtra,
-    {
-      get(target, prop, receiver) {
-        reads.push(prop)
-        return Reflect.get(target, prop, receiver)
-      },
-      ownKeys(target) {
-        spreads++
-        return Reflect.ownKeys(target)
-      },
+it('no-op extra patches and dispatches leaving olderError false notify no Channel listener and keep extra-state identity', async () => {
+  let closeSocket!: (code: number) => void
+  const listMessages = vi.fn().mockImplementation(async (channel: string) => ({
+    ok: true,
+    data: { messages: [record(1, channel)], has_more: false },
+  }))
+  const sync = createSync({
+    selfId: 'me',
+    connect: handlers => {
+      closeSocket = handlers.onClose
+      handlers.onReady()
+      return { send() {}, close() {} }
     },
-  )
-  const extras = new Map<string, ChannelExtra>([['B', initial]])
+    api: { listMessages, sendMessage: vi.fn() },
+  })
+  await sync.start()
+  await sync.watch('B')
 
-  expect(putExtra(extras, 'B', {})).toBe(false)
-  expect(extras.get('B')).toBe(initial)
-  expect(reads).toEqual([])
-  expect(spreads).toBe(0)
+  const b = sync.getTimeline('B')
+  b.setDraft('bad\0')
+  expect(await b.submit()).toBe(false)
+  const bSnapshot = b.get()
+  expect(bSnapshot.composerError).not.toBeNull()
+  const bListener = vi.fn()
+  b.subscribe(bListener)
 
-  reads = []
-  expect(putExtra(extras, 'B', { olderError: true })).toBe(false)
-  expect(extras.get('B')).toBe(initial)
-  expect(reads).toEqual(['olderError'])
-  expect(spreads).toBe(0)
+  await sync.watch('A')
+  expect(await b.submit()).toBe(false)
+  b.setDraft('bad\0')
+  expect(bListener).not.toHaveBeenCalled()
+  expect(b.get()).toBe(bSnapshot)
 
-  reads = []
-  expect(putExtra(extras, 'B', { olderError: true, draft: 'hello', composerError: 'err' })).toBe(false)
-  expect(extras.get('B')).toBe(initial)
-  expect(spreads).toBe(0)
+  b.setDraft('fixed')
+  expect(b.get()).toMatchObject({ draft: 'fixed', composerError: null })
 
-  expect(putExtra(extras, 'C', { olderError: false })).toBe(false)
-  expect(putExtra(extras, 'C', { draft: '' })).toBe(false)
-  expect(putExtra(extras, 'C', { composerError: null })).toBe(false)
-  expect(extras.has('C')).toBe(false)
+  const c = sync.getTimeline('C')
+  c.setDraft('draft C')
+  const cBeforeWatch = c.get()
+  const d = sync.getTimeline('D')
+  const dEmpty = d.get()
+  d.setDraft('temp')
+  d.setDraft('')
 
-  expect(putExtra(extras, 'B', { olderError: false })).toBe(true)
-  const updated = extras.get('B')
-  expect(updated).toEqual({ olderError: false, draft: 'hello', composerError: 'err' })
-  expect(updated).not.toBe(initial)
-
-  expect(putExtra(extras, 'B', { draft: '', composerError: null })).toBe(true)
-  expect(extras.has('B')).toBe(false)
+  await sync.watch('C')
+  closeSocket(4001)
+  expect(c.get()).toBe(cBeforeWatch)
+  expect(d.get()).toBe(dEmpty)
+  await sync.close()
 })
