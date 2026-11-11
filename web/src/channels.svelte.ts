@@ -19,11 +19,7 @@ export function channelsAdapter(channels: Channels) {
     load: () => channels.load(),
     select: (id: string) => channels.select(id),
     selectHint: (id: string) => channels.selectHint(id),
-    /** Returns an error message, or null when the Channel was created. */
-    async create(name: string, visibility: 'public' | 'private'): Promise<string | null> {
-      const r = await channels.create({ name, visibility })
-      return 'error' in r ? r.error : null
-    },
+    create: (name: string, visibility: 'public' | 'private') => channels.create({ name, visibility }),
   }
 }
 export type ChannelsAdapter = ReturnType<typeof channelsAdapter>

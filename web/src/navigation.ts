@@ -30,7 +30,8 @@ export function createNavigation(browser: NavigationBrowser = window) {
     const focus: NavigationFocus = !next?.channelId ? 'list'
       : next.channelId === old?.channelId && old?.topicId && !next?.topicId ? 'topic-summary'
       : next?.channelId !== old?.channelId || next?.topicId !== old?.topicId ? 'composer'
-      : !next.panel ? 'opener' : next.panel.startsWith('reply:') ? 'reply-composer' : 'heading'
+      : !next.panel ? 'opener' : next.panel.startsWith('reply:') ? 'reply-composer'
+      : old?.panel ? 'tab' : 'heading'
     const state = browser.history.state as { navigationPreviousTab?: PanelTab } | null
     const tab = state?.navigationPreviousTab
     publish(next, focus, tab === 'topics' || tab === 'overview' || tab === 'members' ? tab : null)

@@ -258,7 +258,7 @@ describe('auth adapter: a new session never shows the old one', () => {
     // The old session's answers arrive after the new session is up.
     first.lists[0].resolve(ok({ channels: [channel('theirs')] }))
     first.creates[0].resolve(ok(channel('general')))
-    expect(await creating).toBe('セッションが終了しました。')
+    expect(await creating).toEqual({ error: 'セッションが終了しました。' })
     await settle()
     expect(s.auth.session!.channels.state).toMatchObject({ channels: [{ id: 'mine' }], selectedId: 'mine' })
     expect(old.channels.state.channels).toEqual([])

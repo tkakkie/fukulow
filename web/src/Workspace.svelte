@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import type { Navigation } from './navigation'
   import { navigationAdapter } from './navigation.svelte'
   import { createSubscriber } from 'svelte/reactivity'
@@ -61,6 +61,7 @@
   const channels = $derived(session.channels)
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
+  const channelListStatus = $derived(s.status)
   const currentOrganizationId = $derived(selectedOrganizationId || organization?.organization.organization_id || '')
   const nav = navigationAdapter(() => navigation)
   const route = $derived(nav.state.target)
@@ -124,8 +125,9 @@
   })
 
   $effect(() => {
-    if (route?.organizationId !== currentOrganizationId) return
-    if (route.channelId && route.channelId !== s.selectedId) channels.selectHint(route.channelId)
+    if (channelListStatus !== 'ready' || route?.organizationId !== currentOrganizationId) return
+    // Follow URL changes; reacting to creation's selection would briefly reselect the old Channel.
+    if (route.channelId && route.channelId !== untrack(() => s.selectedId)) channels.selectHint(route.channelId)
   })
 
   $effect(() => {
@@ -184,9 +186,10 @@
   }
 
   async function handleCreateChannel(name: string, visibility: 'public' | 'private'): Promise<string | null> {
-    const err = await channels.create(name, visibility)
-    if (err === null && channels.state.selectedId) handleSelectChannel(channels.state.selectedId)
-    return err
+    const result = await channels.create(name, visibility)
+    if ('error' in result) return result.error
+    handleSelectChannel(result.channel.id)
+    return null
   }
 
   function openPanel() { nav.navigate({ type: 'tab', tab: 'topics' }, panelToggleBtn) }

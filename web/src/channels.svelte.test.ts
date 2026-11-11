@@ -40,7 +40,7 @@ describe('channels adapter', () => {
 
     const created = adapter.create('general', 'public')
     creates[0].resolve(ok(channel('n', 'general')))
-    expect(await created).toBeNull()
+    expect(await created).toEqual({ channel: channel('n', 'general') })
     await settle()
     expect(view.last.channels.map((c) => c.id)).toEqual(['a', 'b', 'n'])
     expect(view.last.selectedId).toBe('n')
@@ -62,12 +62,34 @@ describe('channels adapter', () => {
     await view.unmount()
   })
 
+  it('returns the created Channel even when URL synchronization restores the previous selection', async () => {
+    const { adapter, lists, creates } = setup()
+    void adapter.load()
+    lists[0].resolve(ok({ channels: [channel('previous')] }))
+    await settle()
+    // Workspace keeps controller selection aligned with the URL until navigation completes.
+    const view = await mount(() => {
+      if (adapter.state.selectedId !== 'previous') adapter.selectHint('previous')
+      return adapter.state
+    })
+    try {
+      const created = adapter.create('New Channel', 'public')
+      creates[0].resolve(ok(channel('new', 'New Channel')))
+      const result = await created
+      expect(adapter.state.selectedId).toBe('previous')
+      expect(result).toEqual({ channel: channel('new', 'New Channel') })
+      expect(adapter.state.channels.map(c => c.id)).toEqual(['previous', 'new'])
+    } finally {
+      await view.unmount()
+    }
+  })
+
   it('create returns the error message and leaves the list unchanged', async () => {
     const { adapter, creates } = setup()
     const view = await mount(() => adapter.state)
     const created = adapter.create(' padded', 'public')
     creates[0].resolve({ ok: false, kind: 'http', status: 400 })
-    expect(await created).toBe('チャンネル名の前後に空白を入れず、128文字以内にしてください。')
+    expect(await created).toEqual({ error: 'チャンネル名の前後に空白を入れず、128文字以内にしてください。' })
     expect(creates[0].name).toBe(' padded') // sent unchanged
     expect(view.last.channels).toEqual([])
     await view.unmount()
@@ -114,7 +136,7 @@ describe('channels adapter', () => {
     controller.close()
     lists[1].resolve(ok({ channels: [channel('old')] }))
     creates[0].resolve(ok(channel('late')))
-    expect(await created).toBe('セッションが終了しました。')
+    expect(await created).toEqual({ error: 'セッションが終了しました。' })
     await settle()
     expect(adapter.state.channels.map((c) => c.id)).toEqual(['a'])
     expect(view.last.channels.map((c) => c.id)).toEqual(['a'])

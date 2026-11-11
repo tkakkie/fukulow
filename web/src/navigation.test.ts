@@ -81,6 +81,38 @@ describe('History navigation table', () => {
     expect(calls).toEqual(['replace'])
     nav.destroy()
   })
+
+  it('popstate follows the navigation focus table, including Reply back and tab switches', () => {
+    const transitions: { from: NavigationTarget; to: NavigationTarget; focus: string }[] = []
+    for (const panel of ['topics', 'overview', 'members'] as const) {
+      transitions.push(
+        { from: { ...base, panel: 'reply:a' }, to: { ...base, panel }, focus: 'tab' },
+        { from: base, to: { ...base, panel }, focus: 'heading' },
+        { from: { ...base, panel }, to: base, focus: 'opener' },
+        { from: { ...base, panel }, to: { ...base, panel: 'reply:a' }, focus: 'reply-composer' },
+        { from: { ...base, panel }, to: { ...base, channelId: 'other', panel }, focus: 'composer' },
+        { from: { ...base, panel }, to: { ...base, topicId: 'topic', panel }, focus: 'composer' },
+        { from: { ...base, topicId: 'topic', panel }, to: { ...base, panel }, focus: 'topic-summary' },
+      )
+      for (const previous of ['topics', 'overview', 'members'] as const) {
+        if (previous !== panel) transitions.push({ from: { ...base, panel: previous }, to: { ...base, panel }, focus: 'tab' })
+      }
+    }
+    transitions.push(
+      { from: { ...base, panel: 'reply:a' }, to: base, focus: 'opener' },
+      { from: { ...base, panel: 'reply:a' }, to: { ...base, panel: 'reply:b' }, focus: 'reply-composer' },
+      { from: base, to: { ...base, channelId: null }, focus: 'list' },
+      { from: { ...base, channelId: null }, to: base, focus: 'composer' },
+    )
+    for (const { from, to, focus } of transitions) {
+      const { nav, calls, pop } = harness(from)
+      pop(serializeNavigation(to))
+      expect(nav.get().target).toEqual(to)
+      expect(nav.get().focus, `${serializeNavigation(from)} -> ${serializeNavigation(to)}`).toBe(focus)
+      expect(calls).toEqual([])
+      nav.destroy()
+    }
+  })
 })
 
 it('Back from a Topic targets its summary and preserves panel state without writing history', () => {
