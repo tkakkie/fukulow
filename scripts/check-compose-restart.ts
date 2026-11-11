@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -13,8 +13,10 @@ const helper = `${project}-kill`
 const directory = mkdtempSync(join(tmpdir(), 'fukulow-restart-'))
 const override = join(directory, 'restart.yml')
 const stop = new AbortController()
-const env = { ...process.env, CHECK_IMAGE: image, POSTGRES_PASSWORD: 'restart-check-only' }
-const compose = ['compose', '-p', project, '-f', 'compose.yml', '-f', override]
+const env = { ...process.env, CHECK_IMAGE: image, POSTGRES_PASSWORD: 'restart-check-only', FUKULOW_SETUP_TOKEN: 'restart-setup-test-only',
+  // Separate from deployment defaults and the security check's second-octet range.
+  FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(192, 256)}.${randomInt(256)}` }
+const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
 
 async function run(command: string, args: string[], allowFailure = false, cleaning = false) {
   const result = await new Promise<{ code: number | null, stdout: string, stderr: string }>((resolve, reject) => {
@@ -102,7 +104,7 @@ try {
   db:
     container_name: ${project}-db
 networks:
-  default:
+  edge:
     name: ${project}-network
 volumes:
   postgres_data:
@@ -110,7 +112,7 @@ volumes:
 `)
   const sha = (await run('git', ['rev-parse', 'HEAD'])).stdout
   const dirty = (await run('git', ['status', '--porcelain'])).stdout !== ''
-  console.log(`commit=${sha} dirty=${dirty} project=${project}`)
+  console.log(`commit=${sha} dirty=${dirty} project=${project} edge=${env.FUKULOW_EDGE_PREFIX}.0/29`)
   console.log('Building release image (may take several minutes)...')
   await dc(['build', 'app'])
   await dc(['up', '-d', '--no-build'])

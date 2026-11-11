@@ -118,9 +118,9 @@ export function expandSeqs(list: SeqItem[]): number[] | null {
 const channelKey = (ref: Json): string =>
   isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
 
-// Topic projection vocabulary runs at the controller layer; Reply and Unread rules remain proposed.
-const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline'])
-const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'])
+// Topic and Reply projections run at the controller layer; Unread remains proposed.
+const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline', 'open_reply_chain', 'load_reply_chain', 'reply_chain_result', 'reply_chain_failed', 'fetch_reply_chain'])
+const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'])
 
 /** The path of the first planned term in a scenario, or null. */
 function plannedTerm(value: Json, path: string, delivery = false, controller = false): string | null {
@@ -133,9 +133,9 @@ function plannedTerm(value: Json, path: string, delivery = false, controller = f
   }
   if (!isObject(value)) return null
   for (const [key, item] of Object.entries(value)) {
-    if (plannedKeys.has(key) && !(controller && ['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position'].includes(key))) return `${path}.${key}`
+    if (plannedKeys.has(key) && !(controller && ['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position', 'reply_to'].includes(key))) return `${path}.${key}`
     if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !controller && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7'].includes(String(r))))) return `${path}.covers`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7'].includes(String(r))))) return `${path}.covers`
     const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery, controller)
     if (found) return found
   }
@@ -323,6 +323,8 @@ const respondsTo: Record<string, string> = {
   timer_elapsed: 'wait',
   membership_check_result: 'membership_check',
   main_timeline_result: 'fetch_main_timeline',
+  reply_chain_result: 'fetch_reply_chain',
+  reply_chain_failed: 'fetch_reply_chain',
 }
 
 function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
@@ -372,6 +374,7 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
     const channels = ((step.observe ?? {}) as { channels?: Record<string, Record<string, Json>> }).channels ?? {}
     for (const [name, observed] of Object.entries(channels)) {
       checkSeqList(observed.visible, `${at}.observe.channels.${name}.visible`, errors)
+      if (isObject(observed.reply_chain)) checkSeqList(observed.reply_chain.visible, `${at}.observe.channels.${name}.reply_chain.visible`, errors)
       checkLines(observed.main_timeline, `${at}.observe.channels.${name}.main_timeline`, errors)
       for (const [topic, view] of Object.entries((observed.topics ?? {}) as Record<string, Record<string, Json>>)) {
         checkSeqList(view.visible, `${at}.observe.channels.${name}.topics.${topic}.visible`, errors)
@@ -447,7 +450,7 @@ export function checkFixtures(dir: string = defaultDir): Problems {
 // Client scenario runner
 
 export type Effect = { type: string; [field: string]: unknown }
-export type Message = { seq: number; id: string; sender: string; client_message_id: string; body: string; created_at: string; topic?: string }
+export type Message = { seq: number; id: string; sender: string; client_message_id: string; body: string; created_at: string; topic?: string; reply_to?: string | null; reply_root_id?: string | null }
 /** The fixture input with respond_to replaced by the effect (as the client emitted it) it answers, and messages expanded. */
 export type ResolvedInput = { type: string; respond_to?: Effect; message?: Message; messages?: Message[]; [field: string]: unknown }
 export type ObservedChannel = {
@@ -457,6 +460,7 @@ export type ObservedChannel = {
   pending: { client_message_id: string; state: string }[]
   main_timeline?: ({ seq: number } | { topic: string; position: number; message_count: number | null })[]
   topics?: Record<string, { visible: number[] }>
+  reply_chain?: { root_id: string | null; topic?: string; visible: number[]; has_more: boolean; error?: boolean }
 }
 export type Observed = { session?: string; organization?: string; channels: Record<string, ObservedChannel> }
 /** What a client must provide to run fixtures. */
@@ -482,6 +486,8 @@ export function expandMessage(spec: Record<string, Json>, channel?: string): Mes
   return seqs.map((seq) => ({
     seq,
     ...(typeof spec.topic === 'string' ? { topic: spec.topic } : {}),
+    ...(typeof spec.reply_to === 'string' ? { reply_to: spec.reply_to } : {}),
+    ...(typeof spec.reply_root_id === 'string' ? { reply_root_id: spec.reply_root_id } : {}),
     id: (spec.id as string | undefined) ?? `id${seq}`,
     sender: (spec.sender as string | undefined) ?? 'other',
     client_message_id: (spec.client_message_id as string | undefined) ?? `auto-${channel ?? 'x'}-${seq}`,
@@ -614,6 +620,13 @@ function checkObservation(expected: NonNullable<ClientStep['observe']>, actual: 
       const visible = got.topics?.[topic]?.visible
       const wanted = expandSeqs(view.visible)
       if (JSON.stringify(visible) !== JSON.stringify(wanted)) failures.push(`${where} Topic ${topic} visible is ${JSON.stringify(visible)}, expected ${JSON.stringify(wanted)}`)
+    }
+    if (isObject(want.reply_chain)) {
+      const chain = got.reply_chain
+      for (const [key, value] of Object.entries(want.reply_chain)) {
+        const wanted = key === 'visible' ? expandSeqs(value as SeqItem[]) : value
+        if (!isDeepStrictEqual(chain?.[key as keyof NonNullable<typeof chain>], wanted)) failures.push(`${where} reply_chain ${key} is ${JSON.stringify(chain)}, expected ${JSON.stringify(wanted)}`)
+      }
     }
     if (want.pending !== undefined) {
       const key = (p: { client_message_id: unknown; state: unknown }) => `${String(p.client_message_id)}:${String(p.state)}`

@@ -112,8 +112,15 @@ jobs:
           [ "$(node -p "require('./load/package.json').engines.node")" = "$node" ]
   docker:
     runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: ci-compose-only
+      FUKULOW_SETUP_TOKEN: ci-setup-test-only
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version }
+      - name: Compose security configuration and rejection checks
+        run: node --test scripts/compose-security.test.ts
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Expose GitHub Actions cache credentials to buildx bake
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
@@ -128,6 +135,10 @@ jobs:
         run: docker buildx bake --load --file compose.yml --set "app.cache-from=type=gha,scope=docker" --set "app.cache-to=type=gha,scope=docker,mode=max"
         env:
           POSTGRES_PASSWORD: ci-compose-only
+      - name: Both proxy profiles reject forwarded-IP spoofing
+        run: node scripts/check-compose-security.ts
+        env:
+          CHECK_COMPOSE_IMAGE: fukulow-app
       - run: docker compose --profile caddy up -d --no-build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
@@ -137,7 +148,9 @@ jobs:
           LOAD_BOOTSTRAP: '1'
           LOAD_EMAIL: load@example.test
           LOAD_PASSWORD: ci-load-test-only-password
-        run: timeout 55s make load LOAD_CONTAINER_NAME=fukulow-ci-load
+          LOAD_SETUP_TOKEN: ci-setup-test-only
+          K6_INSECURE_SKIP_TLS_VERIFY: 'true'
+        run: timeout 55s make load LOAD_CONTAINER_NAME=fukulow-ci-load BASE_URL=https://localhost
       - name: Remove load container even after timeout
         if: always()
         run: docker rm -f fukulow-ci-load || true

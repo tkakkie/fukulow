@@ -9,7 +9,8 @@ beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 describe('controller shared client fixtures with fake transport and timers', () => {
   it.each(scenarios)('$id', async scenario => {
-    const client = controllerClient({}, scenario.steps.some(s => s.input.type === 'load_main_timeline' || s.input.type === 'open_topic'))
+    const client = controllerClient({}, scenario.steps.some(s => s.input.type === 'load_main_timeline' || s.input.type === 'open_topic'),
+      scenario.steps.some(s => s.input.type === 'open_reply_chain'))
     expect(await runClientScenarioAsync(scenario, client)).toEqual([])
     await client.sync.close()
     expect(vi.getTimerCount()).toBe(0)
@@ -18,7 +19,8 @@ describe('controller shared client fixtures with fake transport and timers', () 
   it('runs every implemented client fixture through controller transports and timers', async () => {
     expect(scenarios.length).toBeGreaterThan(0)
     for (const scenario of scenarios) {
-      const client = controllerClient({}, scenario.steps.some(s => s.input.type === 'load_main_timeline' || s.input.type === 'open_topic'))
+      const client = controllerClient({}, scenario.steps.some(s => s.input.type === 'load_main_timeline' || s.input.type === 'open_topic'),
+        scenario.steps.some(s => s.input.type === 'open_reply_chain'))
       expect(await runClientScenarioAsync(scenario, client), scenario.id).toEqual([])
       await client.sync.close()
     }

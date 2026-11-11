@@ -98,7 +98,7 @@ async fn account_migration_preserves_single_organization_and_requires_new_sign_i
     let app = app(AppState {
         pool: pool.clone(),
         cookie_secure: false,
-        setup_token: None,
+        setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
