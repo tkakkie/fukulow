@@ -152,7 +152,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         }
         prune(c)
       }
-      const unresolved = new Map([...channels].filter(([id, c]) => tokens.get(id) === c.token && !c.stopped && c.main.error))
+      const unresolved = new Map([...channels].filter(([id, c]) => tokens.get(id) === c.token && !c.stopped &&
+        (needsRecovery(c, c.main) || (c.aggregate !== undefined && c.aggregate.as_of_seq < c.requiredBase))))
       if (unresolved.size > 0) {
         const affected = new Map([...unresolved].map(([id, c]) => [id, c.token]))
         listTimer = setTimeout(() => { listTimer = undefined; void refresh(affected) }, retryDelay(listAttempt++, r))

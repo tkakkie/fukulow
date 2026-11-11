@@ -72,6 +72,23 @@ it('serializes Channel-list refreshes across reconnect with only one queued fetc
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
   await c.sync.close()
 })
+it.each([3, 4])('retries a Channel list below the bootstrap baseline until as_of_seq %s resolves main and aggregate counts', async asOfSeq => {
+  const c = unreadClient()
+  c.rows[0] = row({ as_of_seq: 2 })
+  await c.boot()
+  expect(c.sync.get().channels.A.cursor).toBe(3)
+  expect(c.unread.get('A')).toMatchObject({ unreadCount: null, main: { unreadCount: null, error: false } })
+  const n = c.unreadApi.listChannels.mock.calls.length
+  await vi.advanceTimersByTimeAsync(499)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n)
+  c.rows[0] = row({ as_of_seq: asOfSeq })
+  await vi.advanceTimersByTimeAsync(1)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  expect(c.unread.get('A')).toMatchObject({ asOfSeq, unreadCount: 3, main: { unreadCount: 1, error: false } })
+  await vi.advanceTimersByTimeAsync(30_000)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
 it.each([
   { rule: 'larger as_of_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }),
     stale: row({ as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 }) },
