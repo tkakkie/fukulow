@@ -112,16 +112,20 @@ export function createSync(options: SyncOptions) {
   const timelines = new Map<string, ReturnType<typeof timeline>>()
   const extras = new Map<string, ChannelExtra>()
   const topicExtras = new Map<string, TopicComposerState>()
+  const replyExtras = new Map<string, TopicComposerState>()
   const pendingTopics = new Map<string, string>()
   const submitted = new Map<string, { channel: string; detached: boolean; restore: () => void }>()
   let unsubscribeDrafts: (() => void) | undefined
 
-  const draftTarget = (channel: string, topicId: string | null = null) => ({
+  const draftTarget = (channel: string, topicId: string | null = null, replyRootId: string | null = null) => ({
     organizationId: options.organizationId ?? '',
     channelId: channel,
     topicId,
+    replyRootId,
   })
   const topicKey = (channel: string, topicId: string) => JSON.stringify([channel, topicId])
+  const replyKey = (channel: string, replyRootId: string, topicId: string | null) =>
+    JSON.stringify([channel, topicId, replyRootId])
   const getExtra = (channel: string): ChannelExtra => {
     const existing = extras.get(channel)
     if (existing) return existing
@@ -183,6 +187,45 @@ export function createSync(options: SyncOptions) {
   function setTopicExtra(channel: string, topicId: string, patch: Partial<TopicComposerState>) {
     if (putTopicExtra(channel, topicId, patch)) channelListeners.get(channel)?.forEach(l => l())
   }
+  const getReplyExtra = (channel: string, replyRootId: string, topicId: string | null): TopicComposerState => {
+    const key = replyKey(channel, replyRootId, topicId)
+    const existing = replyExtras.get(key)
+    if (existing) return existing
+    const draft = options.drafts?.get(draftTarget(channel, topicId, replyRootId)) ?? ''
+    if (!draft) return emptyTopicExtra
+    const extra = { ...emptyTopicExtra, draft }
+    replyExtras.set(key, extra)
+    return extra
+  }
+  function putReplyExtra(
+    channel: string,
+    replyRootId: string,
+    topicId: string | null,
+    patch: Partial<TopicComposerState>,
+  ): boolean {
+    const key = replyKey(channel, replyRootId, topicId)
+    const prev = getReplyExtra(channel, replyRootId, topicId)
+    if (
+      (patch.draft === undefined || patch.draft === prev.draft) &&
+      (patch.composerError === undefined || patch.composerError === prev.composerError)
+    ) {
+      return false
+    }
+    const draft = patch.draft ?? prev.draft
+    const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
+    if (draft === '' && composerError === null) replyExtras.delete(key)
+    else replyExtras.set(key, { draft, composerError })
+    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel, topicId, replyRootId), draft)
+    return true
+  }
+  function setReplyExtra(
+    channel: string,
+    replyRootId: string,
+    topicId: string | null,
+    patch: Partial<TopicComposerState>,
+  ) {
+    if (putReplyExtra(channel, replyRootId, topicId, patch)) channelListeners.get(channel)?.forEach(l => l())
+  }
   function clearOlderError(channel: string, prev: ChannelState | undefined, next: ChannelState | undefined): boolean {
     return ((prev?.older === undefined && next?.older !== undefined) ||
       !next?.watched || next.state === 'unavailable' || next.cursor === null || !next.hasOlder) &&
@@ -208,18 +251,28 @@ export function createSync(options: SyncOptions) {
         const [channel] = JSON.parse(key) as [string, string]
         extraChanged.add(channel)
       }
+      for (const key of replyExtras.keys()) {
+        const [channel] = JSON.parse(key) as [string, string | null, string]
+        extraChanged.add(channel)
+      }
       extras.clear()
       topicExtras.clear()
+      replyExtras.clear()
       pendingTopics.clear()
       if (input.type === 'stop') {
         unsubscribeDrafts?.()
         unsubscribeDrafts = undefined
       } else {
         unsubscribeDrafts ??= options.drafts?.subscribe(target => {
-          if (target.organizationId !== (options.organizationId ?? '') || target.replyRootId != null) return
+          if (target.organizationId !== (options.organizationId ?? '')) return
           const draft = options.drafts?.get(target) ?? ''
           // Detached restores write the Account Session store, outside this controller's lifetime.
-          if (target.topicId != null) {
+          if (target.replyRootId != null) {
+            const key = replyKey(target.channelId, target.replyRootId, target.topicId ?? null)
+            const extra = replyExtras.get(key) ?? emptyTopicExtra
+            if (extra.draft === draft) return
+            replyExtras.set(key, { ...extra, draft })
+          } else if (target.topicId != null) {
             const key = topicKey(target.channelId, target.topicId)
             const extra = topicExtras.get(key) ?? emptyTopicExtra
             if (extra.draft === draft) return
@@ -406,6 +459,7 @@ export function createSync(options: SyncOptions) {
     let last: ChannelState | undefined | null = null
     let lastExtra: ChannelExtra | null = null
     const topicComposers = new Map<string, ReturnType<typeof createTopicComposer>>()
+    const replyComposers = new Map<string, ReturnType<typeof createReplyComposer>>()
     const listeners = new Set<() => void>()
     channelListeners.set(channel, listeners)
     async function send(
@@ -484,6 +538,77 @@ export function createSync(options: SyncOptions) {
           putTopicExtra(channel, topicId, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
           void dispatch({ type: 'user_discard', channel, clientMessageId })
           return true
+        },
+      }
+    }
+    function createReplyComposer(replyRootId: string, topicId: string | null) {
+      let replyDraftRevision = 0
+      const target = draftTarget(channel, topicId, replyRootId)
+      return {
+        get: (): TopicComposerState => getReplyExtra(channel, replyRootId, topicId),
+        setDraft(draft: string) {
+          if (draft === getReplyExtra(channel, replyRootId, topicId).draft) return
+          replyDraftRevision++
+          setReplyExtra(channel, replyRootId, topicId, { draft, composerError: null })
+        },
+        async submit(replyTo: string = replyRootId) {
+          const text = getReplyExtra(channel, replyRootId, topicId).draft
+          if (!text.trim()) return false
+          const bodyError = messageBodyError(text)
+          if (bodyError !== null) {
+            setReplyExtra(channel, replyRootId, topicId, { composerError: bodyError })
+            return false
+          }
+          if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
+            return false
+          }
+          const revision = replyDraftRevision
+          putReplyExtra(channel, replyRootId, topicId, { draft: '', composerError: null })
+          const storeRevision = options.drafts?.revision(target)
+          const restore = () => {
+            if (
+              replyDraftRevision === revision &&
+              options.drafts?.revision(target) === storeRevision &&
+              getReplyExtra(channel, replyRootId, topicId).draft === ''
+            ) {
+              setReplyExtra(channel, replyRootId, topicId, { draft: text })
+            }
+          }
+          const accepted = await send(text, { reply_to: replyTo }, restore, topicId ?? undefined)
+          if (!accepted) restore()
+          return accepted
+        },
+        retry(clientMessageId: string): Promise<void> {
+          const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
+          if (!p?.reply_to) return Promise.resolve()
+          return dispatch({ type: 'user_retry', channel, clientMessageId })
+        },
+        restore(clientMessageId: string): boolean {
+          if (!state.running) return false
+          const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
+          if (p?.state !== 'failed') return false
+          const current = getReplyExtra(channel, replyRootId, topicId).draft
+          replyDraftRevision++
+          putReplyExtra(channel, replyRootId, topicId, {
+            draft: current ? `${current}\n${p.body}` : p.body,
+            composerError: null,
+          })
+          void dispatch({ type: 'user_discard', channel, clientMessageId })
+          return true
+        },
+        migrateDraftFrom(fromReplyRootId: string, fromTopicId: string | null = null): void {
+          if (fromReplyRootId === replyRootId && fromTopicId === topicId) return
+          const tempDraft = getReplyExtra(channel, fromReplyRootId, fromTopicId).draft
+          if (!tempDraft) return
+          const existing = getReplyExtra(channel, replyRootId, topicId).draft
+          const fromComposer = replyComposers.get(replyKey(channel, fromReplyRootId, fromTopicId))
+          if (fromComposer) fromComposer.setDraft('')
+          else putReplyExtra(channel, fromReplyRootId, fromTopicId, { draft: '', composerError: null })
+          replyDraftRevision++
+          setReplyExtra(channel, replyRootId, topicId, {
+            draft: existing ? `${existing}\n${tempDraft}` : tempDraft,
+            composerError: null,
+          })
         },
       }
     }
@@ -587,6 +712,12 @@ export function createSync(options: SyncOptions) {
         if (!tc) { tc = createTopicComposer(topicId); topicComposers.set(topicId, tc) }
         return tc
       },
+      reply(replyRootId: string, topicId: string | null = null) {
+        const key = replyKey(channel, replyRootId, topicId)
+        let rc = replyComposers.get(key)
+        if (!rc) { rc = createReplyComposer(replyRootId, topicId); replyComposers.set(key, rc) }
+        return rc
+      },
     }
   }
 
@@ -607,6 +738,9 @@ export function createSync(options: SyncOptions) {
         if (extra.draft.length > 0 || extra.topicDraft.length > 0) return true
       }
       for (const extra of topicExtras.values()) {
+        if (extra.draft.length > 0) return true
+      }
+      for (const extra of replyExtras.values()) {
         if (extra.draft.length > 0) return true
       }
       for (const c of Object.values(state.channels)) {

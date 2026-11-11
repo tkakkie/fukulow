@@ -75,6 +75,8 @@ CSS custom properties in `web/src/app.css` on `:root`, overridden for dark under
 
 ## 5. Components and states
 Shared components (one each, in `web/src/ui/`): Button (primary, secondary, quiet, icon), Input/Textarea, Chip, Badge (Unread count, @), ListRow (チャンネル, トピック), MessageRow, TopicSummaryLine, Panel (header with back/close, tabs), Dialog, StatusBanner, EmptyState, Skeleton. A screen composes these; a one-off style needs a reason in the PR.
+- Focus and keyboard contracts: `Button` accepts optional `tabindex` (`0 | -1`) and `buttonRef` so composite widgets can omit secondary pointer buttons from the `Tab` sequence while keeping a programmatic return-focus target. `MessageRow` takes `focusable`, `rovingTabindex` (`0 | -1`), `onrowfocus`, `onrowkeydown` and `onopenreplies(opener)`; each timeline assigns `rovingTabindex={0}` to exactly one confirmed row (the active row, or the latest row by default, §9) so `Tab` enters the timeline without clearing a Composer draft, `Enter`/`R` on the row passes `rowRef` as `opener`, and clicking the inline reply `Button` (`tabindex={-1}`) passes `buttonRef` as `opener`.
+- Shared timeline scroll (`web/src/timeline-scroll.ts`): `Timeline`, `TopicView` and `ReplyPanel` share `createTimelineScrollController`, `measureTimelineItems`, `handleTimelineContainerScroll` and `applyTimelineScrollAction` for pinned tracking, anchor preservation, own-send scroll-to-bottom and `新着 n件 ↓` (§8).
 
 States look the same everywhere (board A2-2):
 | State | Shows | Rules |

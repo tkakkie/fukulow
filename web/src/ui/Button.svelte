@@ -12,6 +12,7 @@
     ariaExpanded,
     ariaControls,
     ariaPressed,
+    tabindex,
     testid,
     buttonRef = $bindable(null),
     onclick,
@@ -26,6 +27,7 @@
     ariaExpanded?: boolean
     ariaControls?: string
     ariaPressed?: boolean
+    tabindex?: number
     testid?: string
     buttonRef?: HTMLButtonElement | null
     onclick?: (e: MouseEvent) => void
@@ -44,6 +46,7 @@
   aria-expanded={ariaExpanded}
   aria-controls={ariaControls}
   aria-pressed={ariaPressed}
+  {tabindex}
   data-testid={testid}
   {onclick}
   {onkeydown}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { shouldSubmitOnEnter } from './composer-keys'
+  import { shouldFocusLatestMessageOnArrowUp, shouldSubmitOnEnter } from './composer-keys'
   import { focusTarget, submitAndFocusComposer } from './focus-management'
   import Button from './ui/Button.svelte'
   import Input from './ui/Input.svelte'
@@ -18,6 +18,7 @@
     oninput,
     ontopicinput,
     onsubmit,
+    onarrowupempty,
   }: {
     value: string
     topicValue?: string
@@ -31,6 +32,7 @@
     oninput: (body: string) => void
     ontopicinput?: (topicName: string) => void
     onsubmit: () => Promise<boolean>
+    onarrowupempty?: () => void
   } = $props()
 
   function submit(e: Event) {
@@ -42,6 +44,11 @@
   function keydown(e: KeyboardEvent) {
     if (shouldSubmitOnEnter(e)) {
       submit(e)
+      return
+    }
+    if (onarrowupempty && shouldFocusLatestMessageOnArrowUp(e, value, allowTopicName ? topicValue : '')) {
+      e.preventDefault()
+      onarrowupempty()
     }
   }
 

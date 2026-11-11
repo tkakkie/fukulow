@@ -156,6 +156,34 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
     expect(live4.announcement).toBe('佐藤 健: 新しい話題です')
   })
 
+  it.each([
+    { rootId: 'm-1', expected: '田中 美咲: 未読込の親への返信' },
+    { rootId: 'other-root', expected: null },
+  ])('announces a cold-descendant Reply only for the open root ($rootId)', ({ rootId, expected }) => {
+    const viewId = 'c1/'
+    const replyChainIds = new Set(['m-1'])
+    const history = [msg(10, 'tanaka', '初期履歴')]
+    let state = stepAnnouncements(initialAnnouncementState(), {
+      type: 'view_changed', viewId, kind: 'channel', name: 'general',
+    }).state
+    state = stepAnnouncements(state, {
+      type: 'timeline_updated', viewId, topicId: null, replyChainIds,
+      status: 'ready', live: true, messages: history, selfId: 'me', nowMs: 1_000,
+    }).state
+
+    // Neither the live Reply nor its parent is in the loaded chain window.
+    const reply = {
+      ...msg(11, 'tanaka', '未読込の親への返信'),
+      topic_id: null, reply_to: 'm-5', reply_root_id: rootId,
+    }
+    const result = stepAnnouncements(state, {
+      type: 'timeline_updated', viewId, topicId: null, replyChainIds,
+      status: 'ready', live: true, messages: [...history, reply], selfId: 'me', nowMs: 2_000,
+      resolveSenderName: (id) => names[id] ?? id,
+    })
+    expect(result.announcement).toBe(expected)
+  })
+
   it('never announces initial history, older pages, gap fills, replay, reordering, summary moves or own sends', () => {
     let s = initialAnnouncementState()
     s = stepAnnouncements(s, {
