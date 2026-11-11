@@ -5,7 +5,7 @@ Related: [Members, Roles and Invites; access loss](accounts.md#members-roles-and
 
 ## Real-time sync contract
 Behaviour contract for Message delivery. OpenAPI covers only types (REST shapes, `ClientMessage`/`ServerEvent`, close codes); Rust, the web client and a future Kotlin client satisfy this contract independently and need not share an algorithm. Design and review: #91.
-Scope of every key and guarantee: one Organization and one Account Session. The idempotency key is `(organization_id, sender, client_message_id)`. Delivery guarantees assume the supported single-process deployment (`docs/decisions.md`).
+Scope of every key and guarantee: one Organization and one Account Session. The idempotency key is `(organization_id, sender, client_message_id)`. Delivery guarantees assume the supported single-process deployment (`docs/decisions/process.md`).
 
 ### Server guarantees (implemented and tested)
 Tests are in `server/src/messages/tests.rs` (M), `server/src/realtime/tests.rs` (R) and `web/src/protocol.test.ts` (W).

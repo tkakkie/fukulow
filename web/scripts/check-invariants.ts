@@ -466,7 +466,10 @@ export function checkDecisionDocs(root: string): string[] {
   const indexPath = join(root, 'docs/decisions.md')
   let index = ''
   if (!existsSync(indexPath) || !statSync(indexPath).isFile()) errors.push('docs/decisions.md: line 1: missing index')
-  else index = readFileSync(indexPath, 'utf8')
+  else {
+    index = readFileSync(indexPath, 'utf8')
+    errors.push(...checkDecisions(index).map((e) => 'docs/decisions.md: ' + e))
+  }
   const dir = join(root, 'docs/decisions')
   type Entry = { text: string; line: number }
   const parts = new Map<string, { lines: string[]; entries: Entry[]; otherParts: number }>()
