@@ -8,6 +8,7 @@ let secondName: string
 
 test.beforeEach(async ({ page }) => {
   const setup = await page.request.get('/api/v1/setup')
+  expect(setup.ok()).toBe(true)
   if ((await setup.json()).setup_required) {
     const response = await page.request.post('/api/v1/setup', { data: {
       organization_name: 'Acme', name: 'Alice', email: 'owner@example.com', password: 'correct horse battery',
@@ -396,8 +397,10 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
 
 test('beforeunload warns for a draft in an Organization that is not selected, including while selection is unavailable', async ({ page }) => {
   const identityResponse = await page.request.get('/api/v1/me')
+  expect(identityResponse.ok()).toBe(true)
   const identity = await identityResponse.json() as import('../src/api-schema.d.ts').components['schemas']['AccountIdentity']
   const memberResponse = await page.request.get(`/api/v1/orgs/${org}/me`)
+  expect(memberResponse.ok()).toBe(true)
   const member = await memberResponse.json() as import('../src/api-schema.d.ts').components['schemas']['Identity']
   const other = '00000000-0000-0000-0000-000000000003'
   const otherOrganization = { ...identity.organizations[0]!, organization_id: other, name: 'Other Organization' }

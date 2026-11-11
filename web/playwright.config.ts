@@ -7,7 +7,8 @@ export default defineConfig({
   testDir: './e2e',
   workers: 1,
   timeout: 30_000,
-  use: { baseURL: `http://127.0.0.1:${port}` },
+  reporter: process.env.CI ? [['dot'], ['./scripts/e2e-reporter.ts']] : 'list',
+  use: { baseURL: `http://127.0.0.1:${port}`, trace: 'off' },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   webServer: {
     command: '../target/debug/fukulow-server',
@@ -19,5 +20,8 @@ export default defineConfig({
     },
     reuseExistingServer: false,
     timeout: 30_000,
+    // The server logs no request headers/bodies; see auth.rs and main.rs.
+    stdout: process.env.CI ? 'pipe' : 'ignore',
+    stderr: 'pipe',
   },
 })

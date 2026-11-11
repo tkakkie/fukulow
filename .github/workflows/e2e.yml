@@ -39,3 +39,13 @@ jobs:
         run: echo 'DATABASE_URL=postgres://fukulow_app:ci-e2e-app-only@127.0.0.1:5432/postgres' >> "$GITHUB_ENV"
       - run: npm --prefix web exec -- playwright install --with-deps chromium
       - run: npm --prefix web run e2e
+      - name: Upload restricted E2E failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-failure-diagnostics
+          path: |
+            web/test-results/ci-diagnostics/**/error-context.md
+            web/test-results/ci-diagnostics/report.json
+          retention-days: 3
+          if-no-files-found: ignore
