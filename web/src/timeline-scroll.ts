@@ -381,3 +381,59 @@ export function createTimelineScrollController(options: TimelineScrollController
     },
   }
 }
+
+export type TimelineScrollController = ReturnType<typeof createTimelineScrollController>
+
+/** Measures `[data-message-id]` item offsets relative to a timeline scroll container (`docs/ui.md` §8). */
+export function measureTimelineItems(container: HTMLElement): ItemRect[] {
+  const cRect = container.getBoundingClientRect()
+  const nodes = container.querySelectorAll<HTMLElement>('[data-message-id]')
+  const items: ItemRect[] = []
+  for (const node of nodes) {
+    const id = node.getAttribute('data-message-id')
+    if (!id) continue
+    const r = node.getBoundingClientRect()
+    items.push({ id, top: r.top - cRect.top, bottom: r.bottom - cRect.top })
+  }
+  return items
+}
+
+/** Reports scroll container metrics and visible item rects to the timeline scroll controller (`docs/ui.md` §8). */
+export function handleTimelineContainerScroll(
+  container: HTMLElement | null,
+  controller: Pick<TimelineScrollController, 'onScroll'>,
+): void {
+  if (!container) return
+  controller.onScroll(
+    {
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+    },
+    measureTimelineItems(container),
+  )
+}
+
+/** Applies a `ScrollAction` (`scroll_bottom` or `preserve_anchor`) to a timeline scroll container (`docs/ui.md` §8). */
+export function applyTimelineScrollAction(
+  container: HTMLElement | null,
+  controller: Pick<TimelineScrollController, 'captureAnchor'>,
+  action: ScrollAction,
+  anchor: ScrollAnchor | null,
+): void {
+  if (!container || action === 'none') return
+  if (action === 'scroll_bottom') {
+    container.scrollTop = container.scrollHeight
+    controller.captureAnchor(measureTimelineItems(container))
+    return
+  }
+  if (action === 'preserve_anchor' && anchor) {
+    const el = container.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(anchor.messageId)}"]`)
+    if (el) {
+      const cRect = container.getBoundingClientRect()
+      const r = el.getBoundingClientRect()
+      container.scrollTop = computeAnchoredScrollTop(container.scrollTop, anchor, r.top - cRect.top, 0)
+    }
+    controller.captureAnchor(measureTimelineItems(container))
+  }
+}

@@ -25,6 +25,7 @@ function channelAdapter(sync: Sync, channel: string) {
   const timeline = sync.getTimeline(channel)
   const subscribe = createSubscriber(update => timeline.subscribe(update))
   const topics = new Map<string, ReturnType<typeof topicAdapter>>()
+  const replies = new Map<string, ReturnType<typeof replyAdapter>>()
   function topicAdapter(topicId: string) {
     const tc = timeline.topic(topicId)
     return {
@@ -35,6 +36,21 @@ function channelAdapter(sync: Sync, channel: string) {
       setDraft: (draft: string) => tc.setDraft(draft),
       submit: (topicName: string) => tc.submit(topicName),
       restore: (clientMessageId: string) => tc.restore(clientMessageId),
+    }
+  }
+  function replyAdapter(replyRootId: string, topicId: string | null = null) {
+    const rc = timeline.reply(replyRootId, topicId)
+    return {
+      get composer(): TopicComposerState {
+        subscribe()
+        return rc.get()
+      },
+      setDraft: (draft: string) => rc.setDraft(draft),
+      submit: (replyTo?: string) => rc.submit(replyTo),
+      retry: (clientMessageId: string) => rc.retry(clientMessageId),
+      restore: (clientMessageId: string) => rc.restore(clientMessageId),
+      migrateDraftFrom: (fromReplyRootId: string, fromTopicId?: string | null) =>
+        rc.migrateDraftFrom(fromReplyRootId, fromTopicId),
     }
   }
   return {
@@ -60,6 +76,12 @@ function channelAdapter(sync: Sync, channel: string) {
       let t = topics.get(topicId)
       if (!t) topics.set(topicId, (t = topicAdapter(topicId)))
       return t
+    },
+    reply(replyRootId: string, topicId: string | null = null) {
+      const key = JSON.stringify([topicId, replyRootId])
+      let r = replies.get(key)
+      if (!r) replies.set(key, (r = replyAdapter(replyRootId, topicId)))
+      return r
     },
   }
 }

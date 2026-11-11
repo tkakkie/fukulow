@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shouldOpenRepliesFromRowKey } from '../composer-keys'
   import Button from './Button.svelte'
 
   let {
@@ -11,10 +12,15 @@
     targetUnavailable = false,
     failedReason = '送信できませんでした。内容を確認してください。',
     replyCount = 0,
+    focusable = false,
+    rovingTabindex = -1,
+    rowRef = $bindable(null),
     onretry,
     onrestore,
     ondiscard,
     onopenreplies,
+    onrowfocus,
+    onrowkeydown,
   }: {
     body: string
     createdAt?: string
@@ -25,22 +31,61 @@
     targetUnavailable?: boolean
     failedReason?: string
     replyCount?: number
+    focusable?: boolean
+    rovingTabindex?: 0 | -1
+    rowRef?: HTMLElement | null
     onretry?: () => void
     onrestore?: () => void
     ondiscard?: () => void
-    onopenreplies?: () => void
+    onopenreplies?: (opener?: HTMLElement | null) => void
+    onrowfocus?: () => void
+    onrowkeydown?: (e: KeyboardEvent) => void
   } = $props()
+
+  let replyBtnRef = $state<HTMLButtonElement | null>(null)
+  const isRowFocusable = $derived(!pendingStatus && (focusable || Boolean(onopenreplies)))
 
   const formattedTime = $derived(
     createdAt ? new Date(createdAt).toLocaleString('ja-JP') : '',
   )
+
+  function handleFocus(e: FocusEvent) {
+    if (e.target !== e.currentTarget) return
+    onrowfocus?.()
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.target !== e.currentTarget) return
+    if (onopenreplies && shouldOpenRepliesFromRowKey(e)) {
+      e.preventDefault()
+      onopenreplies(rowRef)
+      return
+    }
+    onrowkeydown?.(e)
+  }
+
+  $effect(() => {
+    const el = rowRef
+    if (!el) return
+    el.tabIndex = isRowFocusable ? rovingTabindex : -1
+    if (!isRowFocusable) return
+    el.addEventListener('focus', handleFocus)
+    el.addEventListener('keydown', handleKeydown)
+    return () => {
+      el.removeEventListener('focus', handleFocus)
+      el.removeEventListener('keydown', handleKeydown)
+    }
+  })
 </script>
 
 <article
+  bind:this={rowRef}
   class="ui-message-row"
   class:ui-message-row--mentioned={mentioned}
   class:ui-message-row--sending={pendingStatus === 'sending'}
   class:ui-message-row--failed={pendingStatus === 'failed'}
+  tabindex="-1"
+  data-focusable={isRowFocusable ? 'true' : undefined}
 >
   {#if senderName || createdAt}
     <header class="ui-message-row__meta">
@@ -91,9 +136,16 @@
         </div>
       {/if}
     </footer>
-  {:else if replyCount > 0 && onopenreplies}
+  {:else if onopenreplies}
     <footer class="ui-message-row__footer">
-      <Button variant="quiet" onclick={onopenreplies}>返信 {replyCount}件›</Button>
+      <Button
+        variant="quiet"
+        tabindex={-1}
+        bind:buttonRef={replyBtnRef}
+        onclick={() => onopenreplies(replyBtnRef)}
+      >
+        {replyCount > 0 ? `返信 ${replyCount}件›` : '返信'}
+      </Button>
     </footer>
   {/if}
 </article>

@@ -51,13 +51,21 @@
   }
 </script>
 
-<aside {id} class="ui-panel" aria-label={ariaLabel} tabindex="-1">
+<aside
+  {id}
+  class="ui-panel"
+  class:ui-panel--reply={mode === 'reply'}
+  aria-label={mode === 'reply' ? '返信のつながり' : ariaLabel}
+  tabindex="-1"
+>
   <header class="ui-panel__header">
     <div class="ui-panel__title-row">
       {#if showBack && onback}
         <Button variant="icon" ariaLabel="前の表示に戻る" onclick={onback}>‹</Button>
       {/if}
-      <h2 bind:this={headingRef} class="ui-panel__title" tabindex="-1">{title}</h2>
+      <h2 bind:this={headingRef} class="ui-panel__title" tabindex="-1">
+        {mode === 'reply' ? '返信のつながり' : title}
+      </h2>
     </div>
     {#if onclose}
       <Button variant="icon" ariaLabel="パネルを閉じる(Esc)" onclick={onclose}>×</Button>
@@ -116,6 +124,10 @@
     color: var(--text);
     border-radius: var(--radius-16);
     overflow: hidden;
+  }
+
+  .ui-panel--reply {
+    grid-template-rows: auto 1fr;
   }
 
   .ui-panel__header {
@@ -182,5 +194,11 @@
     padding: var(--space-12) var(--space-16);
     min-height: 0;
     min-width: 0;
+  }
+
+  .ui-panel--reply .ui-panel__body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 </style>

@@ -9,10 +9,11 @@ import { createSession } from './session'
 import { createMembers } from './members'
 import { membersAdapter, type inviteAcceptanceAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
+import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
+export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -28,6 +29,7 @@ const defaults: AuthDeps = {
   openSession(selfId, onEnded, organizationId, drafts) {
     const session = createSession({ selfId, onEnded, organizationId, sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
+    const replyAdapters = new Map<string, RepliesAdapter>()
     return {
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       channels: channelsAdapter(session.channels),
@@ -35,6 +37,11 @@ const defaults: AuthDeps = {
       topics(id: string) {
         let adapter = topicAdapters.get(id)
         if (!adapter) topicAdapters.set(id, (adapter = topicsAdapter(session.topics, id)))
+        return adapter
+      },
+      replies(id: string) {
+        let adapter = replyAdapters.get(id)
+        if (!adapter) replyAdapters.set(id, (adapter = repliesAdapter(session.replies, id)))
         return adapter
       },
       channelMembers: session.channelMembers,

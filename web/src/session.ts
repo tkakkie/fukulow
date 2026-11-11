@@ -2,6 +2,8 @@ import { createNavigationTargets } from './navigation-targets'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import { createChannels, type ChannelsApi } from './channels'
+import { repliesApi, type RepliesApi } from './replies'
+import { createReplySync } from './reply-sync'
 import type { SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
 import { topicsApi, type TopicsApi } from './topics'
@@ -13,6 +15,7 @@ export type SessionOptions = {
   onEnded: () => void
   channelsApi?: ChannelsApi
   topicsApi?: TopicsApi
+  repliesApi?: RepliesApi
   sync?: Partial<SyncOptions>
 }
 
@@ -38,7 +41,8 @@ export function createSession(options: SessionOptions) {
     sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
   } satisfies NonNullable<SyncOptions['api']>
   const topicSource = options.topicsApi ?? topicsApi(organizationId)
-  const { sync, topics } = createTopicSync({ ...options.sync, selfId: options.selfId, organizationId,
+  const replySource = options.repliesApi ?? repliesApi(organizationId)
+  const topicComposition = createTopicSync({ ...options.sync, selfId: options.selfId, organizationId,
     api: { listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: (channel, body) => observe(timeline.sendMessage(channel, body)) },
     topicsApi: {
@@ -50,9 +54,22 @@ export function createSession(options: SessionOptions) {
     checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
     onSessionEnded: notifyEnded,
   })
+  const { sync, replies } = createReplySync(
+    {
+      ...options.sync,
+      selfId: options.selfId,
+      organizationId,
+      repliesApi: {
+        listReplyChain: (channel, anchor, query) => observe(replySource.listReplyChain(channel, anchor, query)),
+      },
+      onSessionEnded: notifyEnded,
+    },
+    topicComposition.sync,
+  )
+  const { topics } = topicComposition
   const navigationTargets = createNavigationTargets({
     topic: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
-    reply: (channel, message) => observe(api.listReplyChain(organizationId, channel, message, { limit: 1 })),
+    reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
   let watched: string | null = null
@@ -97,7 +114,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, channels, navigationTargets,
+    sync, topics, replies, channels, navigationTargets,
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
       const controller = createChannelMembers(organizationId, channel, r => {

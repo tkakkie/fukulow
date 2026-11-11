@@ -4,6 +4,7 @@ import type {
   ClientMessage,
   Message,
   MessagePage,
+  ReplyChainPage,
   Result,
   SendMessageRequest,
   ServerEvent,
@@ -66,6 +67,8 @@ export function fakeNetwork() {
   const topicLists: Record<string, Result<TopicPage>> = {}
   const topicSummaries: Record<string, Result<TopicSummaryResponse>> = {}
   const topicMessages: Record<string, Result<MessagePage>> = {}
+  const replyChains: Record<string, Result<ReplyChainPage>> = {}
+  const replyHistory: { channel: string; anchor: string; query?: { after_seq?: number; limit?: number } }[] = []
   const sends: ({ channel: string; body: SendMessageRequest } & Deferred<Result<Message>>)[] = []
   const lists: Deferred<Result<{ channels: Channel[] }>>[] = []
   const creates: ({ name: string } & Deferred<Result<Channel>>)[] = []
@@ -98,7 +101,7 @@ export function fakeNetwork() {
       items,
     }
   }
-  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'sync'> => ({
+  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'sync'> => ({
     channelsApi: {
       listChannels() {
         const d = deferred<Result<{ channels: Channel[] }>>()
@@ -156,6 +159,30 @@ export function fakeNetwork() {
         }
       },
     },
+    repliesApi: {
+      async listReplyChain(channel, anchor, query) {
+        replyHistory.push({ channel, anchor, query })
+        const custom =
+          replyChains[`${channel}:${anchor}:${query?.after_seq ?? 'initial'}`] ?? replyChains[`${channel}:${anchor}`]
+        if (custom) return custom
+        const page = pages[channel]
+        if (page && !page.ok) return page
+        const all = page?.data.messages ?? []
+        const byId = new Map(all.map(m => [m.id, m]))
+        let root = byId.get(anchor)
+        if (!root) return { ok: false, kind: 'http', status: 404, error: 'reply_chain_not_found' }
+        while (root.reply_to && byId.has(root.reply_to)) root = byId.get(root.reply_to)!
+        const chainIds = new Set<string>([root.id])
+        const messages: Message[] = []
+        for (const m of all) {
+          if (m.id === root.id || m.reply_root_id === root.id || (m.reply_to !== null && chainIds.has(m.reply_to))) {
+            chainIds.add(m.id)
+            if (query?.after_seq === undefined || m.seq > query.after_seq) messages.push(m)
+          }
+        }
+        return { ok: true, data: { root_id: root.id, messages, has_more: false } }
+      },
+    },
     sync: {
       newId: () => `${selfId}-c${++ids}`,
       api: {
@@ -177,7 +204,7 @@ export function fakeNetwork() {
     },
   })
   return {
-    sockets, history, pages, timelines, topicLists, topicSummaries, topicMessages, sends, lists, creates, options,
+    sockets, history, pages, timelines, topicLists, topicSummaries, topicMessages, replyChains, replyHistory, sends, lists, creates, options,
     get socket() { return sockets.at(-1)! },
     event: (e: ServerEvent) => sockets.at(-1)!.onEvent(e),
     subscribed: (channel: string, caught_up_seq: number) =>

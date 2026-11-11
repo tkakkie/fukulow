@@ -80,3 +80,68 @@ export function stepTabListKey<T extends string>(
       return null
   }
 }
+
+/**
+ * True when pressing `ArrowUp` in an empty Composer (`draft === ''` and `topicDraft === ''`)
+ * should move focus to the latest Message row (`docs/ui.md` §9).
+ */
+export function shouldFocusLatestMessageOnArrowUp(
+  event: KeyEventLike,
+  draft: string,
+  topicDraft = '',
+): boolean {
+  if (event.defaultPrevented || isImeComposing(event)) return false
+  if (event.key !== 'ArrowUp') return false
+  if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false
+  return draft.length === 0 && topicDraft.length === 0
+}
+
+/**
+ * True when pressing `Enter` or `R` (`r`/`R`) on a focused Message row should open its
+ * Reply chain (`返信のつながり`) (`docs/ui.md` §9).
+ */
+export function shouldOpenRepliesFromRowKey(event: KeyEventLike): boolean {
+  if (event.defaultPrevented || isImeComposing(event)) return false
+  if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false
+  return event.key === 'Enter' || event.key === 'r' || event.key === 'R'
+}
+
+/**
+ * Computes the next Message row index for vertical keyboard navigation
+ * (`ArrowUp`, `ArrowDown`, `Home`, `End`) on a focused Message row (`docs/ui.md` §9).
+ */
+export function stepMessageRowIndex(
+  currentIndex: number,
+  totalRows: number,
+  event: KeyEventLike,
+): number | null {
+  if (totalRows <= 0 || currentIndex < 0 || currentIndex >= totalRows) return null
+  if (event.defaultPrevented || isImeComposing(event)) return null
+  if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return null
+
+  switch (event.key) {
+    case 'ArrowUp':
+      return Math.max(0, currentIndex - 1)
+    case 'ArrowDown':
+      return Math.min(totalRows - 1, currentIndex + 1)
+    case 'Home':
+      return 0
+    case 'End':
+      return totalRows - 1
+    default:
+      return null
+  }
+}
+
+/**
+ * Resolves which focusable Message row ID receives `tabindex="0"` in a roving-tabindex timeline (`docs/ui.md` §9):
+ * keeps `activeId` while it remains in `messageIds`, otherwise defaults to the latest Message.
+ */
+export function resolveRovingMessageId(
+  messageIds: readonly string[],
+  activeId: string | null,
+): string | null {
+  if (messageIds.length === 0) return null
+  if (activeId !== null && messageIds.includes(activeId)) return activeId
+  return messageIds[messageIds.length - 1]
+}
