@@ -440,35 +440,39 @@ test('C9 renders no 再試行 and チャンネル一覧へ moves focus to the Ch
   const timeline = page.getByRole('region', { name: 'タイムライン' })
   const goToListButton = timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })
   const targetChannelButton = nav.getByRole('button', { name: target.name })
+  const channelListHeading = nav.getByRole('heading', { name: 'チャンネル', exact: true })
 
   const refusal: ServerEvent = { type: 'error', channel_id: target.id, code: 'channel_not_found' }
   clientSocket!.send(JSON.stringify(refusal))
 
-  // 1. Desktop (1280px): C9 has no 再試行, and チャンネル一覧へ moves focus into the Channel list
+  // 1. Desktop (1280px): C9 has no 再試行, and チャンネル一覧へ shows the Channel list and focuses the チャンネル heading
   await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
   await expect(timeline.getByRole('button', { name: '再試行' })).toHaveCount(0)
   await expect(goToListButton).toBeVisible()
 
   await goToListButton.click()
   await expect(nav).toBeVisible()
-  await expect(targetChannelButton).toBeFocused()
+  await expect(channelListHeading).toBeVisible()
+  await expect(channelListHeading).toBeFocused()
   await expect(goToListButton).not.toBeFocused()
 
-  // Clicking the focused current Channel row directly triggers one retry and recovers from C9
+  // Clicking the current Channel row directly triggers one retry and recovers from C9
   await targetChannelButton.click()
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
   await expect(timeline.getByRole('alert')).toHaveCount(0)
 
-  // 2. Tablet drawer (768px): Channel column starts hidden; チャンネル一覧へ opens the drawer and focuses the Channel list
+  // 2. Tablet drawer (768px): Channel column starts hidden; チャンネル一覧へ opens the drawer and focuses the チャンネル heading
   clientSocket!.send(JSON.stringify(refusal))
   await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
   await page.setViewportSize({ width: 768, height: 800 })
   await expect(nav).toBeHidden()
+  await expect(channelListHeading).toBeHidden()
   await goToListButton.click()
   await expect(nav).toBeVisible()
-  await expect(targetChannelButton).toBeFocused()
+  await expect(channelListHeading).toBeVisible()
+  await expect(channelListHeading).toBeFocused()
 
-  // 3. Phone (375px): enter the Channel view level, trigger C9, and verify チャンネル一覧へ switches to the Channel list and focuses it
+  // 3. Phone (375px): enter the Channel view level, trigger C9, and verify チャンネル一覧へ shows the Channel list and focuses the チャンネル heading
   await page.setViewportSize({ width: 375, height: 800 })
   await nav.getByRole('button', { name: other.name }).click()
   await expect(page.getByRole('heading', { name: other.name })).toBeVisible()
@@ -477,6 +481,7 @@ test('C9 renders no 再試行 and チャンネル一覧へ moves focus to the Ch
   await expect(page.getByRole('heading', { name: target.name })).toBeVisible()
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
   await expect(nav).toBeHidden()
+  await expect(channelListHeading).toBeHidden()
 
   clientSocket!.send(JSON.stringify(refusal))
   await expect(timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })).toBeVisible()
@@ -485,7 +490,8 @@ test('C9 renders no 再試行 and チャンネル一覧へ moves focus to the Ch
   await goToListButton.click()
   await expect(nav).toBeVisible()
   await expect(timeline).toBeHidden()
-  await expect(targetChannelButton).toBeFocused()
+  await expect(channelListHeading).toBeVisible()
+  await expect(channelListHeading).toBeFocused()
 })
 
 test('confirms before replacing a non-empty Composer draft on 編集して送り直す (置き換える / キャンセル)', async ({

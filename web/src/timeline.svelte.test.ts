@@ -535,8 +535,53 @@ class MiniElement extends MiniNode {
     this.dispatchEvent(new MiniDomEvent('click', { bubbles: true, cancelable: true }))
   }
 
+  get hidden(): boolean {
+    return this.attrs.has('hidden')
+  }
+
+  set hidden(v: boolean) {
+    if (v) this.setAttribute('hidden', '')
+    else this.removeAttribute('hidden')
+  }
+
+  isRenderedVisible(): boolean {
+    if (!this.isConnected || !this.ownerDocument) return false
+    if (this.closest('[hidden], [inert], [aria-hidden="true"]')) return false
+    const channelColumn = this.closest('.channel-column')
+    if (channelColumn) {
+      const workspace = channelColumn.closest('.workspace')
+      const width = this.ownerDocument.defaultView?.innerWidth ?? 1280
+      if (workspace) {
+        if (width >= 600 && width < 960 && workspace.getAttribute('data-drawer-open') !== 'true') {
+          return false
+        }
+        if (width < 600 && workspace.getAttribute('data-mobile-level') !== 'channels') {
+          return false
+        }
+      }
+    }
+    return true
+  }
+
   getBoundingClientRect() {
-    return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) }
+    if (!this.isRenderedVisible()) {
+      return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) }
+    }
+    return { top: 0, bottom: 24, left: 0, right: 260, width: 260, height: 24, x: 0, y: 0, toJSON: () => ({}) }
+  }
+
+  getClientRects() {
+    if (!this.isRenderedVisible()) return []
+    return [this.getBoundingClientRect()]
+  }
+
+  closest(selector: string): MiniElement | null {
+    let cur: MiniElement | null = this
+    while (cur) {
+      if (matchesSelectorList(cur, selector)) return cur
+      cur = cur.parentElement
+    }
+    return null
   }
 
   matches(selector: string): boolean {
@@ -633,6 +678,13 @@ class MiniWindow extends MiniEventTarget {
     super()
     this.document = doc
     doc.defaultView = this
+  }
+
+  getComputedStyle(el: MiniElement): { display: string; visibility: string } {
+    return {
+      display: el.isRenderedVisible() ? 'block' : 'none',
+      visibility: 'visible',
+    }
   }
 }
 
@@ -1151,29 +1203,34 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const workspaceEl = host.querySelector('.workspace')!
     const channelNav = host.querySelector('#channel-content')!
-    const selectedChannelBtn = channelNav.querySelector('.channel-list button[aria-current="true"]')!
+    const channelListHeading = channelNav.querySelector('#channel-list-heading')!
     const goToListBtn = buttonsByText(host, 'チャンネル一覧へ')[0]
-    expect(selectedChannelBtn.textContent.trim()).toBe('# general')
+    expect(channelListHeading.tagName).toBe('H2')
+    expect(channelListHeading.textContent.trim()).toBe('チャンネル')
+    expect(channelListHeading.getAttribute('tabindex')).toBe('-1')
 
-    // 1. Desktop (1280px): drawer stays false, focus moves from banner button to selected Channel button
+    // 1. Desktop (1280px): drawer stays false, focus moves from banner button to the visible Channel list heading
     testWin.innerWidth = 1280
     goToListBtn.click()
     flushSync()
     await tick()
     expect(workspaceEl.getAttribute('data-drawer-open')).toBe('false')
-    expect(testDoc.activeElement).toBe(selectedChannelBtn)
+    expect(channelListHeading.isRenderedVisible()).toBe(true)
+    expect(testDoc.activeElement).toBe(channelListHeading)
 
-    // 2. Tablet (768px): opens drawer (data-drawer-open="true") and focuses selected Channel button
+    // 2. Tablet (768px): Channel column starts hidden; clicking チャンネル一覧へ opens drawer and focuses the heading once visible
     testWin.innerWidth = 768
+    expect(channelListHeading.isRenderedVisible()).toBe(false)
     goToListBtn.focus()
     expect(testDoc.activeElement).toBe(goToListBtn)
     goToListBtn.click()
     flushSync()
     await tick()
     expect(workspaceEl.getAttribute('data-drawer-open')).toBe('true')
-    expect(testDoc.activeElement).toBe(selectedChannelBtn)
+    expect(channelListHeading.isRenderedVisible()).toBe(true)
+    expect(testDoc.activeElement).toBe(channelListHeading)
 
-    // 3. Phone (375px): closes tablet drawer, switches mobileLevel to 'channels', and focuses selected Channel button
+    // 3. Phone (375px): switches mobileLevel to 'channels' and focuses the visible Channel list heading
     testWin.innerWidth = 375
     goToListBtn.focus()
     expect(testDoc.activeElement).toBe(goToListBtn)
@@ -1182,7 +1239,20 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await tick()
     expect(workspaceEl.getAttribute('data-drawer-open')).toBe('false')
     expect(workspaceEl.getAttribute('data-mobile-level')).toBe('channels')
-    expect(testDoc.activeElement).toBe(selectedChannelBtn)
+    expect(channelListHeading.isRenderedVisible()).toBe(true)
+    expect(testDoc.activeElement).toBe(channelListHeading)
+
+    // 4. Visibility guard: if the heading is hidden, goToChannelList never moves focus to the hidden element
+    testWin.innerWidth = 1280
+    channelListHeading.hidden = true
+    goToListBtn.focus()
+    expect(testDoc.activeElement).toBe(goToListBtn)
+    goToListBtn.click()
+    flushSync()
+    await tick()
+    expect(channelListHeading.isRenderedVisible()).toBe(false)
+    expect(testDoc.activeElement).toBe(goToListBtn)
+    channelListHeading.hidden = false
 
     await unmount(instance)
     sessionModel.close()

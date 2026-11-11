@@ -4,12 +4,14 @@ import {
   decideEditAndResend,
   discardAndFocusComposer,
   focusAfterPanelClose,
-  focusChannelList,
   focusDialogOnOpen,
+  focusIfVisible,
+  isTargetVisible,
   resolveChannelListNavigation,
   resolveSkipLinkTargetId,
   restoreFocusAfterDialogClose,
   stepDialogTab,
+  type VisibleFocusableTarget,
 } from './focus-management'
 
 describe('focus-management: focus after discard, edit-and-resend, dialog and panel close (docs/ui.md §2, §5, §6)', () => {
@@ -218,60 +220,110 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
       expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
     }
 
-    // 1. Prefers the currently selected Channel row
-    const firstBtn = { focus: vi.fn(), isConnected: true }
-    const selectedBtn = { focus: vi.fn(), isConnected: true }
-    const createInput = { focus: vi.fn(), isConnected: true }
-    const navLandmark = { focus: vi.fn(), isConnected: true }
+    const visibleHeading = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [{ width: 260, height: 20 }],
+    }
+    expect(focusIfVisible(visibleHeading, () => ({ display: 'block', visibility: 'visible' }))).toBe(true)
+    expect(visibleHeading.focus).toHaveBeenCalledOnce()
+  })
 
-    expect(
-      focusChannelList({
-        selectedChannel: selectedBtn,
-        channelButtons: [firstBtn, selectedBtn],
-        fallbackControls: [createInput],
-        landmarkFallback: navLandmark,
-      }),
-    ).toBe(selectedBtn)
-    expect(selectedBtn.focus).toHaveBeenCalledOnce()
-    expect(firstBtn.focus).not.toHaveBeenCalled()
+  it('focusIfVisible guards against hidden headings and focuses only when rendered and visible', () => {
+    const visibleRects = () => [{ width: 260, height: 20 }]
+    const visibleStyle = () => ({ display: 'block', visibility: 'visible' })
 
-    // 2. Falls back to the first connected, enabled Channel button when selectedChannel is absent or disconnected
-    const disconnectedSelected = { focus: vi.fn(), isConnected: false }
-    const disabledFirst = { focus: vi.fn(), isConnected: true, disabled: true }
-    const enabledSecond = { focus: vi.fn(), isConnected: true }
-    expect(
-      focusChannelList({
-        selectedChannel: disconnectedSelected,
-        channelButtons: [disabledFirst, enabledSecond],
-        fallbackControls: [createInput],
-        landmarkFallback: navLandmark,
-      }),
-    ).toBe(enabledSecond)
-    expect(disconnectedSelected.focus).not.toHaveBeenCalled()
-    expect(disabledFirst.focus).not.toHaveBeenCalled()
-    expect(enabledSecond.focus).toHaveBeenCalledOnce()
+    // Null / undefined / disconnected / disabled / [hidden]
+    expect(focusIfVisible(null, visibleStyle)).toBe(false)
+    expect(focusIfVisible(undefined, visibleStyle)).toBe(false)
 
-    // 3. Falls back to Channel column controls (e.g. Channel creation input) when no Channels exist
-    expect(
-      focusChannelList({
-        selectedChannel: null,
-        channelButtons: [],
-        fallbackControls: [createInput],
-        landmarkFallback: navLandmark,
-      }),
-    ).toBe(createInput)
-    expect(createInput.focus).toHaveBeenCalledOnce()
-    expect(navLandmark.focus).not.toHaveBeenCalled()
+    const disconnected: VisibleFocusableTarget = { focus: vi.fn(), isConnected: false, getClientRects: visibleRects }
+    expect(focusIfVisible(disconnected, visibleStyle)).toBe(false)
+    expect(disconnected.focus).not.toHaveBeenCalled()
 
-    // 4. Falls back to the Channel navigation landmark when no interactive controls exist
-    expect(
-      focusChannelList({
-        selectedChannel: null,
-        channelButtons: [],
-        fallbackControls: [],
-        landmarkFallback: navLandmark,
-      }),
-    ).toBe(navLandmark)
-    expect(navLandmark.focus).toHaveBeenCalledOnce()
+    const disabled: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      disabled: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(disabled, visibleStyle)).toBe(false)
+    expect(disabled.focus).not.toHaveBeenCalled()
+
+    const hiddenAttr: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      hidden: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(hiddenAttr, visibleStyle)).toBe(false)
+    expect(hiddenAttr.focus).not.toHaveBeenCalled()
+
+    const hiddenAncestor: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      closest: (sel) => (sel.includes('[inert]') ? {} : null),
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(hiddenAncestor, visibleStyle)).toBe(false)
+    expect(hiddenAncestor.focus).not.toHaveBeenCalled()
+
+    // Computed display: none, visibility: hidden, visibility: collapse
+    const displayNone: VisibleFocusableTarget = { focus: vi.fn(), isConnected: true, getClientRects: visibleRects }
+    expect(focusIfVisible(displayNone, () => ({ display: 'none', visibility: 'visible' }))).toBe(false)
+    expect(displayNone.focus).not.toHaveBeenCalled()
+
+    const visibilityHidden: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(visibilityHidden, () => ({ display: 'block', visibility: 'hidden' }))).toBe(false)
+    expect(visibilityHidden.focus).not.toHaveBeenCalled()
+
+    const visibilityCollapse: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: visibleRects,
+    }
+    expect(focusIfVisible(visibilityCollapse, () => ({ display: 'block', visibility: 'collapse' }))).toBe(false)
+    expect(visibilityCollapse.focus).not.toHaveBeenCalled()
+
+    // Ancestor display: none (empty getClientRects) or zero-size box
+    const closedDrawerHeading: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [],
+    }
+    expect(isTargetVisible(closedDrawerHeading, visibleStyle)).toBe(false)
+    expect(focusIfVisible(closedDrawerHeading, visibleStyle)).toBe(false)
+    expect(closedDrawerHeading.focus).not.toHaveBeenCalled()
+
+    const zeroWidth: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [{ width: 0, height: 20 }],
+    }
+    expect(focusIfVisible(zeroWidth, visibleStyle)).toBe(false)
+    expect(zeroWidth.focus).not.toHaveBeenCalled()
+
+    const zeroHeight: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      getClientRects: () => [{ width: 260, height: 0 }],
+    }
+    expect(focusIfVisible(zeroHeight, visibleStyle)).toBe(false)
+    expect(zeroHeight.focus).not.toHaveBeenCalled()
+
+    // Visible heading: non-zero box and visible style -> focuses once
+    const visibleHeading: VisibleFocusableTarget = {
+      focus: vi.fn(),
+      isConnected: true,
+      closest: () => null,
+      getClientRects: visibleRects,
+    }
+    expect(isTargetVisible(visibleHeading, visibleStyle)).toBe(true)
+    expect(focusIfVisible(visibleHeading, visibleStyle)).toBe(true)
+    expect(visibleHeading.focus).toHaveBeenCalledOnce()
   })
 })

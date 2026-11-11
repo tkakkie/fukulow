@@ -4,6 +4,17 @@ export type FocusableTarget = {
   disabled?: boolean
 }
 
+export type ComputedVisibilityStyle = {
+  readonly display?: string
+  readonly visibility?: string
+}
+
+export type VisibleFocusableTarget = FocusableTarget & {
+  readonly hidden?: boolean | string
+  readonly closest?: (selector: string) => unknown
+  readonly getClientRects?: () => ArrayLike<{ readonly width: number; readonly height: number }>
+}
+
 export type MobileLevel = 'channels' | 'view' | 'panel'
 export type SkipLinkTargetId = 'channel-content' | 'main-content' | 'panel-content'
 
@@ -60,27 +71,56 @@ export function focusTarget(target: FocusableTarget | null | undefined): boolean
   return true
 }
 
-/**
- * Moves focus into the Channel list (`docs/ui.md` §5 C9 `チャンネル一覧へ`):
- * prefers the selected Channel row, then the first Channel row, then any enabled
- * control in the Channel column (e.g. Channel creation input when empty),
- * and finally the Channel navigation landmark (`tabindex="-1"`).
- */
-export function focusChannelList(options: {
-  selectedChannel?: FocusableTarget | null
-  channelButtons?: readonly FocusableTarget[]
-  fallbackControls?: readonly FocusableTarget[]
-  landmarkFallback?: FocusableTarget | null
-}): FocusableTarget | null {
-  if (focusTarget(options.selectedChannel)) return options.selectedChannel ?? null
-  for (const btn of options.channelButtons ?? []) {
-    if (focusTarget(btn)) return btn
-  }
-  for (const ctrl of options.fallbackControls ?? []) {
-    if (focusTarget(ctrl)) return ctrl
-  }
-  if (focusTarget(options.landmarkFallback)) return options.landmarkFallback ?? null
+function defaultComputedStyle(target: VisibleFocusableTarget): ComputedVisibilityStyle | null {
+  if (typeof Element === 'undefined' || !(target instanceof Element)) return null
+  const viewStyle = target.ownerDocument?.defaultView?.getComputedStyle
+  if (typeof viewStyle === 'function') return viewStyle.call(target.ownerDocument.defaultView, target)
+  if (typeof getComputedStyle === 'function') return getComputedStyle(target)
   return null
+}
+
+/**
+ * Checks whether `target` is connected, enabled, and actually rendered with non-zero layout boxes
+ * (neither `display: none`, `visibility: hidden`/`collapse`, `[hidden]`/`[inert]`/`[aria-hidden="true"]`,
+ * nor zero-size via `getClientRects`) so focus never moves to a hidden element (`docs/ui.md` §5, §6).
+ */
+export function isTargetVisible(
+  target: VisibleFocusableTarget | null | undefined,
+  getStyle: (el: VisibleFocusableTarget) => ComputedVisibilityStyle | null | undefined = defaultComputedStyle,
+): boolean {
+  if (!target || target.isConnected === false || target.disabled === true || Boolean(target.hidden)) {
+    return false
+  }
+  if (typeof target.closest === 'function' && target.closest('[hidden], [inert], [aria-hidden="true"]')) {
+    return false
+  }
+  const style = getStyle(target)
+  if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse')) {
+    return false
+  }
+  if (typeof target.getClientRects !== 'function') {
+    return false
+  }
+  const rects = target.getClientRects()
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i]
+    if (rect && rect.width > 0 && rect.height > 0) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Focuses `target` only when `isTargetVisible(target)` holds (`docs/ui.md` §5 C9 `チャンネル一覧へ`).
+ * Returns true when `.focus()` was called.
+ */
+export function focusIfVisible(
+  target: VisibleFocusableTarget | null | undefined,
+  getStyle?: (el: VisibleFocusableTarget) => ComputedVisibilityStyle | null | undefined,
+): boolean {
+  if (!isTargetVisible(target, getStyle)) return false
+  return focusTarget(target)
 }
 
 /**
