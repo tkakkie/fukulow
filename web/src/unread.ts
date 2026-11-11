@@ -5,7 +5,7 @@ import type { Topics } from './topics'
 import type { TopicBaseline } from './topic-selectors'
 import { backoffCap } from './reconnect'
 import { chooseBaseline, chooseChannelBaseline, coveredThrough, inScope, mainBaseline, recordCoverage,
-  scopeCount, sequenceToSubmit, topicBaseline, type Coverage, type ScopeBaseline, type UnreadScope } from './unread-counts'
+  needsUnreadRecord, scopeCount, sequenceToSubmit, topicBaseline, type Coverage, type ScopeBaseline, type UnreadScope } from './unread-counts'
 export type { UnreadScope } from './unread-counts'
 
 type Sync = ReturnType<typeof createSync>
@@ -51,6 +51,21 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     let s = c.topics.get(topic)
     if (!s) c.topics.set(topic, s = scopeState())
     return s
+  }
+  function needed(c: Channel, m: Message) {
+    const s = m.topic_id === null ? c.main : c.topics.get(m.topic_id)
+    // requiredBase/requiredAfter fence baseline authority, not record coverage.
+    const aggregateAfter = m.topic_id === null ? Infinity : Math.max(c.aggregate?.as_of_seq ?? 0,
+      c.heldPositions.get(m.topic_id) ?? s?.position ?? 0)
+    const visitAfter = visit && inScope(m, visit.scope) ? visit.boundary ?? 0 : Infinity
+    return needsUnreadRecord(m.seq, s?.baseline, aggregateAfter, visitAfter)
+  }
+  // Stream events only filter their input; rescan retained rows at baseline refreshes/visit changes.
+  function prune(c: Channel) {
+    for (const [seq, m] of c.records) if (!needed(c, m)) c.records.delete(seq)
+  }
+  function collectRecord(c: Channel, m: Message) {
+    if (needed(c, m)) c.records.set(m.seq, m)
   }
   const active = () => !closed && sync.get().running && sync.get().organization === 'available'
   const watched = (id: string) => active() && sync.get().channels[id]?.watched === true && sync.get().channels[id]?.state !== 'unavailable' && !getChannel(id).stopped
@@ -129,6 +144,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
           c.aggregate = chooseChannelBaseline(c.aggregate, row); c.accepted = number
           c.requiredAfter = 0; c.heldPositions.clear()
         }
+        prune(c)
       }
       resolveBoundary(); notify()
     } else if (!api.isOrganizationUnavailable(r)) {
@@ -174,6 +190,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const unread = count(visit.scope.channel, c, visit.scope.topicId)
     if (unread === null) return
     visit.boundary = s.position; visit.unreadAtEntry = unread
+    prune(c)
     enqueue(visit)
   }
   const isVisit = (v: Visit) => visit === v && visible && watched(v.scope.channel)
@@ -251,22 +268,25 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       c.summaryAttempts.set(topic, attempt + 1)
       c.summaryTimers.set(topic, setTimeout(() => { c.summaryTimers.delete(topic); void refreshTopic(id, topic) }, retryDelay(attempt, r)))
     }
-    resolveBoundary(); notify()
+    resolveBoundary(); prune(c); notify()
     if (c.queuedSummaries.delete(topic)) void refreshTopic(id, topic)
   }
   function collect(id: string, c: Channel) {
     if (!watched(id)) return
-    for (const m of sync.get().channels[id]?.messages ?? []) c.records.set(m.seq, m)
+    for (const m of sync.get().channels[id]?.messages ?? []) collectRecord(c, m)
     const p = options.topics?.get(id)
     if (!p || p.unavailable) return
     for (const line of p.lines) {
-      if (line.kind === 'message') c.records.set(line.message.seq, line.message)
+      if (line.kind === 'message') collectRecord(c, line.message)
     }
+    let changed = false
     for (const line of p.topics) {
       if (line.baseline && !c.ignoredBaselines.has(line.baseline) && !c.observedBaselines.has(line.baseline)) {
         c.observedBaselines.add(line.baseline)
         const s = getScope(c, line.topicId)
+        const previous = s.baseline
         acceptScope(s, topicBaseline(line.baseline.asOfSeq, line.baseline.summary))
+        changed ||= s.baseline !== previous
         if (s.baseline && s.baseline.asOfSeq < c.requiredBase) void refreshTopic(id, line.topicId)
         else if (!s.error && !s.stopped) {
           // A current projection supersedes summary work, including a completion still in flight.
@@ -277,7 +297,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         }
       }
     }
-    for (const topic of c.topics.keys()) for (const m of p.topic(topic).messages) c.records.set(m.seq, m)
+    for (const topic of c.topics.keys()) for (const m of p.topic(topic).messages) collectRecord(c, m)
+    if (changed) prune(c)
   }
   function reconcile() {
     if (closed) return
@@ -350,7 +371,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   function leave(id?: symbol) {
     if (!visit || (id !== undefined && visit.id !== id)) return
     const c = getChannel(visit.scope.channel)
-    fence(visit.scope.channel, c); notify()
+    fence(visit.scope.channel, c); prune(c); notify()
     if (c.requiredAfter > 0 && !c.stopped) void refresh()
   }
   if (active()) { reconcile(); void refresh() }
