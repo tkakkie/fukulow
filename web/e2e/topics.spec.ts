@@ -322,6 +322,7 @@ test('removing a private Channel Member shows C9 in the open Topic while another
     await expect(messageComposer(memberPage)).toBeEnabled()
     await messageComposer(memberPage).fill('other Channel still works')
     await memberPage.locator('#main-content').getByRole('button', { name: '送信', exact: true }).click()
-    await expect(memberPage.locator('#main-content .timeline-list__item')).toContainText('other Channel still works')
+    await expect(memberPage.locator('#main-content .timeline-list__item[data-message-id]').filter({ hasText: 'other Channel still works' })).toHaveCount(1)
+    await expect(memberPage.locator('#main-content .timeline-list__item[data-status]')).toHaveCount(0)
   } finally { await context.close() }
 })

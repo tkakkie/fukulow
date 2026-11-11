@@ -1122,6 +1122,14 @@ it.each(['list', 'history'] as const)('merges live and own Messages once during 
   c.topicsApi.listTopicMessages.mockReturnValueOnce(history.promise)
   const loading = kind === 'list' ? c.topics.loadList('A') : c.topics.loadTopic('A', 'T')
   await flush()
+  if (kind === 'list') {
+    expect(c.topicsApi.listTopics.mock.calls).toEqual([['A', {}]])
+    expect(c.topics.get('A').list.loading).toBe(true)
+    expect(c.topics.get('A').topics.map(t => t.topicId)).toEqual(['T'])
+  } else {
+    expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', { before_seq: 5 }])
+    expect(c.topics.get('A').topic('T').loading).toBe(true)
+  }
   c.event(11, 'T')
   c.sendMessage.mockImplementationOnce(async (_channel, body) => ok({ ...msg(12, 'T'), sender: 'me', client_message_id: body.client_message_id, body: body.body }))
   const composer = c.sync.getTimeline('A').topic('T')
@@ -1132,11 +1140,12 @@ it.each(['list', 'history'] as const)('merges live and own Messages once during 
   const own = result.data
   c.handlers.at(-1)!.onEvent({ type: 'message', message: own })
   c.event(11, 'T')
-  list.resolve(ok({ as_of_seq: 11, topics: [summary('T', 11, 4)], has_more: true }))
-  history.resolve(ok({ messages: [msg(2, 'T'), msg(11, 'T'), own], has_more: false }))
+  list.resolve(ok({ as_of_seq: 11, topics: [summary('U', 3, 1), summary('T', 11, 4)], has_more: true }))
+  history.resolve(ok({ messages: [msg(2, 'T')], has_more: false }))
   await loading
   expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual(kind === 'list' ? [5, 10, 11, 12] : [2, 5, 10, 11, 12])
-  expect(c.topics.get('A').topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([['T', 12, 5]])
+  expect(c.topics.get('A').topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual(kind === 'list' ? [['U', 3, 1], ['T', 12, 5]] : [['T', 12, 5]])
+  if (kind === 'list') expect(c.topics.get('A').list.loading).toBe(false)
   expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.seq : l.position)).toEqual([8, 12])
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 12, pending: [] })
   if (kind === 'history') expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', { before_seq: 5 }])

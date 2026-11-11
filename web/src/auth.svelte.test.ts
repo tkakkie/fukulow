@@ -824,6 +824,8 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
   expect(await original.sync.channel('A').topic('T').submit('Topic T')).toBe(false)
   await s.auth.selectOrganization('o')
   const recoveredNet = s.nets.at(-1)!
+  const olderTopicMessage = { ...record(99), topic_id: 'T' }
+  recoveredNet.topicMessages['A:T'] = ok({ messages: [olderTopicMessage, topicMessage], has_more: false })
   recoveredNet.pages.A = ok({ messages: [record(100), topicMessage], has_more: false })
   recoveredNet.lists[0].resolve(ok({ channels: [channel('A')] }))
   await settle(); recoveredNet.subscribed('A', 101); await settle()
@@ -832,7 +834,8 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
   expect(recovered).not.toBe(original)
   expect(s.auth.organizationStatus).toBe('ready')
   expect(recovered.topics('A').state.unavailable).toBe(false)
-  expect(recovered.topics('A').state.topic('T').messages).toEqual([topicMessage])
+  expect(recovered.topics('A').state.topic('T').messages).toEqual([olderTopicMessage, topicMessage])
+  expect(recovered.topics('A').state.topic('T')).toMatchObject({ initialized: true, loading: false, hasMore: false })
   expect(recovered.topics('A').state.lines.map(l => l.kind === 'message' ? l.message.seq : [l.topicId, l.position])).toEqual([100, ['T', 101]])
   expect(recovered.sync.channel('A').topic('T').composer.draft).toBe('Topic draft survives C10')
   recovered.close()
