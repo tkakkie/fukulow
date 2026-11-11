@@ -83,6 +83,12 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
 
 ## Channels and Messages
+- #149 Owner/Admin with access add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
+- #149 Role demotion keeps grants and may leave a private Channel unmanaged; #231 decides whether to prohibit it. No new manager requirement applies to an already unmanaged Channel.
+- #149 grant_id is a durable UUID per grant lifetime; re-grant/renewal cannot revive an old subscription after a lost fast signal. Public non-Guests keep continuous access when a redundant grant is removed.
+- #149 subscriptions follow the current access path: public non-Guests ignore redundant grants; a Role change requiring a grant captures its lifetime. Reason: continuous access must survive promotion and redundant removal.
+- #149 API mutations lock Organization, actor Member, Channel, grants, then #142 Unread serialization/shared #135. Sends lock Member/grant through COMMIT before exclusive #135; mark-read releases its watermark barrier before Member/grant/position locks.
+
 - Private Channel creation adds the creator atomically; composite FKs bind grants to the same Organization. Listing uses batched visibility/Unread queries in one snapshot, `no-store` (#22, #142).
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
 - Channel names are unique per Organization across visibility, `lower(name COLLATE "C")` (ASCII folds, non-ASCII as-is); duplicates 409. Existing duplicates fail the migration for the operator to resolve; no auto-rename (#51).
@@ -150,6 +156,9 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
 
 ## Sessions and revocation
+- #149 channel_access_lost carries only channel_id, keeps the socket open and retires the subscription. The same fallback worker checks captured grant lifetimes under its 35 s bound; failed/overdue passes fail closed. No retained notification state.
+- #149 observed loss fences queued/replay frames and subscribed at first socket poll under the status read guard. Only an already handed-off frame may finish; REST authorization/data snapshots established before COMMIT may finish without later Messages.
+
 - Two independent revocations: ending an Account Session signals its token hash in all Organizations (4001); Membership loss signals (organization_id, account_id) with its new revision (4003), leaving other Organizations alone (#146).
 - Revocation boundary: history/replay deny once revocation commits; live delivery starts no new protected frame after the check sees loss, but frames already in flight may arrive. Commit never retracts an in-flight frame (#146, #149).
 - Fallback worker: one process-local worker checks all distinct session keys every 30 s in 1,000-key batches under one 5 s deadline; a lost signal is detected within 35 s. Only a fully successful pass revokes; any failure closes the snapshot with 1011 (#57 PR C, #157).

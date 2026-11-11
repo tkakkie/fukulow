@@ -25,7 +25,7 @@ use password::{check_password, hash_password};
 mod session;
 mod throttle;
 pub use cleanup::SessionCleanup;
-pub use session::SessionChanges;
+pub use session::{SessionChanges, SubscriptionRecheck};
 pub use throttle::SignInThrottle;
 
 // Bound Argon2 memory/CPU work independently from Tokio blocking-thread capacity.
@@ -41,7 +41,11 @@ pub struct ErrorBody {
 }
 
 #[derive(Debug)]
-pub struct ApiError(StatusCode, &'static str, Option<std::time::Duration>);
+pub struct ApiError(
+    pub(crate) StatusCode,
+    pub(crate) &'static str,
+    pub(crate) Option<std::time::Duration>,
+);
 impl ApiError {
     pub(crate) fn organization_unavailable() -> Self {
         Self(StatusCode::NOT_FOUND, "organization_unavailable", None)
@@ -54,7 +58,7 @@ impl ApiError {
     fn unauthorized() -> Self {
         Self(StatusCode::UNAUTHORIZED, "invalid credentials", None)
     }
-    fn bad_request() -> Self {
+    pub(crate) fn bad_request() -> Self {
         Self(StatusCode::BAD_REQUEST, "invalid input", None)
     }
     fn throttled(retry: std::time::Duration) -> Self {

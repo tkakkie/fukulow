@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test'
 
 // The Rust binary serves the built app (web/dist is embedded at cargo build time).
-const port = 18080
+const port = Number(process.env.E2E_PORT ?? 18080)
 
 export default defineConfig({
   testDir: './e2e',

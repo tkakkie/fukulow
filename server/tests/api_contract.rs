@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 24 operations document shutdown, including Member/Invite, Unread and Reply chain operations.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 162;
+// All 27 operations document shutdown, including Member/Invite, Unread and Reply chain operations.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 185;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -105,7 +105,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 24);
+        assert_eq!(operations, 27);
     }
 }
 
@@ -135,14 +135,15 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             .replace("{org}", &Uuid::nil().to_string())
             .replace("{id}", &Uuid::nil().to_string())
             .replace("{topic_id}", &Uuid::nil().to_string())
-            .replace("{message_id}", &Uuid::nil().to_string());
+            .replace("{message_id}", &Uuid::nil().to_string())
+            .replace("{member_id}", &Uuid::nil().to_string());
         for method in HTTP_METHODS {
             if item.get(method).is_some() {
                 requests.push((method.to_uppercase(), path.clone()));
             }
         }
     }
-    assert_eq!(requests.len(), 24);
+    assert_eq!(requests.len(), 27);
     requests.extend(
         [
             "/",
@@ -641,6 +642,10 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         &[
             (ServerEvent::Message { message }, "message"),
             (
+                ServerEvent::ChannelAccessLost { channel_id },
+                "channel_access_lost",
+            ),
+            (
                 ServerEvent::Subscribed {
                     channel_id,
                     caught_up_seq: 1,
@@ -996,4 +1001,61 @@ fn reply_openapi_contract_has_nullable_membership_send_target_and_bounded_chain_
                 .contains(&json!(field))
         );
     }
+}
+
+#[test]
+fn channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated() {
+    let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for (path, method) in [
+        ("/api/v1/orgs/{org}/channels/{id}/members", "get"),
+        ("/api/v1/orgs/{org}/channels/{id}/members", "post"),
+        (
+            "/api/v1/orgs/{org}/channels/{id}/members/{member_id}",
+            "delete",
+        ),
+    ] {
+        let operation = &doc["paths"][path][method];
+        assert!(operation.is_object());
+        for status in ["400", "401", "404", "500"] {
+            assert_eq!(
+                operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/ErrorBody"
+            );
+        }
+    }
+    let schemas = &doc["components"]["schemas"];
+    let properties = schemas["ChannelAccessLost"]["properties"]
+        .as_object()
+        .unwrap();
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["channel_id", "type"]
+    );
+    assert_eq!(
+        schemas["ChannelAccessLost"]["required"],
+        json!(["channel_id", "type"])
+    );
+    assert_eq!(
+        schemas["AddChannelMemberRequest"]["properties"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+    for name in ["can_add_members", "can_remove_members", "can_leave"] {
+        assert!(
+            schemas["ChannelCapabilities"]["properties"]
+                .get(name)
+                .is_some()
+        );
+    }
+    assert_eq!(
+        schemas["Member"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["id", "name", "role"]
+    );
 }

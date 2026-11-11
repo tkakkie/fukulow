@@ -132,12 +132,15 @@ async fn topic_live_replay_member_revision_and_removed_grant_denials_have_positi
         }
         gate.release.add_permits(1);
         if loss == "grant" {
-            denied(&mut replay, target).await;
+            access_loss::access_lost(&mut replay, target).await;
         } else {
             closed(&mut replay, CLOSE_ORGANIZATION_UNAVAILABLE).await;
         }
         let second = topic_send(&f, &f.token, target, Uuid::new_v4()).await;
         f.state.message_delivery.flush().await;
+        if loss == "grant" {
+            access_loss::access_lost(&mut live, target).await;
+        }
         silent(&mut live).await;
         subscribe(&mut live, target, 0).await;
         if loss == "grant" {

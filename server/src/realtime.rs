@@ -57,6 +57,8 @@ pub enum ServerEvent {
         #[schema(minimum = 0)]
         caught_up_seq: i64,
     },
+    /// Effective Channel access loss; the socket and other Channels stay open.
+    ChannelAccessLost { channel_id: Uuid },
     Error {
         code: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +157,7 @@ async fn connected_with_lifecycle(
         auth: &auth,
         queue,
         cursors: HashMap::new(),
+        access: HashMap::new(),
     };
     let code = tokio::select! {
         biased;

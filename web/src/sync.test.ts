@@ -756,3 +756,20 @@ it('controller clears olderError in the same dispatch when a non-stale before fe
   expect(bListener).not.toHaveBeenCalled()
   await client.sync.close()
 })
+
+it('ambiguous access-loss events during pending subscribe rewatch or retirement reconnect with backoff', async () => {
+  for (const phase of ['pending', 'rewatch', 'retired']) {
+    const client = controllerClient()
+    if (phase !== 'pending') { await ready(client); await client.sync.unwatch('A'); if (phase === 'rewatch') await client.sync.watch('A') }
+    else {
+      await client.feed({ type: 'session_start' }); await client.feed({ type: 'connection_ready' })
+      const first = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
+      await client.feed({ type: 'history_result', respond_to: first, messages: [record(100)], has_more: false })
+    }
+    const old = client.sockets[0]
+    const effects = await client.feed({ type: 'channel_access_lost', channel: 'A' })
+    expect(effects).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff' }))
+    expect(old.closed).toBe(true); expect(client.sync.get().channels.A.state).not.toBe('unavailable')
+    await client.sync.close()
+  }
+})

@@ -27,6 +27,7 @@ export function checkServerEvent(event: ServerEvent): string {
     }
     case 'subscribed':
       return `${event.channel_id}:${event.caught_up_seq}`
+    case 'channel_access_lost': return event.channel_id
     case 'error':
       return `${event.code}:${event.channel_id ?? ''}`
     default:

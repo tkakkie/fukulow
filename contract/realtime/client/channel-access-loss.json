@@ -1,0 +1,471 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "access-loss-pending-duplicates-stale-completions-and-reselection",
+      "title": "Channel access loss fences pending sends and late history, keeps other Channels and permits explicit selection",
+      "covers": [
+        "S4",
+        "C6",
+        "C9"
+      ],
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "latest",
+                "as": "A_f"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "A_f",
+            "messages": [
+              {
+                "seq": 2
+              }
+            ],
+            "has_more": true
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "A",
+                "after_seq": 2,
+                "as": "A_s"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 2,
+            "respond_to": "A_s"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "B"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "B",
+                "page": "latest",
+                "as": "B_f"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "B_f",
+            "messages": [
+              {
+                "seq": 2
+              }
+            ],
+            "has_more": true
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "B",
+                "after_seq": 2,
+                "as": "B_s"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "B",
+            "caught_up_seq": 2,
+            "respond_to": "B_s"
+          }
+        },
+        {
+          "input": {
+            "type": "user_send",
+            "channel": "A",
+            "client_message_id": "pending",
+            "body": "pending text"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "send",
+                "channel": "A",
+                "client_message_id": "pending",
+                "as": "send"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "load_older",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "before",
+                "as": "older"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "channel_access_lost",
+            "channel": "A"
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "unavailable"
+              },
+              "B": {
+                "state": "ready"
+              }
+            }
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "send"
+              },
+              {
+                "type": "fetch_history",
+                "channel": "A"
+              },
+              {
+                "type": "subscribe",
+                "channel": "A"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "channel_access_lost",
+            "channel": "A"
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "unavailable",
+                "pending": [
+                  {
+                    "client_message_id": "pending",
+                    "state": "unknown"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "older",
+            "messages": [
+              {
+                "seq": 1
+              }
+            ],
+            "has_more": false
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "unavailable",
+                "visible": [
+                  2
+                ]
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "ack",
+            "respond_to": "send",
+            "message": {
+              "seq": 3,
+              "client_message_id": "pending",
+              "sender": "me"
+            }
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "unavailable",
+                "visible": [
+                  2
+                ],
+                "pending": [
+                  {
+                    "client_message_id": "pending",
+                    "state": "unknown"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "user_retry",
+            "client_message_id": "pending"
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "send"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "message",
+            "channel": "B",
+            "message": {
+              "seq": 3
+            }
+          },
+          "observe": {
+            "channels": {
+              "B": {
+                "state": "ready",
+                "cursor": 3
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "unwatch",
+            "channel": "A"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "A"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "access-loss-same-session-late-401",
+      "title": "Same-session late 401 still ends the Account after Channel access loss",
+      "covers": [
+        "C6",
+        "C9"
+      ],
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "latest",
+                "as": "A_f"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "A_f",
+            "messages": [
+              {
+                "seq": 2
+              }
+            ],
+            "has_more": true
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "A",
+                "after_seq": 2,
+                "as": "A_s"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 2,
+            "respond_to": "A_s"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "B"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "B",
+                "page": "latest",
+                "as": "B_f"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "B_f",
+            "messages": [
+              {
+                "seq": 2
+              }
+            ],
+            "has_more": true
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "B",
+                "after_seq": 2,
+                "as": "B_s"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "B",
+            "caught_up_seq": 2,
+            "respond_to": "B_s"
+          }
+        },
+        {
+          "input": {
+            "type": "user_send",
+            "channel": "A",
+            "client_message_id": "late",
+            "body": "late"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "send",
+                "channel": "A",
+                "as": "late"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "channel_access_lost",
+            "channel": "A"
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "state": "unavailable"
+              },
+              "B": {
+                "state": "ready"
+              }
+            }
+          },
+          "effects": {
+            "forbidden": [
+              {
+                "type": "send"
+              },
+              {
+                "type": "fetch_history",
+                "channel": "A"
+              },
+              {
+                "type": "subscribe",
+                "channel": "A"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "send_failed",
+            "respond_to": "late",
+            "status": 401
+          },
+          "observe": {
+            "session": "sign_in_required"
+          }
+        }
+      ]
+    }
+  ]
+}

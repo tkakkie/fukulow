@@ -31,14 +31,93 @@ pub(super) struct Connection<'a> {
     pub auth: &'a Auth,
     pub queue: LiveQueue,
     pub cursors: HashMap<Uuid, i64>,
+    pub access: HashMap<Uuid, crate::channels::AccessWatch>,
 }
 
 impl Connection<'_> {
+    async fn protected_event(
+        &mut self,
+        socket: &mut WebSocket,
+        channel: Uuid,
+        event: ServerEvent,
+    ) -> Result<bool, u16> {
+        let Some(watch) = self.access.get(&channel) else {
+            return Ok(false);
+        };
+        match watch.handoff(Self::event(socket, event)).await {
+            Some(result) => {
+                result?;
+                Ok(true)
+            }
+            None => self.protected(socket, channel).await,
+        }
+    }
+    async fn protected(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<bool, u16> {
+        match self.access.get(&channel).map(|watch| watch.status()) {
+            Some(0) => Ok(true),
+            Some(1) => {
+                self.unsubscribe(channel);
+                Self::event(
+                    socket,
+                    ServerEvent::ChannelAccessLost {
+                        channel_id: channel,
+                    },
+                )
+                .await?;
+                Ok(false)
+            }
+            Some(3) => Err(super::CLOSE_ORGANIZATION_UNAVAILABLE),
+            Some(_) => Err(1011),
+            None => Ok(false),
+        }
+    }
+    async fn refresh(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<bool, u16> {
+        if let Some(watch) = self.access.get(&channel) {
+            watch.refresh(&self.state.pool).await.map_err(|_| 1011u16)?;
+        }
+        self.protected(socket, channel).await
+    }
+    async fn retire_lost(&mut self, socket: &mut WebSocket) -> Result<(), u16> {
+        let lost: Vec<_> = self
+            .access
+            .iter()
+            .filter(|(_, watch)| watch.status() != 0)
+            .map(|(id, _)| *id)
+            .collect();
+        for channel in lost {
+            self.protected(socket, channel).await?;
+        }
+        Ok(())
+    }
+    async fn access_changed(access: &mut HashMap<Uuid, crate::channels::AccessWatch>) {
+        if access.values().any(|watch| watch.status() != 0) {
+            return;
+        }
+        let mut waits: Vec<_> = access
+            .values_mut()
+            .map(|watch| Box::pin(watch.changed.changed()))
+            .collect();
+        std::future::poll_fn(|cx| {
+            for wait in &mut waits {
+                if std::future::Future::poll(wait.as_mut(), cx).is_ready() {
+                    return std::task::Poll::Ready(());
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await
+    }
+
     async fn live(
         &mut self,
         socket: &mut WebSocket,
         message: std::sync::Arc<messages::Message>,
     ) -> Result<(), u16> {
+        #[cfg(test)]
+        super::tests::access_loss::pause(message.channel_id, "live", message.seq).await;
+        if !self.protected(socket, message.channel_id).await? {
+            return Ok(());
+        }
         let Some(&after) = self.cursors.get(&message.channel_id) else {
             return Ok(());
         };
@@ -53,13 +132,18 @@ impl Connection<'_> {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return self.catch_up(socket, message.channel_id).await;
         }
-        Self::event(
-            socket,
-            ServerEvent::Message {
-                message: (*message).clone(),
-            },
-        )
-        .await?;
+        if !self
+            .protected_event(
+                socket,
+                message.channel_id,
+                ServerEvent::Message {
+                    message: (*message).clone(),
+                },
+            )
+            .await?
+        {
+            return Ok(());
+        }
         self.cursors.insert(message.channel_id, message.seq);
         Ok(())
     }
@@ -114,32 +198,59 @@ impl Connection<'_> {
             .latest_seq(&self.state.pool, organization, channel)
             .await
             .map_err(|_| 1011u16)?;
+        if !self.refresh(socket, channel).await? {
+            return Ok(());
+        }
         after = after.min(through);
         self.cursors.insert(channel, after);
         #[cfg(test)]
         super::tests::replay_gate(channel).await;
         while after < through {
-            match self.visible(channel).await {
-                Ok(()) => {}
+            #[cfg(test)]
+            super::tests::access_loss::pause(channel, "snapshot", after).await;
+            let page = match messages::authorized_replay_page(
+                &self.state.pool,
+                organization,
+                (self.auth.identity.member.id, self.auth.membership_revision),
+                channel,
+                after,
+                through,
+            )
+            .await
+            {
+                Ok(page) => page,
                 Err(MessageError::NotFound) => {
-                    self.unsubscribe(channel);
-                    return Self::error(socket, Some(channel), "channel_not_found").await;
+                    self.state.message_delivery.channel_access.observe_loss(
+                        organization,
+                        channel,
+                        (self.auth.identity.member.id, self.auth.membership_revision),
+                    );
+                    self.protected(socket, channel).await?;
+                    return Ok(());
                 }
                 Err(MessageError::OrganizationUnavailable) => {
                     return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                 }
                 Err(_) => return Err(1011),
-            }
-            let page =
-                messages::replay_page(&self.state.pool, organization, channel, after, through)
-                    .await
-                    .map_err(|_| 1011u16)?;
+            };
             if page.is_empty() {
                 return Err(1011);
             }
+            #[cfg(test)]
+            super::tests::access_loss::pause(channel, "page", after).await;
             for message in page {
+                #[cfg(test)]
+                super::tests::access_loss::pause(channel, "frame", message.seq).await;
+                if !self.protected(socket, channel).await? {
+                    return Ok(());
+                }
                 after = message.seq;
-                Self::event(socket, ServerEvent::Message { message }).await?;
+                if !self
+                    .protected_event(socket, channel, ServerEvent::Message { message })
+                    .await?
+                {
+                    return Ok(());
+                }
                 self.cursors.insert(channel, after);
             }
         }
@@ -147,6 +258,7 @@ impl Connection<'_> {
     }
 
     fn unsubscribe(&mut self, channel: Uuid) {
+        self.access.remove(&channel);
         self.queue.unsubscribe(channel);
         self.cursors.remove(&channel);
     }
@@ -176,6 +288,24 @@ impl Connection<'_> {
                     }
                     Err(_) => return Err(1011),
                 }
+                let watch = self
+                    .state
+                    .message_delivery
+                    .channel_access
+                    .subscribe(
+                        &self.state.pool,
+                        self.auth.identity.organization.organization_id,
+                        (self.auth.identity.member.id, self.auth.membership_revision),
+                        channel_id,
+                    )
+                    .await
+                    .map_err(|_| 1011u16)?;
+                let Some(watch) = watch else {
+                    return Self::error(socket, Some(channel_id), "channel_not_found").await;
+                };
+                self.access.insert(channel_id, watch);
+                #[cfg(test)]
+                super::tests::access_loss::pause(channel_id, "registered", 0).await;
                 self.queue.subscribe(channel_id);
                 self.cursors.insert(channel_id, after_seq);
                 self.catch_up(socket, channel_id).await?;
@@ -185,6 +315,9 @@ impl Connection<'_> {
                     if let Ok(message) = self.queue.events.try_recv() {
                         self.live(socket, message).await?;
                     }
+                }
+                if !self.refresh(socket, channel_id).await? {
+                    return Ok(());
                 }
                 if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
                     let latest = self
@@ -197,8 +330,12 @@ impl Connection<'_> {
                         )
                         .await
                         .map_err(|_| 1011u16)?;
-                    Self::event(
+                    if !self.protected(socket, channel_id).await? {
+                        return Ok(());
+                    }
+                    self.protected_event(
                         socket,
+                        channel_id,
                         ServerEvent::Subscribed {
                             channel_id,
                             caught_up_seq: caught_up_seq.min(latest),
@@ -218,6 +355,8 @@ impl Connection<'_> {
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             let frame = tokio::select! {
+                biased;
+                _ = Self::access_changed(&mut self.access) => { self.retire_lost(socket).await?; continue; },
                 frame = socket.recv() => frame,
                 _ = heartbeat.tick() => {
                     if ping_sent_at.is_some_and(|sent| sent.elapsed() >= lifecycle.idle_timeout) {

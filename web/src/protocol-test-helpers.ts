@@ -35,6 +35,7 @@ export function protocolClient() {
         case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', message: msg() } }; break
         case 'subscribed': input = { type: 'event', connection: state.connection!, subscription: e?.id as number | undefined,
           event: { type: 'subscribed', channel_id: channel, caught_up_seq: i.caught_up_seq as number } }; break
+        case 'channel_access_lost': input = { type: 'event', connection: state.connection!, event: { type: 'channel_access_lost', channel_id: channel } }; break
         case 'error_event': input = { type: 'event', connection: state.connection!, event: { type: 'error', channel_id: channel,
           code: i.code as string } }; break
         case 'history_result': input = { type: i.type, request: e!.id as number,

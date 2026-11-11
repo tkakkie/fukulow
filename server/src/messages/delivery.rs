@@ -100,6 +100,7 @@ impl Sender {
 /// once from that pool on first use.
 #[derive(Clone)]
 pub struct Delivery {
+    pub channel_access: channels::AccessChanges,
     pub(crate) work: crate::shutdown::Work,
     recipients: ChannelRegistry,
     notifications: Arc<Semaphore>,
@@ -116,6 +117,7 @@ pub struct Delivery {
 impl Default for Delivery {
     fn default() -> Self {
         Self {
+            channel_access: Default::default(),
             work: Default::default(),
             recipients: Default::default(),
             notifications: Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS)),
@@ -485,7 +487,7 @@ impl Delivery {
             .into_iter()
             .collect();
         let allowed =
-            channels::visible_members(pool, organization, messages[0].channel_id, &members).await;
+            channels::member_access(pool, organization, messages[0].channel_id, &members).await;
         let Ok(allowed) = allowed else {
             // No protected delivery on a failed authorization query. Reconnect and replay.
             for sender in &recipients {
@@ -493,7 +495,20 @@ impl Delivery {
             }
             return;
         };
-        let allowed: HashSet<_> = allowed.into_iter().collect();
+        for &(id, revision, visible) in &allowed {
+            if !visible {
+                self.channel_access.observe_loss(
+                    organization,
+                    messages[0].channel_id,
+                    (id, revision),
+                );
+            }
+        }
+        let allowed: HashSet<_> = allowed
+            .into_iter()
+            .filter(|row| row.2)
+            .map(|(id, revision, _)| (id, revision))
+            .collect();
         let recipients: Vec<_> = recipients
             .iter()
             .filter(|s| allowed.contains(&s.member))

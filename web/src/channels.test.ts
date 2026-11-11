@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createChannels } from './channels'
 
-const ch = (id: string, name = id) => ({ id, name, visibility: 'public' as const, capabilities: { can_add_members: { allowed: false } } })
+const ch = (id: string, name = id) => ({ id, name, visibility: 'public' as const, capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: true } } })
 const ok = <T>(data: T) => ({ ok: true as const, data })
 
 describe('channels', () => {

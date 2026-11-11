@@ -137,3 +137,18 @@ it('ordinary history channel_not_found stays terminal for the Channel under C9',
   expect(onEnded).not.toHaveBeenCalled()
   session.close()
 })
+
+it('explicitly selecting the current C9 Channel reattempts it while another Organization stays ready', async () => {
+  const a = open(), b = open()
+  for (const c of [a, b]) {
+    c.net.pages.A = ok({ messages: [record(100)], has_more: false })
+    c.net.lists[0].resolve(ok({ channels: [channel('A')] })); await settle(); c.net.subscribed('A', 100)
+  }
+  a.net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+  await settle(); expect(a.session.sync.get().channels.A.state).toBe('unavailable')
+  expect(b.session.sync.get().channels.A.state).toBe('ready')
+  a.session.channels.select('A'); await settle()
+  expect(controls(a.net).filter(c => c === 'subscribe:A')).toHaveLength(2)
+  a.net.subscribed('A', 100); await settle(); expect(a.session.sync.get().channels.A.state).toBe('ready')
+  a.session.close(); b.session.close()
+})

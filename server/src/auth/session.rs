@@ -11,6 +11,14 @@ use uuid::Uuid;
 
 const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+pub trait SubscriptionRecheck: Send + Sync {
+    fn check<'a>(
+        &'a self,
+        pool: &'a PgPool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
+    fn failed(&self);
+}
+
 type SessionKey = (Uuid, Vec<u8>);
 
 #[derive(Clone, Copy, Default)]
@@ -38,6 +46,7 @@ pub struct SessionChanges {
     interval: Duration,
     timeout: Duration,
     on_fatal: Arc<dyn Fn() + Send + Sync>,
+    subscriptions: Arc<Mutex<Option<Arc<dyn SubscriptionRecheck>>>>,
     #[cfg(test)]
     default_fatal_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     #[cfg(test)]
@@ -48,6 +57,7 @@ impl Default for SessionChanges {
         #[cfg(test)]
         let default_fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         Self {
+            subscriptions: Default::default(),
             sessions: Default::default(),
             worker: Arc::new(Once::new()),
             interval: RECHECK_INTERVAL,
@@ -70,6 +80,26 @@ impl Default for SessionChanges {
 }
 
 impl SessionChanges {
+    pub fn set_subscription_recheck(&self, check: Arc<dyn SubscriptionRecheck>) {
+        *self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()) = Some(check);
+    }
+
+    pub(crate) async fn recheck_subscriptions(&self, pool: &PgPool) {
+        let check = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(check) = check
+            && !matches!(
+                tokio::time::timeout(CHECK_TIMEOUT, check.check(pool)).await,
+                Ok(Ok(()))
+            )
+        {
+            check.failed();
+        }
+    }
+
     #[cfg(test)]
     fn register(&self, key: SessionKey) -> Registration {
         self.register_member(key, Uuid::nil(), 0)
