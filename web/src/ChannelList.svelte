@@ -13,6 +13,8 @@
     activeTopicId = null,
     topics = [],
     allTopicsKnown = false,
+    channelUnreadCounts = {},
+    topicUnreadCounts = {},
     onselect,
     onselecttopic,
     onopenalltopics,
@@ -22,6 +24,8 @@
     activeTopicId?: string | null
     topics?: readonly TopicLine[]
     allTopicsKnown?: boolean
+    channelUnreadCounts?: Readonly<Record<string, number | null>>
+    topicUnreadCounts?: Readonly<Record<string, { readonly unreadCount: number | null }>>
     onselect: (id: string) => void
     onselecttopic?: (topicId: string) => void
     onopenalltopics?: (opener: HTMLElement | null) => void
@@ -37,21 +41,25 @@
 <ul class="channel-list">
   {#each channels as c (c.id)}
     {@const isExpanded = c.id === selectedId && recentTopics.length > 0}
+    {@const channelUnread = channelUnreadCounts[c.id] ?? null}
     <li class="channel-list__item">
       <ListRow
         kind="channel"
         prefix={c.visibility === 'private' ? '🔒' : '#'}
         name={c.name}
         selected={c.id === selectedId && !activeTopicId}
+        unreadCount={channelUnread !== null && channelUnread > 0 ? channelUnread : 0}
         expanded={isExpanded ? true : undefined}
         onclick={() => onselect(c.id)}
       >
         {#snippet children()}
           {#each recentTopics as t (t.topicId)}
+            {@const topicUnread = topicUnreadCounts[t.topicId]?.unreadCount ?? null}
             <ListRow
               kind="topic"
               name={t.baseline?.summary.name ?? 'トピック'}
               selected={activeTopicId === t.topicId}
+              unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
               onclick={() => onselecttopic?.(t.topicId)}
             />
           {/each}

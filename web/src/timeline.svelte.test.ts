@@ -1,6 +1,7 @@
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ReadPosition, Result } from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
@@ -11,6 +12,7 @@ import { syncAdapter } from './sync.svelte'
 import Timeline from './Timeline.svelte'
 import TopicView from './TopicView.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
+import { unreadAdapter } from './unread.svelte'
 import MessageRow from './ui/MessageRow.svelte'
 import Workspace from './Workspace.svelte'
 
@@ -368,6 +370,7 @@ class MiniElement extends MiniNode {
   scrollTop = 0
   scrollHeight = 0
   clientHeight = 0
+  layoutRowHeight = 0
   readonly content: MiniDocumentFragment
   readonly style = {
     setProperty() {},
@@ -561,10 +564,10 @@ class MiniElement extends MiniNode {
   isRenderedVisible(): boolean {
     if (!this.isConnected || !this.ownerDocument) return false
     if (this.closest('[hidden], [inert], [aria-hidden="true"]')) return false
+    const width = this.ownerDocument.defaultView?.innerWidth ?? 1280
     const channelColumn = this.closest('.channel-column')
     if (channelColumn) {
       const workspace = channelColumn.closest('.workspace')
-      const width = this.ownerDocument.defaultView?.innerWidth ?? 1280
       if (workspace) {
         if (width >= 600 && width < 960 && workspace.getAttribute('data-drawer-open') !== 'true') {
           return false
@@ -574,12 +577,44 @@ class MiniElement extends MiniNode {
         }
       }
     }
+    const mainCard = this.closest('.main-card')
+    if (mainCard) {
+      const workspace = mainCard.closest('.workspace')
+      if (workspace && width < 600 && workspace.getAttribute('data-mobile-level') !== 'view') {
+        return false
+      }
+    }
+    const rightPanelSlot = this.closest('.right-panel-slot')
+    if (rightPanelSlot) {
+      const workspace = rightPanelSlot.closest('.workspace')
+      if (workspace && width < 600 && workspace.getAttribute('data-mobile-level') !== 'panel') {
+        return false
+      }
+    }
     return true
   }
 
   getBoundingClientRect() {
     if (!this.isRenderedVisible()) {
       return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) }
+    }
+    if (this.layoutRowHeight > 0) {
+      const h = this.clientHeight || 100
+      return { top: 0, bottom: h, left: 0, right: 260, width: 260, height: h, x: 0, y: 0, toJSON: () => ({}) }
+    }
+    const item = this.hasAttribute('data-message-id') ? this : this.closest('[data-message-id]')
+    if (item) {
+      const scroller = item.closest('.timeline-scroll, .topic-view__scroll')
+      if (scroller && scroller.layoutRowHeight > 0) {
+        const items = scroller.querySelectorAll('[data-message-id]')
+        const idx = items.indexOf(item)
+        if (idx >= 0) {
+          const rowH = scroller.layoutRowHeight
+          const top = idx * rowH - scroller.scrollTop
+          const bottom = top + rowH
+          return { top, bottom, left: 0, right: 260, width: 260, height: rowH, x: 0, y: top, toJSON: () => ({}) }
+        }
+      }
     }
     return { top: 0, bottom: 24, left: 0, right: 260, width: 260, height: 24, x: 0, y: 0, toJSON: () => ({}) }
   }
@@ -629,6 +664,7 @@ class MiniDocument extends MiniNode {
   readonly body: MiniElement
   activeElement: MiniElement | null = null
   defaultView: MiniWindow | null = null
+  visibilityState: 'visible' | 'hidden' = 'visible'
 
   constructor() {
     super(9, '#document', null)
@@ -678,6 +714,7 @@ class MiniDocument extends MiniNode {
     this.head.textContent = ''
     this.body.textContent = ''
     this.activeElement = this.body
+    this.visibilityState = 'visible'
   }
 }
 
@@ -4814,6 +4851,1235 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(await ch.topic('T').submit('Topic T')).toBe(false)
     expect(net.sends).toHaveLength(0)
     await unmount(instance); raw.close()
+  })
+
+  it('renders Channel and Topic Unread badges across sidebar, accordion, Topic list panel and timeline summary lines, and hides badges when counts are null or zero', async () => {
+    const net = fakeNetwork()
+    // Start with failed Channel-list baseline so counts are unresolved (null)
+    net.unreadListResult = { ok: false, kind: 'http', status: 500, error: 'internal_error' }
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const t1Latest = { ...record(5, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック1最新' }
+    const t2Latest = { ...record(6, 'c1'), sender: 'other', topic_id: 't2', body: 'トピック2最新' }
+    const t1Summary = {
+      id: 't1',
+      name: '進行中トピック',
+      first_seq: 5,
+      last_seq: 5,
+      message_count: 2,
+      latest_message: t1Latest,
+      read_seq: 3,
+      unread_count: 2,
+    }
+    const t2Summary = {
+      id: 't2',
+      name: '既読トピック',
+      first_seq: 6,
+      last_seq: 6,
+      message_count: 1,
+      latest_message: t2Latest,
+      read_seq: 6,
+      unread_count: 0,
+    }
+
+    net.timelines.c1 = ok({
+      as_of_seq: 6,
+      has_more: false,
+      items: [
+        { kind: 'topic', topic: t1Summary },
+        { kind: 'topic', topic: t2Summary },
+      ],
+    })
+    net.topicLists.c1 = ok({
+      as_of_seq: 6,
+      has_more: false,
+      topics: [t1Summary, t2Summary],
+    })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 6, topic: t1Summary })
+    net.topicSummaries['c1:t2'] = ok({ as_of_seq: 6, topic: t2Summary })
+    net.topicSummaries['c1:t3'] = { ok: false, kind: 'http', status: 500 }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'random')] }))
+    await settle()
+    net.subscribed('c1', 6)
+    await settle()
+    // Deliver a live message in t3 while its summary recovery fails -> t3 has unreadCount === null
+    net.event({
+      type: 'message',
+      message: { ...record(7, 'c1'), topic_id: 't3', sender: 'other', body: 't3の新着メッセージ' },
+    })
+    await settle()
+
+    let href = '/o/org-1/c/c1?panel=topics'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+    await settle()
+    flushSync()
+
+    // While Channel-list baseline failed (null), Channel and Topic badges are hidden
+    const channelNav = host.querySelector('#channel-content')!
+    expect(channelNav.querySelectorAll('.ui-badge--unread')).toHaveLength(0)
+    expect(host.querySelectorAll('#main-content .ui-topic-summary .ui-badge--unread')).toHaveLength(0)
+    expect(host.querySelectorAll('#panel-content .ui-topic-summary .ui-badge--unread')).toHaveLength(0)
+
+    // Now resolve the Channel-list baseline: c1 has 2 Unread (from t1), c2 has 4 Unread
+    net.unreadListResult = null
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 6,
+      read_seq: 6,
+      unread_count: 2,
+      main_unread_count: 0,
+    }
+    net.unreadChannels.c2 = {
+      ...channel('c2', 'random'),
+      as_of_seq: 4,
+      read_seq: 0,
+      unread_count: 4,
+      main_unread_count: 4,
+    }
+    await rawSession.unread.refresh()
+    await settle()
+    flushSync()
+
+    // Topic t1 has unread_count = 2 -> shown in accordion, main timeline summary line, and right panel Topic list
+    // Topic t2 has unread_count = 0 -> no badge shown
+    // Topic t3 has unreadCount === null (summary fetch failed) -> no badge shown
+    expect(sessionModel.unread('c1').state.topics.t3?.unreadCount ?? null).toBeNull()
+    const accordionBadges = channelNav.querySelectorAll('.ui-list-row-group--topic .ui-badge--unread')
+    expect(accordionBadges).toHaveLength(1)
+    expect(accordionBadges[0].getAttribute('aria-label')).toBe('未読 2件')
+
+    const allSidebarBadges = channelNav.querySelectorAll('.ui-badge--unread')
+    // 2 Channel row badges (c1: 未読 3件 including seq 7 > as_of_seq 6, c2: 未読 4件) + 1 accordion Topic badge (t1: 未読 2件)
+    expect(allSidebarBadges.map((b) => b.getAttribute('aria-label'))).toEqual(['未読 3件', '未読 2件', '未読 4件'])
+
+    const timelineBadges = host.querySelectorAll('#main-content .ui-topic-summary .ui-badge--unread')
+    expect(timelineBadges).toHaveLength(1)
+    expect(timelineBadges[0].getAttribute('aria-label')).toBe('未読 2件')
+
+    const panelBadges = host.querySelectorAll('#panel-content .ui-topic-summary .ui-badge--unread')
+    expect(panelBadges).toHaveLength(1)
+    expect(panelBadges[0].getAttribute('aria-label')).toBe('未読 2件')
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('opens at the first Unread Message with the 未読 read marker (loading older pages as needed), keeps the marker for the visit while scrolling marks visible confirmed rows, and never marks from hidden tabs, Topic summary lines or ReplyPanel', async () => {
+    const net = fakeNetwork()
+    const sessionOpts = net.options('me')
+    let timelineCalls = 0
+    const origListTimeline = sessionOpts.topicsApi!.listTimeline
+    const m1 = { ...record(1, 'c1'), sender: 'me', body: '自分の既読メッセージ' }
+    const m2 = { ...record(2, 'c1'), sender: 'other', body: '最初の未読メッセージ' }
+    const m3 = { ...record(3, 'c1'), sender: 'other', body: '2番目の未読メッセージ' }
+    const m4 = { ...record(4, 'c1'), sender: 'other', body: '3番目の未読メッセージ' }
+    const t1Msg = { ...record(5, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック内の未読' }
+    const m6 = { ...record(6, 'c1'), sender: 'other', body: '4番目の未読メッセージ' }
+
+    const t1Summary = {
+      id: 't1',
+      name: '別トピック',
+      first_seq: 5,
+      last_seq: 5,
+      message_count: 1,
+      latest_message: t1Msg,
+      read_seq: 0,
+      unread_count: 1,
+    }
+
+    sessionOpts.topicsApi!.listTimeline = async (ch, query) => {
+      timelineCalls++
+      if (query?.before_position !== undefined) {
+        return ok({
+          as_of_seq: 6,
+          has_more: false,
+          items: [
+            { kind: 'message', message: m1 },
+            { kind: 'message', message: m2 },
+            { kind: 'message', message: m3 },
+          ],
+        })
+      }
+      return origListTimeline(ch, query)
+    }
+
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...sessionOpts })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    // Initial timeline page has only seq 4..6 (has_more: true); older page has seq 1..3 (containing first Unread m2 at seq 2)
+    net.timelines.c1 = ok({
+      as_of_seq: 6,
+      has_more: true,
+      items: [
+        { kind: 'message', message: m4 },
+        { kind: 'topic', topic: t1Summary },
+        { kind: 'message', message: m6 },
+      ],
+    })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 6, topic: t1Summary })
+    net.replyChains[`c1:${m2.id}`] = ok({ root_id: m2.id, messages: [m2], has_more: false })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 6,
+      read_seq: 1,
+      unread_count: 5,
+      main_unread_count: 4,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 6)
+    await settle()
+
+    // Also add a failed pending send in c1 to verify unconfirmed rows never mark
+    const chSync = sessionModel.sync.channel('c1')
+    const pSend = chSync.send('未確定の送信失敗メッセージ')
+    await settle()
+    net.sends[0].resolve({ ok: false, kind: 'network' })
+    await pSend
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    // Configure 2-row viewport (clientHeight = 100, rowHeight = 50, total 6 items = 300px) before older page settles
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 300
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    // 1. Older page was automatically loaded so m2 (first Unread above read_seq 1) is in the window
+    expect(timelineCalls).toBeGreaterThanOrEqual(2)
+    const m2Item = host.querySelector(`#main-content [data-message-id="${m2.id}"]`)!
+    const marker = m2Item.querySelector('[data-read-marker="true"]')
+    expect(marker).not.toBeNull()
+    expect(marker!.textContent.trim()).toBe('未読')
+
+    // 2. Scroll container opened positioned at m2 (index 1 -> scrollTop = 50), NOT at the bottom (300)
+    expect(scrollEl.scrollTop).toBe(50)
+
+    // 3. Only m2 (seq 2) and m3 (seq 3) are inside the 100px viewport at scrollTop = 50 -> markRead submitted seq 3 only
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } }])
+    expect(sessionModel.unread('c1').state.main.unreadCount).toBe(2) // m4 and m6 remain Unread
+    expect(sessionModel.unread('c1').state.topics.t1?.unreadCount).toBe(1) // Topic t1 remains Unread
+
+    // 4. Opening ReplyPanel on m2 never marks additional main or Topic Messages as read
+    m2Item.querySelector('button')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(host.querySelector('#panel-content')).not.toBeNull()
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } }])
+
+    // 5. While document is hidden, scrolling through m4 and m6 emits no presented intent and sends no markRead
+    testDoc.visibilityState = 'hidden'
+    testDoc.dispatchEvent(new MiniDomEvent('visibilitychange'))
+    flushSync()
+
+    scrollEl.scrollTop = 150
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    scrollEl.scrollTop = 200
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    await settle()
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } }])
+    expect(sessionModel.unread('c1').state.main.unreadCount).toBe(2)
+
+    // 6. Returning to visible document and scrolling through m4 (index 3) and m6 (index 5) emits presented for confirmed rows, ignoring Topic summary line t1 and failed pending send
+    scrollEl.scrollTop = 150
+    testDoc.visibilityState = 'visible'
+    testDoc.dispatchEvent(new MiniDomEvent('visibilitychange'))
+    flushSync()
+    await settle()
+    scrollEl.scrollTop = 200
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(net.markReads).toEqual([
+      { scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } },
+      { scope: { channel: 'c1', topicId: null }, body: { read_seq: 4 } },
+      { scope: { channel: 'c1', topicId: null }, body: { read_seq: 6 } },
+    ])
+    expect(sessionModel.unread('c1').state.main.unreadCount).toBe(0)
+    // Topic summary line in main timeline never marked Topic t1 as read
+    expect(sessionModel.unread('c1').state.topics.t1?.unreadCount).toBe(1)
+    expect(sessionModel.unread('c1').state.unreadCount).toBe(1)
+
+    // 7. Read marker stays at m2 for the entire visit even after main unreadCount reaches 0
+    expect(m2Item.querySelector('[data-read-marker="true"]')?.textContent.trim()).toBe('未読')
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('calls enter and leave on navigating between main timeline and Topic views, marks only the active Topic, and opens without a marker on a revisit after reading', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const t1m1 = { ...record(1, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック1の未読1' }
+    const t1m2 = { ...record(2, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック1の未読2' }
+    const t2m1 = { ...record(3, 'c1'), sender: 'other', topic_id: 't2', body: 'トピック2の未読1' }
+
+    const t1Summary = {
+      id: 't1',
+      name: 'トピックA',
+      first_seq: 1,
+      last_seq: 2,
+      message_count: 2,
+      latest_message: t1m2,
+      read_seq: 0,
+      unread_count: 2,
+    }
+    const t2Summary = {
+      id: 't2',
+      name: 'トピックB',
+      first_seq: 3,
+      last_seq: 3,
+      message_count: 1,
+      latest_message: t2m1,
+      read_seq: 0,
+      unread_count: 1,
+    }
+
+    net.timelines.c1 = ok({
+      as_of_seq: 3,
+      has_more: false,
+      items: [
+        { kind: 'topic', topic: t1Summary },
+        { kind: 'topic', topic: t2Summary },
+      ],
+    })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 3, topic: t1Summary })
+    net.topicSummaries['c1:t2'] = ok({ as_of_seq: 3, topic: t2Summary })
+    net.topicMessages['c1:t1'] = ok({ messages: [t1m1, t1m2], has_more: false })
+    net.topicMessages['c1:t2'] = ok({ messages: [t2m1], has_more: false })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 3,
+      read_seq: 3,
+      unread_count: 3,
+      main_unread_count: 0,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 3)
+    await settle()
+
+    const enterSpy = vi.spyOn(rawSession.unread, 'enter')
+    const leaveSpy = vi.spyOn(rawSession.unread, 'leave')
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+    await settle()
+    flushSync()
+
+    // 1. Entered main timeline (topicId: null) with 0 main Unread -> no read marker
+    expect(enterSpy).toHaveBeenCalledWith({ channel: 'c1', topicId: null })
+    expect(host.querySelector('[data-read-marker="true"]')).toBeNull()
+    expect(net.markReads).toHaveLength(0)
+    sessionModel.sync.channel('c1').setDraft('main draft')
+    flushSync()
+    expect(leaveSpy).toHaveBeenCalledTimes(0)
+
+    // 2. Click Topic t1 summary line -> leaves main timeline and enters Topic t1
+    const t1LineBtn = host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!
+    t1LineBtn.click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+
+    expect(leaveSpy).toHaveBeenCalledTimes(1)
+    expect(enterSpy).toHaveBeenLastCalledWith({ channel: 'c1', topicId: 't1' })
+
+    // Topic t1 shows read marker on t1m1, marks only t1 read, and leaves t2 Unread
+    const t1m1Item = host.querySelector(`#main-content [data-message-id="${t1m1.id}"]`)!
+    expect(t1m1Item.querySelector('[data-read-marker="true"]')?.textContent.trim()).toBe('未読')
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: 't1' }, body: { read_seq: 2 } }])
+    expect(sessionModel.unread('c1').state.topics.t1?.unreadCount).toBe(0)
+    expect(sessionModel.unread('c1').state.topics.t2?.unreadCount).toBe(1)
+    expect(sessionModel.unread('c1').state.unreadCount).toBe(1)
+
+    // Marker remains visible for the rest of the visit to t1 even across timeline state updates
+    sessionModel.sync.channel('c1').setDraft('updated draft')
+    flushSync()
+    await settle()
+    flushSync()
+    expect(leaveSpy).toHaveBeenCalledTimes(1)
+    expect(t1m1Item.querySelector('[data-read-marker="true"]')).not.toBeNull()
+
+    // 3. Return to main timeline and re-enter Topic t1 -> now t1 has 0 Unread so it opens pinned at bottom with no marker
+    host
+      .querySelectorAll('#main-content .main-card__header button')
+      .find((b) => b.textContent.includes('チャンネルへ戻る'))!
+      .click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(leaveSpy).toHaveBeenCalledTimes(2)
+    expect(enterSpy).toHaveBeenLastCalledWith({ channel: 'c1', topicId: null })
+
+    host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!.click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenLastCalledWith({ channel: 'c1', topicId: 't1' })
+    expect(host.querySelector('[data-read-marker="true"]')).toBeNull()
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('stops automatic Unread re-entry on Channel or Topic 404 while sync remains ready, recovers on C8 clamp, and restarts on explicit user selection', async () => {
+    const net = fakeNetwork()
+    let markReadResponses: Array<Result<ReadPosition>> = [
+      { ok: false, kind: 'http', status: 404, error: 'channel_not_found' },
+      { ok: false, kind: 'http', status: 404, error: 'channel_not_found' },
+    ]
+    const baseOptions = net.options('me')
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...baseOptions,
+      sync: {
+        ...baseOptions.sync,
+        schedule: (fn) => {
+          fn()
+          return 0
+        },
+      },
+      unreadApi: {
+        ...baseOptions.unreadApi!,
+        markRead: async (scope, body) => {
+          net.markReads.push({ scope, body })
+          const next = markReadResponses.shift()
+          if (next) return next
+          return ok({ read_seq: body.read_seq })
+        },
+      },
+    })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const m1 = { ...record(1, 'c1'), sender: 'other', body: '未読メッセージ1' }
+    const t1m1 = { ...record(2, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック未読1' }
+    const t1Summary = {
+      id: 't1',
+      name: 'トピックA',
+      first_seq: 2,
+      last_seq: 2,
+      message_count: 1,
+      latest_message: t1m1,
+      read_seq: 0,
+      unread_count: 1,
+    }
+
+    net.pages.c1 = ok({ messages: [m1, t1m1], has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 2,
+      has_more: false,
+      items: [
+        { kind: 'message', message: m1 },
+        { kind: 'topic', topic: t1Summary },
+      ],
+    })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 2, topic: t1Summary })
+    net.topicMessages['c1:t1'] = ok({ messages: [t1m1], has_more: false })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 2,
+      read_seq: 0,
+      unread_count: 2,
+      main_unread_count: 1,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 2)
+    await settle()
+
+    const enterSpy = vi.spyOn(rawSession.unread, 'enter')
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 100
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+    await settle()
+    flushSync()
+
+    // 1. Two 404s queued, but the 1st 404 stops automatic Unread work while sync stays ready (only 1 enter & 1 markRead, never 3)
+    expect(sessionModel.sync.channel('c1').timeline.status).toBe('ready')
+    expect(enterSpy).toHaveBeenCalledTimes(1)
+    expect(net.markReads).toHaveLength(1)
+    expect(sessionModel.unread('c1').state.stopped).toBe(true)
+
+    const selectChannelBtn = () =>
+      host.querySelectorAll('#channel-content button').find((b) => b.textContent.includes('general'))!
+    const selectTopicBtn = () =>
+      host.querySelectorAll('#channel-content button').find((b) => b.textContent.includes('トピックA'))!
+
+    // 2. Explicit user selection of Channel c1 restarts Unread work once, consumes the 2nd 404, and stops again without looping
+    selectChannelBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(2)
+    expect(net.markReads).toHaveLength(2)
+    expect(sessionModel.unread('c1').state.stopped).toBe(true)
+
+    // 3. Explicit user selection when server allows markRead recovers and marks read
+    selectChannelBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(3)
+    expect(net.markReads).toHaveLength(3)
+    expect(sessionModel.unread('c1').state.stopped).toBe(false)
+    expect(sessionModel.unread('c1').state.main.unreadCount).toBe(0)
+
+    // 4. C8 clamp (reconnect with caught_up_seq < cursor -> resetHistory) automatically creates a new visit for the new generation
+    const visitBeforeC8 = sessionModel.unread('c1').state.entry?.id
+    net.socket.onClose(1006)
+    await settle()
+    net.socket.onReady()
+    await settle()
+    net.subscribed('c1', 0)
+    await settle()
+    await settle()
+    flushSync()
+    expect(sessionModel.unread('c1').state.entry?.id).toBeDefined()
+    expect(sessionModel.unread('c1').state.entry?.id).not.toBe(visitBeforeC8)
+    expect(net.markReads).toHaveLength(4)
+
+    // 5. Open Topic t1 where markRead returns a Topic 404 (topic_not_found) and then a Channel 404: stops until explicit selection
+    markReadResponses = [
+      { ok: false, kind: 'http', status: 404, error: 'topic_not_found' },
+      { ok: false, kind: 'http', status: 404, error: 'channel_not_found' },
+    ]
+    host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!.click()
+    flushSync()
+    const topicScrollEl = host.querySelector('#main-content .topic-view__scroll')!
+    topicScrollEl.clientHeight = 100
+    topicScrollEl.scrollHeight = 100
+    topicScrollEl.layoutRowHeight = 50
+    await settle()
+    await settle()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(enterSpy).toHaveBeenCalledTimes(4)
+    expect(net.markReads).toHaveLength(5)
+    expect(sessionModel.unread('c1').state.topics.t1?.stopped).toBe(true)
+
+    // Explicit user selection of Topic t1 in sidebar restarts once, hits Channel 404, and stops without looping
+    selectTopicBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(5)
+    expect(net.markReads).toHaveLength(6)
+    expect(sessionModel.unread('c1').state.stopped).toBe(true)
+
+    // Explicit user selection of Topic t1 again when server allows markRead succeeds
+    selectTopicBtn().click()
+    flushSync()
+    await settle()
+    await settle()
+    flushSync()
+    expect(enterSpy).toHaveBeenCalledTimes(6)
+    expect(net.markReads).toHaveLength(7)
+    expect(sessionModel.unread('c1').state.stopped).toBe(false)
+    expect(sessionModel.unread('c1').state.topics.t1?.unreadCount).toBe(0)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('defers first-Unread positioning on phone while a panel (?panel=topics) hides main, and scrolls to first Unread when the panel closes', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    // 6 messages (m1..m6), read_seq = 4 so first Unread is at row index 4 (5th row, top = 200px at rowHeight = 50)
+    const msgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メッセージ${seq}`,
+    }))
+    net.pages.c1 = ok({ messages: msgs, has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 6,
+      has_more: false,
+      items: msgs.map((message) => ({ kind: 'message' as const, message })),
+    })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 6,
+      read_seq: 4,
+      unread_count: 2,
+      main_unread_count: 2,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 6)
+    await settle()
+
+    testWin.innerWidth = 375
+    let href = '/o/org-1/c/c1?panel=topics'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 375,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 300
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    // While ?panel=topics is open on phone, main is display: none (data-mobile-level="panel"): positioning and markRead are deferred
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('panel')
+    expect(scrollEl.isRenderedVisible()).toBe(false)
+    expect(scrollEl.scrollTop).toBe(0)
+    expect(net.markReads).toEqual([])
+
+    // Closing the panel displays main (data-mobile-level="view") and positions scrollTop at row index 4 (200px)
+    host.querySelector('#panel-content button[aria-label="パネルを閉じる(Esc)"]')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(scrollEl.isRenderedVisible()).toBe(true)
+    expect(scrollEl.scrollTop).toBe(200)
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 6 } }])
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('resets initial scroll state on a new visit after same-Channel C9 recovery with zero Unread', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const msgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メッセージ${seq}`,
+    }))
+    net.pages.c1 = ok({ messages: msgs, has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 6,
+      has_more: false,
+      items: msgs.map((message) => ({ kind: 'message' as const, message })),
+    })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 6,
+      read_seq: 6,
+      unread_count: 0,
+      main_unread_count: 0,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 6)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 300
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    // 1. Initial visit with 0 Unread pins to bottom (scrollTop = 300)
+    const firstVisitId = sessionModel.unread('c1').state.entry?.id
+    expect(firstVisitId).toBeDefined()
+    expect(scrollEl.scrollTop).toBe(300)
+
+    // 2. User scrolls upward to top (unpinned at scrollTop = 0)
+    scrollEl.scrollTop = 0
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    expect(scrollEl.scrollTop).toBe(0)
+
+    // 3. Lose Channel access via C9
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'c1' })
+    await settle()
+    flushSync()
+    expect(sessionModel.sync.channel('c1').timeline.status).toBe('unavailable')
+
+    // 4. Access returns with boundary 20 and 0 Unread (unchanged rows); user explicitly reselects Channel c1
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 20,
+      read_seq: 20,
+      unread_count: 0,
+      main_unread_count: 0,
+    }
+    host
+      .querySelectorAll('#channel-content button')
+      .find((b) => b.textContent.includes('general'))!
+      .click()
+    flushSync()
+    await settle()
+    net.subscribed('c1', 20)
+    await settle()
+    await settle()
+    flushSync()
+
+    // New visit (new entry id, boundary 20, 0 Unread) resets scroll state and pins to bottom (300) instead of staying at 0
+    const secondVisitId = sessionModel.unread('c1').state.entry?.id
+    expect(secondVisitId).toBeDefined()
+    expect(secondVisitId).not.toBe(firstVisitId)
+    expect(sessionModel.unread('c1').state.entry?.boundary).toBe(20)
+    expect(scrollEl.scrollTop).toBe(300)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('keeps following the bottom instead of jumping back to first Unread when a live Message arrives while hidden behind a phone panel', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    // 6 main messages (seq 1..6, read_seq = 2 -> first Unread m3 at row index 2, top = 100px)
+    const mainMsgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メインメッセージ${seq}`,
+    }))
+    // 6 Topic t1 messages (seq 7..12, read_seq = 8 -> first Unread t1m3 at row index 2, top = 100px)
+    const topicMsgs = [7, 8, 9, 10, 11, 12].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      topic_id: 't1',
+      body: `トピックメッセージ${seq}`,
+    }))
+    const t1Summary = {
+      id: 't1',
+      name: 'トピックA',
+      first_seq: 7,
+      last_seq: 12,
+      message_count: 6,
+      latest_message: topicMsgs[5],
+      read_seq: 8,
+      unread_count: 4,
+    }
+
+    net.pages.c1 = ok({ messages: [...mainMsgs, ...topicMsgs], has_more: false })
+    net.timelines.c1 = ok({
+      as_of_seq: 12,
+      has_more: false,
+      items: [
+        ...mainMsgs.map((message) => ({ kind: 'message' as const, message })),
+        { kind: 'topic' as const, topic: t1Summary },
+      ],
+    })
+    net.topicLists.c1 = ok({ as_of_seq: 12, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 12, topic: t1Summary })
+    net.topicMessages['c1:t1'] = ok({ messages: topicMsgs, has_more: false })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 12,
+      read_seq: 2,
+      unread_count: 8,
+      main_unread_count: 4,
+    }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 12)
+    await settle()
+
+    testWin.innerWidth = 375
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 375,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    const scrollEl = host.querySelector('#main-content .timeline-scroll')!
+    scrollEl.clientHeight = 100
+    scrollEl.scrollHeight = 300
+    scrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    // 1. Main Timeline enters with Unread -> positions at first Unread (m3 at row index 2 = 100px)
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(scrollEl.scrollTop).toBe(100)
+    expect(host.querySelector(`#main-content [data-message-id="${mainMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+
+    // 2. User scrolls to the bottom (pinned), presenting m5 and m6 along the way
+    scrollEl.scrollTop = 200
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    scrollEl.scrollTop = 250
+    scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    await settle()
+
+    // 3. User opens phone panel -> main view is hidden (data-mobile-level="panel")
+    host.querySelector('#main-content button[aria-label="パネルを開く(⌘.)"]')!.click()
+    flushSync()
+    await settle()
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('panel')
+    expect(scrollEl.isRenderedVisible()).toBe(false)
+
+    // 4. Live Message arrives on main Timeline while hidden
+    const m7 = { ...record(13, 'c1'), sender: 'other', body: 'メイン新着7' }
+    net.unreadChannels.c1.as_of_seq = 13
+    net.topicLists.c1 = ok({ as_of_seq: 13, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 13, topic: t1Summary })
+    scrollEl.scrollHeight = 350
+    net.event({ type: 'message', message: m7 })
+    await settle()
+    flushSync()
+
+    // 5. User closes phone panel -> stays following the bottom (350px), not jumping back to first Unread (100px)
+    host.querySelector('#panel-content button[aria-label="パネルを閉じる(Esc)"]')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(scrollEl.isRenderedVisible()).toBe(true)
+    expect(scrollEl.scrollTop).toBe(350)
+    expect(host.querySelector(`#main-content [data-message-id="${mainMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: null }, body: { read_seq: 13 } })
+
+    // 6. Same scenario in TopicView: open Topic t1 -> positions at first Unread (t1m3 at row index 2 = 100px)
+    host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!.click()
+    flushSync()
+    const topicScrollEl = host.querySelector('#main-content .topic-view__scroll')!
+    topicScrollEl.clientHeight = 100
+    topicScrollEl.scrollHeight = 250
+    topicScrollEl.layoutRowHeight = 50
+
+    await settle()
+    await settle()
+    flushSync()
+
+    expect(topicScrollEl.scrollTop).toBe(100)
+    expect(sessionModel.unread('c1').state.entry?.boundary).toBe(8)
+    expect(host.querySelector(`#main-content [data-message-id="${topicMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+
+    // 7. Scroll TopicView to the bottom, open phone panel, receive live Topic Message, close panel -> follows bottom (300px)
+    topicScrollEl.scrollTop = 200
+    topicScrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    topicScrollEl.scrollTop = 250
+    topicScrollEl.dispatchEvent(new MiniDomEvent('scroll'))
+    flushSync()
+    await settle()
+
+    host.querySelector('#main-content button[aria-label="パネルを開く(⌘.)"]')!.click()
+    flushSync()
+    await settle()
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('panel')
+    expect(topicScrollEl.isRenderedVisible()).toBe(false)
+
+    const t1m7 = { ...record(14, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック新着7' }
+    net.unreadChannels.c1.as_of_seq = 14
+    net.topicLists.c1 = ok({ as_of_seq: 14, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 14, topic: t1Summary })
+    topicScrollEl.scrollHeight = 300
+    net.event({ type: 'message', message: t1m7 })
+    await settle()
+    flushSync()
+
+    host.querySelector('#panel-content button[aria-label="パネルを閉じる(Esc)"]')!.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
+    expect(topicScrollEl.isRenderedVisible()).toBe(true)
+    expect(topicScrollEl.scrollTop).toBe(300)
+    expect(host.querySelector(`#main-content [data-message-id="${topicMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: 't1' }, body: { read_seq: 14 } })
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
   })
 
 })
