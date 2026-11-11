@@ -501,6 +501,25 @@ it.each([404, 503])('Topic summary %s stops its target or retries with a current
   }
   await c.sync.close()
 })
+it.each([
+  { failure: 'network', result: { ok: false, kind: 'network' } as Result<ChannelList> },
+  { failure: '5xx', result: http(503) },
+])('retries initial Channel-list $failure failures without a watched Channel and resolves discovered counts', async ({ result }) => {
+  const c = unreadClient()
+  c.unreadApi.listChannels.mockResolvedValueOnce(result).mockResolvedValueOnce(result)
+  await c.sync.start(); await flush()
+  c.handlers[0].onReady(); await flush()
+  expect(c.sync.get().channels).toEqual({})
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(2)
+  expect(c.unread.get('A').unreadCount).toBeNull()
+  await vi.advanceTimersByTimeAsync(999)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(2)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(3)
+  expect(c.unread.get('A')).toMatchObject({ asOfSeq: 3, unreadCount: 3, main: { position: 0, unreadCount: 1 } })
+  expect(c.sync.get().channels).toEqual({})
+  await c.sync.close()
+})
 it('Channel-list network failures retry once per backoff and close cancels their timers', async () => {
   const c = unreadClient(); await c.boot()
   c.unreadApi.listChannels.mockResolvedValueOnce({ ok: false, kind: 'network' })

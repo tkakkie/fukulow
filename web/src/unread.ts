@@ -103,8 +103,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   async function refresh(retryTokens?: Map<string, symbol>) {
     if (!active()) return
+    // Before discovery there are no Channel generations to scope a list retry to.
+    const discovering = channels.size === 0
     const eligible = (id: string, c: Channel) => !c.stopped && (!retryTokens || retryTokens.get(id) === c.token)
-    if (retryTokens && ![...channels].some(([id, c]) => eligible(id, c))) return
+    if (retryTokens && !discovering && ![...channels].some(([id, c]) => eligible(id, c))) return
     if (list) { queuedList = true; return }
     if (listTimer !== undefined) { clearTimeout(listTimer); listTimer = undefined }
     const token = Symbol(), generation = epoch, number = ++issue
@@ -116,7 +118,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (r.ok) {
       listAttempt = 0
       for (const row of r.data.channels) {
-        if (retryTokens && !tokens.has(row.id)) continue
+        if (retryTokens && !discovering && !tokens.has(row.id)) continue
         const existing = channels.get(row.id)
         if (existing && tokens.get(row.id) !== existing.token) continue
         const c = getChannel(row.id)
@@ -136,7 +138,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       }))
       affected.forEach((_, id) => { getChannel(id).error = true })
       notify()
-      if (retryable(r) && affected.size > 0) listTimer = setTimeout(() => { listTimer = undefined; void refresh(affected) }, retryDelay(listAttempt++, r))
+      if (retryable(r) && (discovering || affected.size > 0)) listTimer = setTimeout(() => { listTimer = undefined; void refresh(affected) }, retryDelay(listAttempt++, r))
     }
     if (queuedList) { queuedList = false; void refresh() }
   }
