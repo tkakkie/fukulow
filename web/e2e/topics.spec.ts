@@ -218,7 +218,9 @@ test('keyboard path: create Topic, open Topic view, send a Message, and return t
   await expect(page.locator('#main-content .topic-view__item')).toHaveCount(2)
   await expect(page.locator('#main-content .topic-view__item').nth(1)).toContainText('キーボードからの追記')
 
-  // Shift+Tab from Topic textarea -> panel toggle -> チャンネルへ戻る, then Enter to return to summary line
+  // Shift+Tab from Topic textarea -> roving Message row -> panel toggle -> チャンネルへ戻る, then Enter to return to summary line
+  await page.keyboard.press('Shift+Tab')
+  await expect(page.locator('#main-content .ui-message-row[data-focusable="true"]').last()).toBeFocused()
   await page.keyboard.press('Shift+Tab')
   await expect(page.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true })).toBeFocused()
   await page.keyboard.press('Shift+Tab')

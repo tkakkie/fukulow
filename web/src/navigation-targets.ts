@@ -1,7 +1,7 @@
 import type { Message, Result, TopicSummaryResponse, ReplyChainPage } from './api'
 import type { NavigationTarget } from './navigation-url'
 
-type TargetState = { status: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'; name: string; anchor?: Message }
+type TargetState = { status: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'; name: string; targetId?: string; anchor?: Message }
 const idle: TargetState = { status: 'idle', name: '' }
 type Reads = {
   topic(channel: string, topic: string): Promise<Result<TopicSummaryResponse>>
@@ -34,7 +34,10 @@ export function createNavigationTargets(reads: Reads) {
     const mine = ++generation
     const channel = target.channelId
     const reply = target.panel?.startsWith('reply:') ? target.panel.slice(6) : null
-    state = { topic: channel && target.topicId ? { status: 'loading', name: '' } : idle, reply: channel && reply ? { status: 'loading', name: '' } : idle }
+    state = {
+      topic: channel && target.topicId ? { status: 'loading', name: '' } : idle,
+      reply: channel && reply ? { status: 'loading', name: '', targetId: reply } : idle,
+    }
     publish()
     if (!channel) return
     const apply = (slot: 'topic' | 'reply', result: Result<unknown>, name: string) => {
@@ -42,12 +45,17 @@ export function createNavigationTargets(reads: Reads) {
       const unavailable = !result.ok && result.kind === 'http' && (result.status === 403 || result.status === 404)
       // Resource-not-found affects this hint only; Channel/Organization denial keeps C9/C10 semantics.
       if (unavailable && result.error !== 'topic_not_found' && result.error !== 'reply_chain_not_found' && result.error !== 'organization_unavailable') reads.channelUnavailable(channel)
-      const anchor = slot === 'reply' && result.ok ? (result.data as ReplyChainPage).messages[0] : undefined
+      const anchor =
+        slot === 'reply' && result.ok
+          ? ((result.data as ReplyChainPage).messages.find(m => m.id === reply) ??
+              (result.data as ReplyChainPage).messages[0])
+          : undefined
       state = {
         ...state,
         [slot]: {
           status: result.ok ? 'ready' : unavailable ? 'unavailable' : 'error',
           name,
+          ...(slot === 'reply' && reply ? { targetId: reply } : {}),
           ...(anchor ? { anchor } : {}),
         },
       }

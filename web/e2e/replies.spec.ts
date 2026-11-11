@@ -53,11 +53,13 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
   // leaves 2 replies for paging with "さらに返信を読み込む", plus a 50-Message Topic so the initial
   // unfiltered /messages page (limit 50) does not pre-populate replies 50-51 before paging.
   const rootMsg = await sendApiMessage(page.request, { body: '親メッセージ本文' })
+  let firstReply!: Message
   for (let i = 1; i <= 51; i++) {
-    await sendApiMessage(page.request, {
+    const sent = await sendApiMessage(page.request, {
       body: `既存の返信-${String(i).padStart(2, '0')}`,
       reply_to: rootMsg.id,
     })
+    if (i === 1) firstReply = sent
   }
   const topicRoot = await sendApiMessage(page.request, {
     body: 'トピック内の親メッセージ',
@@ -135,7 +137,7 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await expect(panel).toContainText('既存の返信-51')
     await expect(loadMoreButton).toHaveCount(0)
 
-    // 3. Send a reply from the panel Composer and wait for the confirmed row [data-message-id]
+    // 3. Send a reply from the panel Composer and wait for the confirmed row [data-message-id] in the viewport
     await replyComposer(page).fill('パネルから送信した返信')
     await panel.getByRole('button', { name: '送信', exact: true }).click()
     await expect(replyComposer(page)).toHaveValue('')
@@ -143,18 +145,38 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     const confirmedOwnRow = panel
       .locator('[data-message-id]')
       .filter({ hasText: 'パネルから送信した返信' })
-    await expect(confirmedOwnRow).toBeVisible()
+    await expect(confirmedOwnRow).toBeInViewport()
     await expect(panel.locator('[data-message-id]')).toHaveCount(53)
 
-    // 4. Live update from a second user appears in the open reply chain panel
+    // 4. Live update from a second user while pinned scrolls into the viewport
     const peerMsg = await sendApiMessage(peerContext.request, {
       body: 'Bobからのライブ返信',
       reply_to: rootMsg.id,
     })
     const livePeerRow = panel.locator(`[data-message-id="${peerMsg.id}"]`)
-    await expect(livePeerRow).toBeVisible()
+    await expect(livePeerRow).toBeInViewport()
     await expect(livePeerRow).toContainText('Bobからのライブ返信')
     await expect(rootRow.getByRole('button', { name: '返信 53件›', exact: true })).toBeVisible()
+
+    // 4b. Scroll up (unpinned): live reply from second user stays below viewport and exposes 新着 1件 ↓
+    const replyScroll = panel.locator('.reply-panel__scroll')
+    await replyScroll.evaluate((el) => {
+      el.scrollTop = 0
+      el.dispatchEvent(new Event('scroll'))
+    })
+    await expect(panel.locator(`[data-message-id="${rootMsg.id}"]`)).toBeInViewport()
+    const unpinnedPeerMsg = await sendApiMessage(peerContext.request, {
+      body: 'Bobからの未ピン中ライブ返信',
+      reply_to: rootMsg.id,
+    })
+    const unpinnedPeerRow = panel.locator(`[data-message-id="${unpinnedPeerMsg.id}"]`)
+    const newArrivalsButton = panel.getByRole('button', { name: '新着 1件 ↓', exact: true })
+    await expect(newArrivalsButton).toBeVisible()
+    await expect(unpinnedPeerRow).not.toBeInViewport()
+    await newArrivalsButton.click()
+    await expect(unpinnedPeerRow).toBeInViewport()
+    await expect(newArrivalsButton).toHaveCount(0)
+    await expect(rootRow.getByRole('button', { name: '返信 54件›', exact: true })).toBeVisible()
 
     // 5. Close with × returns focus to the opener button and removes the panel from the URL
     await panel.getByRole('button', { name: 'パネルを閉じる(Esc)', exact: true }).click()
@@ -194,7 +216,7 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     const confirmedTopicReply = panel
       .locator('[data-message-id]')
       .filter({ hasText: 'トピック返信パネルからの追記' })
-    await expect(confirmedTopicReply).toBeVisible()
+    await expect(confirmedTopicReply).toBeInViewport()
     await expect(topicMessageRow.getByRole('button', { name: '返信 50件›', exact: true })).toBeVisible()
 
     // Close with × from Topic view
@@ -203,18 +225,41 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await expect(page).toHaveURL(new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}$`))
     await expect(topicReplyOpener).toBeFocused()
 
-    // 7. Keyboard path: ArrowUp in empty Topic Composer focuses the latest Message row, R opens its Reply chain, Esc restores focus to the row
-    await mainComposer(page).focus()
-    await expect(mainComposer(page)).toHaveValue('')
-    await page.keyboard.press('ArrowUp')
+    // 7. Keyboard path: Shift+Tab from a non-empty Topic Composer reaches the roving tabindex=0 Message row, R opens Reply chain without clearing draft, Esc restores focus
     const latestTopicRow = page.locator('#main-content .ui-message-row[data-focusable="true"]').last()
+    await expect(latestTopicRow).toHaveAttribute('tabindex', '0')
+    await mainComposer(page).fill('消さずに残すトピック下書き')
+    await mainComposer(page).focus()
+    await page.keyboard.press('Shift+Tab')
     await expect(latestTopicRow).toBeFocused()
     await page.keyboard.press('r')
     await expect(panel).toBeVisible()
     await expect(replyComposer(page)).toBeFocused()
+    await expect(mainComposer(page)).toHaveValue('消さずに残すトピック下書き')
     await page.keyboard.press('Escape')
     await expect(panel).toHaveCount(0)
     await expect(latestTopicRow).toBeFocused()
+
+    // Empty Topic Composer ArrowUp also focuses the latest Message row
+    await mainComposer(page).fill('')
+    await expect(mainComposer(page)).toHaveValue('')
+    await page.keyboard.press('ArrowUp')
+    await expect(latestTopicRow).toBeFocused()
+
+    // 8. Cold descendant reply URL (?panel=reply:<descendant-id> outside initial Channel history) resolves and renders the chain
+    await page.goto(`/o/${orgId}/c/${channelId}?panel=reply:${firstReply.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: channelName, exact: true })).toBeVisible()
+    await expect(panel).toBeVisible()
+    await expect(panel.locator(`[data-message-id="${rootMsg.id}"]`)).toContainText('親メッセージ本文')
+    await expect(panel.locator(`[data-message-id="${firstReply.id}"]`)).toContainText('既存の返信-01')
+    await expect(panel.locator('[data-message-id]')).toHaveCount(50)
+    await panel.getByRole('button', { name: 'さらに返信を読み込む', exact: true }).click()
+    await expect(panel.locator('[data-message-id]')).toHaveCount(55)
+    await replyComposer(page).fill('コールド子孫URLからの返信')
+    await panel.getByRole('button', { name: '送信', exact: true }).click()
+    await expect(
+      panel.locator('[data-message-id]').filter({ hasText: 'コールド子孫URLからの返信' }),
+    ).toBeInViewport()
   } finally {
     await peerContext.close()
   }

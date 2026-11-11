@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { tick } from 'svelte'
+  import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
-  import { stepMessageRowIndex } from './composer-keys'
+  import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
   import Composer from './Composer.svelte'
   import {
     confirmReplaceDraftWithFailedSend,
@@ -10,6 +12,13 @@
   } from './focus-management'
   import type { RepliesAdapter } from './replies.svelte'
   import type { ChannelSync } from './sync.svelte'
+  import {
+    applyTimelineScrollAction,
+    createTimelineScrollController,
+    handleTimelineContainerScroll,
+    measureTimelineItems,
+    type ScrollAnchor,
+  } from './timeline-scroll'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
@@ -23,7 +32,9 @@
     replies,
     channelId,
     anchorMessageId,
+    resolvedAnchor = null,
     replyTargetStatus = 'idle',
+    selfId = '',
     organizationUnavailable = false,
     composerRef = $bindable(null),
     resolveSenderName,
@@ -36,7 +47,9 @@
     replies: RepliesAdapter
     channelId: string
     anchorMessageId: string
+    resolvedAnchor?: Message | null
     replyTargetStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
+    selfId?: string
     organizationUnavailable?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     resolveSenderName?: (senderId: string) => string
@@ -56,9 +69,28 @@
     messages: Message[]
   }>({ key: '', rootId: null, topicId: null, messages: [] })
 
+  const currentKey = $derived(`${channelId}:${anchorMessageId}`)
+  const matchedAnchor = $derived(
+    resolvedAnchor && resolvedAnchor.channel_id === channelId
+      ? resolvedAnchor
+      : rState.anchor?.id === anchorMessageId
+        ? rState.anchor
+        : (rState.messages.find((m) => m.id === anchorMessageId) ?? null),
+  )
+  const targetRootId = $derived(
+    matchedAnchor
+      ? (matchedAnchor.reply_root_id ?? matchedAnchor.id)
+      : rState.rootId === anchorMessageId
+        ? rState.rootId
+        : null,
+  )
+  const isCurrentAnchor = $derived(
+    Boolean(rState.rootId && targetRootId && rState.rootId === targetRootId),
+  )
+
   $effect(() => {
-    const key = `${channelId}:${anchorMessageId}`
-    if (rState.anchor?.id === anchorMessageId && rState.messages.length > 0) {
+    const key = currentKey
+    if (isCurrentAnchor && rState.messages.length > 0) {
       retained = {
         key,
         rootId: rState.rootId,
@@ -75,17 +107,23 @@
     }
   })
 
-  const currentKey = $derived(`${channelId}:${anchorMessageId}`)
-  const isCurrentAnchor = $derived(rState.anchor?.id === anchorMessageId)
+  const isTargetResolved = $derived(
+    Boolean(
+      isCurrentAnchor ||
+        matchedAnchor ||
+        (retained.key === currentKey && retained.rootId !== null),
+    ),
+  )
   const effectiveRootId = $derived(
     (isCurrentAnchor ? rState.rootId : null) ??
+      (matchedAnchor ? (matchedAnchor.reply_root_id ?? matchedAnchor.id) : null) ??
       (retained.key === currentKey ? retained.rootId : null) ??
       anchorMessageId,
   )
   const effectiveTopicId = $derived(
     (isCurrentAnchor ? rState.topicId : null) ??
-      (retained.key === currentKey ? retained.topicId : null) ??
-      null,
+      (matchedAnchor ? matchedAnchor.topic_id : null) ??
+      (retained.key === currentKey ? retained.topicId : null),
   )
   const visibleMessages = $derived(
     isCurrentAnchor && rState.messages.length > 0
@@ -109,21 +147,107 @@
     organizationUnavailable || channelUnavailable || replyNotFound,
   )
   const rc = $derived(channel.reply(effectiveRootId, effectiveTopicId))
+  const tempRc = $derived(channel.reply(anchorMessageId, null))
   const composerState = $derived(rc.composer)
-  const canSendReply = $derived(!targetUnavailable && isCurrentAnchor)
-  const isLoading = $derived(
-    !targetUnavailable &&
-      ((isCurrentAnchor && rState.loading) || (!isCurrentAnchor && replyTargetStatus === 'loading')),
+  const pendingMigrationDraft = $derived(
+    isTargetResolved && (effectiveRootId !== anchorMessageId || effectiveTopicId !== null)
+      ? tempRc.composer.draft
+      : '',
   )
+  const displayedDraft = $derived(composerState.draft || pendingMigrationDraft)
+
+  $effect(() => {
+    if (!isTargetResolved) return
+    if (effectiveRootId === anchorMessageId && effectiveTopicId === null) return
+    const tempDraft = tempRc.composer.draft
+    if (!tempDraft) return
+    const existing = rc.composer.draft
+    tempRc.setDraft('')
+    rc.setDraft(existing ? `${existing}\n${tempDraft}` : tempDraft)
+  })
+
+  const canSendReply = $derived(!targetUnavailable && isCurrentAnchor)
+
+  const scrollController = createTimelineScrollController()
+  const subscribeScroll = createSubscriber((update) => scrollController.subscribe(update))
+  const scrollView = $derived.by(() => {
+    subscribeScroll()
+    return scrollController.get()
+  })
+
+  $effect(() => () => scrollController.destroy())
+
   const hasError = $derived(
     !targetUnavailable &&
-      ((isCurrentAnchor && rState.error) || (!isCurrentAnchor && replyTargetStatus === 'error')),
+      ((isCurrentAnchor && rState.error) ||
+        (!isCurrentAnchor && replyTargetStatus === 'error') ||
+        scrollView.loadingTimedOut),
+  )
+  const isLoading = $derived(
+    !targetUnavailable && !hasError && (!isCurrentAnchor || rState.loading),
+  )
+  const chainInitialLoading = $derived(
+    !targetUnavailable && !hasError && (!isCurrentAnchor || (rState.loading && visibleMessages.length <= 1)),
+  )
+  const effectiveScrollStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
+    targetUnavailable
+      ? 'unavailable'
+      : hasError && visibleMessages.length === 0
+        ? 'error'
+        : chainInitialLoading
+          ? 'loading'
+          : 'ready',
   )
 
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
+  let activeRowId = $state<string | null>(null)
+  const focusableMessageIds = $derived(visibleMessages.map((m) => m.id))
+  const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds, activeRowId))
+
+  function captureCurrentAnchor() {
+    if (!scrollEl) return
+    scrollController.captureAnchor(measureTimelineItems(scrollEl))
+  }
+
+  function handleScroll() {
+    handleTimelineContainerScroll(scrollEl, scrollController)
+  }
+
+  function applyScrollAction(action: 'none' | 'scroll_bottom' | 'preserve_anchor', anchor: ScrollAnchor | null) {
+    applyTimelineScrollAction(scrollEl, scrollController, action, anchor)
+  }
+
+  function jumpToBottom() {
+    const action = scrollController.jumpToBottom()
+    applyScrollAction(action, null)
+  }
+
+  $effect(() => {
+    const syncMessages = chainInitialLoading ? [] : visibleMessages
+    const pendingIds = chainInitialLoading ? [] : pending.map((p) => p.clientMessageId)
+    const { action, anchor } = scrollController.sync({
+      channelId: `${channelId}/reply:${effectiveRootId}`,
+      status: effectiveScrollStatus,
+      messages: syncMessages,
+      pendingIds,
+      selfId,
+    })
+    if (action !== 'none') {
+      applyScrollAction(action, anchor)
+      void tick().then(() => {
+        applyScrollAction(action, anchor)
+      })
+    } else {
+      captureCurrentAnchor()
+      void tick().then(() => {
+        captureCurrentAnchor()
+      })
+    }
+  })
 
   function handleRetryLoad() {
+    scrollController.resetLoadingTimeout()
     if (isCurrentAnchor) {
       void replies.loadMore()
     } else {
@@ -132,7 +256,7 @@
   }
 
   function handleRestoreRequest(clientMessageId: string) {
-    const decision = decideEditAndResend(clientMessageId, composerState.draft)
+    const decision = decideEditAndResend(clientMessageId, displayedDraft)
     if (decision.action === 'restore_now') {
       if (rc.restore(clientMessageId)) {
         focusTarget(composerRef)
@@ -151,7 +275,7 @@
     )
     confirmReplaceDraftWithFailedSend(
       id,
-      composerState.draft,
+      displayedDraft,
       canRestore,
       (d) => rc.setDraft(d),
       (targetId) => rc.restore(targetId),
@@ -169,13 +293,27 @@
 
   async function handleSubmit(): Promise<boolean> {
     if (!canSendReply) return false
-    return rc.submit(rState.anchor?.id ?? effectiveRootId)
+    const replyTo = rState.messages.some((m) => m.id === anchorMessageId)
+      ? anchorMessageId
+      : (rState.anchor?.id ?? effectiveRootId)
+    const ok = await rc.submit(replyTo)
+    if (!ok) return false
+    const action = scrollController.onUserSubmit()
+    applyScrollAction(action, null)
+    void tick().then(() => {
+      applyScrollAction(action, null)
+    })
+    return true
   }
 
   function focusLatestMessageRow() {
     if (!scrollEl) return
     const rows = scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]')
-    if (rows.length > 0) focusTarget(rows[rows.length - 1])
+    if (rows.length > 0) {
+      const lastId = focusableMessageIds.at(-1)
+      if (lastId) activeRowId = lastId
+      focusTarget(rows[rows.length - 1])
+    }
   }
 
   function handleMessageRowKeydown(e: KeyboardEvent) {
@@ -185,6 +323,8 @@
     const nextIdx = stepMessageRowIndex(idx, rows.length, e)
     if (nextIdx !== null) {
       e.preventDefault()
+      const nextId = focusableMessageIds[nextIdx]
+      if (nextId) activeRowId = nextId
       focusTarget(rows[nextIdx])
     }
   }
@@ -227,10 +367,10 @@
     </div>
   {/if}
 
-  <div class="reply-panel__scroll" bind:this={scrollEl}>
+  <div class="reply-panel__scroll" bind:this={scrollEl} onscroll={handleScroll}>
     {#if replyNotFound && visibleMessages.length === 0 && pending.length === 0}
       <EmptyState title="この返信のつながりは利用できません。" />
-    {:else if isLoading && visibleMessages.length === 0 && pending.length === 0}
+    {:else if isLoading && !scrollView.loadingTimedOut && visibleMessages.length === 0 && pending.length === 0}
       <Skeleton rows={3} label="返信のつながりを読み込み中" />
     {:else}
       {#if replyNotFound}
@@ -250,6 +390,10 @@
                 createdAt={m.created_at}
                 body={m.body}
                 focusable
+                rovingTabindex={rovingRowId === m.id ? 0 : -1}
+                onrowfocus={() => {
+                  activeRowId = m.id
+                }}
                 onrowkeydown={handleMessageRowKeydown}
               />
             </li>
@@ -284,11 +428,19 @@
     {/if}
   </div>
 
+  {#if !scrollView.pinned && scrollView.belowCount > 0}
+    <div class="reply-panel__new-below">
+      <Button variant="primary" onclick={jumpToBottom}>
+        新着 {scrollView.belowCount}件 ↓
+      </Button>
+    </div>
+  {/if}
+
   <div class="reply-panel__composer">
     <Composer
       bind:textareaRef={composerRef}
       placeholder="返信を入力"
-      value={composerState.draft}
+      value={displayedDraft}
       error={composerState.composerError}
       disabled={targetUnavailable}
       submitDisabled={!canSendReply}
@@ -312,6 +464,7 @@
 
 <style>
   .reply-panel {
+    position: relative;
     display: grid;
     grid-template-rows: auto 1fr auto;
     height: 100%;
@@ -326,6 +479,7 @@
   }
 
   .reply-panel__scroll {
+    grid-row: 2;
     overflow-y: auto;
     padding: var(--space-12);
     display: flex;
@@ -359,7 +513,16 @@
     min-width: 0;
   }
 
+  .reply-panel__new-below {
+    position: absolute;
+    bottom: calc(var(--space-24) * 4);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+  }
+
   .reply-panel__composer {
+    grid-row: 3;
     padding: var(--space-8) var(--space-12) var(--space-12);
     min-width: 0;
   }

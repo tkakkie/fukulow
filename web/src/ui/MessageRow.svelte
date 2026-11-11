@@ -13,11 +13,13 @@
     failedReason = '送信できませんでした。内容を確認してください。',
     replyCount = 0,
     focusable = false,
+    rovingTabindex = -1,
     rowRef = $bindable(null),
     onretry,
     onrestore,
     ondiscard,
     onopenreplies,
+    onrowfocus,
     onrowkeydown,
   }: {
     body: string
@@ -30,11 +32,13 @@
     failedReason?: string
     replyCount?: number
     focusable?: boolean
+    rovingTabindex?: 0 | -1
     rowRef?: HTMLElement | null
     onretry?: () => void
     onrestore?: () => void
     ondiscard?: () => void
     onopenreplies?: (opener?: HTMLElement | null) => void
+    onrowfocus?: () => void
     onrowkeydown?: (e: KeyboardEvent) => void
   } = $props()
 
@@ -44,6 +48,11 @@
   const formattedTime = $derived(
     createdAt ? new Date(createdAt).toLocaleString('ja-JP') : '',
   )
+
+  function handleFocus(e: FocusEvent) {
+    if (e.target !== e.currentTarget) return
+    onrowfocus?.()
+  }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.target !== e.currentTarget) return
@@ -57,9 +66,15 @@
 
   $effect(() => {
     const el = rowRef
-    if (!el || !isRowFocusable) return
+    if (!el) return
+    el.tabIndex = isRowFocusable ? rovingTabindex : -1
+    if (!isRowFocusable) return
+    el.addEventListener('focus', handleFocus)
     el.addEventListener('keydown', handleKeydown)
-    return () => el.removeEventListener('keydown', handleKeydown)
+    return () => {
+      el.removeEventListener('focus', handleFocus)
+      el.removeEventListener('keydown', handleKeydown)
+    }
   })
 </script>
 

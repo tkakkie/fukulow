@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   IME_COMPOSING_KEY_CODE,
   isImeComposing,
+  resolveRovingMessageId,
   shouldCloseOnEscape,
   shouldFocusLatestMessageOnArrowUp,
   shouldOpenRepliesFromRowKey,
@@ -104,6 +105,11 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     expect(stepMessageRowIndex(2, 3, { key: 'ArrowDown' })).toBe(2)
     expect(stepMessageRowIndex(0, 0, { key: 'ArrowUp' })).toBeNull()
     expect(stepMessageRowIndex(1, 3, { key: 'ArrowUp', isComposing: true })).toBeNull()
+
+    expect(resolveRovingMessageId([], null)).toBeNull()
+    expect(resolveRovingMessageId(['m1', 'm2', 'm3'], null)).toBe('m3')
+    expect(resolveRovingMessageId(['m1', 'm2', 'm3'], 'm1')).toBe('m1')
+    expect(resolveRovingMessageId(['m1', 'm2', 'm3'], 'missing')).toBe('m3')
   })
 
   it('wires IME-safe key handlers, Dialog focus trap and ARIA tabs in Svelte components', () => {
@@ -146,6 +152,7 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
 
     const messageRowSrc = readFileSync(join(webDir, 'src/ui/MessageRow.svelte'), 'utf8')
     expect(messageRowSrc).toContain('shouldOpenRepliesFromRowKey')
+    expect(messageRowSrc).toContain('el.tabIndex = isRowFocusable ? rovingTabindex : -1')
     expect(messageRowSrc).toContain('tabindex={-1}')
   })
 })

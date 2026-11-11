@@ -132,3 +132,16 @@ export function stepMessageRowIndex(
       return null
   }
 }
+
+/**
+ * Resolves which focusable Message row ID receives `tabindex="0"` in a roving-tabindex timeline (`docs/ui.md` §9):
+ * keeps `activeId` while it remains in `messageIds`, otherwise defaults to the latest Message.
+ */
+export function resolveRovingMessageId(
+  messageIds: readonly string[],
+  activeId: string | null,
+): string | null {
+  if (messageIds.length === 0) return null
+  if (activeId !== null && messageIds.includes(activeId)) return activeId
+  return messageIds[messageIds.length - 1]
+}

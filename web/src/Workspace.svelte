@@ -108,8 +108,15 @@
     if (fromReplies) return fromReplies
     return null
   })
+  const replyTargetState = $derived(
+    session.navigationTargets &&
+      (!session.navigationTargets.state.reply.targetId ||
+        session.navigationTargets.state.reply.targetId === activeReplyMessageId)
+      ? session.navigationTargets.state.reply
+      : { status: 'idle' as const, name: '' },
+  )
   const resolvedReplyAnchor = $derived(
-    inMemoryReplyAnchor ?? session.navigationTargets?.state.reply.anchor ?? null,
+    inMemoryReplyAnchor ?? replyTargetState.anchor ?? null,
   )
   const allTopicsKnown = $derived(
     currentTopicsState
@@ -220,9 +227,8 @@
     const targetRootId = anchor.reply_root_id ?? anchor.id
     const alreadyOpen = Boolean(
       currentRepliesState?.anchor &&
-        (currentRepliesState.anchor.id === activeReplyMessageId ||
-          currentRepliesState.rootId === targetRootId ||
-          currentRepliesState.messages.some((m) => m.id === activeReplyMessageId)),
+        currentRepliesState.rootId === targetRootId &&
+        currentRepliesState.messages.some((m) => m.id === anchor.id),
     )
     if (!alreadyOpen) {
       void currentReplies.open(anchor)
@@ -795,7 +801,9 @@
               replies={currentReplies}
               channelId={selected.id}
               anchorMessageId={activeReplyMessageId}
-              replyTargetStatus={session.navigationTargets?.state.reply.status ?? 'idle'}
+              resolvedAnchor={resolvedReplyAnchor}
+              replyTargetStatus={replyTargetState.status}
+              selfId={organization?.member.id ?? ''}
               {organizationUnavailable}
               bind:composerRef={replyComposerRef}
               resolveSenderName={resolveSender}
@@ -806,12 +814,12 @@
               onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
               onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
             />
-          {:else if session.navigationTargets?.state.reply.status === 'loading'}
+          {:else if replyTargetState.status === 'loading'}
             <Skeleton rows={3} label="返信のつながりを読み込み中" />
-          {:else if session.navigationTargets?.state.reply.status === 'error'}
+          {:else if replyTargetState.status === 'error'}
             <StatusBanner tone="danger" role="alert" message="返信のつながりを読み込めませんでした。" actionLabel="再試行" onaction={() => { if (route) void session.navigationTargets?.load(route, true) }} />
           {:else}
-            <EmptyState title={session.navigationTargets?.state.reply.status === 'unavailable' ? 'この返信のつながりは利用できません。' : '返信のつながりの表示は準備中です。'} />
+            <EmptyState title={replyTargetState.status === 'unavailable' ? 'この返信のつながりは利用できません。' : '返信のつながりの表示は準備中です。'} />
           {/if}
         {:else if activePanelTab === 'topics'}
           {#if currentTopics && selected}
