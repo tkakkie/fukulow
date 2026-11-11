@@ -264,7 +264,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     for (const line of p.topics) {
       if (line.baseline && !c.ignoredBaselines.has(line.baseline) && !c.observedBaselines.has(line.baseline)) {
         c.observedBaselines.add(line.baseline)
-        acceptScope(getScope(c, line.topicId), topicBaseline(line.baseline.asOfSeq, line.baseline.summary))
+        const s = getScope(c, line.topicId)
+        acceptScope(s, topicBaseline(line.baseline.asOfSeq, line.baseline.summary))
+        if (s.baseline && s.baseline.asOfSeq < c.requiredBase) void refreshTopic(id, line.topicId)
       }
     }
     for (const topic of c.topics.keys()) for (const m of p.topic(topic).messages) c.records.set(m.seq, m)
@@ -352,7 +354,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       visit = { id: Symbol(), scope: { ...scope }, boundary: null, unreadAtEntry: null, presented: new Set() }
       const id = visit.id
       collect(scope.channel, c); resolveBoundary(); notify()
-      if (!s.baseline || wasStopped) {
+      if (!s.baseline || s.baseline.asOfSeq < c.requiredBase || wasStopped) {
         if (scope.topicId === null) void refresh()
         else void refreshTopic(scope.channel, scope.topicId)
       }
