@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-export function checkVersions(files: { rust: string, node: string, webNode: string, loadNode: string, dockerfile: string }): void {
+export function checkVersions(files: {
+  rust: string, node: string, webNode: string, loadNode: string, dockerfile: string,
+  playwright: string, webLock: string, e2e: string,
+}): void {
   const rust = files.rust.match(/^channel = "([^"]+)"$/m)?.[1]
   const node = files.node.trim()
   assert.ok(rust && /^\d+\.\d+\.\d+$/.test(rust), 'Rust must name an exact patch version')
@@ -15,11 +18,22 @@ export function checkVersions(files: { rust: string, node: string, webNode: stri
   }
   assert.equal(files.webNode, node, 'web engines.node must agree with .node-version')
   assert.equal(files.loadNode, node, 'load engines.node must agree with .node-version')
+  assert.match(files.playwright, /^\d+\.\d+\.\d+$/, 'Playwright must name an exact patch version')
+  const packages = JSON.parse(files.webLock).packages
+  assert.equal(packages[''].devDependencies['@playwright/test'], files.playwright, 'Playwright lockfile declaration must agree with package.json')
+  for (const name of ['@playwright/test', 'playwright', 'playwright-core']) {
+    assert.equal(packages[`node_modules/${name}`].version, files.playwright, `${name} lockfile version must agree with package.json`)
+  }
+  const images = [...files.e2e.matchAll(/^\s+PLAYWRIGHT_IMAGE: (\S+)\s*$/gm)]
+  assert.equal(images.length, 1, 'E2E must have exactly one PLAYWRIGHT_IMAGE')
+  assert.equal(images[0][1], `mcr.microsoft.com/playwright:v${files.playwright}-noble`, 'Playwright image must agree with package.json and use Noble')
 }
 
 if (import.meta.main) {
   const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
   checkVersions({ rust: read('rust-toolchain.toml'), node: read('.node-version'),
     webNode: JSON.parse(read('web/package.json')).engines.node,
-    loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile') })
+    loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
+    playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
+    webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml') })
 }
