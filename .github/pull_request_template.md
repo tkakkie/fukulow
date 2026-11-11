@@ -13,6 +13,6 @@ Closes #
 - [ ]
 
 ## Risk
-<!-- auth / permissions / real-time / migrations touched? denial test added? docs/invariants.md updated? -->
+<!-- auth / permissions / real-time / migrations touched? denial test added? docs/invariants/ part updated? -->
 
 <!-- Last line: AI: <name> / model: <id> / effort: <level> -->
