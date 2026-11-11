@@ -54,6 +54,71 @@ impl auth::SubscriptionRecheck for ObservedAccess {
 }
 
 #[sqlx::test]
+async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let app = crate::app(state.clone());
+    let observed = Arc::new(ObservedAccess::default());
+    state
+        .session_changes
+        .set_subscription_recheck(observed.clone());
+    let org = organization(&pool).await;
+    let target = Uuid::new_v4();
+    let tt = member(&pool, org, target, "owner").await;
+    let channel = private(&app, &tt, "Last Owner's private Channel").await;
+    let inactive = Uuid::new_v4();
+    member(&pool, org, inactive, "owner").await;
+    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
+        .bind(org)
+        .bind(inactive)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let foreign = organization(&pool).await;
+    member(&pool, foreign, Uuid::new_v4(), "owner").await;
+    let public = create(&app, &tt, "Public Unread control", "public").await;
+    let public = Uuid::parse_str(public["id"].as_str().unwrap()).unwrap();
+    let message = request(
+        &app, "POST", &format!("/api/v1/channels/{public}/messages"), &tt,
+        json!({"client_message_id":Uuid::new_v4(),"body":"Unread control","topic_name":"Preserved Topic"}),
+    ).await;
+    assert_eq!(message.status(), StatusCode::CREATED);
+    let watch = observed
+        .access
+        .subscribe(&pool, org, (target, 0), public)
+        .await
+        .unwrap()
+        .unwrap();
+    for role in ["member", "guest", "admin"] {
+        let before = all_state(&pool).await;
+        let response = change(&app, &tt, target, role).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(body(response).await, json!({"error":"last_owner"}));
+        assert_eq!(all_state(&pool).await, before);
+        assert_eq!(watch.status(), 0);
+        assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
+    }
+    let replacement = Uuid::new_v4();
+    let ot = member(&pool, org, replacement, "owner").await;
+    let before = all_state(&pool).await;
+    let response = change(&app, &ot, target, "member").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body(response).await,
+        json!({"error":"last_channel_manager"})
+    );
+    assert_eq!(all_state(&pool).await, before);
+    assert_eq!(watch.status(), 0);
+    assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
+    grant(&pool, org, channel, replacement).await;
+    let response = change(&app, &ot, target, "member").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await["role"], "member");
+    assert_eq!(watch.status(), 0);
+    assert_eq!(observed.calls.load(Ordering::SeqCst), 1);
+}
+
+#[sqlx::test]
 async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(pool: PgPool) {
     for multiple in [false, true] {
         let state = AppState::for_test(pool.clone());

@@ -119,7 +119,7 @@ pub async fn list_members(State(state): State<AppState>, auth: Auth) -> Result<R
     (status=401, description="Account Session ended", body=ErrorBody),
     (status=403, description="forbidden: caller is not an Owner", body=ErrorBody),
     (status=404, description="organization_unavailable or member_not_found", body=ErrorBody),
-    (status=409, description="last_owner: the last active Owner cannot be demoted; last_channel_manager: a private Channel cannot lose its last usable Owner/Admin grantee (no Channel details)", body=ErrorBody),
+    (status=409, description="last_owner: the last active Owner cannot be demoted (takes precedence over last_channel_manager); last_channel_manager: a private Channel cannot lose its last usable Owner/Admin grantee (no Channel details)", body=ErrorBody),
     (status=413, description="Request too large", body=ErrorBody),
     (status=415, description="Expected application/json", body=ErrorBody),
     (status=500, description="Database failure", body=ErrorBody)))]
@@ -134,6 +134,19 @@ pub async fn change_role<G: RoleChangeGuard>(
     lock_organization(&mut tx, org).await?;
     let guard = G::lock(&mut tx, org, id).await?;
     current_actor(&mut tx, &auth, Action::ChangeRole).await?;
+    if input.role != Role::Owner {
+        let last_owner: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE organization_id=$1 AND id=$2 AND role='owner' AND deactivated_at IS NULL)
+             AND NOT EXISTS (SELECT 1 FROM users WHERE organization_id=$1 AND id<>$2 AND role='owner' AND deactivated_at IS NULL)",
+        )
+        .bind(org)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if last_owner {
+            return Err(ApiError(StatusCode::CONFLICT, "last_owner", None));
+        }
+    }
     guard.check(&mut tx, org, id, input.role).await?;
     let row = sqlx::query_as::<_,(Uuid,String,Role)>("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING id,name,role")
         .bind(org).bind(id).bind(input.role).fetch_optional(&mut *tx).await.map_err(member_write_error)?
