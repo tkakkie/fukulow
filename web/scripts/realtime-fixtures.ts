@@ -11,6 +11,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import type { UnreadChannel } from '../src/api-schema.d.ts'
 
 export const defaultDir = resolve(import.meta.dirname, '../../contract/realtime')
 
@@ -118,9 +119,9 @@ export function expandSeqs(list: SeqItem[]): number[] | null {
 const channelKey = (ref: Json): string =>
   isObject(ref) ? JSON.stringify(Object.keys(ref).sort().map((k) => [k, ref[k]])) : JSON.stringify(ref)
 
-// Topic and Reply projections run at the controller layer; Unread remains proposed.
-const plannedTypes = new Set(['open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline', 'open_reply_chain', 'load_reply_chain', 'reply_chain_result', 'reply_chain_failed', 'fetch_reply_chain'])
-const plannedKeys = new Set(['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'])
+// Topic and Reply projections run at the controller layer; Unread server delivery runs, while Unread client runtime remains proposed.
+const plannedTypes = new Set(['load_unread', 'unread_result', 'fetch_unread', 'open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline', 'open_reply_chain', 'load_reply_chain', 'reply_chain_result', 'reply_chain_failed', 'fetch_reply_chain'])
+const plannedKeys = new Set(['unread', 'topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'])
 
 /** The path of the first planned term in a scenario, or null. */
 function plannedTerm(value: Json, path: string, delivery = false, controller = false): string | null {
@@ -135,7 +136,7 @@ function plannedTerm(value: Json, path: string, delivery = false, controller = f
   for (const [key, item] of Object.entries(value)) {
     if (plannedKeys.has(key) && !(controller && ['topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'].includes(key)) && !(delivery && ['topic', 'as_of_seq', 'before_position', 'reply_to'].includes(key))) return `${path}.${key}`
     if ((key === 'type' || key === 'do') && plannedTypes.has(item as string) && !controller && !(delivery && item === 'main_timeline')) return `${path}.${key} ${String(item)}`
-    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7'].includes(String(r))))) return `${path}.covers`
+    if (key === 'covers' && Array.isArray(item) && item.some((r) => String(r).startsWith('P') && !(controller && ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'].includes(String(r))) && !(delivery && ['P1', 'P2', 'P5', 'P6', 'P7', 'P8'].includes(String(r))))) return `${path}.covers`
     const found = key === 'proposed' ? null : plannedTerm(item, `${path}.${key}`, delivery, controller)
     if (found) return found
   }
@@ -270,6 +271,11 @@ function checkDelivery(s: Record<string, Json>, where: string, errors: string[])
       case 'sign_out':
         member(step.member)
         break
+      case 'mark_read':
+      case 'unread':
+        member(step.as)
+        checkChannel(step.channel, at, false)
+        break
       case 'history':
         member(step.as)
         checkChannel(step.channel, at)
@@ -323,6 +329,7 @@ const respondsTo: Record<string, string> = {
   timer_elapsed: 'wait',
   membership_check_result: 'membership_check',
   main_timeline_result: 'fetch_main_timeline',
+  unread_result: 'fetch_unread',
   reply_chain_result: 'fetch_reply_chain',
   reply_chain_failed: 'fetch_reply_chain',
 }
@@ -454,6 +461,7 @@ export type Message = { seq: number; id: string; sender: string; client_message_
 /** The fixture input with respond_to replaced by the effect (as the client emitted it) it answers, and messages expanded. */
 export type ResolvedInput = { type: string; respond_to?: Effect; message?: Message; messages?: Message[]; [field: string]: unknown }
 export type ObservedChannel = {
+  unread?: Pick<UnreadChannel, 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count'>
   state?: string
   cursor: number | null
   messages: Message[]
@@ -606,6 +614,9 @@ function checkObservation(expected: NonNullable<ClientStep['observe']>, actual: 
   for (const [name, want] of Object.entries(expected.channels ?? {})) {
     const got = actual.channels[name] ?? { cursor: null, messages: [], pending: [] }
     const where = `${at}: channel ${name}`
+    if (want.unread !== undefined && !isDeepStrictEqual(got.unread, want.unread)) {
+      failures.push(`${where} unread is ${JSON.stringify(got.unread)}, expected ${JSON.stringify(want.unread)}`)
+    }
     if (want.state !== undefined && got.state !== want.state) failures.push(`${where} state is ${String(got.state)}, expected ${String(want.state)}`)
     if (want.cursor !== undefined && got.cursor !== want.cursor) failures.push(`${where} cursor is ${String(got.cursor)}, expected ${String(want.cursor)}`)
     if (want.visible !== undefined) {

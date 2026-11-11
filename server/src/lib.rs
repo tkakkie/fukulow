@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod channels;
+pub mod database;
 pub mod messages;
 pub mod openapi;
 pub mod realtime;
@@ -98,8 +99,24 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/me", get(auth::me))
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
         .route(
+            "/api/v1/orgs/{org}/members",
+            get(auth::members::list_members),
+        )
+        .route(
+            "/api/v1/orgs/{org}/members/{id}/role",
+            axum::routing::patch(auth::members::change_role),
+        )
+        .route(
+            "/api/v1/orgs/{org}/invites",
+            axum::routing::post(auth::invites::create_invite),
+        )
+        .route(
+            "/api/v1/orgs/{org}/invites/accept",
+            axum::routing::post(auth::invites::accept_invite),
+        )
+        .route(
             "/api/v1/orgs/{org}/channels",
-            get(channels::list_channels).post(channels::create_channel),
+            get(messages::list_channels).post(channels::create_channel),
         )
         .route(
             "/api/v1/orgs/{org}/channels/{id}/messages",
@@ -107,6 +124,14 @@ pub fn app(state: AppState) -> Router {
                 .post(messages::send_message)
                 // 4000 control characters escape to 6 bytes each in JSON, so the global 16 KiB would reject valid bodies.
                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/read",
+            axum::routing::put(messages::mark_channel_read),
+        )
+        .route(
+            "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/read",
+            axum::routing::put(messages::mark_topic_read),
         )
         .route(
             "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain",
@@ -270,8 +295,13 @@ async fn security_headers(State(secure): State<bool>, request: Request, next: Ne
 }
 
 #[utoipa::path(get, path = "/api/v1/health", responses((status = 200, description = "Server is responding; returns the plain-text body ok", body = String, content_type = "text/plain")))]
-async fn health() -> &'static str {
-    "ok"
+async fn health() -> Result<&'static str, auth::ApiError> {
+    auth::authorization::require(
+        auth::Actor::Anonymous,
+        auth::Action::Public,
+        auth::Resource::Global,
+    )?;
+    Ok("ok")
 }
 
 async fn static_handler(uri: Uri) -> Response {

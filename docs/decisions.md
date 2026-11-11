@@ -10,16 +10,20 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - OpenAPI generated from Rust, committed, diff-checked in CI. Reason: future native clients (Kotlin).
 - `organization_id` on every table from day one. Reason: multi-organization later without retrofit.
 - Public repo. Reason: free CI minutes.
-- Migrations run at startup before listening. PostgreSQL 18 persists under `/var/lib/postgresql` (its new data path).
+- #194 B: one-shot `migrate` holds owner credentials; app waits for success and only validates migration versions/checksums/state. Owner credentials stay out of app. PostgreSQL 18 persists under `/var/lib/postgresql`.
 - Deployment is single-process: live delivery, revocation, throttles and admission are process-local. Multiple server processes need shared publication/revocation and a shared limiter first (#18, #57).
 - #195: shutdown also returns 503 for non-API paths, including static assets and SPA routes; these middleware rejections are outside OpenAPI.
-- A second instance blocked on the migration advisory lock past the 5 s timeout fails startup and relies on Compose `restart: unless-stopped` to retry (#88, #93).
+- #194 B: migration advisory/DDL lock waits fail after 5 s (#88, #93). The one-shot service does not restart automatically; operators resolve the blocker and rerun, keeping app stopped on failure.
 - PostgreSQL 17+ is required (`transaction_timeout`); on older servers every send/subscription fails loudly. Compose and CI use 18; no startup check (#158).
 - Dependabot security updates were enabled on 2026-11-08 but no security PR has been seen, so do not claim they work. VPS automatic OS security updates are planned with the deploy work.
+
+- #194 B: shared initdb/explicit roles SQL keeps `fukulow` owner and updates `fukulow_app` without changing rows. Bind/quote passwords after transaction-local log/nested-stat suppression; fail closed without settings rights. Reject ownership/memberships rather than reassigning them.
+- #194 B: grant DML/sequence USAGE by default for future owner-created objects; normalize migration history to SELECT after migrating. Revoke public CREATE/TEMP so indirect privileges cannot bypass trigger protection. Reapply grants after #198 no-ACL restore.
 
 ## Rules, CI and AI process
 - Rules have tiers: Absolute (CI only with a reliable check), Default (deviation needs a PR line), Free. Reason: hard rules without a good check push AIs into awkward code; boundaries and tenant isolation are worth enforcing (#29).
 - One crate with module boundaries, each module owning its tables. Reason: cross-crate refactors are costly for AI-driven work; revisit when build time, dependencies or conflicts hurt.
+- #194 B: `database` is composition-level deployment/startup plumbing, outside the four domain modules traced by module direction; review enforces that it never depends on them.
 - #200 adds `docs/ui.md` as a doc kind for web UI rules. Reason: several AIs build screens in parallel; one short rule set keeps look, states, focus and copy consistent without re-deciding per PR.
 - Minimal docs. Reason: AI credit cost. `AGENTS.md` holds always-needed rules, `docs/workflow.md` procedures that change more often, so an AI keeps going alone and stops only on a human decision (#101, #174).
 - `organization_id` exemptions and why: `organizations` (tenant root), `_sqlx_migrations` (SQLx bookkeeping), `accounts` and `account_sessions` (global Account data). The same names in another schema are not exempt.
@@ -75,8 +79,13 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - CI probes health through Caddy HTTPS (local certificate verification off) to exercise proxy routing and TLS startup.
 - Cookie WebSockets require one matching Origin: same Host over HTTPS (HTTP when cookie_secure=false) or `FUKULOW_WS_ALLOWED_ORIGINS`; forwarded headers never decide it. Origin is checked before Auth and Organization parsing; Bearer needs no Origin.
 
+- #144 uses one deny-by-default authorize function, including SQL role sets derived from it. Owner changes Roles/invites any Role; Admin invites non-Owners. Guests need explicit current grants even for public Channels; private grants remain required for every Role.
+- #144 Invites bind email/Role for 7 days; SHA-256 of 256 random bits is stored. Existing Accounts authenticate; anonymous uniqueness conflicts require sign-in, never email attachment. Activation/consumption is atomic.
+- #144 Invites retain their same-Organization issuer. Acceptance re-checks active Membership and current Role under the Organization lock using the creation policy, so demotion/deactivation cannot be bypassed with a stored Invite.
+- #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
+
 ## Channels and Messages
-- Private Channel creation adds the creator in the same transaction; composite FKs bind memberships to a Channel and Member of the same Organization. Listing is one scoped query, `no-store` (#22).
+- Private Channel creation adds the creator atomically; composite FKs bind grants to the same Organization. Listing uses batched visibility/Unread queries in one snapshot, `no-store` (#22, #142).
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
 - Channel names are unique per Organization across visibility, `lower(name COLLATE "C")` (ASCII folds, non-ASCII as-is); duplicates 409. Existing duplicates fail the migration for the operator to resolve; no auto-rename (#51).
 - Accepted (#51): a 409 on creation lets an Organization Member infer a private Channel name exists (names only, no members or messages).
@@ -131,6 +140,14 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - Main-timeline paging correctness (`position_W`, W as page anchor) is fixed in the spec; its cost is a measured feasibility gate in #137 that stops and asks on a miss, not a guarantee (maintainer, 2026-11-11, #148).
 - Topic counts are an as-of-W baseline plus deduplicated live Messages with `seq` > W; a Topic seen only live has no count until a summary fetch. Reason: replay below W or late older pages must neither double-count nor drop the baseline (#148).
 - Unread keeps a Channel position (Messages without Topic) and per-Topic positions; badge = sum. Initial position = latest committed `seq` when the Member gains access; older history is not unread (maintainer, 2026-11-11, #148, #142).
+- #142 Messages owns read positions. Migration/grant triggers capture the committed counter at access time, discard revoked positions and initialize existing Topics; later Topics inherit the grant baseline. Reason: first-fetch initialization loses Messages sent after a grant.
+- #142 access triggers serialize per Organization (seed 142) so Member/Channel creation cannot miss initialization. New grants hold shared #135 through COMMIT. Mark-read rechecks access after W, locks Member/position; revocation deletes positions, denying a waiting update.
+- #142/#144 triggers mirror Channel visibility, including Roles and current public/private grants on reactivation; changes to visibility must update both predicates. The position/visibility equivalence test guards this duplication without reversing module ownership.
+- #142 list counts range-scan messages_topic_seq from read positions, skipping fully read Topics by last_seq: O(Channels + Topics + unread-range Messages), independent of read history. Own Messages in those ranges are filtered; see measurements.md.
+- #142 missing positions suppress only that Channel's Unread at committed seq (Topic projections: W), with a list error log; reads persist nothing and mark-read stays 404. Zero would mark all history unread; a list-wide 500 would hide unaffected Channels.
+- #144 Role/grant changes reconcile positions under #142 serialization: only newly visible Channels initialize through #135; continuous access keeps Channel/Topic positions. This avoids resetting Unread on redundant grants or Owner/Admin/Member changes.
+- #142 access changes serialize per Organization: public Channel inserts are set-based O(active Members + their Topics); Member activation is O(visible Channels + Topics), retaining shared #135 locks until COMMIT. Accept at current scale; remeasure larger Organizations.
+- #142 backfill blocks sends, Member and grant writes under SHARE ROW EXCLUSIVE; work scales with visible Member×Channel pairs plus their Topics. Startup lock acquisition times out at 5 s; once acquired, a large backfill can extend the write outage.
 - Move, Edit, Delete (principles only, #148): clients apply entries idempotently; a later change takes a Channel log position. Open: replay of a changed Message (current or as it was), of a deleted one, read positions after a Move. `channel_events` vs `channel_log`: Sprint 3 (#160).
 - DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
 
@@ -149,7 +166,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #163 manual check: `node scripts/check-compose-restart.ts` verifies `restart: unless-stopped` after killing the real main process (host-PID helper when in-container SIGKILL is ignored); Rust tests cover the panic path.
 
 ## Admission and timeouts
-- #88 bounds startup migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
+- #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
 - Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).
 - The budget is partitioned (#156, #158): sends round up, watermarks round down (8 each in production), no borrowing; per Organization/Channel at most one send and four watermarks. No per-Organization DB admission reservation.
 - #156 chose bounded admission outside the pool over short-wait or try advisory locks: a DB lock wait still holds a connection, and try-lock turns normal contention into repeated 1011/reconnect and send failures.
@@ -174,11 +191,12 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 ## Web client
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
 - Web sync is layered (components, adapter, controller, pure protocol, API/transport) so ordering and dedup are testable without Svelte or I/O; only message sync has a protocol (#91/#94). No CI layer check yet (needs a negative test).
-- Capabilities (`{allowed, reason?}` per operation) are added only when the UI must show in advance whether an operation is possible (#91).
+- Capabilities (`{allowed, reason?}`) come from authorize: Organization invite/manage-Roles/create-Channels, Channel add-Members (#144). Server requests re-check independently; #149 owns Channel management endpoints.
 - #120: an async `channel_not_found` carries no subscription generation; if it could belong to a retired or a pending subscription, the controller reconnects with backoff. Cost: one resubscribe of all Channels; other clients must do the same.
 - #97 Svelte 5 adapters only read the controller and forward intents; `createSubscriber` carries change notifications, so state is never copied into `$state`. Session controllers live from Sign in to sign-out/4001/401/replacement, closed by the auth adapter.
 - #195: reconnect uses full jitter [0, min(10 s, 500 ms * 2^attempt)), including the first 4008; only subscribed resets attempts, avoiding handshake retry loops. 4001/4003 remain terminal. History fill keeps deterministic backoff; injected randomness permits exact tests.
 - #146/#148 client classification: 4001 Sign in; 4003 terminal Organization unavailable; 1001/1011 back off and reconnect; 4008 reconnects with bounded retries. A rejected browser handshake never implies 4003 (`GET .../me` confirms).
+- #144 explicit Organization re-selection REST-checks Membership and starts fresh sync only on success, allowing re-invites without sign-out. Failure never loops; old pending sends and work stay fenced, including same-Account vs replaced-Account 401 handling.
 - The auth adapter keeps Account/controller lifetime and Organization selection together (Tier 2 deviation) to avoid an unrelated abstraction in the #146 migration; sync policy stays in the controller/protocol.
 - #200 layout A2 (rail, チャンネル column with トピック accordion, main card, closable right panel), picked by the maintainer from three mockups; surfaces split by tone and radius, not rules. Details in `docs/ui.md`.
 - #200 navigation uses the History API and the existing SPA fallback, with no router dependency: one entry per view or panel layer; in-app back/close controls replace instead of popping, so they never change main or leave the app. URLs are hints; the API decides access.

@@ -3,7 +3,7 @@ import { errorMessage, restore, setupAndSignIn, signOut } from './auth'
 
 const identity = {
   account: { id: 'a', email: 'a@example.com' },
-  organizations: [{ organization_id: 'o', name: 'Org' }],
+  organizations: [{ organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } }],
 }
 const j = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 const route = (table: Record<string, () => Response | Promise<Response>>) =>

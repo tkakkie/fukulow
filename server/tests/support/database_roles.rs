@@ -1,0 +1,244 @@
+use super::*;
+use fukulow_server::database::{grants, roles, validate_migrations};
+use futures_util::FutureExt;
+use sqlx::postgres::PgPoolOptions;
+
+async fn app_pool(owner: &PgPool, password: &str) -> Result<PgPool, sqlx::Error> {
+    PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            owner
+                .connect_options()
+                .as_ref()
+                .clone()
+                .username("fukulow_app")
+                .password(password),
+        )
+        .await
+}
+
+async fn role_settings(owner: &PgPool) -> Vec<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT ARRAY[current_setting('log_statement'), current_setting('log_min_messages'), \
+         current_setting('log_parameter_max_length'), current_setting('log_parameter_max_length_on_error'), \
+         current_setting('pg_stat_statements.track', true)]",
+    )
+    .fetch_one(owner)
+    .await
+    .unwrap()
+}
+
+async fn check_membership_rejection(owner: &PgPool, app_is_member: bool) {
+    let other_role = format!("role_membership_test_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(&format!("CREATE ROLE {other_role}"))
+        .execute(owner)
+        .await
+        .unwrap();
+    // Memberships are cluster-global: clean up even if a rejection assertion panics.
+    let result = std::panic::AssertUnwindSafe(async {
+        let (granted, member) = if app_is_member {
+            (other_role.as_str(), "fukulow_app")
+        } else {
+            ("fukulow_app", other_role.as_str())
+        };
+        sqlx::raw_sql(&format!("GRANT {granted} TO {member}"))
+            .execute(owner)
+            .await
+            .unwrap();
+        let snapshot = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT jsonb_build_object('role', to_jsonb(r), 'memberships', \
+                 (SELECT jsonb_agg(to_jsonb(m) ORDER BY roleid, member) FROM pg_auth_members m \
+                  WHERE member = r.oid OR roleid = r.oid))::text \
+                 FROM pg_authid r WHERE rolname = 'fukulow_app'",
+            )
+            .fetch_one(owner)
+            .await
+            .unwrap()
+        };
+        let before = snapshot().await;
+        let error = roles(owner, "rejected-membership-test-only")
+            .await
+            .expect_err(&format!("roles accepted GRANT {granted} TO {member}"));
+        assert_eq!(
+            error.to_string(),
+            "Database roles update failed (diagnostics suppressed)"
+        );
+        // Include the password hash without printing it in assertion diagnostics.
+        assert!(before == snapshot().await, "role or memberships changed");
+    })
+    .catch_unwind()
+    .await;
+    sqlx::raw_sql(&format!("DROP ROLE {other_role}"))
+        .execute(owner)
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+pub(super) async fn check_app_role(owner: PgPool) {
+    // Reuse one connection so leakage of transaction-local settings is observable.
+    let owner = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(owner.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let settings = role_settings(&owner).await;
+    // Keep the cluster-wide role/password lifecycle in one test to avoid rotation races.
+    // Exercise quotes, backslashes and SQL-looking input without a password in SQL.
+    let original = "role-test-only-'\\; DROP TABLE users; --";
+    roles(&owner, original).await.unwrap();
+    assert_eq!(role_settings(&owner).await, settings);
+    let app = app_pool(&owner, original).await.unwrap();
+    validate_migrations(&app).await.unwrap();
+    let flags: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolreplication, rolbypassrls \
+         FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(&app)
+    .await
+    .unwrap();
+    assert_eq!(flags, (false, false, false, false, false, false));
+    let owns_objects: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM pg_shdepend WHERE refobjid = 'fukulow_app'::regrole \
+         AND refclassid = 'pg_authid'::regclass AND deptype = 'o')",
+    )
+    .fetch_one(&owner)
+    .await
+    .unwrap();
+    assert!(!owns_objects);
+    for statement in [
+        "ALTER TABLE users DISABLE TRIGGER protect_member_identity",
+        "DROP TRIGGER protect_member_identity ON users",
+        "CREATE OR REPLACE FUNCTION protect_member_identity() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+        "SET session_replication_role = replica",
+        "TRUNCATE users CASCADE",
+        "TRUNCATE messages CASCADE",
+        "CREATE TABLE public.denied (organization_id uuid NOT NULL)",
+        "CREATE TEMP TABLE denied (organization_id uuid NOT NULL)",
+        "CREATE SCHEMA denied",
+        "CREATE FUNCTION public.denied() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+        "CREATE TRIGGER denied BEFORE INSERT ON users FOR EACH ROW EXECUTE FUNCTION protect_member_identity()",
+        "ALTER TABLE messages ADD COLUMN denied text",
+        "DELETE FROM _sqlx_migrations",
+        "UPDATE _sqlx_migrations SET success = false",
+    ] {
+        let error = sqlx::raw_sql(statement).execute(&app).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("42501"),
+            "{statement}: {error}"
+        );
+    }
+    let identity = check_member_identity(app.clone()).await;
+    check_member_truncate(app.clone(), identity, "42501").await;
+    // The existing tenant check sets up its own Organization.
+    app.close().await;
+
+    // Clear test-only fixture using the existing tables' owning connection.
+    sqlx::raw_sql("ALTER TABLE users DISABLE TRIGGER protect_member_truncate; TRUNCATE organizations, accounts CASCADE; ALTER TABLE users ENABLE TRIGGER protect_member_truncate;")
+        .execute(&owner).await.unwrap();
+    let app = app_pool(&owner, original).await.unwrap();
+    check_tenant_denials(app.clone()).await;
+
+    // Default grants cover objects created later by the migration owner.
+    sqlx::raw_sql(
+        "CREATE TABLE future_role_test (organization_id uuid NOT NULL, id bigserial PRIMARY KEY)",
+    )
+    .execute(&owner)
+    .await
+    .unwrap();
+    let organization = Uuid::new_v4();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO future_role_test (organization_id) VALUES ($1) RETURNING id",
+    )
+    .bind(organization)
+    .fetch_one(&app)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE future_role_test SET organization_id = $1 WHERE id = $2")
+        .bind(organization)
+        .bind(id)
+        .execute(&app)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM future_role_test WHERE id = $1")
+        .bind(id)
+        .execute(&app)
+        .await
+        .unwrap();
+    for statement in [
+        "TRUNCATE future_role_test",
+        "DROP TABLE future_role_test",
+        "ALTER SEQUENCE future_role_test_id_seq RESTART",
+    ] {
+        let error = sqlx::raw_sql(statement).execute(&app).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("42501"),
+            "{statement}: {error}"
+        );
+    }
+
+    // Reapplying fixes excess direct grants and updates the existing role's password.
+    sqlx::raw_sql("GRANT ALL ON ALL TABLES IN SCHEMA public TO fukulow_app; GRANT CREATE ON SCHEMA public TO fukulow_app; ALTER ROLE fukulow_app CREATEDB CREATEROLE")
+        .execute(&owner).await.unwrap();
+    let updated = "updated-role-test-only";
+    roles(&owner, updated).await.unwrap();
+    roles(&owner, updated).await.unwrap();
+    app.close().await;
+    assert!(app_pool(&owner, original).await.is_err());
+    let app = app_pool(&owner, updated).await.unwrap();
+    grants(&owner).await.unwrap();
+    validate_migrations(&app).await.unwrap();
+    for statement in [
+        "TRUNCATE messages CASCADE",
+        "CREATE TABLE denied (organization_id uuid NOT NULL)",
+    ] {
+        let error = sqlx::raw_sql(statement).execute(&app).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("42501"),
+            "{statement}: {error}"
+        );
+    }
+    assert!(roles(&owner, "").await.is_err());
+    check_membership_rejection(&owner, true).await;
+    check_membership_rejection(&owner, false).await;
+    sqlx::query("ALTER TABLE future_role_test OWNER TO fukulow_app")
+        .execute(&owner)
+        .await
+        .unwrap();
+    // Restore cluster-global ownership even if the rejection assertion panics.
+    let result = std::panic::AssertUnwindSafe(async {
+        let error = roles(&owner, "rejected-role-test-only").await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Database roles update failed (diagnostics suppressed)"
+        );
+    })
+    .catch_unwind()
+    .await;
+    sqlx::query("ALTER TABLE future_role_test OWNER TO CURRENT_USER")
+        .execute(&owner)
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(role_settings(&owner).await, settings);
+    let flags: (bool, bool) = sqlx::query_as(
+        "SELECT rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = 'fukulow_app'",
+    )
+    .fetch_one(&app)
+    .await
+    .unwrap();
+    assert_eq!(flags, (false, false));
+    // A rejected update preserves the previous password and grants.
+    let still_works = app_pool(&owner, updated).await.unwrap();
+    still_works.close().await;
+    app.close().await;
+    owner.close().await;
+}

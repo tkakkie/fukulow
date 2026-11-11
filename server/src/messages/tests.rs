@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 mod admission;
+pub(super) mod unread;
 
 fn router(pool: &PgPool) -> Router {
     crate::app(AppState::for_test(pool.clone()))

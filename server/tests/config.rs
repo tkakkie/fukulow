@@ -3,6 +3,38 @@
 use std::process::Command;
 
 #[test]
+fn roles_command_requires_password_before_connecting_and_rejects_unknown_commands() {
+    for password in [None, Some("")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
+        command.env_clear().args(["migrate", "roles"]);
+        if let Some(password) = password {
+            command.env("POSTGRES_APP_PASSWORD", password);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("POSTGRES_APP_PASSWORD must")
+        );
+        assert!(output.stdout.is_empty());
+    }
+    for args in [
+        vec!["unknown"],
+        vec!["migrate", "unknown"],
+        vec!["migrate", "roles", "unknown"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+            .env_clear()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr).unwrap().contains("Usage:"));
+    }
+}
+
+#[test]
 fn startup_requires_setup_token_regardless_of_cookie_security() {
     for cookie_secure in [None, Some("true"), Some("false")] {
         for setup_token in [

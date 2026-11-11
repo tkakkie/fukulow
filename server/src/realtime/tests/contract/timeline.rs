@@ -31,7 +31,8 @@ impl Runner {
                     }).map(|((_, seq), _)| *seq).min().unwrap();
                     json!({"kind":"topic","topic":{
                         "id":id,"name":topic.name,"first_seq":first_seq,"last_seq":topic.last_seq,
-                        "message_count":topic.message_count,"latest_message":self.records[&(channel, topic.last_seq)]
+                        "message_count":topic.message_count,"latest_message":self.records[&(channel, topic.last_seq)],
+                        "read_seq":topic.read_seq,"unread_count":topic.unread_count
                     }})
                 }
             }).collect::<Vec<_>>();

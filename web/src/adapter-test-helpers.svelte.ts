@@ -5,7 +5,7 @@ import { record } from './protocol-test-helpers'
 import type { SessionOptions } from './session'
 
 export { record }
-export const channel = (id: string, name = id): Channel => ({ id, name, visibility: 'public' })
+export const channel = (id: string, name = id): Channel => ({ id, name, visibility: 'public', capabilities: { can_add_members: { allowed: false } } })
 export const flush = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
 
 /** Lets pending promises finish, then applies Svelte's pending effects. */

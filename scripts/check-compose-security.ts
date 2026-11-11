@@ -14,6 +14,7 @@ const directory = mkdtempSync(join(tmpdir(), project))
 const override = join(directory, 'compose.yml')
 const image = process.env.CHECK_COMPOSE_IMAGE || `${project}-app`
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-e2e-db-test-only',
+  POSTGRES_APP_PASSWORD: 'compose-e2e-app-test-only',
   FUKULOW_SETUP_TOKEN: 'compose-e2e-setup-test-only',
   // Per-run private subnets; restart checks use a separate second-octet range.
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(128, 192)}.${randomInt(256)}`,
@@ -24,6 +25,8 @@ const run = (args: string[], input?: string) => execFileSync('docker', args, { c
 const dc = (...args: string[]) => run([...compose, ...args])
 const owner = { email: 'compose-owner@example.test', password: 'compose-owner-password-test-only' }
 writeFileSync(override, `services:
+  migrate:
+    image: ${image}
   app:
     image: ${image}
     ports: ["127.0.0.1::8080"]

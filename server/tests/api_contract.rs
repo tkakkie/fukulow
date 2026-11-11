@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 18 operations document shutdown, including the Reply chain projection.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 110;
+// All 24 operations document shutdown, including Member/Invite, Unread and Reply chain operations.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 162;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -96,15 +96,16 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 if method == "post" && path.ends_with("/messages") {
                     assert!(description.contains("Send admission queue is full"));
                     assert!(description.contains("persistence has not started"));
-                } else if path.contains("/timeline")
+                } else if (path.contains("/timeline")
                     || path.contains("/topics")
-                    || path.ends_with("/chain")
+                    || path.ends_with("/chain"))
+                    && !path.ends_with("/read")
                 {
                     assert!(description.contains("Projection watermark admission unavailable"));
                 }
             }
         }
-        assert_eq!(operations, 18);
+        assert_eq!(operations, 24);
     }
 }
 
@@ -141,7 +142,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 18);
+    assert_eq!(requests.len(), 24);
     requests.extend(
         [
             "/",
@@ -843,7 +844,7 @@ fn topic_openapi_contract_includes_all_shapes_and_discriminators() {
             .as_array()
             .unwrap()
             .len(),
-        6
+        8
     );
     for (route, shape) in [
         ("timeline", "TimelinePage"),
@@ -858,6 +859,60 @@ fn topic_openapi_contract_includes_all_shapes_and_discriminators() {
             format!("#/components/schemas/{shape}")
         );
     }
+}
+
+#[test]
+fn unread_openapi_exposes_positions_counts_and_scoped_monotonic_updates() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(schemas["MarkReadRequest"]["additionalProperties"], false);
+    assert_eq!(
+        schemas["MarkReadRequest"]["properties"]["read_seq"]["minimum"],
+        0
+    );
+    assert_eq!(schemas["ReadPosition"]["required"], json!(["read_seq"]));
+    let channel = &schemas["UnreadChannel"]["allOf"][1];
+    for field in ["as_of_seq", "read_seq", "main_unread_count", "unread_count"] {
+        assert!(
+            channel["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field))
+        );
+        assert_eq!(channel["properties"][field]["type"], "integer");
+        assert_eq!(channel["properties"][field]["format"], "int64");
+    }
+    for field in ["read_seq", "unread_count"] {
+        assert!(
+            schemas["TopicSummary"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field))
+        );
+    }
+    for suffix in ["read", "topics/{topic_id}/read"] {
+        let path = format!("/api/v1/orgs/{{org}}/channels/{{id}}/{suffix}");
+        let operation = &document["paths"][path]["put"];
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/MarkReadRequest"
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ReadPosition"
+        );
+        assert_eq!(operation["security"], json!([{"cookie":[]},{"bearer":[]}]));
+        assert!(
+            operation["responses"]["404"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("organization_unavailable")
+        );
+    }
+    assert_eq!(
+        schemas["ChannelList"]["properties"]["channels"]["items"]["$ref"],
+        "#/components/schemas/UnreadChannel"
+    );
 }
 
 #[test]
