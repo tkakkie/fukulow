@@ -8,24 +8,26 @@ const actions = new Set(['Click', 'Fill', 'Press', 'Select', 'Navigate', 'Reload
 const categories = new Set(['hook', 'expect', 'pw:api', 'test.step', 'fixture', 'test.attach'])
 const testStatuses = new Set(['passed', 'failed', 'timedOut', 'skipped', 'interrupted'])
 const runStatuses = new Set(['passed', 'failed', 'timedout', 'interrupted'])
-const e2eDir = resolve(import.meta.dirname, '../e2e')
 
 // Titles and paths come only from public repository source, never runtime titles
 // (which may interpolate credentials). Dynamic declarations get a fixed title.
-const sources = new Map(readdirSync(e2eDir).filter(file => file.endsWith('.ts')).map(file => {
-  const path = join(e2eDir, file)
-  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
-  const titles = new Map<number, string>()
-  function visit(node: ts.Node) {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'test') {
-      const title = node.arguments[0]
-      titles.set(source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
-        title && ts.isStringLiteralLike(title) ? title.text : 'Parameterized test')
+const sources = new Map(['e2e', 'e2e-compose'].flatMap(directory => {
+  const e2eDir = resolve(import.meta.dirname, '..', directory)
+  return readdirSync(e2eDir).filter(file => file.endsWith('.ts')).map(file => {
+    const path = join(e2eDir, file)
+    const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+    const titles = new Map<number, string>()
+    function visit(node: ts.Node) {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'test') {
+        const title = node.arguments[0]
+        titles.set(source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+          title && ts.isStringLiteralLike(title) ? title.text : 'Parameterized test')
+      }
+      ts.forEachChild(node, visit)
     }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
-  return [path, { file: `e2e/${file}`, lines: source.getLineStarts().length, titles }] as const
+    visit(source)
+    return [path, { file: `${directory}/${file}`, lines: source.getLineStarts().length, titles }] as const
+  })
 }))
 
 function location(value: TestError['location']) {

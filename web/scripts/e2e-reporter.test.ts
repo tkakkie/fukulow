@@ -73,6 +73,24 @@ function testCase(secret: string): TestCase {
 }
 
 describe('restricted E2E diagnostics', () => {
+  it('allowlists Compose source locations and titles without serializing runtime credentials', async () => {
+    const file = resolve(import.meta.dirname, '../e2e-compose/realtime.spec.ts')
+    const source = await readFile(file, 'utf8')
+    const line = source.split('\n').findIndex(line => line.startsWith('test(')) + 1
+    await withReporter(async (reporter, directory) => {
+      const entry = testCase(secrets.join('\n'))
+      entry.location = { file, line, column: 1 }
+      reporter.onTestEnd(entry, result(secrets.join('\n')))
+      await reporter.onEnd(completed)
+      const json = await readFile(join(directory, 'report.json'), 'utf8')
+      expect(JSON.parse(json).tests[0]).toMatchObject({
+        title: 'HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and sign-out',
+        location: { file: 'e2e-compose/realtime.spec.ts', line }, status: 'timedOut',
+      })
+      for (const secret of secrets) expect(json).not.toContain(secret)
+    })
+  })
+
   it.each(secrets)('omits sentinel payload %s from every runtime input and emits no output', async secret => {
     await withReporter(async (reporter, directory) => {
       reporter.onError(failure(secret))
@@ -139,13 +157,13 @@ describe('restricted E2E diagnostics', () => {
     }
   })
 
-  it('keeps actual dot failure messages, call logs, source frames and artifacts free of credentials', async () => {
+  it.each(['playwright.config.ts', 'playwright.compose.config.ts'])('keeps %s dot output and artifacts free of credentials', async config => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-dot-'))
     const web = resolve(import.meta.dirname, '..')
     const secret = 'sentinel-runtime-cookie-token'
     try {
       await writeFile(join(directory, 'playwright.config.ts'), `
-import config from ${JSON.stringify(join(web, 'playwright.config.ts'))}
+import config from ${JSON.stringify(join(web, config))}
 export default { ...config, testDir: '.', testMatch: 'failures.spec.ts', webServer: undefined,
   outputDir: ${JSON.stringify(join(directory, 'results'))},
   reporter: [['dot'], [${JSON.stringify(join(web, 'scripts/e2e-reporter.ts'))}, { outputDir: ${JSON.stringify(join(directory, 'published'))} }]],

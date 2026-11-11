@@ -4,7 +4,7 @@ Business chat app (Zulip-like: channels, topics, reply chains), built mostly by 
 Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (past measurement records), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13).
 
 ## What to read
-- Always this file; for a behaviour change, the relevant `docs/spec.md` sections first.
+- Always this file; for a behaviour change, read the `docs/spec.md` index, then the relevant parts.
 - Web UI work (components, layout, styles, copy, keyboard): `docs/ui.md` first, in full.
 - `docs/decisions.md`, `docs/invariants.md`: by default search headings/keywords and read only the matches.
 - Auth, permissions, tenant scoping, real-time delivery, API contract, migrations: check the related decisions and invariants first (required).
@@ -45,7 +45,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.
 - (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure protocol: `step(state, input) -> {state, effects}`, no clock, randomness, I/O, Svelte; vitest-testable. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
 - 4 and 5 do not know each other; only message sync has a protocol, CRUD is controller + adapter; no `$state` in 3 or 4.
-- REST/WebSocket types only from generated `api-schema.d.ts` (review); web-only types not duplicating the contract are fine. Behaviour: `docs/spec.md` "Real-time sync contract".
+- REST/WebSocket types only from generated `api-schema.d.ts` (review); web-only types not duplicating the contract are fine. Behaviour: `docs/spec/realtime.md` "Real-time sync contract".
 
 ## Commands
 - Server: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
@@ -61,5 +61,5 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 ## Workflow essentials
 - Own worktree, branch `claude/|codex/|antigravity/<topic>`. Never push to `main`; only the maintainer merges (or tells an AI to).
 - Implement only an Issue with "Done when" and `status:ready`; set `status:working`; draft PR; CI green; maintainer always reviews.
-- At most one status label, set by the AI handing off: `working` (AI busy), `ai-review` (CI/AI/Copilot), `ready` (may start), `human-review` (maintainer; entry conditions in `docs/workflow.md` §2, §5), `needs-decision` (question in last comment). Also `security`, `bug`, `risk:needs-review` (auth, permissions, real-time, migrations), `blocked`; every Issue has a milestone.
+- At most one status label, set by the AI handing off: `working` (AI busy), `ai-review` (CI/AI/Copilot), `ready` (may start), `human-review` (maintainer; entry conditions in `docs/workflow.md` §2, §5), `needs-decision` (question in last comment). Also `security`, `bug`, `risk:needs-review` (auth, permissions, real-time, migrations), `blocked`; every Issue has a milestone (a sprint, or `Backlog` if unscheduled).
 - GitHub text in English (Japanese only for UI strings). AI comments, reviews, PR bodies end with `AI: <name> / model: <id> / effort: <level>`.

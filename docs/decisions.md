@@ -200,7 +200,7 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #212 follows up handshake admission, listen backlog and accept pacing; client jitter is in #195. #199's local recovery was bounded by handshake capacity, not the watermark cap; it does not establish production 10,000-connection capacity.
 
 ## Web client
-- #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
+- #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec/realtime.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
 - Web sync is layered (components, adapter, controller, pure protocol, API/transport) so ordering and dedup are testable without Svelte or I/O; only message sync has a protocol (#91/#94). No CI layer check yet (needs a negative test).
 - Capabilities (`{allowed, reason?}`) come from authorize: Organization invite/manage-Roles/create-Channels, Channel add-Members (#144). Server requests re-check independently; #149 owns Channel management endpoints.
 - #120: an async `channel_not_found` carries no subscription generation; if it could belong to a retired or a pending subscription, the controller reconnects with backoff. Cost: one resubscribe of all Channels; other clients must do the same.
@@ -215,6 +215,8 @@ Current decisions only: what + why, at most 300 characters each; details in the 
 - #242 draft-store epochs fence ended Account Sessions; target revisions protect edits across Organization controllers. Observe detached sends only to restore definite refusals after a switch: the old failed Message UI is gone; ACKs and unknown outcomes never restore text.
 - #200 skips `@axe-core/playwright` and checks WCAG 2.2 AA token contrast, token-only component styles and single polite status-region structure in vitest (`ui-tokens.test.ts`), avoiding a new dependency while running in fast CI.
 - Sprint 1 web acceptance: `npm --prefix web run e2e:compose` against `docker compose --profile caddy up` from an empty database (#19).
+- #211: Compose browser acceptance runs on main pushes and manual dispatch, never PRs, keeping image/browser costs off PR feedback. #150 Sprint 2 requires a successful manual dispatch on the release candidate. Use Caddy for HTTPS/WSS; ci.yml covers both proxies.
+- #211/#254: upload only allowlisted report.json on failure (3 days). No traces, ARIA snapshots or raw requests; screenshots can expose the setup token, and unfiltered sqlx errors prevent certifying Compose logs as secret-free.
 
 ## Load testing and measurement
 - #20 load scaffold: `npm --prefix load ci && npm --prefix load run check && npm --prefix load test`; `make load` signs in to a disposable test Organization (`LOAD_EMAIL`, `LOAD_PASSWORD`; `LOAD_BOOTSTRAP=1` only for an empty DB). CI runs 5 sockets for 10 s.
