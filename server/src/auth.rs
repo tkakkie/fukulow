@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
-use rand::{TryRngCore, rngs::OsRng};
+use rand::{TryRng, rngs::SysRng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -505,7 +505,7 @@ async fn sign_in_with_entropy(
 }
 
 fn fill_random(bytes: &mut [u8]) -> Result<(), ApiError> {
-    OsRng
+    SysRng
         .try_fill_bytes(bytes)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))
 }
