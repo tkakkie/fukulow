@@ -7,6 +7,8 @@ import { createReplySync } from './reply-sync'
 import type { SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
 import { topicsApi, type TopicsApi } from './topics'
+import { unreadApi, type UnreadApi } from './unread'
+import { createUnreadSync } from './unread-sync'
 
 export type SessionOptions = {
   selfId: string
@@ -16,6 +18,7 @@ export type SessionOptions = {
   channelsApi?: ChannelsApi
   topicsApi?: TopicsApi
   repliesApi?: RepliesApi
+  unreadApi?: UnreadApi
   sync?: Partial<SyncOptions>
 }
 
@@ -42,6 +45,7 @@ export function createSession(options: SessionOptions) {
   } satisfies NonNullable<SyncOptions['api']>
   const topicSource = options.topicsApi ?? topicsApi(organizationId)
   const replySource = options.repliesApi ?? repliesApi(organizationId)
+  const unreadSource = options.unreadApi ?? unreadApi(organizationId)
   const topicComposition = createTopicSync({ ...options.sync, selfId: options.selfId, organizationId,
     api: { listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: (channel, body) => observe(timeline.sendMessage(channel, body)) },
@@ -54,7 +58,7 @@ export function createSession(options: SessionOptions) {
     checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
     onSessionEnded: notifyEnded,
   })
-  const { sync, replies } = createReplySync(
+  const replyComposition = createReplySync(
     {
       ...options.sync,
       selfId: options.selfId,
@@ -67,6 +71,21 @@ export function createSession(options: SessionOptions) {
     topicComposition.sync,
   )
   const { topics } = topicComposition
+  const { replies } = replyComposition
+  const { sync, unread } = createUnreadSync(
+    {
+      ...options.sync,
+      selfId: options.selfId,
+      organizationId,
+      unreadApi: {
+        listChannels: () => observe(unreadSource.listChannels()),
+        markRead: (scope, body) => observe(unreadSource.markRead(scope, body)),
+        getTopicSummary: (channel, topic) => observe(unreadSource.getTopicSummary(channel, topic)),
+      },
+      onSessionEnded: notifyEnded,
+    },
+    { sync: replyComposition.sync, topics },
+  )
   const navigationTargets = createNavigationTargets({
     topic: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
     reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
@@ -79,9 +98,12 @@ export function createSession(options: SessionOptions) {
       createChannel: body => observe(source.createChannel(body)),
     },
     id => {
-      if (!closed && !unavailable && id === watched && sync.get().organization === 'available' &&
-        sync.get().channels[id]?.state === 'unavailable') {
-        void sync.watch(id)
+      if (!closed && !unavailable && id === watched && sync.get().organization === 'available') {
+        if (sync.get().channels[id]?.state === 'unavailable') {
+          void sync.watch(id)
+        } else if (unread.get(id).stopped || unread.get(id).main.stopped) {
+          void unread.enter({ channel: id, topicId: null })
+        }
       }
     },
   )
@@ -114,7 +136,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, channels, navigationTargets,
+    sync, topics, replies, unread, channels, navigationTargets,
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
       const controller = createChannelMembers(organizationId, channel, r => {

@@ -87,6 +87,16 @@
   const currentTopicsState = $derived(currentTopics ? currentTopics.state : null)
   const currentReplies = $derived(selected ? session.replies?.(selected.id) ?? null : null)
   const currentRepliesState = $derived(currentReplies ? currentReplies.state : null)
+  const currentUnread = $derived(selected ? session.unread?.(selected.id) ?? null : null)
+  const selectedChannelUnread = $derived(s.selectedId ? session.unread?.(s.selectedId) ?? null : null)
+  const selectedChannelUnreadState = $derived(selectedChannelUnread ? selectedChannelUnread.state : null)
+  const channelUnreadCounts = $derived.by(() => {
+    const counts: Record<string, number | null> = {}
+    for (const c of s.channels) {
+      counts[c.id] = session.unread?.(c.id).state.unreadCount ?? null
+    }
+    return counts
+  })
   const activeReplyMessageId = $derived(route?.panel?.startsWith('reply:') ? route.panel.slice(6) : null)
   let lastOpenedAnchor = $state<Message | null>(null)
   const inMemoryReplyAnchor = $derived.by(() => {
@@ -150,6 +160,9 @@
   const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')
   const effectiveMobileLevel = $derived(mobileLevel)
   let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
+  const mainViewSelected = $derived(
+    viewportWidth >= MOBILE_BREAKPOINT_PX || effectiveMobileLevel === 'view',
+  )
   const currentSkipTargetId = $derived(
     resolveSkipLinkTargetId({
       viewportWidth,
@@ -386,17 +399,31 @@
 
   function handleSelectChannel(id: string) {
     const navigated = nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
-    if (id === s.selectedId || navigated === false) channels.select(id)
+    if (id === s.selectedId || navigated === false) {
+      channels.select(id)
+      if (
+        navigated === false &&
+        typeof currentUnread !== 'undefined' &&
+        currentUnread &&
+        (currentUnread.state.stopped || currentUnread.state.main.stopped)
+      ) {
+        void currentUnread.enter(null)
+      }
+    }
     drawerOpen = false
   }
 
   function handleSelectTopic(topicId: string) {
     if (!selected || !currentOrganizationId) return
+    const wasSameTopic = route?.topicId === topicId
     nav.navigate({
       type: 'topic',
       topicId,
       phone: viewportWidth < MOBILE_BREAKPOINT_PX,
     })
+    if (wasSameTopic && currentUnread && (currentUnread.state.stopped || currentUnread.state.topics[topicId]?.stopped)) {
+      void currentUnread.enter(topicId)
+    }
     drawerOpen = false
   }
 
@@ -584,6 +611,8 @@
         activeTopicId={route?.channelId === s.selectedId ? (route?.topicId ?? null) : null}
         topics={currentTopicsState && selected?.id === s.selectedId ? currentTopicsState.topics : []}
         allTopicsKnown={selected?.id === s.selectedId ? allTopicsKnown : false}
+        {channelUnreadCounts}
+        topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
         onselect={handleSelectChannel}
         onselecttopic={handleSelectTopic}
         onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
@@ -662,11 +691,13 @@
               channel={currentChannel}
               topics={currentTopics}
               replies={currentReplies}
+              unread={currentUnread}
               channelId={selected.id}
               topicId={route.topicId}
               topicName={resolvedTopicName}
               topicStatus={session.navigationTargets?.state.topic.status ?? 'idle'}
               selfId={organization?.member.id ?? ''}
+              viewSelected={mainViewSelected}
               {organizationUnavailable}
               reconnecting={announcementView.reconnecting}
               resolveSenderName={resolveSender}
@@ -686,8 +717,10 @@
             channel={currentChannel}
             topics={currentTopics}
             replies={currentReplies}
+            unread={currentUnread}
             channelId={selected.id}
             selfId={organization?.member.id ?? ''}
+            viewSelected={mainViewSelected}
             {organizationUnavailable}
             reconnecting={announcementView.reconnecting}
             resolveSenderName={resolveSender}
@@ -826,6 +859,7 @@
           {#if currentTopics && selected}
             <TopicList
               topics={currentTopics}
+              unread={currentUnread}
               channelId={selected.id}
               activeTopicId={route?.topicId ?? null}
               unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
