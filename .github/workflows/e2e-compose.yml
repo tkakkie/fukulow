@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request: # TEMP(#211): demo runs only, reverted before review
 permissions:
   contents: read
 
