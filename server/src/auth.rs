@@ -133,6 +133,8 @@ pub enum Role {
     Guest,
 }
 
+pub(crate) const ALL_ROLES: [Role; 4] = [Role::Owner, Role::Admin, Role::Member, Role::Guest];
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Organization {
     pub organization_id: Uuid,
@@ -707,6 +709,18 @@ pub async fn deactivate_member(
         if let Some(revision) = revision { state.session_changes.membership_revoked(organization,account,revision); }
         Ok(())
     }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
+}
+
+// Cross-module trigger tests mutate Membership through its owning module.
+#[cfg(test)]
+pub(crate) async fn set_member_active_for_test(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: Uuid,
+    active: bool,
+) {
+    sqlx::query("UPDATE users SET deactivated_at=CASE WHEN $3 THEN NULL ELSE now() END WHERE organization_id=$1 AND id=$2")
+        .bind(organization).bind(member).bind(active).execute(pool).await.unwrap();
 }
 
 fn credential_hash(headers: &HeaderMap, secure: bool) -> Result<Vec<u8>, ApiError> {
