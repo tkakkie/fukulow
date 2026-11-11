@@ -118,7 +118,8 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
         let path = path
             .replace("{org}", &Uuid::nil().to_string())
             .replace("{id}", &Uuid::nil().to_string())
-            .replace("{topic_id}", &Uuid::nil().to_string());
+            .replace("{topic_id}", &Uuid::nil().to_string())
+            .replace("{message_id}", &Uuid::nil().to_string());
         for method in HTTP_METHODS {
             if item.get(method).is_some() {
                 requests.push((method.to_uppercase(), path.clone()));
@@ -524,6 +525,10 @@ fn send_and_topic_admission_retry_after_is_at_least_one_second() {
     for (path, method) in [
         ("/api/v1/orgs/{org}/channels/{id}/messages", "post"),
         ("/api/v1/orgs/{org}/channels/{id}/timeline", "get"),
+        (
+            "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain",
+            "get",
+        ),
         ("/api/v1/orgs/{org}/channels/{id}/topics", "get"),
         ("/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}", "get"),
         (
@@ -706,6 +711,7 @@ fn account_and_member_openapi_contracts_are_separate() {
         "me",
         "channels",
         "channels/{id}/messages",
+        "channels/{id}/messages/{message_id}/chain",
         "channels/{id}/timeline",
         "channels/{id}/topics",
         "channels/{id}/topics/{topic_id}",
