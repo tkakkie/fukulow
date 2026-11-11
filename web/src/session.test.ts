@@ -370,3 +370,47 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
     vi.useRealTimers()
   }
 })
+
+it('composes replies and topics over a single sync instance and fences replaceSession/close in order (replies -> topics -> sync)', async () => {
+  const { net, session, onEnded } = open()
+  try {
+    expect(net.sockets).toHaveLength(1)
+    const anchor = record(100, 'A')
+    net.pages.A = ok({ messages: [anchor], has_more: false })
+    net.replyChains['A:id100'] = ok({
+      root_id: 'id100',
+      messages: [anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }],
+      has_more: false,
+    })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+
+    await session.replies.open('A', anchor)
+    expect(session.replies.get('A').messages.map((m) => m.id)).toEqual(['id100', 'id101'])
+    expect(net.sockets).toHaveLength(1)
+
+    const order: string[] = []
+    session.replies.subscribe(() => {
+      if (!order.includes('replies')) order.push('replies')
+    })
+    session.topics.subscribe(() => {
+      if (!order.includes('topics')) order.push('topics')
+    })
+    session.sync.subscribe(() => {
+      if (!order.includes('sync')) order.push('sync')
+    })
+
+    await session.sync.replaceSession('next')
+    expect(order).toEqual(['replies', 'topics', 'sync'])
+    expect(session.replies.get('A').anchor).toBeNull()
+
+    order.length = 0
+    await session.sync.close()
+    expect(order).toEqual(['replies', 'topics', 'sync'])
+    expect(onEnded).not.toHaveBeenCalled()
+  } finally {
+    session.close()
+  }
+})

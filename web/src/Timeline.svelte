@@ -1,6 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
+  import type { Message } from './api'
+  import { stepMessageRowIndex } from './composer-keys'
   import Composer from './Composer.svelte'
   import {
     confirmReplaceDraftWithFailedSend,
@@ -8,6 +10,7 @@
     discardAndFocusComposer,
     focusTarget,
   } from './focus-management'
+  import { countRepliesByMessageId, type RepliesAdapter } from './replies.svelte'
   import type { ChannelSync } from './sync.svelte'
   import {
     computeAnchoredScrollTop,
@@ -29,26 +32,32 @@
   let {
     channel,
     topics = null,
+    replies = null,
     channelId = '',
     selfId = '',
     organizationUnavailable = false,
     reconnecting = false,
+    resolveSenderName,
     composerRef = $bindable(null),
     topicInputRef = $bindable(null),
     onopentopic,
+    onopenreplies,
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
   }: {
     channel: ChannelSync
     topics?: TopicsAdapter | null
+    replies?: RepliesAdapter | null
     channelId?: string
     selfId?: string
     organizationUnavailable?: boolean
     reconnecting?: boolean
+    resolveSenderName?: (senderId: string) => string
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
     onopentopic?: (topicId: string) => void
+    onopenreplies?: (message: Message, opener?: HTMLElement | null) => void
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
@@ -56,11 +65,19 @@
 
   const s = $derived(channel.timeline)
   const tState = $derived(topics ? topics.state : null)
+  const rState = $derived(replies ? replies.state : null)
   const targetUnavailable = $derived(
     s.status === 'unavailable' || Boolean(tState?.unavailable) || organizationUnavailable,
   )
   const lines = $derived<MainTimelineLine[]>(
     tState ? tState.lines : s.messages.map((message) => ({ kind: 'message', message })),
+  )
+  const replyCounts = $derived(
+    countRepliesByMessageId([
+      s.messages,
+      lines.flatMap((l) => (l.kind === 'message' ? [l.message] : [])),
+      rState?.messages ?? [],
+    ]),
   )
   const mainPending = $derived(s.pending.filter((p) => !p.replyTo && !p.topicId))
   const effectiveStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
@@ -325,7 +342,25 @@
         {#each lines as line (line.kind === 'message' ? line.message.id : `topic:${line.topicId}`)}
           {#if line.kind === 'message'}
             <li class="timeline-list__item" data-message-id={line.message.id}>
-              <MessageRow createdAt={line.message.created_at} body={line.message.body} />
+              <MessageRow
+                senderName={resolveSenderName ? resolveSenderName(line.message.sender) : undefined}
+                createdAt={line.message.created_at}
+                body={line.message.body}
+                replyCount={replyCounts.get(line.message.id) ?? 0}
+                onopenreplies={onopenreplies && !targetUnavailable
+                  ? (opener) => onopenreplies(line.message, opener)
+                  : undefined}
+                onrowkeydown={(e) => {
+                  if (!scrollEl) return
+                  const rows = Array.from(scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]'))
+                  const idx = rows.indexOf(e.currentTarget as HTMLElement)
+                  const nextIdx = stepMessageRowIndex(idx, rows.length, e)
+                  if (nextIdx !== null) {
+                    e.preventDefault()
+                    focusTarget(rows[nextIdx])
+                  }
+                }}
+              />
             </li>
           {:else}
             <li class="timeline-list__item" data-message-id={`topic:${line.topicId}:${line.position}`}>
@@ -387,6 +422,11 @@
       oninput={(b) => channel.setDraft(b)}
       ontopicinput={(t) => channel.setTopicDraft(t)}
       onsubmit={handleSubmit}
+      onarrowupempty={() => {
+        if (!scrollEl) return
+        const rows = scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]')
+        if (rows.length > 0) focusTarget(rows[rows.length - 1])
+      }}
     />
   </div>
 

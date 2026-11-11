@@ -4,7 +4,7 @@
   import { navigationAdapter } from './navigation.svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import { createAnnouncementController } from './announcements'
-  import type { Channel, Identity } from './api'
+  import type { Channel, Identity, Message } from './api'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
   import ChannelList from './ChannelList.svelte'
@@ -25,6 +25,7 @@
   import ChannelMembers from './ChannelMembers.svelte'
   import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
+  import ReplyPanel from './ReplyPanel.svelte'
   import Timeline from './Timeline.svelte'
   import TopicList from './TopicList.svelte'
   import TopicView from './TopicView.svelte'
@@ -84,6 +85,32 @@
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
   const currentTopics = $derived(selected ? session.topics(selected.id) : null)
   const currentTopicsState = $derived(currentTopics ? currentTopics.state : null)
+  const currentReplies = $derived(selected ? session.replies?.(selected.id) ?? null : null)
+  const currentRepliesState = $derived(currentReplies ? currentReplies.state : null)
+  const activeReplyMessageId = $derived(route?.panel?.startsWith('reply:') ? route.panel.slice(6) : null)
+  let lastOpenedAnchor = $state<Message | null>(null)
+  const inMemoryReplyAnchor = $derived.by(() => {
+    if (!activeReplyMessageId || !selected) return null
+    if (lastOpenedAnchor?.id === activeReplyMessageId && lastOpenedAnchor.channel_id === selected.id) {
+      return lastOpenedAnchor
+    }
+    const fromTimeline = currentTimeline?.messages.find((m) => m.id === activeReplyMessageId)
+    if (fromTimeline) return fromTimeline
+    for (const line of currentTopicsState?.lines ?? []) {
+      if (line.kind === 'message' && line.message.id === activeReplyMessageId) return line.message
+    }
+    if (route?.topicId && currentTopicsState) {
+      const fromTopic = currentTopicsState.topic(route.topicId).messages.find((m) => m.id === activeReplyMessageId)
+      if (fromTopic) return fromTopic
+    }
+    if (currentRepliesState?.anchor?.id === activeReplyMessageId) return currentRepliesState.anchor
+    const fromReplies = currentRepliesState?.messages.find((m) => m.id === activeReplyMessageId)
+    if (fromReplies) return fromReplies
+    return null
+  })
+  const resolvedReplyAnchor = $derived(
+    inMemoryReplyAnchor ?? session.navigationTargets?.state.reply.anchor ?? null,
+  )
   const allTopicsKnown = $derived(
     currentTopicsState
       ? currentTopicsState.list.asOfSeq !== undefined
@@ -127,9 +154,12 @@
   let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
   let focusTopicInputNext = false
+  let appliedFocusRevision = -1
+  let navFocusBaseline: { revision: number; active: Element | null } = { revision: -1, active: null }
   const topicSummaryFocus = createTopicSummaryFocusController()
 
   const channelMemberController = $derived(panelOpen && activePanelTab === 'members' && selected ? session.channelMembers?.(selected.id) : undefined)
@@ -169,13 +199,52 @@
   })
 
   $effect(() => {
-    if (route?.organizationId === currentOrganizationId && !organizationUnavailable) void session.navigationTargets?.load(route)
+    if (route?.organizationId !== currentOrganizationId || organizationUnavailable) return
+    const skipReplyHint = Boolean(currentReplies && activeReplyMessageId && untrack(() => inMemoryReplyAnchor))
+    void session.navigationTargets?.load(skipReplyHint ? { ...route, panel: null } : route)
   })
 
   $effect(() => {
-    topicSummaryFocus.syncNavigation(navigation.get(), navigation.getReturningTopicId())
+    if (!currentReplies || !selected) return
+    if (!activeReplyMessageId) {
+      if (currentRepliesState?.anchor) currentReplies.dismiss()
+      return
+    }
+    if (organizationUnavailable || currentTimeline?.status === 'unavailable' || currentRepliesState?.unavailable) {
+      return
+    }
+    // Wait until the Channel timeline is watched before opening the Reply chain.
+    void currentTimeline?.status
+    const anchor = resolvedReplyAnchor
+    if (!anchor || anchor.channel_id !== selected.id) return
+    const targetRootId = anchor.reply_root_id ?? anchor.id
+    const alreadyOpen = Boolean(
+      currentRepliesState?.anchor &&
+        (currentRepliesState.anchor.id === activeReplyMessageId ||
+          currentRepliesState.rootId === targetRootId ||
+          currentRepliesState.messages.some((m) => m.id === activeReplyMessageId)),
+    )
+    if (!alreadyOpen) {
+      void currentReplies.open(anchor)
+    }
+  })
+
+  $effect(() => {
+    const snap = navigation.get()
+    navFocusBaseline = {
+      revision: snap.revision,
+      active: typeof document !== 'undefined' ? document.activeElement : null,
+    }
+    topicSummaryFocus.syncNavigation(snap, navigation.getReturningTopicId())
     const unsubscribe = navigation.subscribe(() => {
-      topicSummaryFocus.syncNavigation(navigation.get(), navigation.getReturningTopicId())
+      const next = navigation.get()
+      if (next.revision !== navFocusBaseline.revision) {
+        navFocusBaseline = {
+          revision: next.revision,
+          active: typeof document !== 'undefined' ? document.activeElement : null,
+        }
+      }
+      topicSummaryFocus.syncNavigation(next, navigation.getReturningTopicId())
     })
     return () => {
       unsubscribe()
@@ -192,12 +261,28 @@
     // Wait for API-owned Channel selection and the rendered destination before focusing.
     if (!state.target || state.target.organizationId !== currentOrganizationId) return
     const revision = state.revision
+    if (appliedFocusRevision === revision) return
     void tick().then(() => {
-      if (nav.state.revision !== revision) return
+      if (nav.state.revision !== revision || appliedFocusRevision === revision) return
+      appliedFocusRevision = revision
+      if (
+        navFocusBaseline.revision === revision &&
+        typeof document !== 'undefined' &&
+        document.activeElement &&
+        document.activeElement !== document.body &&
+        document.activeElement !== document.documentElement &&
+        (document.activeElement as HTMLElement).isConnected !== false &&
+        document.activeElement !== navFocusBaseline.active
+      ) {
+        focusTopicInputNext = false
+        return
+      }
       if (state.focus === 'list') focusIfVisible(channelListHeadingRef)
       else if (state.focus === 'heading') focusTarget(panelHeadingRef)
       else if (state.focus === 'reply-composer') {
-        if (!focusTarget(document.querySelector<HTMLElement>('#panel-content textarea'))) focusTarget(panelHeadingRef)
+        if (!focusTarget(replyComposerRef ?? document.querySelector<HTMLElement>('#panel-content textarea'))) {
+          focusTarget(panelHeadingRef)
+        }
       }
       else if (state.focus === 'tab') focusTarget(document.getElementById(`panel-tab-${activePanelTab}`))
       else if (state.focus === 'opener') focusAfterPanelClose(navigation.getOpener(), mainComposerRef)
@@ -274,12 +359,20 @@
   $effect(() => {
     const viewId = selected ? `${selected.id}/${route?.topicId ?? ''}` : ''
     if (!selected || !currentTimeline || viewId !== lastViewId) return
+    const replyChainIds =
+      activeReplyMessageId && currentRepliesState
+        ? new Set([
+            ...(currentRepliesState.rootId ? [currentRepliesState.rootId] : []),
+            ...currentRepliesState.messages.map((m) => m.id),
+          ])
+        : undefined
     announcementController.onTimelineUpdated({
       viewId,
       topicId: route?.topicId ?? null,
       status: currentTimeline.status,
       live: currentLive,
       messages: currentTimeline.messages,
+      replyChainIds,
       selfId: organization?.member.id ?? '',
       resolveSenderName: resolveSender,
     })
@@ -299,6 +392,12 @@
       phone: viewportWidth < MOBILE_BREAKPOINT_PX,
     })
     drawerOpen = false
+  }
+
+  function handleOpenReplies(message: Message, opener?: HTMLElement | null) {
+    lastOpenedAnchor = message
+    void currentReplies?.open(message)
+    nav.navigate({ type: 'reply', messageId: message.id }, opener)
   }
 
   function handleStartNewTopic() {
@@ -370,6 +469,11 @@
     if (panelOpen) {
       e.preventDefault()
       closePanel()
+      return
+    }
+    if (typeof document !== 'undefined' && document.activeElement?.closest('.ui-message-row') && mainComposerRef) {
+      e.preventDefault()
+      focusTarget(mainComposerRef)
     }
   }
 
@@ -551,6 +655,7 @@
             <TopicView
               channel={currentChannel}
               topics={currentTopics}
+              replies={currentReplies}
               channelId={selected.id}
               topicId={route.topicId}
               topicName={resolvedTopicName}
@@ -558,7 +663,9 @@
               selfId={organization?.member.id ?? ''}
               {organizationUnavailable}
               reconnecting={announcementView.reconnecting}
+              resolveSenderName={resolveSender}
               bind:composerRef={mainComposerRef}
+              onopenreplies={handleOpenReplies}
               onretrytopicmeta={() => {
                 if (route) void session.navigationTargets?.load(route, true)
               }}
@@ -572,13 +679,16 @@
           <Timeline
             channel={currentChannel}
             topics={currentTopics}
+            replies={currentReplies}
             channelId={selected.id}
             selfId={organization?.member.id ?? ''}
             {organizationUnavailable}
             reconnecting={announcementView.reconnecting}
+            resolveSenderName={resolveSender}
             bind:composerRef={mainComposerRef}
             bind:topicInputRef={mainTopicInputRef}
             onopentopic={handleSelectTopic}
+            onopenreplies={handleOpenReplies}
             ongoToChannelList={goToChannelList}
             onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
             onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
@@ -679,7 +789,24 @@
         onclose={closePanel}
       >
         {#if route?.panel?.startsWith('reply:')}
-          {#if session.navigationTargets?.state.reply.status === 'loading'}
+          {#if currentReplies && currentChannel && selected && activeReplyMessageId}
+            <ReplyPanel
+              channel={currentChannel}
+              replies={currentReplies}
+              channelId={selected.id}
+              anchorMessageId={activeReplyMessageId}
+              replyTargetStatus={session.navigationTargets?.state.reply.status ?? 'idle'}
+              {organizationUnavailable}
+              bind:composerRef={replyComposerRef}
+              resolveSenderName={resolveSender}
+              onretrytarget={() => {
+                if (route) void session.navigationTargets?.load(route, true)
+              }}
+              ongoToChannelList={goToChannelList}
+              onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
+              onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+            />
+          {:else if session.navigationTargets?.state.reply.status === 'loading'}
             <Skeleton rows={3} label="返信のつながりを読み込み中" />
           {:else if session.navigationTargets?.state.reply.status === 'error'}
             <StatusBanner tone="danger" role="alert" message="返信のつながりを読み込めませんでした。" actionLabel="再試行" onaction={() => { if (route) void session.navigationTargets?.load(route, true) }} />

@@ -6,6 +6,7 @@ import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { createSession } from './session'
+import { repliesAdapter } from './replies.svelte'
 import { syncAdapter } from './sync.svelte'
 import Timeline from './Timeline.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
@@ -535,7 +536,12 @@ class MiniElement extends MiniNode {
   click(): void {
     if (this.disabled) return
     this.focus()
-    this.dispatchEvent(new MiniDomEvent('click', { bubbles: true, cancelable: true }))
+    const evt = new MiniDomEvent('click', { bubbles: true, cancelable: true })
+    this.dispatchEvent(evt)
+    if (!evt.defaultPrevented && this.tagName === 'BUTTON' && (this.getAttribute('type') ?? 'submit') === 'submit') {
+      const form = this.closest('form')
+      form?.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    }
   }
 
   get hidden(): boolean {
@@ -3311,6 +3317,618 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     expect(host.querySelector('#main-content [data-topic-id="t-2"]')).not.toBeNull()
     expect(testDoc.activeElement).toBe(panelToggleBtn)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('opens the Reply chain panel from main timeline and Topic view, manages focus (Reply Composer, opener return, user focus preservation, keyboard ↑/R/Esc), and supports phone level', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const m1 = { ...record(1, 'c1'), body: 'タイムライン親メッセージ' }
+    const m2 = { ...record(2, 'c1'), body: 'タイムライン2件目' }
+    const tm1 = { ...record(3, 'c1'), topic_id: 't-1', body: 'トピック内メッセージ' }
+    const r1 = { ...record(4, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: '既存の返信1' }
+    const tr1 = { ...record(5, 'c1'), topic_id: 't-1', reply_to: tm1.id, reply_root_id: tm1.id, body: 'トピック内への返信1' }
+
+    net.timelines.c1 = ok({
+      as_of_seq: 3,
+      has_more: false,
+      items: [
+        { kind: 'message', message: m1 },
+        { kind: 'message', message: m2 },
+        {
+          kind: 'topic',
+          topic: {
+            id: 't-1',
+            name: '設計相談',
+            first_seq: 3,
+            last_seq: 3,
+            message_count: 1,
+            latest_message: tm1,
+            read_seq: 0,
+            unread_count: 0,
+          },
+        },
+      ],
+    })
+    net.topicSummaries['c1:t-1'] = ok({
+      as_of_seq: 3,
+      topic: {
+        id: 't-1',
+        name: '設計相談',
+        first_seq: 3,
+        last_seq: 3,
+        message_count: 1,
+        latest_message: tm1,
+        read_seq: 0,
+        unread_count: 0,
+      },
+    })
+    net.topicMessages['c1:t-1'] = ok({ messages: [tm1], has_more: false })
+    net.replyChains[`c1:${m1.id}`] = ok({
+      root_id: m1.id,
+      messages: [m1, r1],
+      has_more: false,
+    })
+    net.replyChains[`c1:${m2.id}`] = ok({
+      root_id: m2.id,
+      messages: [m2],
+      has_more: false,
+    })
+    net.replyChains[`c1:${tm1.id}`] = ok({
+      root_id: tm1.id,
+      messages: [tm1, tr1],
+      has_more: false,
+    })
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 3)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      get innerWidth() {
+        return testWin.innerWidth
+      },
+      location: {
+        get href() {
+          return href
+        },
+      } as Location,
+      history: {
+        get state() {
+          return historyState
+        },
+        pushState(state: unknown, _: string, url?: string | URL | null) {
+          historyState = state
+          href = String(url)
+        },
+        replaceState(state: unknown, _: string, url?: string | URL | null) {
+          historyState = state
+          href = String(url)
+        },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+    await settle()
+    flushSync()
+
+    // 1. Open Reply chain panel from main timeline by clicking 返信
+    const m1Row = host.querySelector(`#main-content [data-message-id="${m1.id}"]`)!
+    const m1ReplyBtn = buttonsByText(m1Row, '返信')[0]
+    expect(m1ReplyBtn).toBeDefined()
+    m1ReplyBtn.focus()
+    m1ReplyBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const panel = host.querySelector('#panel-content')
+    expect(panel).not.toBeNull()
+    expect(panel!.querySelector('h2')?.textContent).toBe('返信のつながり')
+    expect(panel!.textContent).toContain('タイムライン親メッセージ')
+    expect(panel!.textContent).toContain('既存の返信1')
+    // Only 1 listReplyChain request (navigationTargets did not duplicate it)
+    expect(net.replyHistory.filter((h) => h.anchor === m1.id)).toHaveLength(1)
+    // Reply count updated on m1 row in main timeline
+    expect(buttonsByText(m1Row, '返信 1件›')).toHaveLength(1)
+    // Focus moved to the Reply Composer
+    const replyTextarea = panel!.querySelector('textarea')!
+    expect(testDoc.activeElement).toBe(replyTextarea)
+
+    // 2. Closing via Escape returns focus to the opener button
+    const escEvent = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    escEvent.key = 'Escape'
+    testWin.dispatchEvent(escEvent)
+    flushSync()
+    await settle()
+    flushSync()
+    expect(host.querySelector('#panel-content')).toBeNull()
+    expect(testDoc.activeElement).toBe(m1ReplyBtn)
+
+    // 3. Keyboard path: ArrowUp from empty main Composer -> latest row -> ArrowUp -> R opens Reply panel -> Escape returns to row -> Escape returns to main Composer
+    const mainTextarea = host.querySelector('#main-content textarea')!
+    mainTextarea.focus()
+    const arrowUpComposer = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    arrowUpComposer.key = 'ArrowUp'
+    mainTextarea.dispatchEvent(arrowUpComposer)
+    flushSync()
+
+    const m2Article = host.querySelector(`#main-content [data-message-id="${m2.id}"] .ui-message-row`)!
+    const m1Article = host.querySelector(`#main-content [data-message-id="${m1.id}"] .ui-message-row`)!
+    expect(testDoc.activeElement).toBe(m2Article)
+
+    const arrowUpRow = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    arrowUpRow.key = 'ArrowUp'
+    m2Article.dispatchEvent(arrowUpRow)
+    flushSync()
+    expect(testDoc.activeElement).toBe(m1Article)
+
+    const keyR = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    keyR.key = 'r'
+    m1Article.dispatchEvent(keyR)
+    flushSync()
+    await settle()
+    flushSync()
+    expect(host.querySelector('#panel-content')).not.toBeNull()
+    expect(testDoc.activeElement).toBe(host.querySelector('#panel-content textarea'))
+
+    // Close panel with × button -> returns focus to m1Article (the keyboard opener)
+    const closeBtn = queryAll(host, '#panel-content button').find(
+      (b) => b.getAttribute('aria-label') === 'パネルを閉じる(Esc)',
+    )!
+    closeBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(host.querySelector('#panel-content')).toBeNull()
+    expect(testDoc.activeElement).toBe(m1Article)
+
+    // Escape on focused Message row when panel is closed returns focus to main Composer
+    const escToComposer = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    escToComposer.key = 'Escape'
+    testWin.dispatchEvent(escToComposer)
+    flushSync()
+    expect(testDoc.activeElement).toBe(mainTextarea)
+
+    // 4. User focus moves are never overridden when opening the Reply panel
+    const railChannelBtn = queryAll(host, 'button').find((b) => b.getAttribute('aria-label') === 'チャンネル一覧')!
+    const m2ReplyBtn = buttonsByText(
+      host.querySelector(`#main-content [data-message-id="${m2.id}"]`)!,
+      '返信',
+    )[0]
+    m2ReplyBtn.focus()
+    m2ReplyBtn.click()
+    flushSync()
+    railChannelBtn.focus()
+    await settle()
+    flushSync()
+    expect(testDoc.activeElement).toBe(railChannelBtn)
+
+    // Close panel before testing Topic view
+    navigation.navigate({ type: 'close' })
+    flushSync()
+    await settle()
+    flushSync()
+
+    // 5. Open Reply chain from a Topic view (and check phone width < 600px level switching)
+    testWin.innerWidth = 375
+    testWin.dispatchEvent(new MiniDomEvent('resize'))
+    navigation.navigate({ type: 'topic', topicId: 't-1', phone: true })
+    flushSync()
+    await settle()
+    flushSync()
+
+    const tm1Row = host.querySelector(`#main-content [data-message-id="${tm1.id}"]`)!
+    const tm1ReplyBtn = buttonsByText(tm1Row, '返信')[0]
+    tm1ReplyBtn.focus()
+    tm1ReplyBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const workspaceEl = host.querySelector('.workspace')!
+    expect(workspaceEl.getAttribute('data-mobile-level')).toBe('panel')
+    const topicReplyPanel = host.querySelector('#panel-content')!
+    expect(topicReplyPanel.textContent).toContain('トピック内メッセージ')
+    expect(topicReplyPanel.textContent).toContain('トピック内への返信1')
+    expect(testDoc.activeElement).toBe(topicReplyPanel.querySelector('textarea'))
+
+    // Phone back button ‹ in Panel header closes the panel and returns focus to tm1ReplyBtn in TopicView
+    const mobileBackBtn = queryAll(topicReplyPanel, 'button').find(
+      (b) => b.getAttribute('aria-label') === '前の表示に戻る',
+    )!
+    mobileBackBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(workspaceEl.getAttribute('data-mobile-level')).toBe('view')
+    expect(host.querySelector('#panel-content')).toBeNull()
+    expect(testDoc.activeElement).toBe(tm1ReplyBtn)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('supports Reply chain paging (さらに返信を読み込む), live reply updates, and Reply Composer send/retry/restore/discard without late async focus', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const m1 = { ...record(1, 'c1'), body: 'ルートメッセージ' }
+    const r1 = { ...record(2, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: '返信ページ1' }
+    const r2 = { ...record(3, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: '返信ページ2' }
+
+    net.timelines.c1 = ok({
+      as_of_seq: 1,
+      has_more: false,
+      items: [{ kind: 'message', message: m1 }],
+    })
+    net.replyChains[`c1:${m1.id}`] = ok({
+      root_id: m1.id,
+      messages: [m1, r1],
+      has_more: true,
+    })
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 1)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: {
+        get href() {
+          return href
+        },
+      } as Location,
+      history: {
+        get state() {
+          return historyState
+        },
+        pushState(state: unknown, _: string, url?: string | URL | null) {
+          historyState = state
+          href = String(url)
+        },
+        replaceState(state: unknown, _: string, url?: string | URL | null) {
+          historyState = state
+          href = String(url)
+        },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+    await settle()
+    flushSync()
+
+    // Open Reply panel for m1
+    const m1Row = host.querySelector(`#main-content [data-message-id="${m1.id}"]`)!
+    buttonsByText(m1Row, '返信')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const panel = host.querySelector('#panel-content')!
+    expect(panel.textContent).toContain('ルートメッセージ')
+    expect(panel.textContent).toContain('返信ページ1')
+    expect(buttonsByText(panel, 'さらに返信を読み込む')).toHaveLength(1)
+
+    // 1. Paging trigger: clicking さらに返信を読み込む fetches after_seq: 2 and appends r2
+    net.replyChains[`c1:${m1.id}`] = ok({
+      root_id: m1.id,
+      messages: [r2],
+      has_more: false,
+    })
+    buttonsByText(panel, 'さらに返信を読み込む')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(net.replyHistory.at(-1)).toEqual({
+      channel: 'c1',
+      anchor: m1.id,
+      query: { after_seq: 2 },
+    })
+    expect(panel.textContent).toContain('返信ページ2')
+    expect(buttonsByText(panel, 'さらに返信を読み込む')).toHaveLength(0)
+
+    // 2. Live update: a new reply arriving on the stream appears in the panel immediately
+    const liveReply = { ...record(4, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: 'ライブ到着の返信' }
+    net.event({ type: 'message', message: liveReply })
+    await settle()
+    flushSync()
+    expect(panel.textContent).toContain('ライブ到着の返信')
+    expect(buttonsByText(m1Row, '返信 3件›')).toHaveLength(1)
+
+    // 3. Send a reply from the Reply panel Composer; focus stays in Reply Composer synchronously and never steals focus on async settle
+    const replyTextarea = panel.querySelector('textarea')!
+    replyTextarea.value = 'パネルからの返信送信'
+    replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    const sendBtn = buttonsByText(panel, '送信')[0]
+    sendBtn.click()
+    flushSync()
+    expect(testDoc.activeElement).toBe(replyTextarea)
+    expect(replyTextarea.value).toBe('')
+    expect(panel.textContent).toContain('パネルからの返信送信')
+    expect(panel.textContent).toContain('送信中…')
+
+    // User moves focus to main Composer while send is in flight
+    const mainTextarea = host.querySelector('#main-content textarea')!
+    mainTextarea.focus()
+    expect(testDoc.activeElement).toBe(mainTextarea)
+
+    await settle()
+    expect(net.sends[0].body).toMatchObject({
+      body: 'パネルからの返信送信',
+      reply_to: m1.id,
+    })
+    expect(net.sends[0].body.topic_name).toBeUndefined()
+    const sentMsg = {
+      ...record(5, 'c1'),
+      sender: 'me',
+      client_message_id: net.sends[0].body.client_message_id,
+      body: 'パネルからの返信送信',
+      reply_to: m1.id,
+      reply_root_id: m1.id,
+    }
+    net.sends[0].resolve(ok(sentMsg))
+    net.event({ type: 'message', message: sentMsg })
+    await settle()
+    flushSync()
+
+    // Focus remains on mainTextarea (no late async focus steal)
+    expect(testDoc.activeElement).toBe(mainTextarea)
+    expect(panel.textContent).not.toContain('送信中…')
+    expect(panel.textContent).toContain('パネルからの返信送信')
+
+    // 4. Refused send in panel: 編集して送り直す with non-empty draft opens confirmation Dialog
+    replyTextarea.value = '失敗する返信'
+    replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    buttonsByText(panel, '送信')[0].click()
+    flushSync()
+    await settle()
+    net.sends[1].resolve({ ok: false, kind: 'http', status: 400, error: 'invalid_input' })
+    await settle()
+    flushSync()
+
+    expect(buttonsByText(panel, '編集して送り直す')).toHaveLength(1)
+    replyTextarea.value = '編集中の一時下書き'
+    replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    buttonsByText(panel, '編集して送り直す')[0].click()
+    flushSync()
+    const dialog = panel.querySelector('[role="dialog"]')!
+    expect(dialog).not.toBeNull()
+    buttonsByText(dialog, '置き換える')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(replyTextarea.value).toBe('失敗する返信')
+    expect(testDoc.activeElement).toBe(replyTextarea)
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('handles Reply panel load error, 404 unavailable, and C9/C10 states (preserving chain messages, draft, and failed pending 破棄)', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const m1 = { ...record(1, 'c1'), body: 'C9確認用ルート' }
+    const r1 = { ...record(2, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: 'C9確認用返信' }
+
+    net.timelines.c1 = ok({
+      as_of_seq: 1,
+      has_more: false,
+      items: [{ kind: 'message', message: m1 }],
+    })
+    net.replyChains[`c1:${m1.id}`] = { ok: false, kind: 'network' }
+
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 1)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: {
+        get href() {
+          return href
+        },
+      } as Location,
+      history: {
+        get state() {
+          return historyState
+        },
+        pushState(state: unknown, _: string, url?: string | URL | null) {
+          historyState = state
+          href = String(url)
+        },
+        replaceState(state: unknown, _: string, url?: string | URL | null) {
+          historyState = state
+          href = String(url)
+        },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+    await settle()
+    flushSync()
+
+    // 1. Network error on opening Reply chain shows StatusBanner + 再試行
+    const m1Row = host.querySelector(`#main-content [data-message-id="${m1.id}"]`)!
+    buttonsByText(m1Row, '返信')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const panel = host.querySelector('#panel-content')!
+    expect(panel.textContent).toContain('返信のつながりを読み込めませんでした。通信状況を確認して、もう一度お試しください。')
+    expect(buttonsByText(panel, '再試行')).toHaveLength(1)
+
+    // Retry succeeds
+    net.replyChains[`c1:${m1.id}`] = ok({
+      root_id: m1.id,
+      messages: [m1, r1],
+      has_more: false,
+    })
+    buttonsByText(panel, '再試行')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(panel.textContent).toContain('C9確認用ルート')
+    expect(panel.textContent).toContain('C9確認用返信')
+
+    // 2. Start an in-flight reply send and type a new Reply Composer draft, then trigger C9 channel_access_lost
+    const replyTextarea = panel.querySelector('textarea')!
+    replyTextarea.value = 'C9直前の送信'
+    replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    buttonsByText(panel, '送信')[0].click()
+    flushSync()
+    await settle()
+
+    replyTextarea.value = 'C9でも失わない返信下書き'
+    replyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    net.event({ type: 'channel_access_lost', channel_id: 'c1' })
+    await settle()
+    flushSync()
+
+    // Panel shows C9 StatusBanner, retains loaded chain messages & draft, disables Composer, and shows only 破棄 on failed pending reply
+    expect(panel.textContent).toContain('このチャンネルは利用できません。')
+    expect(buttonsByText(panel, 'チャンネル一覧へ')).toHaveLength(1)
+    expect(panel.textContent).toContain('C9確認用ルート')
+    expect(panel.textContent).toContain('C9確認用返信')
+    expect(panel.textContent).toContain('C9直前の送信')
+    expect(replyTextarea.value).toBe('C9でも失わない返信下書き')
+    expect(replyTextarea.disabled).toBe(true)
+    expect(buttonsByText(panel, '再送する')).toHaveLength(0)
+    expect(buttonsByText(panel, '編集して送り直す')).toHaveLength(0)
+    expect(buttonsByText(panel, '破棄')).toHaveLength(1)
+
+    // Clicking 破棄 removes the failed reply
+    buttonsByText(panel, '破棄')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+    expect(buttonsByText(panel, '破棄')).toHaveLength(0)
+    expect(panel.textContent).not.toContain('C9直前の送信')
 
     navigation.destroy()
     await unmount(instance)

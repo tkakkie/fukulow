@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { repliesAdapter } from './replies.svelte'
+import { countRepliesByMessageId, repliesAdapter } from './replies.svelte'
+import { syncAdapter } from './sync.svelte'
 import { ok, reply, replyClient, root } from './reply-test-helpers'
 import { mount, settle } from './adapter-test-helpers.svelte'
 
@@ -67,4 +68,56 @@ it('composition close and replacement clear observed chains and fence adapter re
   expect(view.last.messages).toEqual([])
   await adapter.open(root()); expect(adapter.state.messages).toEqual([])
   await view.unmount(); expect(vi.getTimerCount()).toBe(0)
+})
+
+it('countRepliesByMessageId deduplicates messages across sources and counts by reply_root_id and reply_to', () => {
+  const m1 = root()
+  const r2 = reply(2, 'id1')
+  const r3 = reply(3, 'id2')
+  const counts = countRepliesByMessageId([[m1, r2], [m1, r2, r3]])
+  expect(counts.get('id1')).toBe(2)
+  expect(counts.get('id2')).toBe(1)
+})
+
+it('channel.reply(replyRootId) manages per-chain drafts, hasUnsavedChanges, submit, detached refusal restore and restore()', async () => {
+  const c = replyClient(); await c.boot()
+  const syncModel = syncAdapter(c.sync)
+  const channel = syncModel.channel('A')
+  const rc = channel.reply('id1')
+
+  expect(rc.composer).toEqual({ draft: '', composerError: null })
+  expect(syncModel.hasUnsavedChanges()).toBe(false)
+
+  rc.setDraft('返信下書き')
+  expect(rc.composer.draft).toBe('返信下書き')
+  expect(syncModel.hasUnsavedChanges()).toBe(true)
+
+  // Over-limit draft refuses to submit and sets composerError
+  rc.setDraft('あ'.repeat(4_001))
+  expect(await rc.submit('id1')).toBe(false)
+  expect(rc.composer.composerError).toBe('メッセージは4000文字以内にしてください。')
+
+  // Valid submit clears draft and sends with reply_to
+  rc.setDraft('最初の返信')
+  const sendPromise = rc.submit('id1')
+  expect(rc.composer.draft).toBe('')
+  expect(await sendPromise).toBe(true)
+  expect(c.sendMessage).toHaveBeenLastCalledWith('A', expect.objectContaining({ body: '最初の返信', reply_to: 'id1' }))
+
+  // Failed non-retryable send can be restored into the Reply Composer via rc.restore()
+  c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'http', status: 400, error: 'invalid_message' })
+  rc.setDraft('失敗する返信')
+  expect(await rc.submit('id1')).toBe(true)
+  await settle()
+  const failed = channel.timeline.pending.find((p) => p.replyTo === 'id1' && p.status === 'failed')
+  expect(failed).toBeDefined()
+  expect(rc.restore(failed!.clientMessageId)).toBe(true)
+  expect(rc.composer.draft).toBe('失敗する返信')
+  expect(channel.timeline.pending.some((p) => p.clientMessageId === failed!.clientMessageId)).toBe(false)
+
+  // Draft survives C9 channel unavailability
+  void c.sync.channelUnavailable('A')
+  await settle()
+  expect(rc.composer.draft).toBe('失敗する返信')
+  await c.sync.close()
 })

@@ -5,8 +5,11 @@ import {
   IME_COMPOSING_KEY_CODE,
   isImeComposing,
   shouldCloseOnEscape,
+  shouldFocusLatestMessageOnArrowUp,
+  shouldOpenRepliesFromRowKey,
   shouldSubmitOnEnter,
   shouldTogglePanelShortcut,
+  stepMessageRowIndex,
   stepTabListKey,
 } from './composer-keys'
 
@@ -81,6 +84,28 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     expect(stepTabListKey(tabs, 'topics', { key: 'Tab' })).toBeNull()
   })
 
+  it('handles message list keyboard navigation: ArrowUp from empty Composer, row ArrowUp/ArrowDown, and Enter/R to open Replies', () => {
+    expect(shouldFocusLatestMessageOnArrowUp({ key: 'ArrowUp' }, '')).toBe(true)
+    expect(shouldFocusLatestMessageOnArrowUp({ key: 'ArrowUp' }, 'draft')).toBe(false)
+    expect(shouldFocusLatestMessageOnArrowUp({ key: 'ArrowUp', isComposing: true }, '')).toBe(false)
+    expect(shouldFocusLatestMessageOnArrowUp({ key: 'ArrowUp', shiftKey: true }, '')).toBe(false)
+    expect(shouldFocusLatestMessageOnArrowUp({ key: 'ArrowDown' }, '')).toBe(false)
+
+    expect(shouldOpenRepliesFromRowKey({ key: 'Enter' })).toBe(true)
+    expect(shouldOpenRepliesFromRowKey({ key: 'r' })).toBe(true)
+    expect(shouldOpenRepliesFromRowKey({ key: 'R' })).toBe(true)
+    expect(shouldOpenRepliesFromRowKey({ key: 'r', metaKey: true })).toBe(false)
+    expect(shouldOpenRepliesFromRowKey({ key: 'Enter', isComposing: true })).toBe(false)
+    expect(shouldOpenRepliesFromRowKey({ key: 'a' })).toBe(false)
+
+    expect(stepMessageRowIndex(1, 3, { key: 'ArrowUp' })).toBe(0)
+    expect(stepMessageRowIndex(0, 3, { key: 'ArrowUp' })).toBe(0)
+    expect(stepMessageRowIndex(1, 3, { key: 'ArrowDown' })).toBe(2)
+    expect(stepMessageRowIndex(2, 3, { key: 'ArrowDown' })).toBe(2)
+    expect(stepMessageRowIndex(0, 0, { key: 'ArrowUp' })).toBeNull()
+    expect(stepMessageRowIndex(1, 3, { key: 'ArrowUp', isComposing: true })).toBeNull()
+  })
+
   it('wires IME-safe key handlers, Dialog focus trap and ARIA tabs in Svelte components', () => {
     const composerSrc = readFileSync(join(webDir, 'src/Composer.svelte'), 'utf8')
     expect(composerSrc).toMatch(/if\s*\(\s*shouldSubmitOnEnter\s*\(\s*e\s*\)\s*\)/)
@@ -118,5 +143,9 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     const appSrc = readFileSync(join(webDir, 'src/App.svelte'), 'utf8')
     expect(appSrc).toContain('href={`#${skipTargetId}`}')
     expect(appSrc).toContain('bind:skipTargetId={workspaceSkipTargetId}')
+
+    const messageRowSrc = readFileSync(join(webDir, 'src/ui/MessageRow.svelte'), 'utf8')
+    expect(messageRowSrc).toContain('shouldOpenRepliesFromRowKey')
+    expect(messageRowSrc).toContain('tabindex={-1}')
   })
 })

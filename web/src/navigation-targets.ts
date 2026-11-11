@@ -1,7 +1,7 @@
-import type { Result, TopicSummaryResponse, ReplyChainPage } from './api'
+import type { Message, Result, TopicSummaryResponse, ReplyChainPage } from './api'
 import type { NavigationTarget } from './navigation-url'
 
-type TargetState = { status: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'; name: string }
+type TargetState = { status: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'; name: string; anchor?: Message }
 const idle: TargetState = { status: 'idle', name: '' }
 type Reads = {
   topic(channel: string, topic: string): Promise<Result<TopicSummaryResponse>>
@@ -42,7 +42,15 @@ export function createNavigationTargets(reads: Reads) {
       const unavailable = !result.ok && result.kind === 'http' && (result.status === 403 || result.status === 404)
       // Resource-not-found affects this hint only; Channel/Organization denial keeps C9/C10 semantics.
       if (unavailable && result.error !== 'topic_not_found' && result.error !== 'reply_chain_not_found' && result.error !== 'organization_unavailable') reads.channelUnavailable(channel)
-      state = { ...state, [slot]: { status: result.ok ? 'ready' : unavailable ? 'unavailable' : 'error', name } }
+      const anchor = slot === 'reply' && result.ok ? (result.data as ReplyChainPage).messages[0] : undefined
+      state = {
+        ...state,
+        [slot]: {
+          status: result.ok ? 'ready' : unavailable ? 'unavailable' : 'error',
+          name,
+          ...(anchor ? { anchor } : {}),
+        },
+      }
       publish()
     }
     await Promise.all([

@@ -46,6 +46,7 @@ export type AnnouncementInput =
       type: 'timeline_updated'
       viewId: string
       topicId?: string | null
+      replyChainIds?: ReadonlySet<string>
       status: 'loading' | 'ready' | 'unavailable' | 'error'
       live: boolean
       messages: readonly AnnounceableMessage[]
@@ -296,7 +297,10 @@ export function stepAnnouncements(
             (m) =>
               m.sender !== input.selfId &&
               !prev.announcedSeqs.has(m.seq) &&
-              (input.topicId === undefined ||
+              ((input.replyChainIds !== undefined &&
+                (input.replyChainIds.has(m.id) ||
+                  (m.reply_to != null && input.replyChainIds.has(m.reply_to)))) ||
+                input.topicId === undefined ||
                 (input.topicId === null
                   ? (m.topic_id ?? null) === null && (m.reply_to ?? null) === null
                   : m.topic_id === input.topicId)),
@@ -496,6 +500,7 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
     onTimelineUpdated(input: {
       viewId: string
       topicId?: string | null
+      replyChainIds?: ReadonlySet<string>
       status: 'loading' | 'ready' | 'unavailable' | 'error'
       live: boolean
       messages: readonly AnnounceableMessage[]
