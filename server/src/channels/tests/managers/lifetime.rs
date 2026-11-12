@@ -362,19 +362,33 @@ async fn channel_manager_migration_has_no_backfill_and_rejects_public_or_guest_r
     let public = Uuid::parse_str(public["id"].as_str().unwrap()).unwrap();
     let (guest, _) = f.user("guest").await;
     for (channel, target) in [(public, f.creator), (f.channel, guest)] {
-        let error = sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id,manager) VALUES ($1,$2,$3,true)").bind(f.org).bind(channel).bind(target).execute(&f.pools.app).await.unwrap_err();
+        let error = crate::database::organization(
+            &f.pools.app,
+            f.org,
+            async |tx: &mut sqlx::PgConnection| {
+                sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id,manager) VALUES ($1,$2,$3,true)")
+                    .bind(f.org).bind(channel).bind(target).execute(tx).await
+            },
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             error.as_database_error().unwrap().constraint(),
             Some("channel_members_manager")
         );
     }
     let error =
-        sqlx::query("UPDATE channels SET visibility='public' WHERE organization_id=$1 AND id=$2")
+        crate::database::organization(&f.pools.app, f.org, async |tx: &mut sqlx::PgConnection| {
+            sqlx::query(
+                "UPDATE channels SET visibility='public' WHERE organization_id=$1 AND id=$2",
+            )
             .bind(f.org)
             .bind(f.channel)
-            .execute(&f.pools.app)
+            .execute(tx)
             .await
-            .unwrap_err();
+        })
+        .await
+        .unwrap_err();
     assert_eq!(
         error.as_database_error().unwrap().constraint(),
         Some("channel_members_manager")
@@ -439,20 +453,23 @@ async fn channel_manager_public_visibility_race_cannot_commit_a_right_on_public(
         let org = f.org;
         let channel = f.channel;
         let pending = tokio::spawn(async move {
-            if grant_first {
-                sqlx::query(visibility_sql)
-                    .bind(org)
-                    .bind(channel)
-                    .execute(&app)
-                    .await
-            } else {
-                sqlx::query(grant_sql)
-                    .bind(org)
-                    .bind(channel)
-                    .bind(target)
-                    .execute(&app)
-                    .await
-            }
+            crate::database::organization(&app, org, async |tx: &mut sqlx::PgConnection| {
+                if grant_first {
+                    sqlx::query(visibility_sql)
+                        .bind(org)
+                        .bind(channel)
+                        .execute(tx)
+                        .await
+                } else {
+                    sqlx::query(grant_sql)
+                        .bind(org)
+                        .bind(channel)
+                        .bind(target)
+                        .execute(tx)
+                        .await
+                }
+            })
+            .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(3),async {
             loop {

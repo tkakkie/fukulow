@@ -10,6 +10,21 @@ Rules for new records: keep results that affect a design decision, performance c
 
 Record text is copied verbatim from its source line(s) (values and conditions unchanged). Raw logs, artifact directories and `/private/tmp` paths named in records were kept outside Git; they are not in this repository and may no longer exist, so they cannot be restored from here.
 
+## #314 step 3b subscription context round trips (2026-11-13)
+
+Rust 1.99.0, SQLx 0.8.6, debug profile, isolated test PostgreSQL at loopback port 55471. `realtime::tests::round_trips::measure_subscription_round_trips` counts PostgreSQL frontend Query/Sync/Flush boundaries through a local plaintext test relay; packet counts are not used. An authenticated socket subscribes to one empty Channel four times on a pool capped at three, with checkout health probes disabled. The last two subscriptions have no Parse messages; authentication and fixture work are outside the window. Independent source snapshots/build directories compare local `origin/main` 1069a9f, PR head df7319c, and this fix; no Git state is changed.
+
+| Per warm subscription | main 1069a9f | PR df7319c | Fixed |
+|---|---:|---:|---:|
+| Data/control statement executions | 13 | 30 | 13 |
+| Wire round trips, including SQLx pool Sync overhead | 20 | 37 | 20 |
+
+A subscription has five visibility/access reads and two watermarks: single-statement reads cost 1 -> 4 -> 1 executions; each barrier-protected watermark costs 4 -> 5 -> 4. The barrier wait and subsequent fresh READ COMMITTED sequence snapshot remain separate. First-subscription wire counts were 30/51/34 respectively, including prepare and connection/cache initialization; they do not represent the steady-state cost.
+
+Reproduce on the isolated test database with `cargo test --locked -p fukulow-server --lib measure_subscription_round_trips -- --ignored --nocapture` after setting DATABASE_URL explicitly. This is a protocol-cost comparison, not a latency or production-capacity guarantee. Single-batch access checks now use one statement; larger per-Organization checks retain their REPEATABLE READ transaction.
+
+The unchanged 512-socket/20-connection/1 s admission-deadline regression passed 10/10 isolated repetitions and again in the full Rust suite. An earlier exploratory run failed with a global watermark admission rejection during concurrent baseline compilation; the isolated loop ran after all builds finished. SQLx reported test-database cleanup warnings during the loop, without test failures.
+
 ## Load harness methods (#20, #57)
 
 Commands, metric definitions and limits of the load harness. Current rules: `docs/decisions/load.md` "Load testing and measurement".

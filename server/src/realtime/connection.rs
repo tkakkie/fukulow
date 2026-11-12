@@ -176,7 +176,7 @@ impl Connection<'_> {
     }
 
     async fn visible(&self, channel: Uuid) -> Result<(), MessageError> {
-        messages::require_visible(
+        messages::require_visible_scoped(
             &self.state.pool,
             self.auth.identity.organization.organization_id,
             (self.auth.identity.member.id, self.auth.membership_revision),

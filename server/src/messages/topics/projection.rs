@@ -63,7 +63,7 @@ async fn read(
     let limit = query.validate()?;
     let organization = auth.identity.organization.organization_id;
     // Cheap denial before watermark admission; reauthorize in the page snapshot.
-    require_visible(
+    require_visible_scoped(
         &state.pool,
         organization,
         (auth.identity.member.id, auth.membership_revision),
@@ -78,18 +78,25 @@ async fn read(
         let w = query.as_of_seq.unwrap_or(w);
         // The barrier and its permit are released. Immutable seq <= W is complete;
         // this fresh statement snapshots authorization and projection data together.
-        let rows = sqlx::query(&page_sql())
-            .bind(organization)
-            .bind(auth.identity.member.id)
-            .bind(auth.membership_revision)
-            .bind(channel)
-            .bind(w)
-            .bind(query.before_position)
-            .bind(i64::from(limit) + 1)
-            .bind(topics_only)
-            .bind(topic)
-            .fetch_all(&state.pool)
-            .await?;
+        let rows = crate::database::organization_read_only(
+            &state.pool,
+            organization,
+            async |tx: &mut sqlx::PgConnection| {
+                sqlx::query(&page_sql())
+                    .bind(organization)
+                    .bind(auth.identity.member.id)
+                    .bind(auth.membership_revision)
+                    .bind(channel)
+                    .bind(w)
+                    .bind(query.before_position)
+                    .bind(i64::from(limit) + 1)
+                    .bind(topics_only)
+                    .bind(topic)
+                    .fetch_all(tx)
+                    .await
+            },
+        )
+        .await?;
         let first = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         match first.try_get::<Option<bool>, _>("visible")? {
             None => return Err(MessageError::OrganizationUnavailable),

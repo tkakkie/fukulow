@@ -65,6 +65,8 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [auth](auth.md): `#314 single-statement hot reads use`
+
 - [auth](auth.md): `#149 channel_access_lost carries only channel_id, keeps`, `#149 observed loss fences queued/replay frames`, `Two independent revocations: ending an Account`, `Revocation boundary: history/replay deny once revocation`, `Classification precedence: known Account Session end`
 - [auth](auth.md): `Open sockets use the database expiry`, `The initial WebSocket session check is`, `#157 supervises the worker: any unexpected`, `#163/#195: successful return after registry drop`
 - [messages](messages.md): `#149 grant_id is a durable UUID`, `#149 fast subscription rechecks/failures target Organization+Channel`, `#149 subscriptions follow the current access`, `#149 API mutations lock Organization, Channels`
