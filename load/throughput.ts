@@ -61,7 +61,7 @@ export function setup(): Setup {
       const response = http.post(`${baseUrl}${organizationPath(data.organizationId, false)}/invites`, JSON.stringify(invite), params('invite', data.token));
       requireStatus(response, 201, 'invite');
       const accept: AcceptInviteRequest = { email, password, name: `Load Member ${i}`, token: (response.json() as InviteResponse).token };
-      requireStatus(http.post(`${baseUrl}${organizationPath(data.organizationId, false)}/invites/accept`, JSON.stringify(accept), params('accept_invite')), 201, 'accept_invite');
+      requireStatus(http.post(`${baseUrl}${organizationPath(data.organizationId, false)}/invites/accept`, JSON.stringify(accept), params('accept_invite')), 200, 'accept_invite');
       const signIn: SignInRequest = { email, password };
       const session = http.post(`${baseUrl}${signInPath(false)}`, JSON.stringify(signIn), params('sign_in'));
       requireStatus(session, 200, 'sign_in');
