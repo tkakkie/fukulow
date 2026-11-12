@@ -81,12 +81,19 @@ pub async fn list_members(State(state): State<AppState>, auth: Auth) -> Result<R
         "SELECT m.id,m.name,m.role,u.role FROM ({}) u JOIN users m ON m.organization_id=$1 AND m.deactivated_at IS NULL ORDER BY m.name,m.id",
         current_member_sql(false)
     );
-    let rows = sqlx::query_as::<_, (Uuid, String, Role, Role)>(&sql)
-        .bind(auth.identity.organization.organization_id)
-        .bind(auth.identity.member.id)
-        .bind(auth.membership_revision)
-        .fetch_all(&state.pool)
-        .await?;
+    let rows = crate::database::organization_read_only(
+        &state.pool,
+        auth.identity.organization.organization_id,
+        async |tx: &mut sqlx::PgConnection| {
+            sqlx::query_as::<_, (Uuid, String, Role, Role)>(&sql)
+                .bind(auth.identity.organization.organization_id)
+                .bind(auth.identity.member.id)
+                .bind(auth.membership_revision)
+                .fetch_all(tx)
+                .await
+        },
+    )
+    .await?;
     let role = rows
         .first()
         .map(|row| row.3)
@@ -130,28 +137,29 @@ pub async fn change_role<G: RoleChangeGuard>(
     ApiJson(input): ApiJson<ChangeRoleRequest>,
 ) -> Result<Response, ApiError> {
     let Path((org, id)) = path.map_err(|_| ApiError::bad_request())?;
-    let mut tx = state.pool.begin().await?;
-    lock_organization(&mut tx, org).await?;
-    let guard = G::lock(&mut tx, org, id).await?;
-    current_actor(&mut tx, &auth, Action::ChangeRole).await?;
-    if input.role != Role::Owner {
-        let last_owner: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM users WHERE organization_id=$1 AND id=$2 AND role='owner' AND deactivated_at IS NULL)
-             AND NOT EXISTS (SELECT 1 FROM users WHERE organization_id=$1 AND id<>$2 AND role='owner' AND deactivated_at IS NULL)",
-        )
-        .bind(org)
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if last_owner {
-            return Err(ApiError(StatusCode::CONFLICT, "last_owner", None));
+    let row = crate::database::organization(&state.pool, auth.identity.organization.organization_id, async |tx: &mut sqlx::PgConnection| {
+        lock_organization(&mut *tx, org).await?;
+        let guard = G::lock(&mut *tx, org, id).await?;
+        current_actor(&mut *tx, &auth, Action::ChangeRole).await?;
+        if input.role != Role::Owner {
+            let last_owner: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM users WHERE organization_id=$1 AND id=$2 AND role='owner' AND deactivated_at IS NULL)
+                 AND NOT EXISTS (SELECT 1 FROM users WHERE organization_id=$1 AND id<>$2 AND role='owner' AND deactivated_at IS NULL)",
+            )
+            .bind(org)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if last_owner {
+                return Err(ApiError(StatusCode::CONFLICT, "last_owner", None));
+            }
         }
-    }
-    guard.check(&mut tx, org, id, input.role).await?;
-    let row = sqlx::query_as::<_,(Uuid,String,Role)>("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING id,name,role")
-        .bind(org).bind(id).bind(input.role).fetch_optional(&mut *tx).await.map_err(member_write_error)?
-        .ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
-    tx.commit().await?;
+        guard.check(&mut *tx, org, id, input.role).await?;
+        let row = sqlx::query_as::<_,(Uuid,String,Role)>("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING id,name,role")
+            .bind(org).bind(id).bind(input.role).fetch_optional(&mut *tx).await.map_err(member_write_error)?
+            .ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
+        Ok::<_, ApiError>(row)
+    }).await?;
     state
         .session_changes
         .recheck_subscriptions(&state.pool, SubscriptionScope::Member(org, id))

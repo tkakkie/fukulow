@@ -189,18 +189,28 @@ async fn check(
     keys: &[CheckKey],
     bound: Instant,
 ) -> Result<HashMap<SessionKey, u16>, sqlx::Error> {
-    let mut connection = tokio::time::timeout_at(bound, pool.acquire())
-        .await
-        .map_err(|_| sqlx::Error::PoolTimedOut)??;
-    match tokio::time::timeout_at(bound, query(&mut connection, keys)).await {
-        Ok(result) => result,
-        Err(_) => {
-            // Release the pool slot and drop the socket immediately: graceful
-            // close-on-drop retains its permit until asynchronous cleanup finishes.
-            drop(connection.detach());
-            Err(sqlx::Error::PoolTimedOut)
+    tokio::time::timeout_at(bound, async {
+        let mut ended = HashMap::new();
+        for batch in keys.chunks(BATCH_SIZE) {
+            let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+            for key in batch {
+                groups.entry(key.0).or_default().push(key.clone());
+            }
+            for (organization, keys) in groups {
+                ended.extend(
+                    crate::database::organization_read_only(
+                        pool,
+                        organization,
+                        async |tx: &mut PgConnection| query(tx, &keys).await,
+                    )
+                    .await?,
+                );
+            }
         }
-    }
+        Ok(ended)
+    })
+    .await
+    .map_err(|_| sqlx::Error::PoolTimedOut)?
 }
 
 async fn query(

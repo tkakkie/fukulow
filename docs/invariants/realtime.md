@@ -65,3 +65,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [topics](topics.md): `shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish`, `send_completes_while_topic_projection_query_is_paused`
 - [replies](replies.md): `reply_live_replay_member_revision_and_removed_grant_denials_have_positive_controls`
 - [deployment](deployment.md): `generated_openapi_matches_committed_contract`, `channel_list_database_failure_returns_generic_500`
+
+- [auth](auth.md): `handlers_and_fanout_require_authenticated_context`

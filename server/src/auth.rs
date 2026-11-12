@@ -240,6 +240,7 @@ fn email(value: &str) -> Result<String, ApiError> {
 
 // Global bootstrap is a tenant-scope exception: only existence is exposed.
 async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<bool, sqlx::Error> {
+    // #314 step 4 replaces this global bootstrap read with a SECURITY DEFINER function.
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organizations)")
         .fetch_one(executor)
         .await
@@ -328,36 +329,37 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
         ));
     }
     let password_hash = hash_password(input.password).await?;
-    let mut tx = state.pool.begin().await?;
-    // Global bootstrap is a tenant-scope exception. The table lock also
-    // serializes setup across processes and concurrent first requests.
-    sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
-        .execute(&mut *tx)
-        .await?;
-    if organization_exists(&mut *tx).await? {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "setup already completed",
-            None,
-        ));
-    }
     let organization_id = Uuid::new_v4();
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, $2)")
-        .bind(organization_id)
-        .bind(organization_name)
-        .execute(&mut *tx)
-        .await?;
-    let account_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, $3)")
-        .bind(account_id)
-        .bind(&email)
-        .bind(password_hash)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, $4, 'owner')")
-        .bind(organization_id).bind(id).bind(account_id).bind(name).execute(&mut *tx).await?;
-    tx.commit().await?;
+    let id = crate::database::organization(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
+        // Global bootstrap is a tenant-scope exception. The table lock also
+        // serializes setup across processes and concurrent first requests.
+        sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
+        if organization_exists(&mut *tx).await? {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "setup already completed",
+                None,
+            ));
+        }
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, $2)")
+            .bind(organization_id)
+            .bind(organization_name)
+            .execute(&mut *tx)
+            .await?;
+        let account_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, $3)")
+            .bind(account_id)
+            .bind(&email)
+            .bind(password_hash)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, $4, 'owner')")
+            .bind(organization_id).bind(id).bind(account_id).bind(name).execute(&mut *tx).await?;
+        Ok::<_, ApiError>(id)
+    }).await?;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -543,20 +545,22 @@ async fn account_identity(
     pool: &sqlx::PgPool,
     account_id: Uuid,
 ) -> Result<AccountIdentity, ApiError> {
-    let email = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
-        .bind(account_id)
-        .fetch_one(pool)
-        .await?;
-    let organizations = sqlx::query_as::<_, (Uuid, String, Role)>(
-        "SELECT o.organization_id, o.name, u.role FROM organizations o JOIN users u USING (organization_id) WHERE u.account_id = $1 AND u.deactivated_at IS NULL ORDER BY o.organization_id"
-    ).bind(account_id).fetch_all(pool).await?.into_iter().map(|(organization_id,name,role)|Organization{organization_id,name,capabilities: OrganizationCapabilities::for_member(organization_id,role)}).collect();
-    Ok(AccountIdentity {
-        account: Account {
-            id: account_id,
-            email,
-        },
-        organizations,
-    })
+    crate::database::account_read_only(pool, account_id, async |tx: &mut sqlx::PgConnection| {
+        let email = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let organizations = sqlx::query_as::<_, (Uuid, String, Role)>(
+            "SELECT o.organization_id, o.name, u.role FROM organizations o JOIN users u USING (organization_id) WHERE u.account_id = $1 AND u.deactivated_at IS NULL ORDER BY o.organization_id"
+        ).bind(account_id).fetch_all(&mut *tx).await?.into_iter().map(|(organization_id,name,role)|Organization{organization_id,name,capabilities: OrganizationCapabilities::for_member(organization_id,role)}).collect();
+        Ok(AccountIdentity {
+            account: Account {
+                id: account_id,
+                email,
+            },
+            organizations,
+        })
+    }).await
 }
 
 pub struct AccountAuth {
@@ -607,26 +611,33 @@ impl FromRequestParts<AppState> for Auth {
             .ok_or_else(ApiError::bad_request)?
             .parse()
             .map_err(|_| ApiError::bad_request())?;
-        let row = sqlx::query_as::<
-            _,
-            (
-                Uuid,
-                Option<Uuid>,
-                Option<String>,
-                Option<Role>,
-                Option<String>,
-                Option<i64>,
-            ),
-        >(
-            "SELECT s.account_id, u.id, u.name, u.role, o.name, u.membership_revision \
+        let row = crate::database::organization_read_only(
+            &state.pool,
+            organization,
+            async |tx: &mut sqlx::PgConnection| {
+                sqlx::query_as::<
+                    _,
+                    (
+                        Uuid,
+                        Option<Uuid>,
+                        Option<String>,
+                        Option<Role>,
+                        Option<String>,
+                        Option<i64>,
+                    ),
+                >(
+                    "SELECT s.account_id, u.id, u.name, u.role, o.name, u.membership_revision \
              FROM account_sessions s LEFT JOIN users u ON u.account_id = s.account_id \
              AND u.organization_id = $2 AND u.deactivated_at IS NULL \
              LEFT JOIN organizations o ON o.organization_id = u.organization_id \
              WHERE s.token_hash = $1 AND s.expires_at > now()",
+                )
+                .bind(&token_hash)
+                .bind(organization)
+                .fetch_optional(tx)
+                .await
+            },
         )
-        .bind(&token_hash)
-        .bind(organization)
-        .fetch_optional(&state.pool)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
         let unavailable = || ApiError(StatusCode::NOT_FOUND, "organization_unavailable", None);
@@ -704,12 +715,13 @@ pub async fn deactivate_member(
 ) -> Result<(), sqlx::Error> {
     let state = state.clone();
     tokio::spawn(async move {
-        let mut tx = state.pool.begin().await?;
-        sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
-            .bind(organization).fetch_optional(&mut *tx).await?;
-        let revision: Option<(Uuid, i64)> = sqlx::query_as("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING id, membership_revision")
-            .bind(organization).bind(account).fetch_optional(&mut *tx).await?;
-        tx.commit().await?;
+        let revision = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
+            sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
+                .bind(organization).fetch_optional(&mut *tx).await?;
+            let revision: Option<(Uuid, i64)> = sqlx::query_as("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING id, membership_revision")
+                .bind(organization).bind(account).fetch_optional(&mut *tx).await?;
+            Ok::<_, sqlx::Error>(revision)
+        }).await?;
         if let Some((member, revision)) = revision {
             state.session_changes.membership_revoked(organization,account,revision);
             state.session_changes.recheck_subscriptions(&state.pool, SubscriptionScope::Member(organization, member)).await;

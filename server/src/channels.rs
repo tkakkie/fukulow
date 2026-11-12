@@ -167,68 +167,61 @@ pub async fn create_channel(
             .into_response());
     }
     let organization_id = auth.identity.organization.organization_id;
-    let mut tx = state.pool.begin().await?;
-    if matches!(input.visibility, ChannelVisibility::Private) {
-        auth::members::lock_organization(&mut tx, organization_id).await?;
-    }
-    let actor = auth::members::current_actor(&mut tx, &auth, Action::CreateChannel).await?;
-    let role = match actor {
-        Actor::Member { role, .. } => role,
-        _ => return Err(ApiError::forbidden()),
-    };
-    let channel = match sqlx::query_as::<_, (Uuid, String, ChannelVisibility)>(
-        "INSERT INTO channels (organization_id, id, name, visibility) \
-         VALUES ($1, $2, $3, $4) RETURNING id, name, visibility",
-    )
-    .bind(organization_id)
-    .bind(Uuid::new_v4())
-    .bind(input.name)
-    .bind(input.visibility)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(channel) => channel,
-        Err(error)
-            if error.as_database_error().is_some_and(|error| {
-                error.is_unique_violation()
-                    && error.constraint() == Some("channels_organization_name_unique")
-            }) =>
-        {
-            tx.rollback().await?;
-            return Ok((
-                StatusCode::CONFLICT,
-                [(header::CACHE_CONTROL, "no-store")],
-                Json(ErrorBody {
-                    error: "channel name already exists".into(),
-                }),
-            )
-                .into_response());
+    let channel = crate::database::organization(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
+        if matches!(input.visibility, ChannelVisibility::Private) {
+            auth::members::lock_organization(&mut *tx, organization_id).await?;
         }
-        Err(error) => return Err(error.into()),
-    };
-    let channel = Channel {
-        id: channel.0,
-        name: channel.1,
-        capabilities: ChannelCapabilities::for_visible(
-            organization_id,
-            role,
-            matches!(channel.2, ChannelVisibility::Public),
-        ),
-        visibility: channel.2,
-    };
-    if matches!(channel.visibility, ChannelVisibility::Private) {
-        sqlx::query(
-            "INSERT INTO channel_members (organization_id, channel_id, member_id, membership_revision) \
-             VALUES ($1, $2, $3, $4)",
+        let actor = auth::members::current_actor(&mut *tx, &auth, Action::CreateChannel).await?;
+        let role = match actor {
+            Actor::Member { role, .. } => role,
+            _ => return Err(ApiError::forbidden()),
+        };
+        let channel = match sqlx::query_as::<_, (Uuid, String, ChannelVisibility)>(
+            "INSERT INTO channels (organization_id, id, name, visibility) \
+             VALUES ($1, $2, $3, $4) RETURNING id, name, visibility",
         )
         .bind(organization_id)
-        .bind(channel.id)
-        .bind(auth.identity.member.id)
-        .bind(auth.membership_revision)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
+        .bind(Uuid::new_v4())
+        .bind(input.name)
+        .bind(input.visibility)
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(channel) => channel,
+            Err(error)
+                if error.as_database_error().is_some_and(|error| {
+                    error.is_unique_violation()
+                        && error.constraint() == Some("channels_organization_name_unique")
+                }) =>
+            {
+                return Err(ApiError(StatusCode::CONFLICT, "channel name already exists", None));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let channel = Channel {
+            id: channel.0,
+            name: channel.1,
+            capabilities: ChannelCapabilities::for_visible(
+                organization_id,
+                role,
+                matches!(channel.2, ChannelVisibility::Public),
+            ),
+            visibility: channel.2,
+        };
+        if matches!(channel.visibility, ChannelVisibility::Private) {
+            sqlx::query(
+                "INSERT INTO channel_members (organization_id, channel_id, member_id, membership_revision) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(organization_id)
+            .bind(channel.id)
+            .bind(auth.identity.member.id)
+            .bind(auth.membership_revision)
+            .execute(&mut *tx)
+            .await?;
+        }
+        Ok::<_, ApiError>(channel)
+    }).await?;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -401,13 +394,20 @@ pub(crate) async fn member_access(
         "SELECT v.id,v.membership_revision,v.visible FROM ({}) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision",
         visibility_sql(&auth::candidate_members_sql(), "$2")
     );
-    sqlx::query_as(&sql)
-        .bind(organization)
-        .bind(channel)
-        .bind(ids)
-        .bind(revisions)
-        .fetch_all(pool)
-        .await
+    crate::database::organization_read_only(
+        pool,
+        organization,
+        async |tx: &mut sqlx::PgConnection| {
+            sqlx::query_as(&sql)
+                .bind(organization)
+                .bind(channel)
+                .bind(ids)
+                .bind(revisions)
+                .fetch_all(tx)
+                .await
+        },
+    )
+    .await
 }
 #[cfg(test)]
 mod tests;

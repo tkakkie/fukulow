@@ -83,7 +83,7 @@ pub async fn list_channels(
     State(state): State<AppState>,
     auth: Auth,
 ) -> Result<Response, ApiError> {
-    crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
+    crate::database::organization_read_only(&state.pool, auth.identity.organization.organization_id, async |tx: &mut sqlx::PgConnection| {
         let channels = channels::visible_list(&mut *tx, &auth).await?;
         #[cfg(test)]
         tests::unread::baseline::pause_list(auth.identity.member.id).await;
@@ -209,38 +209,39 @@ async fn mark_inner(
 ) -> Result<Response, MessageError> {
     let organization = auth.identity.organization.organization_id;
     let member = (auth.identity.member.id, auth.membership_revision);
-    require_visible(&state.pool, organization, member, channel).await?;
+    require_visible_scoped(&state.pool, organization, member, channel).await?;
     let w = topics::watermark(state, organization, channel).await?;
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("SET LOCAL lock_timeout = '5s'")
-        .execute(&mut *tx)
-        .await?;
-    match channels::is_visible_for_write(&mut tx, organization, member, channel).await? {
-        None => return Err(MessageError::OrganizationUnavailable),
-        Some(false) => return Err(MessageError::NotFound),
-        Some(true) => {}
-    }
-    #[cfg(test)]
-    tests::removal::pause(member.0).await;
-    // Serialize positions with revocation's cascading delete/reset. If access
-    // is lost while waiting, the deleted position itself makes this return 404.
-    let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")
-        .bind(organization).bind(channel).bind(member.0).bind(member.1).fetch_optional(&mut *tx).await?.ok_or(MessageError::NotFound)?;
-    let requested = input.read_seq.min(w).max(initial);
-    let read_seq = if let Some(topic) = topic {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id=$1 AND channel_id=$2 AND id=$3)")
-            .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
-        if !exists {
-            return Err(MessageError::TopicNotFound);
+    let read_seq = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        match channels::is_visible_for_write(&mut *tx, organization, member, channel).await? {
+            None => return Err(MessageError::OrganizationUnavailable),
+            Some(false) => return Err(MessageError::NotFound),
+            Some(true) => {}
         }
-        sqlx::query_scalar("INSERT INTO topic_read_positions (organization_id,channel_id,member_id,topic_id,read_seq) VALUES ($1,$2,$3,$4,$5) \
-            ON CONFLICT (organization_id,channel_id,member_id,topic_id) DO UPDATE SET read_seq=GREATEST(topic_read_positions.read_seq,EXCLUDED.read_seq) RETURNING read_seq")
-            .bind(organization).bind(channel).bind(member.0).bind(topic).bind(requested).fetch_one(&mut *tx).await?
-    } else {
-        sqlx::query_scalar("UPDATE channel_read_positions SET read_seq=GREATEST(read_seq,$4) WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 RETURNING read_seq")
-            .bind(organization).bind(channel).bind(member.0).bind(requested).fetch_one(&mut *tx).await?
-    };
-    tx.commit().await?;
+        #[cfg(test)]
+        tests::removal::pause(member.0).await;
+        // Serialize positions with revocation's cascading delete/reset. If access
+        // is lost while waiting, the deleted position itself makes this return 404.
+        let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")
+            .bind(organization).bind(channel).bind(member.0).bind(member.1).fetch_optional(&mut *tx).await?.ok_or(MessageError::NotFound)?;
+        let requested = input.read_seq.min(w).max(initial);
+        let read_seq = if let Some(topic) = topic {
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id=$1 AND channel_id=$2 AND id=$3)")
+                .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
+            if !exists {
+                return Err(MessageError::TopicNotFound);
+            }
+            sqlx::query_scalar("INSERT INTO topic_read_positions (organization_id,channel_id,member_id,topic_id,read_seq) VALUES ($1,$2,$3,$4,$5) \
+                ON CONFLICT (organization_id,channel_id,member_id,topic_id) DO UPDATE SET read_seq=GREATEST(topic_read_positions.read_seq,EXCLUDED.read_seq) RETURNING read_seq")
+                .bind(organization).bind(channel).bind(member.0).bind(topic).bind(requested).fetch_one(&mut *tx).await?
+        } else {
+            sqlx::query_scalar("UPDATE channel_read_positions SET read_seq=GREATEST(read_seq,$4) WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 RETURNING read_seq")
+                .bind(organization).bind(channel).bind(member.0).bind(requested).fetch_one(&mut *tx).await?
+        };
+        Ok::<_, MessageError>(read_seq)
+    }).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(ReadPosition { read_seq }),

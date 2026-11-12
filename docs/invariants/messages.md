@@ -50,3 +50,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [realtime](realtime.md): `ambiguous_commit_rollback_allows_gap_free_same_key_retry`, `shared_gap_query_failure_latches_only_affected_channel_for_replay`, `organization_cap_rejection_is_channel_scoped_and_releases_partial_reservations`
 - [web](web.md): `sign-out, expiry, 401 and Account replacement drop every Organization draft`, `a send ACK, refusal and late refusal after settlement preserve text typed after submit in the Account Session store`, `A to B to A shows a late 409 restore in the current Composer without user action`
 - [deployment](deployment.md): `channel_list_database_failure_returns_generic_500`
+
+- [auth](auth.md): `handlers_and_fanout_require_authenticated_context`

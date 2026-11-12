@@ -298,3 +298,43 @@ async fn context_values_are_bound_before_work(pool: PgPool) {
     }
     pools.app.close().await;
 }
+
+/// Opt-in call-site guard, only in an isolated sqlx test database. Production RLS
+/// remains disabled. Account context grants SELECT only on the caller's Members
+/// and their Organizations; every other access requires Organization context.
+pub(crate) async fn context_policies(admin: &PgPool) {
+    const APP_ROLE: &str = "fukulow_sqlx_test_app";
+    for table in [
+        "organizations",
+        "users",
+        "channels",
+        "channel_members",
+        "channel_message_sequences",
+        "messages",
+        "topics",
+        "channel_read_positions",
+        "topic_read_positions",
+        "invites",
+    ] {
+        sqlx::raw_sql(&format!(
+            "ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY context_organization ON {table} TO {APP_ROLE}
+             USING (organization_id = NULLIF(current_setting('fukulow.organization_id', true), '')::uuid)
+             WITH CHECK (organization_id = NULLIF(current_setting('fukulow.organization_id', true), '')::uuid);"
+        ))
+        .execute(admin)
+        .await
+        .unwrap();
+    }
+    sqlx::raw_sql(
+        "CREATE POLICY context_account ON users FOR SELECT TO fukulow_sqlx_test_app
+         USING (account_id = NULLIF(current_setting('fukulow.account_id', true), '')::uuid);
+         CREATE POLICY context_account ON organizations FOR SELECT TO fukulow_sqlx_test_app
+         USING (EXISTS (SELECT 1 FROM users u WHERE u.organization_id = organizations.organization_id
+            AND u.account_id = NULLIF(current_setting('fukulow.account_id', true), '')::uuid
+            AND u.deactivated_at IS NULL));",
+    )
+    .execute(admin)
+    .await
+    .unwrap();
+}

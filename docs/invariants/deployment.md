@@ -34,3 +34,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [topics](topics.md): `topic_openapi_contract_includes_all_shapes_and_discriminators`
 - [replies](replies.md): `validates running Reply delivery labels and pages`
 - [realtime](realtime.md): `sigint_drains_and_closes_idle_sockets_normally`, `sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work`, `work_counts_unpolled_and_cancelled_tasks_and_nested_notification`, `delivery_contract_rejects_incorrect_unread_counts_and_positions`
+
+- [auth](auth.md): `handlers_and_fanout_require_authenticated_context`

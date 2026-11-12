@@ -252,6 +252,33 @@ async fn access_rows(
     pool: &sqlx::PgPool,
     entries: &[Arc<Entry>],
 ) -> Result<Vec<(bool, Option<Uuid>, bool)>, sqlx::Error> {
+    let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for (index, entry) in entries.iter().enumerate() {
+        groups
+            .entry(entry.organization)
+            .or_default()
+            .push((index, entry));
+    }
+    let mut rows = vec![(false, None, false); entries.len()];
+    for (organization, group) in groups {
+        let selected: Vec<_> = group.iter().map(|(_, entry)| (*entry).clone()).collect();
+        let scoped = crate::database::organization_read_only(
+            pool,
+            organization,
+            async |tx: &mut sqlx::PgConnection| access_rows_in(tx, &selected).await,
+        )
+        .await?;
+        for ((index, _), row) in group.into_iter().zip(scoped) {
+            rows[index] = row;
+        }
+    }
+    Ok(rows)
+}
+
+async fn access_rows_in(
+    connection: &mut sqlx::PgConnection,
+    entries: &[Arc<Entry>],
+) -> Result<Vec<(bool, Option<Uuid>, bool)>, sqlx::Error> {
     let public_roles = auth::authorization::channel_roles_sql(false);
     let explicit_roles = auth::authorization::channel_roles_sql(true);
     let sql = format!("SELECT COALESCE((c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL), false),
@@ -266,7 +293,7 @@ async fn access_rows(
         .bind(entries.iter().map(|e| e.member.0).collect::<Vec<_>>())
         .bind(entries.iter().map(|e| e.member.1).collect::<Vec<_>>())
         .bind(entries.iter().map(|e| e.channel).collect::<Vec<_>>())
-        .fetch_all(pool)
+        .fetch_all(connection)
         .await
 }
 
@@ -320,5 +347,66 @@ mod tests {
             None
         );
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[sqlx::test]
+    async fn mixed_organization_access_rows_keep_input_order(pool: sqlx::PgPool) {
+        let pools = crate::test_support::TestPools::new(pool).await;
+        let mut organizations = [Uuid::new_v4(), Uuid::new_v4()];
+        organizations.sort();
+        let member = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        for (index, organization) in organizations.iter().enumerate() {
+            let account = Uuid::new_v4();
+            sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Context')")
+                .bind(organization)
+                .execute(&pools.admin)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO accounts (id,email,password_hash) VALUES ($1,$2,'unused')")
+                .bind(account)
+                .bind(format!("{account}@example.com"))
+                .execute(&pools.admin)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Member','member')")
+                .bind(organization).bind(member).bind(account).execute(&pools.admin).await.unwrap();
+            sqlx::query("INSERT INTO channels (organization_id,id,name,visibility) VALUES ($1,$2,'Channel',$3)")
+                .bind(organization).bind(channel).bind(if index == 0 {"private"} else {"public"})
+                .execute(&pools.admin).await.unwrap();
+        }
+        crate::database::tests::context::context_policies(&pools.admin).await;
+        let entry = |organization, revision| {
+            Arc::new(Entry {
+                organization,
+                member: (member, revision),
+                channel,
+                grant: Mutex::new(None),
+                status: watch::channel(0).0,
+            })
+        };
+        // Reverse Organization order and interleave a stale epoch of the first Member.
+        let entries = [
+            entry(organizations[1], 0),
+            entry(organizations[0], 0),
+            entry(organizations[1], 1),
+        ];
+        assert_eq!(
+            access_rows(&pools.app, &entries).await.unwrap(),
+            vec![
+                (true, None, true),
+                (false, None, true),
+                (false, None, false),
+            ]
+        );
+        check_entries(&pools.app, &entries).await.unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| *e.status.borrow())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 3]
+        );
+        pools.app.close().await;
     }
 }

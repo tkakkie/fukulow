@@ -48,6 +48,7 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 | Every Role has public/private/grant/foreign REST controls; writes re-check Role, active Membership and revision after Auth, with no denied writes | `server/src/auth/invites/tests.rs::every_role_rest_channel_denials_and_grants_have_positive_controls`, `server/src/auth/invites/tests.rs::writes_reauthorize_role_deactivation_and_revision_after_auth_with_positive_controls` |
 | Expiry is rechecked after waiting for consumption; concurrent anonymous signups never attach an existing Account by email | `server/src/auth/invites/tests.rs::queued_invite_expiry_and_new_account_uniqueness_race_never_attach_by_email` |
 | Role changes hide unknown/foreign/inactive targets behind identical member_not_found; active target positive control succeeds | `server/src/auth/invites/tests.rs::role_change_unknown_foreign_and_inactive_targets_deny_with_active_positive_control` |
+| Organization access uses URL/internal context; Account identity uses verified Account context; setup existence is global. Rechecks group by Organization | `server/src/messages/tests/context.rs::handlers_and_fanout_require_authenticated_context`, `server/src/auth/session/recheck/tests.rs::rechecks_scope_each_organization_and_preserve_revocation_causes`, `server/src/channels/access.rs::mixed_organization_access_rows_keep_input_order` |
 
 ## Rows in other parts
 

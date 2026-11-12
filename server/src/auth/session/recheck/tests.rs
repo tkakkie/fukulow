@@ -503,3 +503,53 @@ async fn deadline_includes_query_result_application(pool: PgPool) {
     assert!(!socket.registration.changed.borrow().membership_revoked);
     tokio::time::resume();
 }
+
+#[sqlx::test]
+async fn rechecks_scope_each_organization_and_preserve_revocation_causes(pool: PgPool) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let (_, first) = fixture(&pools.admin).await;
+    let (_, second) = fixture(&pools.admin).await;
+    crate::database::tests::context::context_policies(&pools.admin).await;
+    let key = |auth: &Auth| {
+        (
+            auth.identity.organization.organization_id,
+            auth.token_hash.clone(),
+            auth.membership_revision,
+        )
+    };
+    let keys = vec![key(&first), key(&second)];
+    // A single mixed batch must retain both valid Members under restricted RLS.
+    assert!(
+        check(&pools.app, &keys, Instant::now() + CHECK_TIMEOUT)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut state = AppState::for_test(pools.app.clone());
+    state.session_changes = SessionChanges::default().with_on_fatal(Arc::new(|| {}));
+    let mut first_watch = first.watch_session(&state).await.unwrap().unwrap();
+    let second_watch = second.watch_session(&state).await.unwrap().unwrap();
+    // Use the actual fallback pass, including registration epochs and result application.
+    sqlx::query("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND account_id=$2")
+        .bind(keys[0].0).bind(first.account_id).execute(&pools.admin).await.unwrap();
+    pass(
+        &state.session_changes.sessions,
+        &pools.app,
+        Instant::now() + CHECK_TIMEOUT,
+        &state.session_changes.gate,
+    )
+    .await;
+    assert_eq!(first_watch.ended().await.unwrap(), 4003);
+    assert!(!second_watch.registration.changed.has_changed().unwrap());
+    sqlx::query("DELETE FROM account_sessions WHERE token_hash=$1")
+        .bind(&keys[0].1)
+        .execute(&pools.admin)
+        .await
+        .unwrap();
+    let ended = check(&pools.app, &keys, Instant::now() + CHECK_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[&(keys[0].0, keys[0].1.clone())], 4001);
+    pools.app.close().await;
+}

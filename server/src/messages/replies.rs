@@ -87,43 +87,47 @@ pub async fn reply_chain(
     let auth = auth.ok_or(MessageError::OrganizationUnavailable)?;
     let organization = auth.identity.organization.organization_id;
     let member = (auth.identity.member.id, auth.membership_revision);
-    require_visible(&state.pool, organization, member, channel).await?;
+    require_visible_scoped(&state.pool, organization, member, channel).await?;
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
         let w = topics::watermark(&state, organization, channel).await?;
-        crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
-            require_visible(&mut *tx, organization, member, channel).await?;
-            let root_id: Uuid = sqlx::query_scalar(
-                "SELECT COALESCE(reply_root_id,id) FROM messages \
+        crate::database::organization_read_only(
+            &state.pool,
+            organization,
+            async |tx: &mut sqlx::PgConnection| {
+                require_visible(&mut *tx, organization, member, channel).await?;
+                let root_id: Uuid = sqlx::query_scalar(
+                    "SELECT COALESCE(reply_root_id,id) FROM messages \
          WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq<=$4",
-            )
-            .bind(organization)
-            .bind(channel)
-            .bind(anchor)
-            .bind(w)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(MessageError::ReplyChainNotFound)?;
-            let mut messages = sqlx::query_as::<_, Message>(PAGE_SQL)
+                )
                 .bind(organization)
                 .bind(channel)
-                .bind(root_id)
-                .bind(after)
-                .bind(i64::from(limit) + 1)
+                .bind(anchor)
                 .bind(w)
-                .fetch_all(&mut *tx)
-                .await?;
-            let has_more = messages.len() > usize::from(limit);
-            messages.truncate(usize::from(limit));
-            Ok((
-                [(header::CACHE_CONTROL, "no-store")],
-                Json(ReplyChainPage {
-                    root_id,
-                    messages,
-                    has_more,
-                }),
-            )
-                .into_response())
-        })
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(MessageError::ReplyChainNotFound)?;
+                let mut messages = sqlx::query_as::<_, Message>(PAGE_SQL)
+                    .bind(organization)
+                    .bind(channel)
+                    .bind(root_id)
+                    .bind(after)
+                    .bind(i64::from(limit) + 1)
+                    .bind(w)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                let has_more = messages.len() > usize::from(limit);
+                messages.truncate(usize::from(limit));
+                Ok((
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(ReplyChainPage {
+                        root_id,
+                        messages,
+                        has_more,
+                    }),
+                )
+                    .into_response())
+            },
+        )
         .await
     })
     .await
