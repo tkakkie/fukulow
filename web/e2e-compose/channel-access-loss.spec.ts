@@ -38,11 +38,22 @@ async function assertRestSurfacesDeniedAfterCommit(
   }
 }
 
+type RecordedClientFrame = {
+  type: ClientMessage['type']
+  channel_id?: string
+}
+
+type RecordedServerEvent = {
+  type: ServerEvent['type']
+  channel_id?: string | null
+  message_id?: string
+}
+
 function observeOrgSocket(page: Page) {
   const sockets: import('@playwright/test').WebSocket[] = []
   const closedCount = { value: 0 }
-  const sentFrames: ClientMessage[] = []
-  const receivedEvents: ServerEvent[] = []
+  const sentFrames: RecordedClientFrame[] = []
+  const receivedEvents: RecordedServerEvent[] = []
   page.on('websocket', (ws) => {
     sockets.push(ws)
     ws.on('close', () => {
@@ -50,14 +61,28 @@ function observeOrgSocket(page: Page) {
     })
     ws.on('framesent', ({ payload }) => {
       try {
-        sentFrames.push(JSON.parse(String(payload)) as ClientMessage)
+        const frame = JSON.parse(String(payload)) as ClientMessage
+        sentFrames.push({
+          type: frame.type,
+          channel_id: 'channel_id' in frame ? frame.channel_id : undefined,
+        })
       } catch {
         // ignore non-json frames
       }
     })
     ws.on('framereceived', ({ payload }) => {
       try {
-        receivedEvents.push(JSON.parse(String(payload)) as ServerEvent)
+        const event = JSON.parse(String(payload)) as ServerEvent
+        receivedEvents.push({
+          type: event.type,
+          channel_id:
+            event.type === 'message'
+              ? event.message.channel_id
+              : 'channel_id' in event
+                ? event.channel_id
+                : undefined,
+          message_id: event.type === 'message' ? event.message.id : undefined,
+        })
       } catch {
         // ignore non-json frames
       }
@@ -75,6 +100,7 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
   let guestContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
   try {
     const ownerPage = await ownerContext.newPage()
+    const ownerWsObs = observeOrgSocket(ownerPage)
     const orgId = await ensureOwnerAndSignIn(ownerPage)
 
     const targetPublic = await createChannelApi(ownerPage.request, orgId, `c9-guest-pub-${suffix}`, 'public')
@@ -110,12 +136,14 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
     await memberPanel.getByRole('button', { name: `${guest.name}を追加`, exact: true }).click()
     await expect(memberPanel.getByRole('button', { name: `${guest.name}をチャンネルから外す`, exact: true })).toBeVisible()
 
-    // Switch Owner back to targetPublic so Owner can remove Guest's grant on targetPublic.
+    // Switch Owner back to targetPublic and keep Owner subscribed as an authorized observer on the revoked Channel.
     await ownerPage.getByRole('button', { name: `# ${targetPublic.name}`, exact: true }).click()
+    await expect(ownerPage.getByRole('heading', { level: 1, name: targetPublic.name, exact: true })).toBeVisible()
+    await expect(ownerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(memberPanel.getByRole('button', { name: `${guest.name}をチャンネルから外す`, exact: true })).toBeVisible()
 
-    // Guest opens targetPublic on guestPage, and also keeps an active subscription on controlPublic in a second page
-    // of the same browser context across the grant removal (since each page watches only its selected Channel).
+    // Proves an existing access-preserving subscription on another socket of the same Account and browser context survives without resubscribe;
+    // same-socket preservation is covered by server/src/realtime/tests/access_loss.rs::idle_all_sessions_and_effective_loss_preserve_other_channels_and_redundant_grants.
     const guestControlPage = await guestContext.newPage()
     await guestControlPage.setViewportSize({ width: 1280, height: 800 })
     const controlWsObs = observeOrgSocket(guestControlPage)
@@ -163,12 +191,15 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
       plainMsg.id,
     )
 
-    // Post a new Message to targetPublic while guestPage is still on targetPublic, then post a control Message to controlPublic.
-    // Verify the active subscription on guestControlPage receives the control Message without reselecting or resubscribing,
-    // and that neither socket received a frame for the revoked Channel's Message.
+    // Prove targetPublic publication finished on the authorized Owner socket before posting the control Message.
     const postAfterRevokeWhileOpen = await sendApiMessage(ownerPage.request, orgId, targetPublic.id, {
       body: `剥奪後の秘匿発言1-${suffix}`,
     })
+    await expect
+      .poll(() =>
+        ownerWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterRevokeWhileOpen.id),
+      )
+      .toBe(true)
     const activeControlBody = `既存購読コントロール発言-${suffix}`
     const activeControlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, {
       body: activeControlBody,
@@ -176,20 +207,22 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
     await expect(
       guestControlPage.locator('#main-content .ui-message-row').filter({ hasText: activeControlBody }),
     ).toHaveCount(1)
+    await expect
+      .poll(() => controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === activeControlMsg.id))
+      .toBe(true)
     expect(controlWsObs.closedCount.value).toBe(0)
     expect(
       controlWsObs.sentFrames.filter((f) => f.type === 'subscribe' && f.channel_id === controlPublic.id).length,
     ).toBe(controlSubscribesBefore)
     expect(
-      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message.id === activeControlMsg.id),
-    ).toBe(true)
+      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterRevokeWhileOpen.id),
+    ).toBe(false)
     expect(
-      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message.channel_id === targetPublic.id),
+      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.channel_id === targetPublic.id),
     ).toBe(false)
     await expect(guestPage.locator('#main-content').getByText(postAfterRevokeWhileOpen.body)).toHaveCount(0)
 
-    // Also switch guestPage to controlPublic on the same open Organization socket, post again to targetPublic and then
-    // to controlPublic, wait for the control frame on guestPage's socket, and assert no post-loss frame for targetPublic arrived.
+    // Switch guestPage to controlPublic on the same socket, await Owner's targetPublic frame, then drain guestPage's socket with a control Message.
     await guestPage.locator('#channel-content .channel-list button').filter({ hasText: controlPublic.name }).click()
     await expect(guestPage.getByRole('heading', { level: 1, name: controlPublic.name, exact: true })).toBeVisible()
     await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
@@ -198,23 +231,28 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
     const postAfterRevokeAfterSwitch = await sendApiMessage(ownerPage.request, orgId, targetPublic.id, {
       body: `剥奪後の秘匿発言2-${suffix}`,
     })
+    await expect
+      .poll(() =>
+        ownerWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterRevokeAfterSwitch.id),
+      )
+      .toBe(true)
     const liveControlBody = `コントロールチャンネルライブ発言-${suffix}`
     const liveControlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, { body: liveControlBody })
     await expect(guestPage.locator('#main-content .ui-message-row').filter({ hasText: liveControlBody })).toHaveCount(1)
     await expect
-      .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message.id === liveControlMsg.id))
+      .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === liveControlMsg.id))
       .toBe(true)
     expect(
       wsObs.receivedEvents.some(
         (e) =>
           e.type === 'message' &&
-          (e.message.id === postAfterRevokeWhileOpen.id || e.message.id === postAfterRevokeAfterSwitch.id),
+          (e.message_id === postAfterRevokeWhileOpen.id || e.message_id === postAfterRevokeAfterSwitch.id),
       ),
     ).toBe(false)
     expect(
       wsObs.receivedEvents
         .slice(lossEventIdx + 1)
-        .some((e) => e.type === 'message' && e.message.channel_id === targetPublic.id),
+        .some((e) => e.type === 'message' && e.channel_id === targetPublic.id),
     ).toBe(false)
     expect(wsObs.closedCount.value).toBe(0)
     expect(wsObs.sockets.length).toBe(socketsBeforeLoss)
@@ -230,6 +268,7 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
   let memberContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
   try {
     const ownerPage = await ownerContext.newPage()
+    const ownerWsObs = observeOrgSocket(ownerPage)
     const orgId = await ensureOwnerAndSignIn(ownerPage)
 
     const targetPrivate = await createChannelApi(ownerPage.request, orgId, `c9-priv-${suffix}`, 'private')
@@ -254,14 +293,16 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
 
     await ownerPage.reload()
     await ownerPage.getByRole('button', { name: `🔒 ${targetPrivate.name}`, exact: true }).click()
+    await expect(ownerPage.getByRole('heading', { level: 1, name: targetPrivate.name, exact: true })).toBeVisible()
+    await expect(ownerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await ownerPage.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true }).click()
     await ownerPage.getByRole('tab', { name: 'メンバー', exact: true }).click()
     const memberPanel = ownerPage.getByRole('region', { name: 'チャンネルのメンバー', exact: true })
     await memberPanel.getByRole('button', { name: `${member.name}を追加`, exact: true }).click()
     await expect(memberPanel.getByRole('button', { name: `${member.name}をチャンネルから外す`, exact: true })).toBeVisible()
 
-    // Member keeps an active subscription on controlPublic in a second page of the same browser context across the removal,
-    // while memberPage opens targetPrivate, types a draft, and has a failed retryable send to verify C9 disables retry.
+    // Proves an existing access-preserving subscription on another socket of the same Account and browser context survives without resubscribe;
+    // same-socket preservation is covered by server/src/realtime/tests/access_loss.rs::idle_all_sessions_and_effective_loss_preserve_other_channels_and_redundant_grants.
     const memberControlPage = await memberContext.newPage()
     await memberControlPage.setViewportSize({ width: 1280, height: 800 })
     const controlWsObs = observeOrgSocket(memberControlPage)
@@ -324,11 +365,15 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
       plainMsg.id,
     )
 
-    // Verify the active subscription on memberControlPage receives a live Message without reselecting or resubscribing,
-    // and no frame for the revoked private Channel arrives.
+    // Prove targetPrivate publication finished on the authorized Owner socket before posting the control Message.
     const postAfterPrivateRevoke1 = await sendApiMessage(ownerPage.request, orgId, targetPrivate.id, {
       body: `プライベート剥奪後秘匿発言1-${suffix}`,
     })
+    await expect
+      .poll(() =>
+        ownerWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterPrivateRevoke1.id),
+      )
+      .toBe(true)
     const activeControlBody = `プライベート剥奪中も継続購読-${suffix}`
     const activeControlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, {
       body: activeControlBody,
@@ -336,41 +381,49 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
     await expect(
       memberControlPage.locator('#main-content .ui-message-row').filter({ hasText: activeControlBody }),
     ).toHaveCount(1)
+    await expect
+      .poll(() => controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === activeControlMsg.id))
+      .toBe(true)
     expect(controlWsObs.closedCount.value).toBe(0)
     expect(
       controlWsObs.sentFrames.filter((f) => f.type === 'subscribe' && f.channel_id === controlPublic.id).length,
     ).toBe(controlSubscribesBefore)
     expect(
-      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message.id === activeControlMsg.id),
-    ).toBe(true)
+      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterPrivateRevoke1.id),
+    ).toBe(false)
     expect(
-      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.message.channel_id === targetPrivate.id),
+      controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.channel_id === targetPrivate.id),
     ).toBe(false)
 
-    // Also switch memberPage to controlPublic on the same socket and verify denied live delivery on memberPage's socket.
+    // Switch memberPage to controlPublic on the same socket, await Owner's targetPrivate frame, then drain memberPage's socket with a control Message.
     await memberPage.locator('#channel-content .channel-list button').filter({ hasText: controlPublic.name }).click()
     await expect(memberPage.getByRole('heading', { level: 1, name: controlPublic.name, exact: true })).toBeVisible()
     await expect(memberPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     const postAfterPrivateRevoke2 = await sendApiMessage(ownerPage.request, orgId, targetPrivate.id, {
       body: `プライベート剥奪後秘匿発言2-${suffix}`,
     })
+    await expect
+      .poll(() =>
+        ownerWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterPrivateRevoke2.id),
+      )
+      .toBe(true)
     const controlBody = `プライベート剥奪後パブリック発言-${suffix}`
     const controlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, { body: controlBody })
     await expect(memberPage.locator('#main-content .ui-message-row').filter({ hasText: controlBody })).toHaveCount(1)
     await expect
-      .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message.id === controlMsg.id))
+      .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === controlMsg.id))
       .toBe(true)
     expect(
       wsObs.receivedEvents.some(
         (e) =>
           e.type === 'message' &&
-          (e.message.id === postAfterPrivateRevoke1.id || e.message.id === postAfterPrivateRevoke2.id),
+          (e.message_id === postAfterPrivateRevoke1.id || e.message_id === postAfterPrivateRevoke2.id),
       ),
     ).toBe(false)
     expect(
       wsObs.receivedEvents
         .slice(lossEventIdx + 1)
-        .some((e) => e.type === 'message' && e.message.channel_id === targetPrivate.id),
+        .some((e) => e.type === 'message' && e.channel_id === targetPrivate.id),
     ).toBe(false)
     expect(wsObs.closedCount.value).toBe(0)
   } finally {
@@ -388,6 +441,7 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
   let peerContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
   try {
     const ownerPage = await ownerContext.newPage()
+    const ownerWsObs = observeOrgSocket(ownerPage)
     const orgId = await ensureOwnerAndSignIn(ownerPage)
 
     // Create two public Channels:
@@ -447,8 +501,13 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
     await memberPanel.getByRole('button', { name: `${peer.name}を追加`, exact: true }).click()
     await expect(memberPanel.getByRole('button', { name: `${peer.name}をチャンネルから外す`, exact: true })).toBeVisible()
 
-    // Each page watches only its selected Channel (session.ts stopFollowing), so open a second page in peerContext
-    // that stays subscribed to grantedPublic throughout the demotion while peerPage stays subscribed to ungrantedPublic.
+    // Switch Owner back to ungrantedPublic and keep Owner subscribed as an authorized observer on the revoked Channel.
+    await ownerPage.getByRole('button', { name: `# ${ungrantedPublic.name}`, exact: true }).click()
+    await expect(ownerPage.getByRole('heading', { level: 1, name: ungrantedPublic.name, exact: true })).toBeVisible()
+    await expect(ownerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+
+    // Proves an existing access-preserving subscription on another socket of the same Account and browser context survives without resubscribe;
+    // same-socket preservation is covered by server/src/realtime/tests/access_loss.rs::idle_all_sessions_and_effective_loss_preserve_other_channels_and_redundant_grants.
     const peerGrantedPage = await peerContext.newPage()
     await peerGrantedPage.setViewportSize({ width: 1280, height: 800 })
     const grantedWsObs = observeOrgSocket(peerGrantedPage)
@@ -489,11 +548,15 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
       plainMsg.id,
     )
 
-    // Control 2 assertion (existing subscription): peerGrantedPage stayed on grantedPublic across demotion without
-    // reselecting or resubscribing, receives no channel_access_lost, and receives a post-COMMIT live Message.
+    // Prove ungrantedPublic publication finished on the authorized Owner socket before posting the control Message.
     const postAfterDemote1 = await sendApiMessage(ownerPage.request, orgId, ungrantedPublic.id, {
       body: `降格後の秘匿発言1-${suffix}`,
     })
+    await expect
+      .poll(() =>
+        ownerWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterDemote1.id),
+      )
+      .toBe(true)
     const activeGrantedBody = `既存購読で明示権限あり降格後もライブ-${suffix}`
     const activeGrantedMsg = await sendApiMessage(ownerPage.request, orgId, grantedPublic.id, {
       body: activeGrantedBody,
@@ -502,19 +565,22 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
       peerGrantedPage.locator('#main-content .ui-message-row').filter({ hasText: activeGrantedBody }),
     ).toHaveCount(1)
     await expect(mainComposer(peerGrantedPage)).toBeEnabled()
+    await expect
+      .poll(() => grantedWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === activeGrantedMsg.id))
+      .toBe(true)
     expect(grantedWsObs.closedCount.value).toBe(0)
     expect(
       grantedWsObs.sentFrames.filter((f) => f.type === 'subscribe' && f.channel_id === grantedPublic.id).length,
     ).toBe(grantedSubscribesBeforeDemotion)
     expect(grantedWsObs.receivedEvents.some((e) => e.type === 'channel_access_lost')).toBe(false)
     expect(
-      grantedWsObs.receivedEvents.some((e) => e.type === 'message' && e.message.id === activeGrantedMsg.id),
-    ).toBe(true)
+      grantedWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterDemote1.id),
+    ).toBe(false)
     expect(
-      grantedWsObs.receivedEvents.some((e) => e.type === 'message' && e.message.channel_id === ungrantedPublic.id),
+      grantedWsObs.receivedEvents.some((e) => e.type === 'message' && e.channel_id === ungrantedPublic.id),
     ).toBe(false)
 
-    // Also verify switching peerPage to grantedPublic on the same open Organization socket works and no frame for ungrantedPublic arrived.
+    // Switch peerPage to grantedPublic on the same socket, await Owner's ungrantedPublic frame, then drain peerPage's socket with a control Message.
     await peerPage.locator('#channel-content .channel-list button').filter({ hasText: grantedPublic.name }).click()
     await expect(peerPage.getByRole('heading', { level: 1, name: grantedPublic.name, exact: true })).toBeVisible()
     await expect(peerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
@@ -523,25 +589,30 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
     const postAfterDemote2 = await sendApiMessage(ownerPage.request, orgId, ungrantedPublic.id, {
       body: `降格後の秘匿発言2-${suffix}`,
     })
-    const grantedControlBody = `明示権限あり降格後もライブ-${suffix}`
+    await expect
+      .poll(() =>
+        ownerWsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === postAfterDemote2.id),
+      )
+      .toBe(true)
+    const grantedControlBody = `切替後の明示権限あり降格後もライブ-${suffix}`
     const grantedControlMsg = await sendApiMessage(ownerPage.request, orgId, grantedPublic.id, {
       body: grantedControlBody,
     })
     await expect(peerPage.locator('#main-content .ui-message-row').filter({ hasText: grantedControlBody })).toHaveCount(1)
     await expect
-      .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message.id === grantedControlMsg.id))
+      .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === grantedControlMsg.id))
       .toBe(true)
     expect(
       wsObs.receivedEvents.some(
         (e) =>
           e.type === 'message' &&
-          (e.message.id === postAfterDemote1.id || e.message.id === postAfterDemote2.id),
+          (e.message_id === postAfterDemote1.id || e.message_id === postAfterDemote2.id),
       ),
     ).toBe(false)
     expect(
       wsObs.receivedEvents
         .slice(lossEventIdx + 1)
-        .some((e) => e.type === 'message' && e.message.channel_id === ungrantedPublic.id),
+        .some((e) => e.type === 'message' && e.channel_id === ungrantedPublic.id),
     ).toBe(false)
     expect(wsObs.closedCount.value).toBe(0)
   } finally {
