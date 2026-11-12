@@ -8,14 +8,20 @@ export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest']
 export type AccountIdentity = components['schemas']['AccountIdentity']
 export type AddChannelMemberRequest = components['schemas']['AddChannelMemberRequest']
 export type Channel = components['schemas']['Channel']
+export type ChannelList = components['schemas']['ChannelList']
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest']
 export type CreateInviteRequest = components['schemas']['CreateInviteRequest']
 export type Identity = components['schemas']['Identity']
 export type InviteResponse = components['schemas']['InviteResponse']
 export type Message = components['schemas']['Message']
+export type ReadPosition = components['schemas']['ReadPosition']
 export type Role = components['schemas']['Role']
 export type SendMessageRequest = components['schemas']['SendMessageRequest']
 export type SetupStatus = components['schemas']['SetupStatus']
+export type TimelinePage = components['schemas']['TimelinePage']
+export type TopicPage = components['schemas']['TopicPage']
+export type TopicSummaryResponse = components['schemas']['TopicSummaryResponse']
+export type UnreadChannel = components['schemas']['UnreadChannel']
 
 export const owner = { email: 'owner@example.com', password: 'correct horse battery' }
 
@@ -72,16 +78,59 @@ export async function installSocketCloseHook(page: Page): Promise<ObservedWebSoc
     sockets.push(socket)
   })
   await page.addInitScript(() => {
-    const tracked: WebSocket[] = []
+    const tracked: Array<{ close: (code?: number, reason?: string) => void }> = []
+    let holdReconnect = false
+    const pendingConnects: Array<() => void> = []
     const Original = window.WebSocket
-    window.WebSocket = class extends Original {
+    class HookedWebSocket {
+      private real: WebSocket | null = null
+      private closedByClient = false
+      onopen: ((this: WebSocket, ev: Event) => unknown) | null = null
+      onmessage: ((this: WebSocket, ev: MessageEvent) => unknown) | null = null
+      onclose: ((this: WebSocket, ev: CloseEvent) => unknown) | null = null
+      onerror: ((this: WebSocket, ev: Event) => unknown) | null = null
       constructor(url: string | URL, protocols?: string | string[]) {
-        super(url, protocols)
+        const openReal = () => {
+          if (this.closedByClient) return
+          const ws = protocols !== undefined ? new Original(url, protocols) : new Original(url)
+          this.real = ws
+          ws.onopen = (ev) => this.onopen?.call(ws, ev)
+          ws.onmessage = (ev) => this.onmessage?.call(ws, ev)
+          ws.onclose = (ev) => this.onclose?.call(ws, ev)
+          ws.onerror = (ev) => this.onerror?.call(ws, ev)
+        }
+        if (holdReconnect) {
+          pendingConnects.push(openReal)
+        } else {
+          openReal()
+        }
         tracked.push(this)
       }
+      send(data: string | Blob | BufferSource) {
+        this.real?.send(data)
+      }
+      close(code?: number, reason?: string) {
+        this.closedByClient = true
+        this.real?.close(code, reason)
+      }
     }
+    window.WebSocket = HookedWebSocket as unknown as typeof WebSocket
     Object.assign(window, {
-      closeTestSockets: () => tracked.forEach((socket) => socket.close(4008, 'E2E reconnect')),
+      closeTestSockets: () => {
+        const toClose = tracked.splice(0, tracked.length)
+        toClose.forEach((socket) => socket.close(4008, 'E2E reconnect'))
+      },
+      holdTestSockets: () => {
+        holdReconnect = true
+        const toClose = tracked.splice(0, tracked.length)
+        toClose.forEach((socket) => socket.close(4008, 'E2E reconnect'))
+      },
+      releaseTestSockets: () => {
+        holdReconnect = false
+        while (pendingConnects.length > 0) {
+          pendingConnects.shift()?.()
+        }
+      },
     })
   })
   return sockets
@@ -94,6 +143,25 @@ export async function closePageSockets(page: Page, sockets: ObservedWebSocket[])
   await page.evaluate(() => (window as typeof window & { closeTestSockets: () => void }).closeTestSockets())
   await closed
   await expect.poll(() => sockets.length).toBeGreaterThan(count)
+}
+
+export async function holdPageSockets(page: Page, sockets: ObservedWebSocket[]): Promise<number> {
+  const oldSocket = sockets.at(-1)!
+  const count = sockets.length
+  const closed = new Promise<void>((resolve) => oldSocket.once('close', () => resolve()))
+  await page.evaluate(() => (window as typeof window & { holdTestSockets: () => void }).holdTestSockets())
+  await closed
+  return count
+}
+
+export async function releasePageSockets(
+  page: Page,
+  sockets: ObservedWebSocket[],
+  countBefore: number,
+): Promise<ObservedWebSocket> {
+  await page.evaluate(() => (window as typeof window & { releaseTestSockets: () => void }).releaseTestSockets())
+  await expect.poll(() => sockets.length).toBeGreaterThan(countBefore)
+  return sockets.at(-1)!
 }
 
 export async function createChannelApi(
@@ -125,6 +193,32 @@ export async function sendApiMessage(
   return (await secretSafe(() => res.json())) as Message
 }
 
+export async function waitForChannelListLoad(page: Page, action: () => Promise<unknown>): Promise<UnreadChannel[]> {
+  const responses: Promise<UnreadChannel[]>[] = []
+  const onResponse = (res: import('@playwright/test').Response) => {
+    if (res.request().method() === 'GET' && /\/api\/v1\/orgs\/[^/]+\/channels$/.test(new URL(res.url()).pathname)) {
+      responses.push(
+        (async () => {
+          expect(res.ok()).toBe(true)
+          const body = (await secretSafe(() => res.json())) as ChannelList
+          return body.channels
+        })(),
+      )
+    }
+  }
+  page.on('response', onResponse)
+  try {
+    await action()
+    await expect.poll(() => responses.length).toBeGreaterThanOrEqual(2)
+    const results = await Promise.all(responses)
+    await expect(page.locator('#channel-content')).toBeVisible()
+    await expect(page.locator('#channel-content [aria-label="チャンネルを読み込み中"]')).toHaveCount(0)
+    return results.at(-1)!
+  } finally {
+    page.off('response', onResponse)
+  }
+}
+
 export async function inviteAndSignInPeerViaUi(
   ownerPage: Page,
   browser: Browser,
@@ -138,6 +232,7 @@ export async function inviteAndSignInPeerViaUi(
   password: string
   name: string
   memberId: string
+  initialChannels: UnreadChannel[]
 }> {
   const email = `peer-${role}-${suffix}@example.invalid`
   const name = `Peer-${role}-${suffix}`
@@ -173,7 +268,9 @@ export async function inviteAndSignInPeerViaUi(
 
   await page.getByLabel('メールアドレス', { exact: true }).fill(email)
   await page.getByLabel('パスワード', { exact: true }).fill(password)
-  await page.getByRole('button', { name: 'ログイン', exact: true }).click()
+  const initialChannels = await waitForChannelListLoad(page, () =>
+    page.getByRole('button', { name: 'ログイン', exact: true }).click(),
+  )
   await expect(page.getByText(`Acme / ${name} さん`)).toBeVisible()
 
   const meRes = await secretSafe(() => page.request.get('/api/v1/me'))
@@ -184,5 +281,13 @@ export async function inviteAndSignInPeerViaUi(
   expect(orgMeRes.ok()).toBe(true)
   const identity = (await secretSafe(() => orgMeRes.json())) as Identity
 
-  return { context, page, email, password, name, memberId: identity.member.id }
+  return {
+    context,
+    page,
+    email,
+    password,
+    name,
+    memberId: identity.member.id,
+    initialChannels,
+  }
 }
