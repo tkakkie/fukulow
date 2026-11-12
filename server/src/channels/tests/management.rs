@@ -97,7 +97,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
         if method == "GET" {
             assert_eq!(
                 body(response).await,
-                json!({"members":[{"id":owner,"name":"Member","role":"owner"}]})
+                json!({"members":[{"id":owner,"name":"Member","role":"owner","manager":true}]})
             );
         }
         let granted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3)")
@@ -195,7 +195,7 @@ async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: P
             m.as_object()
                 .unwrap()
                 .keys()
-                .all(|k| ["id", "name", "role"].contains(&k.as_str()))
+                .all(|k| ["id", "name", "role", "manager"].contains(&k.as_str()))
         }));
         assert_eq!(
             mutation(&app, &token, channel, id, false).await.status(),
@@ -364,6 +364,15 @@ async fn private_last_manager_last_grant_and_concurrent_removals_are_serialized(
         member(&pool, org, g, "guest").await;
         let c = create(&app, &at, "Managed", "private").await;
         let c = Uuid::parse_str(c["id"].as_str().unwrap()).unwrap();
+        // Exercise the pre-#311 Role-only manager protection.
+        sqlx::query(
+            "UPDATE channel_members SET manager=false WHERE organization_id=$1 AND channel_id=$2",
+        )
+        .bind(org)
+        .bind(c)
+        .execute(&pool)
+        .await
+        .unwrap();
         for id in [b, m, g] {
             grant(&pool, org, c, id).await;
         }
@@ -473,6 +482,15 @@ async fn unmanaged_guest_leave_succeeds_and_last_grant_is_protected(pool: PgPool
     let gt = member(&pool, org, g, "guest").await;
     let c = create(&app, &mt, "Unmanaged", "private").await;
     let c = Uuid::parse_str(c["id"].as_str().unwrap()).unwrap();
+    // Existing unmanaged Channels receive no backfill in #311.
+    sqlx::query(
+        "UPDATE channel_members SET manager=false WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(org)
+    .bind(c)
+    .execute(&pool)
+    .await
+    .unwrap();
     grant(&pool, org, c, g).await;
     assert_eq!(
         mutation(&app, &gt, c, g, false).await.status(),

@@ -138,7 +138,8 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/api/v1/orgs/{org}/channels/{id}/members/{member_id}",
-            axum::routing::delete(channels::members::remove),
+            axum::routing::delete(channels::members::remove)
+                .patch(channels::members::change_manager),
         )
         .route(
             "/api/v1/orgs/{org}/channels/{id}/messages",

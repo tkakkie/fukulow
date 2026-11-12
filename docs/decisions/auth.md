@@ -63,7 +63,9 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 Entries that also govern this area, listed by the start of the entry in that part.
 
 - [messages](messages.md): `#231 rejects Role demotion with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
-- [messages](messages.md): `#292 (planned, #311): a private`, `#292 (planned) The right lives`, `#292 (planned) last_channel_manager counts`
+- [messages](messages.md): `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`
 - [messages](messages.md): `#142/#144 triggers mirror Channel visibility, including`, `#144 Role/grant changes reconcile positions under`, `DeferredOrganizationAuth rejects Session/database errors before reading`
 - [realtime](realtime.md): `Message persistence and sign-out finish regardless`, `#57 item 4: auth owns the`
 - [web](web.md): `Capabilities ({allowed, reason?}) come from authorize:`
+
+- [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`, `#311 The private-Channel trigger locks its Channel row`

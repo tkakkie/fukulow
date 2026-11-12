@@ -1,16 +1,23 @@
 import * as api from './api'
 import { memberError } from './members'
 
-type Deps = Pick<typeof api, 'listChannelMembers' | 'addChannelMember' | 'removeChannelMember'>
+type Deps = Pick<typeof api, 'listChannelMembers' | 'addChannelMember' | 'removeChannelMember' | 'changeChannelManager'>
 export function channelMemberError(r: Exclude<api.Result<unknown>, { ok: true }>) {
-  if (r.kind === 'http' && r.error === 'last_channel_manager') return '最後のオーナーまたは管理者はチャンネルから外せません。先に別のオーナーまたは管理者を追加してください。'
-  if (r.kind === 'http' && r.error === 'last_channel_grant') return '最後のメンバーはチャンネルから外せません。先に別のメンバーを追加してください。'
+  if (r.kind === 'http') {
+    if (r.error === 'last_channel_manager') return 'このチャンネルを管理できる最後のメンバーです。先に別のオーナー、管理者、またはチャンネル管理者を設定してください。'
+    if (r.error === 'last_channel_grant') return '最後のメンバーはチャンネルから外せません。先に別のメンバーを追加してください。'
+    if (r.error === 'channel_manager_private_only') return 'パブリックチャンネルではチャンネル管理者を設定できません。'
+    if (r.error === 'channel_manager_guest') return 'ゲストにはチャンネル管理者を設定できません。'
+    if (r.error === 'member_not_found') return '対象のメンバーが見つかりません。一覧を更新してからもう一度お試しください。'
+    if (r.error === 'channel_grant_not_found') return 'このメンバーはチャンネルに参加していません。一覧を更新してからもう一度お試しください。'
+    if (r.error === 'channel not found' || (r.status === 404 && !api.isOrganizationUnavailable(r))) return 'このチャンネルは利用できません。チャンネル一覧から選び直してください。'
+  }
   return memberError(r)
 }
 
 export function createChannelMembers(org: string, channel: string, onResult: (r: api.Result<unknown>) => void,
-  deps: Deps = api, onUnavailable: () => void = () => {}) {
-  let state = { members: [] as api.Member[], loading: true, busy: false, error: '', unavailable: false, retryable: false }
+  deps: Deps = api, onUnavailable: () => void = () => {}, onRefreshChannels: () => unknown = () => {}) {
+  let state = { members: [] as api.ChannelMember[], loading: true, busy: false, error: '', unavailable: false, retryable: false }
   let generation = 0, closed = false
   const listeners = new Set<() => void>()
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
@@ -32,20 +39,23 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     else if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && !api.isOrganizationUnavailable(r)))) { onUnavailable(); set({ loading: false, unavailable: true }) }
     else set({ loading: false, error: channelMemberError(r), retryable: r.kind === 'network' })
   }
-  async function mutate(id: string, add: boolean) {
+  async function mutate(run: () => Promise<api.Result<undefined>>, refreshChannels = false) {
     if (closed || state.busy || state.unavailable) return
     const own = ++generation
     set({ busy: true, error: '' })
-    const r = await request(() => add ? deps.addChannelMember(org, channel, { member_id: id }) : deps.removeChannelMember(org, channel, id))
+    const r = await request(run)
     if (closed || own !== generation || state.unavailable) return
     set({ busy: false })
     if (!r.ok) set({ error: channelMemberError(r) })
-    else await load()
+    else await Promise.all([load(), refreshChannels ? onRefreshChannels() : undefined])
   }
   return {
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
-    load, add: (id: string) => mutate(id, true), remove: (id: string) => mutate(id, false),
+    load,
+    add: (id: string) => mutate(() => deps.addChannelMember(org, channel, { member_id: id })),
+    remove: (id: string) => mutate(() => deps.removeChannelMember(org, channel, id)),
+    changeManager: (id: string, manager: boolean) => mutate(() => deps.changeChannelManager(org, channel, id, { manager }), true),
     reselect() { if (!closed && state.unavailable) { set({ unavailable: false }); void load() } },
     unavailable() { generation++; set({ unavailable: true, loading: false, busy: false }) },
     close() { closed = true; generation++; listeners.clear() },

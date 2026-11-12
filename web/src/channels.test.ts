@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createChannels } from './channels'
 
-const ch = (id: string, name = id) => ({ id, name, visibility: 'public' as const, capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: true } } })
+const ch = (id: string, name = id) => ({ id, name, visibility: 'public' as const, capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true } } })
 const ok = <T>(data: T) => ({ ok: true as const, data })
 
 describe('channels', () => {
@@ -109,6 +109,50 @@ describe('channels', () => {
     release(ok({ channels: [ch('a'), ch('b')] }))
     await loading
     expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'b', 'n'])
+  })
+  it('two overlapping loads where the first resolves last keep the second capabilities', async () => {
+    const resolvers: ((r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void)[] = []
+    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>((r) => resolvers.push(r)))
+    const c = createChannels({ listChannels, createChannel: vi.fn() })
+    const first = c.load()
+    const second = c.load()
+    const stale = ch('a')
+    const fresh = { ...ch('a'), capabilities: { ...stale.capabilities, can_manage_managers: { allowed: true } } }
+    resolvers[1](ok({ channels: [fresh] }))
+    await second
+    expect(c.get().channels[0]?.capabilities.can_manage_managers.allowed).toBe(true)
+    resolvers[0](ok({ channels: [stale] }))
+    await first
+    expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'a' })
+    expect(c.get().channels[0]?.capabilities.can_manage_managers.allowed).toBe(true)
+  })
+  it('a superseded load that fails does not set error over a newer success', async () => {
+    const resolvers: ((r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>> | { ok: false; kind: 'network' }) => void)[] = []
+    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>> | { ok: false; kind: 'network' }>((r) => resolvers.push(r)))
+    const c = createChannels({ listChannels, createChannel: vi.fn() })
+    const first = c.load()
+    const second = c.load()
+    resolvers[1](ok({ channels: [ch('a')] }))
+    await second
+    expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'a' })
+    resolvers[0]({ ok: false, kind: 'network' })
+    await first
+    expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'a' })
+    expect(c.get().channels.map((x) => x.id)).toEqual(['a'])
+  })
+  it('create-race merge still holds for the latest load when an earlier load is superseded', async () => {
+    const resolvers: ((r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void)[] = []
+    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>((r) => resolvers.push(r)))
+    const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
+    const first = c.load()
+    const second = c.load()
+    await c.create({ name: 'n', visibility: 'public' })
+    resolvers[0](ok({ channels: [ch('old')] }))
+    await first
+    resolvers[1](ok({ channels: [ch('a')] }))
+    await second
+    expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'n'])
+    expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'n' })
   })
   describe('close (the session ended)', () => {
     const held = <T>() => {

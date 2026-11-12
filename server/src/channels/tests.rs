@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+mod managers;
 mod membership;
 mod name_length;
 mod name_whitespace;
@@ -357,6 +358,14 @@ async fn foreign_membership_does_not_grant_private_channel_visibility(pool: PgPo
     .unwrap();
 
     assert_eq!(list(&app, &reader_a).await, json!({"channels": []}));
+    let mut private = private;
+    for capability in [
+        "can_add_members",
+        "can_remove_members",
+        "can_manage_managers",
+    ] {
+        private["capabilities"][capability] = json!({"allowed":false,"reason":"forbidden"});
+    }
     assert_eq!(
         list(&app, &reader_b).await,
         json!({"channels": [unread_channel(&private)]})

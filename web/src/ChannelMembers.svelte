@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Channel, Member } from './api'
+  import type { Channel, ChannelMember, Member } from './api'
   import type { channelMembersAdapter } from './channel-members.svelte'
   import { roleNames } from './members'
   import Button from './ui/Button.svelte'
@@ -14,7 +14,8 @@
   } = $props()
   const s = $derived(model.state)
   const additions = $derived(candidates.filter(m => !s.members.some(current => current.id === m.id)))
-  let removing = $state<Member | null>(null)
+  let removing = $state<ChannelMember | null>(null)
+  let managing = $state<{ member: ChannelMember; manager: boolean } | null>(null)
   const leaving = $derived(removing?.id === self)
 </script>
 
@@ -29,6 +30,10 @@
       {#each s.members as member (member.id)}
         <li>
           <span>{member.name}</span><Chip>{roleNames[member.role]}</Chip>
+          {#if member.manager}<Chip>チャンネル管理者</Chip>{/if}
+          {#if channel.capabilities.can_manage_managers.allowed && (member.manager || member.role !== 'guest')}
+            <Button variant="quiet" disabled={s.busy} ariaLabel={`${member.name}のチャンネル管理者を${member.manager ? '解除する' : '付与する'}`} onclick={() => managing = { member, manager: !member.manager }}>{member.manager ? 'チャンネル管理者を解除する' : 'チャンネル管理者にする'}</Button>
+          {/if}
           {#if member.id === self ? channel.capabilities.can_leave.allowed : channel.capabilities.can_remove_members.allowed}
             <Button variant="quiet" disabled={s.busy} ariaLabel={`${member.name}${member.id === self ? 'としてチャンネルを退出' : 'をチャンネルから外す'}`} onclick={() => removing = member}>{member.id === self ? '退出する' : '外す'}</Button>
           {/if}
@@ -50,6 +55,10 @@
   description={leaving ? 'プライベートチャンネルやゲストの参加先には、再び追加されるまでアクセスできなくなります。' : `${removing?.name ?? ''}さんは、参加が必要なチャンネルへのアクセス権を失います。`}
   confirmLabel={leaving ? '退出する' : '外す'} oncancel={() => removing = null}
   onconfirm={() => { const id = removing?.id; removing = null; if (id) void model.remove(id) }} />
+<Dialog open={managing !== null && !s.unavailable} title={managing?.manager ? 'チャンネル管理者を付与しますか？' : 'チャンネル管理者を解除しますか？'}
+  description={managing?.manager ? `${managing.member.name}さんにチャンネル管理者を付与します。` : `${managing?.member.name ?? ''}さんのチャンネル管理者を解除します。`}
+  confirmLabel={managing?.manager ? '付与する' : '解除する'} oncancel={() => managing = null}
+  onconfirm={() => { const next = managing; managing = null; if (next) void model.changeManager(next.member.id, next.manager) }} />
 
 <style>
   section { display: grid; gap: var(--space-12); min-width: 0; }

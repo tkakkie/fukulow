@@ -95,7 +95,12 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
       return
     }
     console.log(`Upgrade source=${revision} project=${project}`)
-    execFileSync('docker', ['build', '-q', '-t', oldImage, source], { cwd, env, stdio: 'inherit' })
+    // CI reuses main's exported layers; buildx needs HOME for the builder and the Actions cache credentials.
+    const cacheFrom = process.env.CHECK_UPGRADE_CACHE_FROM
+    const buildEnv = cacheFrom ? { ...env, HOME: process.env.HOME, ACTIONS_RESULTS_URL: process.env.ACTIONS_RESULTS_URL,
+      ACTIONS_RUNTIME_TOKEN: process.env.ACTIONS_RUNTIME_TOKEN } : env
+    const build = cacheFrom ? ['buildx', 'build', '--load', '--cache-from', cacheFrom] : ['build']
+    execFileSync('docker', [...build, '-q', '-t', oldImage, source], { cwd, env: buildEnv, stdio: 'inherit' })
     if (!process.env.CHECK_COMPOSE_IMAGE) {
       execFileSync('docker', [...current, 'build', 'app'], { cwd, env, stdio: 'inherit' })
     }
