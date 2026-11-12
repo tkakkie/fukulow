@@ -1161,7 +1161,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(dialog!.getAttribute('aria-label')).toBe('入力中の下書きを置き換えますか？')
     expect(buttonsByText(dialog!, '置き換える')).toHaveLength(1)
     expect(buttonsByText(dialog!, 'キャンセル')).toHaveLength(1)
-    expect(ch.timeline.draft).toBe('入力途中の大事な下書き')
+    expect(ch.composer.draft).toBe('入力途中の大事な下書き')
     expect(ch.timeline.pending).toHaveLength(1)
 
     // 2. Clicking キャンセル closes the dialog and preserves both the draft and the failed Message
@@ -1171,7 +1171,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     expect(host.querySelector('[role="dialog"]')).toBeNull()
-    expect(ch.timeline.draft).toBe('入力途中の大事な下書き')
+    expect(ch.composer.draft).toBe('入力途中の大事な下書き')
     expect(textarea.value).toBe('入力途中の大事な下書き')
     expect(ch.timeline.pending).toHaveLength(1)
     expect(buttonsByText(host, '編集して送り直す')).toHaveLength(1)
@@ -1186,7 +1186,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     expect(host.querySelector('[role="dialog"]')).toBeNull()
-    expect(ch.timeline.draft).toBe('拒否されたメッセージ本文')
+    expect(ch.composer.draft).toBe('拒否されたメッセージ本文')
     expect(textarea.value).toBe('拒否されたメッセージ本文')
     expect(ch.timeline.pending).toHaveLength(0)
     expect(buttonsByText(host, '編集して送り直す')).toHaveLength(0)

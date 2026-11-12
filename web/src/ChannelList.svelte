@@ -13,7 +13,6 @@
     activeTopicId = null,
     topics = [],
     allTopicsKnown = false,
-    channelUnreadCounts = {},
     channelUnreadCount,
     topicUnreadCounts = {},
     onselect,
@@ -25,7 +24,6 @@
     activeTopicId?: string | null
     topics?: readonly TopicLine[]
     allTopicsKnown?: boolean
-    channelUnreadCounts?: Readonly<Record<string, number | null>>
     channelUnreadCount?: (channelId: string) => number | null
     topicUnreadCounts?: Readonly<Record<string, { readonly unreadCount: number | null }>>
     onselect: (id: string) => void
@@ -43,7 +41,7 @@
 <ul class="channel-list">
   {#each channels as c (c.id)}
     {@const isExpanded = c.id === selectedId && recentTopics.length > 0}
-    {@const channelUnread = channelUnreadCount ? channelUnreadCount(c.id) : (channelUnreadCounts[c.id] ?? null)}
+    {@const channelUnread = channelUnreadCount?.(c.id) ?? null}
     <li class="channel-list__item">
       <ListRow
         kind="channel"

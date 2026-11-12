@@ -49,9 +49,6 @@ export type TimelineState = {
   hasOlder: boolean
   loadingOlder: boolean
   olderError: boolean
-  draft: string
-  topicDraft: string
-  composerError: string | null
 }
 
 /** Max Message body length in Unicode scalar values (API rule; a test compares it to openapi.json). */
@@ -515,11 +512,20 @@ export function createSync(options: SyncOptions) {
       let topicDraftRevision = 0
       const target = draftTarget(channel, topicId)
       const key = topicKey(channel, topicId)
-      const tcListeners = new Set<() => void>()
-      topicComposerListeners.set(key, tcListeners)
       return {
         get: (): TopicComposerState => getTopicExtra(channel, topicId),
-        subscribe(listener: () => void) { tcListeners.add(listener); return () => { tcListeners.delete(listener) } },
+        subscribe(listener: () => void) {
+          let tcListeners = topicComposerListeners.get(key)
+          if (!tcListeners) {
+            tcListeners = new Set()
+            topicComposerListeners.set(key, tcListeners)
+          }
+          tcListeners.add(listener)
+          return () => {
+            tcListeners.delete(listener)
+            if (tcListeners.size === 0 && topicComposerListeners.get(key) === tcListeners) topicComposerListeners.delete(key)
+          }
+        },
         setDraft(draft: string) {
           if (draft === getTopicExtra(channel, topicId).draft) return
           topicDraftRevision++
@@ -573,11 +579,20 @@ export function createSync(options: SyncOptions) {
       let replyDraftRevision = 0
       const target = draftTarget(channel, topicId, replyRootId)
       const key = replyKey(channel, replyRootId, topicId)
-      const rcListeners = new Set<() => void>()
-      replyComposerListeners.set(key, rcListeners)
       return {
         get: (): TopicComposerState => getReplyExtra(channel, replyRootId, topicId),
-        subscribe(listener: () => void) { rcListeners.add(listener); return () => { rcListeners.delete(listener) } },
+        subscribe(listener: () => void) {
+          let rcListeners = replyComposerListeners.get(key)
+          if (!rcListeners) {
+            rcListeners = new Set()
+            replyComposerListeners.set(key, rcListeners)
+          }
+          rcListeners.add(listener)
+          return () => {
+            rcListeners.delete(listener)
+            if (rcListeners.size === 0 && replyComposerListeners.get(key) === rcListeners) replyComposerListeners.delete(key)
+          }
+        },
         setDraft(draft: string) {
           if (draft === getReplyExtra(channel, replyRootId, topicId).draft) return
           replyDraftRevision++
@@ -666,9 +681,6 @@ export function createSync(options: SyncOptions) {
           })),
           hasOlder: c?.hasOlder ?? false, loadingOlder: c?.older !== undefined,
           olderError,
-          get draft() { return getComposer(channel).draft },
-          get topicDraft() { return getComposer(channel).topicDraft },
-          get composerError() { return getComposer(channel).composerError },
         }
         return snapshot
       },

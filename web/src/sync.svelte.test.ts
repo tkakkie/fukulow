@@ -239,6 +239,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
     const { session, sync } = start(net)
     const a = sync.channel('A')
     const view = await mount(() => a.timeline)
+    const composer = await mount(() => a.composer)
     await loadChannels(net)
     net.subscribed('A', 100)
     await settle()
@@ -253,6 +254,8 @@ describe('sync adapter and the unavailable state (C9)', () => {
     expect(view.last).toMatchObject({
       status: 'error',
       messages: [record(100)],
+    })
+    expect(composer.last).toMatchObject({
       draft: 'draft kept across failures',
     })
 
@@ -263,17 +266,20 @@ describe('sync adapter and the unavailable state (C9)', () => {
     expect(view.last).toMatchObject({
       status: 'unavailable',
       messages: [record(100)],
+    })
+    expect(composer.last).toMatchObject({
       draft: 'draft kept across failures',
     })
     expect(await a.submit()).toBe(false)
     expect(net.sends).toHaveLength(0)
-    expect(view.last.draft).toBe('draft kept across failures')
+    expect(composer.last.draft).toBe('draft kept across failures')
 
     // Replacing the session clears drafts as well as loaded records.
     void session.sync.replaceSession('other')
     await settle()
-    expect(view.last.draft).toBe('')
+    expect(composer.last.draft).toBe('')
 
+    await composer.unmount()
     await view.unmount()
     session.close()
   })

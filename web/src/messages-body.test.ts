@@ -61,16 +61,16 @@ describe('message body validation', () => {
     const overLimit = '😀'.repeat(MESSAGE_BODY_MAX + 1)
     a.setDraft(overLimit)
     expect(await a.submit()).toBe(false)
-    expect(a.get().draft).toBe(overLimit)
-    expect(a.get().composerError).toMatch(/4000/)
+    expect(a.composer.get().draft).toBe(overLimit)
+    expect(a.composer.get().composerError).toMatch(/4000/)
     expect(sendMessage).not.toHaveBeenCalled()
 
     const withNul = 'bad\0text'
     a.setDraft(withNul)
-    expect(a.get().composerError).toBeNull()
+    expect(a.composer.get().composerError).toBeNull()
     expect(await a.submit()).toBe(false)
-    expect(a.get().draft).toBe(withNul)
-    expect(a.get().composerError).toMatch(/NUL/)
+    expect(a.composer.get().draft).toBe(withNul)
+    expect(a.composer.get().composerError).toMatch(/NUL/)
     expect(sendMessage).not.toHaveBeenCalled()
 
     expect(await a.send(overLimit)).toBe(false)
@@ -79,10 +79,10 @@ describe('message body validation', () => {
 
     const exact = '😀'.repeat(MESSAGE_BODY_MAX)
     a.setDraft(exact)
-    expect(a.get().composerError).toBeNull()
+    expect(a.composer.get().composerError).toBeNull()
     expect(await a.submit()).toBe(true)
-    expect(a.get().draft).toBe('')
-    expect(a.get().composerError).toBeNull()
+    expect(a.composer.get().draft).toBe('')
+    expect(a.composer.get().composerError).toBeNull()
     expect(sendMessage).toHaveBeenCalledWith('A', { client_message_id: 'c1', body: exact })
     await sync.close()
   })
@@ -184,9 +184,9 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
     a.setDraft('最初の投稿')
     expect(sync.hasUnsavedChanges()).toBe(true)
     expect(await a.submit()).toBe(false)
-    expect(a.get().composerError).toMatch(/60/)
-    expect(a.get().draft).toBe('最初の投稿')
-    expect(a.get().topicDraft).toBe(' 日報 ')
+    expect(a.composer.get().composerError).toMatch(/60/)
+    expect(a.composer.get().draft).toBe('最初の投稿')
+    expect(a.composer.get().topicDraft).toBe(' 日報 ')
     expect(sendMessage).not.toHaveBeenCalled()
 
     // Valid new-Topic submit clears draft + topicDraft, forwards topic_name, and restores both on 400 refusal + restore()
@@ -200,13 +200,13 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
     })
     expect(a.get().pending).toMatchObject([{ clientMessageId: 'cid-1', topicName: '日報', status: 'failed' }])
     expect(a.restore('cid-1')).toBe(true)
-    expect(a.get().draft).toBe('最初の投稿')
-    expect(a.get().topicDraft).toBe('日報')
+    expect(a.composer.get().draft).toBe('最初の投稿')
+    expect(a.composer.get().topicDraft).toBe('日報')
 
     // Per-Topic Composer uses isolated DraftStore key and tags pending sends with topicId
     topicT.setDraft('トピック別下書き')
     expect(drafts.get({ organizationId: 'org-1', channelId: 'A', topicId: 'topic-1' })).toBe('トピック別下書き')
-    expect(a.get().draft).toBe('最初の投稿')
+    expect(a.composer.get().draft).toBe('最初の投稿')
 
     let resolveTopicSend!: (res: unknown) => void
     sendMessage.mockReturnValueOnce(new Promise(r => { resolveTopicSend = r }))

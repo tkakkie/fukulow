@@ -621,8 +621,10 @@ it('controller skips unchanged Channels during olderError bookkeeping and keeps 
   const cChannel = client.sync.get().channels.C
   const bSnapshot = b.get()
   const cSnapshot = c.get()
-  expect(bSnapshot).toMatchObject({ olderError: true, draft: 'draft B' })
-  expect(cSnapshot).toMatchObject({ olderError: false, draft: 'draft C' })
+  expect(bSnapshot).toMatchObject({ olderError: true })
+  expect(b.composer.get()).toMatchObject({ draft: 'draft B' })
+  expect(cSnapshot).toMatchObject({ olderError: false })
+  expect(c.composer.get()).toMatchObject({ draft: 'draft C' })
 
   let visits = 0
   for (const ch of [bChannel, cChannel]) {
@@ -680,7 +682,8 @@ it('controller skips unchanged Channels during olderError bookkeeping and keeps 
   const send2 = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c2', body: 'bye' }))
     .find(e => e.type === 'send')!
   await client.feed({ type: 'send_failed', respond_to: send2, status: 401 })
-  expect(b.get()).toMatchObject({ olderError: false, draft: 'draft B' })
+  expect(b.get()).toMatchObject({ olderError: false })
+  expect(b.composer.get()).toMatchObject({ draft: 'draft B' })
   await client.sync.close()
 })
 
