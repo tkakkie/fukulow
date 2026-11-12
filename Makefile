@@ -1,6 +1,6 @@
 .PHONY: api load load-record load-image
 api:
-	cargo run --quiet -p fukulow-server --bin openapi > openapi.json
+	cargo run --locked --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
 
 K6_IMAGE := grafana/k6:1.8.2

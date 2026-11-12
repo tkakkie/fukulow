@@ -12,7 +12,7 @@
 //     #[ignore = "..."]. Any #[cfg(...)] other than exactly cfg(test), and cfg_attr, on the test fn is
 //     treated as "cannot be verified" and refused, also when it sits on an enclosing inline `mod`.
 //     NOT detected: cfg on an enclosing file, runtime early returns, --features / env dependent behaviour.
-//     Reconciled with `cargo test -- --list` (CLI only), per test binary (src/lib.rs, src/main.rs, tests/<x>.rs: one cargo
+//     Reconciled with `cargo test --locked -- --list` (CLI only), per test binary (src/lib.rs, src/main.rs, tests/<x>.rs: one cargo
 //     run each, stdout only). A reference must (1) sit in a file that is really part of the module tree and (2) appear in
 //     the list of that binary under the exact name `<module path>::<inline mods>::name`.
 //     (1) is a small declaration scan, not a Rust parser: `mod x;` is resolved from server/src/lib.rs and main.rs
@@ -21,7 +21,7 @@
 //     tree cannot be trusted (#[path], include!, macro_rules!, unbalanced braces). So an unreferenced
 //     server/src/unused_guard.rs is refused even if lib.rs has an inline `mod unused_guard` with a test of the same name.
 //     Other server/tests/** paths (e.g. tests/helpers/mod.rs) and server/src/bin/** cannot be mapped and are refused.
-//     Without cargo, the CLI fails. CI runs it in the server job right after `cargo test` (already compiled).
+//     Without cargo, the CLI fails. CI runs it in the server job after `cargo nextest run --locked` (already compiled).
 //     The vitest "real docs" test uses the static scan only (the web job has no Rust build).
 //   - Vitest: web/**/*.{test,spec}.ts outside web/e2e (mirrors `test.exclude` in web/vite.config.ts).
 //     Not run: .skip, .todo, .fixme, xit/xtest/xdescribe, and any test inside such a describe.
@@ -412,7 +412,7 @@ export function reconcileWithCargoList(known: Known, listed: ListedTest[]): Know
 }
 
 /**
- * Lists the tests of each server test binary with its own `cargo test -p <pkg> <target> -- --list` run, stdout only
+ * Lists the tests of each server test binary with its own `cargo test --locked -p <pkg> <target> -- --list` run, stdout only
  * (the "Running <binary>" headers are on stderr, so one run per binary is the unambiguous way to attribute names).
  * Throws (never skips) if cargo is unavailable or any run fails.
  */
@@ -427,14 +427,14 @@ export function cargoList(root: string): ListedTest[] {
       if (f.endsWith('.rs') && statSync(join(root, 'server/tests', f)).isFile()) targets.push({ binary: `tests/${f}`, args: ['--test', f.slice(0, -3)] })
   const listed: ListedTest[] = []
   for (const t of targets) {
-    const r = spawnSync('cargo', ['test', '-p', pkg, ...t.args, '--', '--list'], {
+    const r = spawnSync('cargo', ['test', '--locked', '-p', pkg, ...t.args, '--', '--list'], {
       cwd: root,
       encoding: 'utf8',
       maxBuffer: 64 << 20,
       env: { ...process.env, CARGO_TERM_COLOR: 'never' },
     })
     if (r.error || r.status !== 0)
-      throw new Error(`\`cargo test ${t.args.join(' ')} -- --list\` failed (cargo is required; this check does not skip):\n${r.error ?? ''}${r.stderr ?? ''}`)
+      throw new Error(`\`cargo test --locked ${t.args.join(' ')} -- --list\` failed (cargo is required; this check does not skip):\n${r.error ?? ''}${r.stderr ?? ''}`)
     listed.push(...parseTestList(r.stdout, t.binary))
   }
   if (listed.length === 0) throw new Error('`cargo test -- --list` printed no tests; cannot reconcile')

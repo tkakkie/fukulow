@@ -398,7 +398,8 @@ pub fn emit(_: TokenStream, _: TokenStream) -> TokenStream {
 
   await t.test('Cargo wrapper checks unit-test imports and propagates failures', () => {
     writeFileSync(join(directory, 'Cargo.toml'), '[package]\nname="fixture"\nversion="0.0.0"\nedition="2024"\n[lib]\npath="lib.rs"\n[workspace]\n')
-    const cargo = () => spawnSync('cargo', ['check', '--offline', '--all-targets'], {
+    writeFileSync(join(directory, 'Cargo.lock'), 'version = 4\n\n[[package]]\nname = "fixture"\nversion = "0.0.0"\n')
+    const cargo = () => spawnSync('cargo', ['check', '--locked', '--offline', '--all-targets'], {
       cwd: directory, encoding: 'utf8',
       env: { ...process.env, RUSTC_WORKSPACE_WRAPPER: driver, CARGO_TARGET_DIR: join(directory, 'target') },
     })
