@@ -324,6 +324,28 @@ pub(crate) async fn is_visible_for_write(
     ))
 }
 
+pub(crate) async fn is_visible_scoped(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: (Uuid, i64),
+    channel: Uuid,
+) -> Result<Option<bool>, sqlx::Error> {
+    crate::database::organization_statement(
+        pool,
+        &member_visibility_sql(false),
+        async |connection: &mut sqlx::PgConnection, sql: &str| {
+            sqlx::query_scalar(sql)
+                .bind(organization)
+                .bind(member.0)
+                .bind(member.1)
+                .bind(channel)
+                .fetch_optional(connection)
+                .await
+        },
+    )
+    .await
+}
+
 async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     organization_id: Uuid,
@@ -394,11 +416,11 @@ pub(crate) async fn member_access(
         "SELECT v.id,v.membership_revision,v.visible FROM ({}) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision",
         visibility_sql(&auth::candidate_members_sql(), "$2")
     );
-    crate::database::organization_read_only(
+    crate::database::organization_statement(
         pool,
-        organization,
-        async |tx: &mut sqlx::PgConnection| {
-            sqlx::query_as(&sql)
+        &sql,
+        async |tx: &mut sqlx::PgConnection, sql: &str| {
+            sqlx::query_as(sql)
                 .bind(organization)
                 .bind(channel)
                 .bind(ids)

@@ -360,14 +360,11 @@ pub(crate) async fn require_visible_scoped(
     member: (Uuid, i64),
     channel: Uuid,
 ) -> Result<(), MessageError> {
-    crate::database::organization_read_only(
-        pool,
-        organization,
-        async |tx: &mut sqlx::PgConnection| {
-            require_visible(tx, organization, member, channel).await
-        },
-    )
-    .await
+    match channels::is_visible_scoped(pool, organization, member, channel).await? {
+        Some(true) => Ok(()),
+        Some(false) => Err(MessageError::NotFound),
+        None => Err(MessageError::OrganizationUnavailable),
+    }
 }
 
 pub(crate) async fn require_visible<'e, E: sqlx::PgExecutor<'e>>(
@@ -562,13 +559,9 @@ async fn latest_seq(
 ) -> Result<i64, sqlx::Error> {
     // A post-failure subscription must not snapshot behind an unresolved COMMIT.
     // Take a fresh READ COMMITTED snapshot *after* acquiring the shared barrier.
-    let mut tx = commit::Transaction::begin(
-        pool,
-        permit,
-        "BEGIN ISOLATION LEVEL READ COMMITTED",
-        Some(organization),
-    )
-    .await?;
+    let mut tx =
+        commit::Transaction::begin(pool, permit, "BEGIN ISOLATION LEVEL READ COMMITTED", None)
+            .await?;
     commit::lock(tx.connection()?, organization, channel, true).await?;
     let sql = "SELECT seq FROM channel_message_sequences \
                    WHERE organization_id = $1 AND channel_id = $2";
@@ -591,21 +584,26 @@ pub(crate) async fn replay_page(
     after: i64,
     through: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
-    crate::database::organization_read_only(pool, organization, async |tx: &mut sqlx::PgConnection| {
-        sqlx::query_as(
-            "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+    let sql = "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
-             ORDER BY seq ASC LIMIT $5",
-        )
-        .bind(organization)
-        .bind(channel)
-        .bind(after)
-        .bind(through)
-        .bind(REPLAY_PAGE_SIZE)
-        .fetch_all(tx)
-        .await
-    }).await
+             ORDER BY seq ASC LIMIT $5";
+    crate::database::organization_statement(
+        pool,
+        sql,
+        async |tx: &mut sqlx::PgConnection, sql: &str| {
+            let sql = format!("{sql} ORDER BY seq");
+            sqlx::query_as(&sql)
+                .bind(organization)
+                .bind(channel)
+                .bind(after)
+                .bind(through)
+                .bind(REPLAY_PAGE_SIZE)
+                .fetch_all(tx)
+                .await
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -632,10 +630,11 @@ pub(crate) async fn authorized_replay_page(
         ) m ON true ORDER BY m.seq"#,
         channels::member_visibility_sql(false)
     );
-    let rows = crate::database::organization_read_only(
+    let rows = crate::database::organization_statement(
         pool,
-        organization,
-        async |tx: &mut sqlx::PgConnection| {
+        &sql,
+        async |tx: &mut sqlx::PgConnection, sql: &str| {
+            let sql = format!("{sql} ORDER BY seq");
             sqlx::query(&sql)
                 .bind(organization)
                 .bind(member.0)

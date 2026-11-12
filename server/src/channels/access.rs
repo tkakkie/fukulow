@@ -257,21 +257,34 @@ async fn access_rows(
             .or_default()
             .push((index, entry));
     }
+    let sql = access_rows_sql();
     let mut rows = vec![(false, None, false); entries.len()];
     for (organization, group) in groups {
         let selected: Vec<_> = group.iter().map(|(_, entry)| (*entry).clone()).collect();
-        let scoped = crate::database::organization_read_only(
-            pool,
-            organization,
-            async |tx: &mut sqlx::PgConnection| {
-                let mut rows = Vec::with_capacity(selected.len());
-                for batch in selected.chunks(1000) {
-                    rows.extend(access_rows_in(tx, batch).await?);
-                }
-                Ok::<_, sqlx::Error>(rows)
-            },
-        )
-        .await?;
+        let scoped = if selected.len() <= 1000 {
+            crate::database::organization_statement(
+                pool,
+                &sql,
+                async |connection: &mut sqlx::PgConnection, sql: &str| {
+                    let sql = format!("{sql} ORDER BY n");
+                    access_rows_in(connection, &selected, &sql).await
+                },
+            )
+            .await?
+        } else {
+            crate::database::organization_read_only(
+                pool,
+                organization,
+                async |tx: &mut sqlx::PgConnection| {
+                    let mut rows = Vec::with_capacity(selected.len());
+                    for batch in selected.chunks(1000) {
+                        rows.extend(access_rows_in(tx, batch, &sql).await?);
+                    }
+                    Ok::<_, sqlx::Error>(rows)
+                },
+            )
+            .await?
+        };
         for ((index, _), row) in group.into_iter().zip(scoped) {
             rows[index] = row;
         }
@@ -279,26 +292,37 @@ async fn access_rows(
     Ok(rows)
 }
 
+fn access_rows_sql() -> String {
+    let public_roles = auth::authorization::channel_roles_sql(false);
+    let explicit_roles = auth::authorization::channel_roles_sql(true);
+    format!("SELECT COALESCE((c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL), false),
+        CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL, r.n
+        FROM unnest($2::uuid[], $3::bigint[], $4::uuid[]) WITH ORDINALITY r(member_id,revision,channel_id,n)
+        LEFT JOIN ({}) u ON u.organization_id=$1 AND u.id=r.member_id AND u.membership_revision=r.revision
+        LEFT JOIN channels c ON c.organization_id=$1 AND c.id=r.channel_id AND u.id IS NOT NULL
+        LEFT JOIN channel_members cm ON cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision
+        ORDER BY r.n", auth::members::ACTIVE_SCOPED_MEMBERS_SQL)
+}
+
 async fn access_rows_in(
     connection: &mut sqlx::PgConnection,
     entries: &[Arc<Entry>],
+    sql: &str,
 ) -> Result<Vec<(bool, Option<Uuid>, bool)>, sqlx::Error> {
-    let public_roles = auth::authorization::channel_roles_sql(false);
-    let explicit_roles = auth::authorization::channel_roles_sql(true);
-    let sql = format!("SELECT COALESCE((c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL), false),
-        CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL
-        FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::uuid[]) WITH ORDINALITY r(organization_id,member_id,revision,channel_id,n)
-        LEFT JOIN ({}) u ON u.organization_id=r.organization_id AND u.id=r.member_id AND u.membership_revision=r.revision
-        LEFT JOIN channels c ON c.organization_id=r.organization_id AND c.id=r.channel_id AND u.id IS NOT NULL
-        LEFT JOIN channel_members cm ON cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision
-        ORDER BY r.n", auth::members::ACTIVE_SCOPED_MEMBERS_SQL);
-    sqlx::query_as(&sql)
-        .bind(entries.iter().map(|e| e.organization).collect::<Vec<_>>())
+    use sqlx::Row;
+    let Some(first) = entries.first() else {
+        return Ok(Vec::new());
+    };
+    let rows = sqlx::query(sql)
+        .bind(first.organization)
         .bind(entries.iter().map(|e| e.member.0).collect::<Vec<_>>())
         .bind(entries.iter().map(|e| e.member.1).collect::<Vec<_>>())
         .bind(entries.iter().map(|e| e.channel).collect::<Vec<_>>())
         .fetch_all(connection)
-        .await
+        .await?;
+    rows.iter()
+        .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+        .collect()
 }
 
 #[cfg(test)]

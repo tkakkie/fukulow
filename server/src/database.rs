@@ -4,6 +4,7 @@ mod context;
 pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
 pub use context::{account, account_read_only, organization, organization_read_only};
+pub(crate) use context::{organization_statement, organization_statement_sql};
 
 pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);

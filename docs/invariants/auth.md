@@ -66,4 +66,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [web](web.md): `a 401 on a send ends the session the same way`
 - [deployment](deployment.md): `channel_list_database_failure_returns_generic_500`, `channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated`, `readiness_rejects_abnormal_worker_until_process_replacement`
 - [deployment](deployment.md): `context_helpers_scope_settings_and_preserve_transaction_modes`, `context_helpers_cancelled_begin_setting_work_and_cleanup_discard`
+- [deployment](deployment.md): `statement_context_precedes_rls_and_clears_on_the_same_connection`
 - [messages](messages.md): `send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort`, `send_context_cancelled_begin_setting_work_and_cleanup_discard`

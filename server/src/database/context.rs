@@ -1,6 +1,48 @@
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
+/// One autocommit SELECT, with $1 bound as the Organization UUID. The local
+/// setting ends with the statement's implicit transaction. The materialized
+/// context must produce a row before the correlated LATERAL read can run;
+/// OFFSET 0 prevents flattening away that dependency (a bare CROSS JOIN does not).
+/// Callers must consume the complete result, issue no other SQL, and preserve
+/// ORDER BY at the outermost level when row order matters. Multi-statement reads
+/// must use organization_read_only instead. Errors/cancellation discard the
+/// connection rather than trusting an unconfirmed ReadyForQuery/implicit COMMIT.
+pub(crate) async fn organization_statement<T>(
+    pool: &PgPool,
+    sql: &str,
+    body: impl AsyncFnOnce(&mut PgConnection, &str) -> Result<T, sqlx::Error>,
+) -> Result<T, sqlx::Error> {
+    let sql = organization_statement_sql(sql);
+    let mut guard = super::TransactionConnection {
+        connection: Some(pool.acquire().await?),
+        finished: false,
+        discard: super::Discard::Detach,
+    };
+    let result = body(
+        guard
+            .connection
+            .as_deref_mut()
+            .ok_or(sqlx::Error::WorkerCrashed)?,
+        &sql,
+    )
+    .await?;
+    guard.finished = true;
+    Ok(result)
+}
+
+/// Also usable inside an owned explicit transaction (e.g. the COMMIT barrier).
+/// $1 must be a UUID; all data parameters remain bound by the caller.
+pub(crate) fn organization_statement_sql(sql: &str) -> String {
+    format!(
+        "WITH fukulow_context AS MATERIALIZED (\
+         SELECT set_config('fukulow.organization_id', $1::uuid::text, true) AS id) \
+         SELECT data.* FROM fukulow_context CROSS JOIN LATERAL (\
+         SELECT * FROM ({sql}) scoped WHERE fukulow_context.id IS NOT NULL OFFSET 0) data"
+    )
+}
+
 /// Commit successful work; roll back body errors. Context never outlives the transaction.
 pub async fn organization<T, E>(
     pool: &PgPool,

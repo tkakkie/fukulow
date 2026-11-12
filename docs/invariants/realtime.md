@@ -67,3 +67,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [deployment](deployment.md): `generated_openapi_matches_committed_contract`, `channel_list_database_failure_returns_generic_500`
 
 - [auth](auth.md): `handlers_and_fanout_require_authenticated_context`, `multi_chunk_recheck_uses_one_transaction_per_organization`, `later_organization_failure_applies_no_partial_session_revocations`, `deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled`
+- [deployment](deployment.md): `statement_context_precedes_rls_and_clears_on_the_same_connection`
