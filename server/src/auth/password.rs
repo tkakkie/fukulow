@@ -1,23 +1,64 @@
 use super::{ApiError, fill_random, throttle};
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use axum::http::StatusCode;
+use std::time::Duration;
+use tokio::sync::{Semaphore, SemaphorePermit};
+
+const PASSWORD_CONCURRENCY: usize = 4;
+const PASSWORD_QUEUE_CAP: usize = 32;
+const PASSWORD_WAIT: Duration = Duration::from_secs(1);
+
+pub(super) struct PasswordWorkers {
+    pub(super) running: Semaphore,
+    pub(super) waiting: Semaphore,
+    #[cfg(test)]
+    pub(super) on_start: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl PasswordWorkers {
+    pub(super) const fn new() -> Self {
+        Self {
+            running: Semaphore::const_new(PASSWORD_CONCURRENCY),
+            waiting: Semaphore::const_new(PASSWORD_QUEUE_CAP),
+            #[cfg(test)]
+            on_start: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub(super) async fn acquire(&self) -> Result<SemaphorePermit<'_>, ApiError> {
+        if let Ok(permit) = self.running.try_acquire() {
+            return Ok(permit);
+        }
+        // Reserve synchronously: a timeout by itself would allow unbounded waiters.
+        let _waiting = self.waiting.try_acquire().map_err(|_| unavailable())?;
+        tokio::time::timeout(PASSWORD_WAIT, self.running.acquire())
+            .await
+            .map_err(|_| unavailable())?
+            .map_err(|_| unavailable())
+    }
+}
+
+fn unavailable() -> ApiError {
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "password admission unavailable",
+        Some(Duration::from_secs(rand::random_range(1..=5))),
+    )
+}
 
 pub(super) async fn hash_password(
     password: String,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
 ) -> Result<String, ApiError> {
     hash_password_with_entropy(password, workers, fill_random).await
 }
 
 pub(super) async fn hash_password_with_entropy(
     password: String,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
     entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError> + Send + 'static,
 ) -> Result<String, ApiError> {
-    let permit = workers
-        .acquire()
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
+    let permit = workers.acquire().await?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         hash_password_sync_with_entropy(password.as_bytes(), entropy)
@@ -31,7 +72,7 @@ pub(super) async fn check_password(
     password: String,
     stored: Option<String>,
     attempt: throttle::Attempt,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
 ) -> Result<bool, ApiError> {
     check_password_with_hash(password, stored, attempt, workers, hash_password_sync).await
 }
@@ -40,15 +81,16 @@ async fn check_password_with_hash(
     password: String,
     stored: Option<String>,
     attempt: throttle::Attempt,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
     dummy_hash: impl FnOnce(&[u8]) -> Result<String, ApiError> + Send + 'static,
 ) -> Result<bool, ApiError> {
-    let permit = workers
-        .acquire()
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?;
+    let permit = workers.acquire().await?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        #[cfg(test)]
+        if let Some(on_start) = workers.on_start.lock().unwrap().take() {
+            on_start();
+        }
         let valid = match stored {
             Some(stored) => {
                 let argon2 = password_hasher();
@@ -64,6 +106,8 @@ async fn check_password_with_hash(
         // Keep the reservation and record failures even if the HTTP task was cancelled.
         if !valid {
             attempt.failed();
+        } else {
+            drop(attempt);
         }
         Ok(valid)
     })
@@ -115,6 +159,49 @@ mod tests {
 
     // Observe only registered passwords, so parallel password tests cannot interfere.
     static HASH_CALLS: Mutex<BTreeMap<Vec<u8>, usize>> = Mutex::new(BTreeMap::new());
+
+    #[tokio::test]
+    async fn queue_is_bounded_and_cancellation_releases_waiters() {
+        let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
+        let held = workers
+            .running
+            .acquire_many(PASSWORD_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let mut tasks = Vec::new();
+        for _ in 0..PASSWORD_QUEUE_CAP {
+            let workers: &'static PasswordWorkers = workers;
+            tasks.push(tokio::spawn(async move { workers.acquire().await }));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while workers.waiting.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let rejected = tokio::time::timeout(Duration::from_millis(100), workers.acquire())
+            .await
+            .expect("a full queue must reject immediately");
+        assert_eq!(rejected.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+        for task in tasks {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        assert_eq!(workers.waiting.available_permits(), PASSWORD_QUEUE_CAP);
+        // Admitted work also releases the queue reservation immediately.
+        let waiting = tokio::spawn(async move { workers.acquire().await });
+        tokio::task::yield_now().await;
+        drop(held);
+        let admitted = waiting.await.unwrap().unwrap();
+        assert_eq!(workers.waiting.available_permits(), PASSWORD_QUEUE_CAP);
+        assert_eq!(
+            workers.running.available_permits(),
+            PASSWORD_CONCURRENCY - 1
+        );
+        drop(admitted);
+        assert_eq!(workers.running.available_permits(), PASSWORD_CONCURRENCY);
+    }
 
     pub(super) fn record_hash(password: &[u8]) {
         if let Some(calls) = HASH_CALLS.lock().unwrap().get_mut(password) {

@@ -129,7 +129,8 @@ async fn valid_invite(
     (status=409, description="invite_sign_in_required for an existing Account; member_already_active for an active Member", body=ErrorBody),
     (status=413, description="Request too large", body=ErrorBody),
     (status=415, description="Expected application/json", body=ErrorBody),
-    (status=500, description="Database or password hashing failure", body=ErrorBody)))]
+    (status=500, description="Database or password hashing failure", body=ErrorBody),
+    (status=503, description="Argon2 queue is full or the one second admission wait expired; password admission unavailable; Invite is not consumed", body=ErrorBody)))]
 pub async fn accept_invite(
     State(state): State<AppState>,
     InviteAuth(account): InviteAuth,

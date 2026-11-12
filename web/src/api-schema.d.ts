@@ -1075,7 +1075,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Argon2 queue is full or the one second admission wait expired; password admission unavailable; no Account Session created; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
@@ -2500,7 +2500,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Argon2 queue is full or the one second admission wait expired; password admission unavailable; Invite is not consumed; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
@@ -2965,7 +2965,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Argon2 queue is full or the one second admission wait expired; password admission unavailable; no Account Session created; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
@@ -3150,7 +3150,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Argon2 queue is full or the one second admission wait expired; password admission unavailable; no setup writes; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

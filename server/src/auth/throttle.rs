@@ -14,7 +14,7 @@ use tokio::time::Instant;
 const WINDOW: Duration = Duration::from_secs(60);
 const IP_LIMIT: u32 = 20;
 const ACCOUNT_LIMIT: u32 = 5;
-const MAX_KEYS: usize = 10_000;
+pub(super) const MAX_KEYS: usize = 10_000;
 
 type Account = String;
 
@@ -93,14 +93,27 @@ impl Bucket {
     }
 }
 
-fn reserve<K: Eq + std::hash::Hash>(
+fn reserve<K: Clone + Eq + std::hash::Hash>(
     buckets: &mut HashMap<K, Bucket>,
     key: K,
     limit: u32,
     now: Instant,
 ) -> Result<(), Duration> {
     if !buckets.contains_key(&key) && buckets.len() >= MAX_KEYS {
-        return Err(WINDOW);
+        buckets.retain(|_, bucket| bucket.pending > 0 || bucket.expires > now);
+        if buckets.len() >= MAX_KEYS {
+            // Keep reservations addressable until Drop, even across window expiry.
+            let oldest = buckets
+                .iter()
+                .filter(|(_, bucket)| bucket.pending == 0)
+                .min_by_key(|(_, bucket)| bucket.expires)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                buckets.remove(&oldest);
+            } else {
+                return Err(WINDOW);
+            }
+        }
     }
     let bucket = buckets.entry(key).or_insert(Bucket {
         failures: 0,
@@ -126,6 +139,15 @@ fn ip_key(ip: IpAddr) -> IpAddr {
 }
 
 impl SignInThrottle {
+    #[cfg(test)]
+    pub(super) fn pending_counts(&self) -> (u32, u32) {
+        let buckets = self.lock();
+        (
+            buckets.ips.values().map(|bucket| bucket.pending).sum(),
+            buckets.accounts.values().map(|bucket| bucket.pending).sum(),
+        )
+    }
+
     /// Proxy peer IPs/CIDRs, plus a header whose rightmost value is the client IP.
     /// Both settings must be present; the default trusts no forwarded headers.
     pub fn with_proxy_config(
@@ -196,18 +218,6 @@ impl SignInThrottle {
             buckets.last_prune = Some(now);
         }
         let ip = ip_key(ip);
-        if !buckets.ips.contains_key(&ip) && buckets.ips.len() >= MAX_KEYS {
-            // Never evict a reservation: its eventual Drop must release this bucket.
-            let oldest = buckets
-                .ips
-                .iter()
-                .filter(|(_, bucket)| bucket.pending == 0)
-                .min_by_key(|(_, bucket)| bucket.expires)
-                .map(|(key, _)| *key);
-            if let Some(key) = oldest {
-                buckets.ips.remove(&key);
-            }
-        }
         reserve(&mut buckets.ips, ip, IP_LIMIT, now)?;
         Ok(Attempt {
             throttle: self.clone(),
@@ -248,12 +258,13 @@ impl Attempt {
 impl Drop for Attempt {
     fn drop(&mut self) {
         let mut buckets = self.throttle.lock();
-        let account = self
-            .account
-            .as_ref()
-            .and_then(|key| buckets.accounts.get_mut(key));
-        if let Some(bucket) = account {
+        if let Some(key) = &self.account
+            && let Some(bucket) = buckets.accounts.get_mut(key)
+        {
             finish(bucket, self.failed);
+            if bucket.failures == 0 && bucket.pending == 0 {
+                buckets.accounts.remove(key);
+            }
         }
         if let Some(bucket) = buckets.ips.get_mut(&self.ip) {
             finish(bucket, self.failed);
@@ -471,18 +482,110 @@ mod tests {
     async fn bucket_storage_is_bounded_and_expired_entries_are_purged() {
         let throttle = SignInThrottle::default();
         for n in 0..MAX_KEYS {
-            let mut attempt = throttle.begin(ip(1)).unwrap();
+            let mut attempt = throttle
+                .begin(IpAddr::from((n as u32).to_be_bytes()))
+                .unwrap();
             attempt.account(format!("{n}@example.com")).unwrap();
+            attempt.failed();
         }
         let mut rejected = throttle.begin(ip(1)).unwrap();
-        assert!(rejected.account("overflow@example.com".into()).is_err());
+        rejected.account("overflow@example.com".into()).unwrap();
         assert_eq!(throttle.lock().accounts.len(), MAX_KEYS);
         drop(rejected);
-        assert!(throttle.lock().ips.is_empty());
         tokio::time::advance(WINDOW).await;
         let mut allowed = throttle.begin(ip(1)).unwrap();
         allowed.account("overflow@example.com".into()).unwrap();
         assert_eq!(throttle.lock().accounts.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn account_reclamation_preserves_pending_and_evicts_oldest_idle() {
+        let throttle = SignInThrottle::default();
+        let mut pending = throttle.begin(ip(1)).unwrap();
+        pending.account("pending@example.com".into()).unwrap();
+        tokio::time::advance(WINDOW).await;
+        let mut oldest = throttle.begin(ip(2)).unwrap();
+        oldest.account("oldest@example.com".into()).unwrap();
+        oldest.failed();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for n in 0..MAX_KEYS as u32 - 2 {
+            let mut attempt = throttle.begin(IpAddr::from(n.to_be_bytes())).unwrap();
+            attempt.account(format!("unknown-{n}@example.com")).unwrap();
+            attempt.failed();
+        }
+        let mut new = throttle.begin(ip(3)).unwrap();
+        new.account("new@example.com".into()).unwrap();
+        {
+            let buckets = throttle.lock();
+            assert_eq!(buckets.accounts.len(), MAX_KEYS);
+            assert_eq!(buckets.accounts["pending@example.com"].pending, 1);
+            assert!(!buckets.accounts.contains_key("oldest@example.com"));
+        }
+        pending.failed();
+        drop(new);
+        let buckets = throttle.lock();
+        assert_eq!(buckets.accounts["pending@example.com"].pending, 0);
+        assert_eq!(buckets.accounts["pending@example.com"].failures, 1);
+        assert_eq!(buckets.accounts.len(), MAX_KEYS - 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_account_map_keeps_all_pending_reservations_until_drop() {
+        let throttle = SignInThrottle::default();
+        let mut attempts = Vec::new();
+        for n in 0..MAX_KEYS as u32 {
+            let mut attempt = throttle.begin(IpAddr::from(n.to_be_bytes())).unwrap();
+            attempt.account(format!("{n}@example.com")).unwrap();
+            attempts.push(attempt);
+        }
+        tokio::time::advance(WINDOW).await;
+        // Use an existing IP reservation so the Account map alone rejects admission.
+        let mut rejected = throttle.begin(IpAddr::from(0u32.to_be_bytes())).unwrap();
+        assert!(rejected.account("new@example.com".into()).is_err());
+        assert_eq!(throttle.lock().accounts.len(), MAX_KEYS);
+        assert_eq!(
+            throttle.pending_counts(),
+            (MAX_KEYS as u32 + 1, MAX_KEYS as u32)
+        );
+        drop(attempts.pop());
+        rejected.account("new@example.com".into()).unwrap();
+        assert_eq!(throttle.lock().accounts.len(), MAX_KEYS);
+        drop((attempts, rejected));
+        assert_eq!(throttle.pending_counts(), (0, 0));
+        assert!(throttle.lock().accounts.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_buckets_are_reclaimed_before_unexpired_history_in_both_maps() {
+        let throttle = SignInThrottle::default();
+        for n in 0..MAX_KEYS as u32 {
+            let mut attempt = throttle.begin(IpAddr::from(n.to_be_bytes())).unwrap();
+            attempt.account(format!("{n}@example.com")).unwrap();
+            attempt.failed();
+            if n == 1 {
+                tokio::time::advance(Duration::from_millis(1)).await;
+            }
+        }
+        tokio::time::advance(WINDOW - Duration::from_millis(1)).await;
+        // Suppress the periodic sweep to exercise reclamation on insertion pressure.
+        throttle.lock().last_prune = Some(Instant::now());
+        let mut new = throttle.begin(ip(1)).unwrap();
+        new.account("new@example.com".into()).unwrap();
+        let buckets = throttle.lock();
+        assert_eq!(buckets.ips.len(), MAX_KEYS - 1);
+        assert_eq!(buckets.accounts.len(), MAX_KEYS - 1);
+        for n in 0..MAX_KEYS as u32 {
+            assert_eq!(
+                buckets.ips.contains_key(&IpAddr::from(n.to_be_bytes())),
+                n >= 2
+            );
+            assert_eq!(
+                buckets.accounts.contains_key(&format!("{n}@example.com")),
+                n >= 2
+            );
+        }
+        drop(buckets);
+        drop(new);
     }
 
     #[test]
