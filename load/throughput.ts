@@ -31,7 +31,8 @@ const other = new Counter('throughput_other');
 const invalidRetry = new Counter('throughput_invalid_retry_after');
 const retry = new Trend('throughput_retry_after');
 const latency = new Trend('throughput_accepted_ms', true);
-const completion = new Trend('throughput_completion_ms', true);
+// Offset from scenario start for drain attribution, not HTTP latency.
+const completionOffset = new Trend('throughput_completion_offset_ms', true);
 const counters = ['throughput_attempted', 'throughput_accepted', 'throughput_accepted_in_window',
   'throughput_429', 'throughput_503', 'throughput_other', 'throughput_invalid_retry_after', 'dropped_iterations'];
 export const options: Options = {
@@ -46,7 +47,7 @@ export const options: Options = {
     throughput_invalid_retry_after: ['count==0'],
     ...Object.fromEntries(steps.flatMap(step => [
       ...counters.map(metric => [`${metric}{scenario:${step.name}}`, ['count>=0']]),
-      ...['throughput_accepted_ms', 'throughput_completion_ms', 'throughput_retry_after']
+      ...['throughput_accepted_ms', 'throughput_completion_offset_ms', 'throughput_retry_after']
         .map(metric => [`${metric}{scenario:${step.name}}`, ['max>=0']]),
     ])),
   },
@@ -98,7 +99,7 @@ export default function(data: Setup): void {
   invalidRetry.add(Number(outcome.invalidRetryAfter));
   if (outcome.outcome === 'accepted') latency.add(Date.now() - started);
   if ((outcome.outcome === 'rejected429' || outcome.outcome === 'rejected503') && !outcome.invalidRetryAfter) retry.add(Number(response.headers['Retry-After']));
-  completion.add(elapsed);
+  completionOffset.add(elapsed);
 }
 
 export function teardown(data: Setup): void {

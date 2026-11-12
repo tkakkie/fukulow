@@ -39,13 +39,13 @@ for (const [channels, members] of [[1, 2], [1, 4], [200, 4], [3, 5]]) {
   });
 }
 
-test('per-step report uses in-window accepts, isolates percentiles, and exposes generator drops and incomplete requests', () => {
+test('per-step report uses in-window accepts, isolates percentiles, and exposes dropped iterations and incomplete requests', () => {
   const steps = throughputPlan('10,100', '5', 3);
   const metrics = Object.fromEntries(Object.entries({
     throughput_attempted: { count: 50 }, throughput_accepted: { count: 30 },
     throughput_accepted_in_window: { count: 20 }, throughput_429: { count: 5 }, throughput_503: { count: 10 },
     throughput_other: { count: 4 }, dropped_iterations: { count: 2 },
-    throughput_completion_ms: { max: 6000, 'p(95)': 4800, 'p(99)': 5900 }, throughput_accepted_ms: { med: 10, 'p(95)': 50, 'p(99)': 80 },
+    throughput_completion_offset_ms: { max: 6000, 'p(95)': 4800, 'p(99)': 5900 }, throughput_accepted_ms: { med: 10, 'p(95)': 50, 'p(99)': 80 },
     throughput_retry_after: { min: 1, max: 5 }, throughput_invalid_retry_after: { count: 1 },
   }).map(([key, values]) => [`${key}{scenario:step_1}`, { values }]));
   const report = throughputReport({ metrics }, steps);
@@ -57,7 +57,7 @@ test('per-step report uses in-window accepts, isolates percentiles, and exposes 
   assert.equal(row.acceptedIncludingDrainPerSecond, 5);
   assert.equal(row.acceptedTail, 10);
   assert.deepEqual(row.acceptedLatencyMs, { p50: 10, p95: 50, p99: 80 });
-  assert.deepEqual(row.completionMs, { p95: 4800, p99: 5900 });
+  assert.deepEqual(row.completionOffsetMs, { p95: 4800, p99: 5900 });
   assert.equal(row.rejected429, 5);
   assert.equal(row.rejected429Rate, 0.1);
   assert.equal(row.rejected503, 10);
@@ -66,28 +66,28 @@ test('per-step report uses in-window accepts, isolates percentiles, and exposes 
   assert.equal(row.invalidRetryAfter, 1);
   assert.deepEqual(row.retryAfterSeconds, { min: 1, max: 5 });
   assert.equal(row.droppedIterations, 2);
-  assert.equal(row.generatorLimited, true);
+  assert.equal(row.droppedIterationsSeen, true);
   assert.equal(row.incomplete, 1);
   assert.equal(report.steps[1].rejected429, 0);
   assert.equal(report.steps[1].rejected429Rate, null);
   assert.equal(report.steps[1].rejected503Rate, null);
   assert.deepEqual(report.steps[1].acceptedLatencyMs, { p50: null, p95: null, p99: null });
-  assert.deepEqual(report.steps[1].completionMs, { p95: null, p99: null });
-  assert.equal(report.steps[1].generatorLimited, false);
+  assert.deepEqual(report.steps[1].completionOffsetMs, { p95: null, p99: null });
+  assert.equal(report.steps[1].droppedIterationsSeen, false);
 });
 
 test('429-only steps preserve Retry-After samples and complete accounting', () => {
   const metrics = Object.fromEntries(Object.entries({
     throughput_attempted: { count: 2 }, throughput_429: { count: 2 },
     throughput_retry_after: { min: 1, max: 2 },
-    throughput_completion_ms: { 'p(95)': 4500, 'p(99)': 4900 },
+    throughput_completion_offset_ms: { 'p(95)': 4500, 'p(99)': 4900 },
   }).map(([key, values]) => [`${key}{scenario:step_1}`, { values }]));
   const row = throughputReport({ metrics }, throughputPlan('10', '5', 3)).steps[0];
   assert.equal(row.rejected429Rate, 1);
   assert.equal(row.otherErrors, 0);
   assert.equal(row.incomplete, 0);
   assert.deepEqual(row.retryAfterSeconds, { min: 1, max: 2 });
-  assert.deepEqual(row.completionMs, { p95: 4500, p99: 4900 });
+  assert.deepEqual(row.completionOffsetMs, { p95: 4500, p99: 4900 });
 });
 
 test('sampled CPU peaks identify app, DB and generator and preserve missing samples', () => {
