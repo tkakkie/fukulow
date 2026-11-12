@@ -4,7 +4,7 @@ import { memberError } from './members'
 type Deps = Pick<typeof api, 'listChannelMembers' | 'addChannelMember' | 'removeChannelMember' | 'changeChannelManager'>
 export function channelMemberError(r: Exclude<api.Result<unknown>, { ok: true }>) {
   if (r.kind === 'http') {
-    if (r.error === 'last_channel_manager') return '最後のチャンネル管理者は外せません。先に別のチャンネル管理者を設定してください。'
+    if (r.error === 'last_channel_manager') return 'このチャンネルを管理できる最後のメンバーです。先に別のオーナー、管理者、またはチャンネル管理者を設定してください。'
     if (r.error === 'last_channel_grant') return '最後のメンバーはチャンネルから外せません。先に別のメンバーを追加してください。'
     if (r.error === 'channel_manager_private_only') return 'パブリックチャンネルではチャンネル管理者を設定できません。'
     if (r.error === 'channel_manager_guest') return 'ゲストにはチャンネル管理者を設定できません。'

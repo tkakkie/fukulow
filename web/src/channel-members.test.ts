@@ -88,7 +88,7 @@ it('explains both private Channel protections in Japanese and preserves the list
 it('explains every Channel manager PATCH refusal in Japanese and preserves the list without raw codes', async () => {
   const c = fixture(); await c.controller.load()
   const refusals: Array<[number, string, string]> = [
-    [409, 'last_channel_manager', '最後のチャンネル管理者は外せません。先に別のチャンネル管理者を設定してください。'],
+    [409, 'last_channel_manager', 'このチャンネルを管理できる最後のメンバーです。先に別のオーナー、管理者、またはチャンネル管理者を設定してください。'],
     [400, 'channel_manager_private_only', 'パブリックチャンネルではチャンネル管理者を設定できません。'],
     [400, 'channel_manager_guest', 'ゲストにはチャンネル管理者を設定できません。'],
     [403, 'forbidden', 'この操作の権限がありません。'],
@@ -430,7 +430,7 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
 
     // 3. Each refusal shows its Japanese copy in the alert banner
     const refusals: Array<[number, string, string]> = [
-      [409, 'last_channel_manager', '最後のチャンネル管理者は外せません。先に別のチャンネル管理者を設定してください。'],
+      [409, 'last_channel_manager', 'このチャンネルを管理できる最後のメンバーです。先に別のオーナー、管理者、またはチャンネル管理者を設定してください。'],
       [400, 'channel_manager_private_only', 'パブリックチャンネルではチャンネル管理者を設定できません。'],
       [400, 'channel_manager_guest', 'ゲストにはチャンネル管理者を設定できません。'],
       [403, 'forbidden', 'この操作の権限がありません。'],
