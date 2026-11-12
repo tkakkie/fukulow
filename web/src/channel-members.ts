@@ -16,7 +16,7 @@ export function channelMemberError(r: Exclude<api.Result<unknown>, { ok: true }>
 }
 
 export function createChannelMembers(org: string, channel: string, onResult: (r: api.Result<unknown>) => void,
-  deps: Deps = api, onUnavailable: () => void = () => {}) {
+  deps: Deps = api, onUnavailable: () => void = () => {}, onRefreshChannels: () => unknown = () => {}) {
   let state = { members: [] as api.ChannelMember[], loading: true, busy: false, error: '', unavailable: false, retryable: false }
   let generation = 0, closed = false
   const listeners = new Set<() => void>()
@@ -39,7 +39,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     else if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && !api.isOrganizationUnavailable(r)))) { onUnavailable(); set({ loading: false, unavailable: true }) }
     else set({ loading: false, error: channelMemberError(r), retryable: r.kind === 'network' })
   }
-  async function mutate(run: () => Promise<api.Result<undefined>>) {
+  async function mutate(run: () => Promise<api.Result<undefined>>, refreshChannels = false) {
     if (closed || state.busy || state.unavailable) return
     const own = ++generation
     set({ busy: true, error: '' })
@@ -47,7 +47,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     if (closed || own !== generation || state.unavailable) return
     set({ busy: false })
     if (!r.ok) set({ error: channelMemberError(r) })
-    else await load()
+    else await Promise.all([load(), refreshChannels ? onRefreshChannels() : undefined])
   }
   return {
     get: () => state,
@@ -55,7 +55,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     load,
     add: (id: string) => mutate(() => deps.addChannelMember(org, channel, { member_id: id })),
     remove: (id: string) => mutate(() => deps.removeChannelMember(org, channel, id)),
-    changeManager: (id: string, manager: boolean) => mutate(() => deps.changeChannelManager(org, channel, id, { manager })),
+    changeManager: (id: string, manager: boolean) => mutate(() => deps.changeChannelManager(org, channel, id, { manager }), true),
     reselect() { if (!closed && state.unavailable) { set({ unavailable: false }); void load() } },
     unavailable() { generation++; set({ unavailable: true, loading: false, busy: false }) },
     close() { closed = true; generation++; listeners.clear() },

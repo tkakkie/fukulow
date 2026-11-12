@@ -14,9 +14,9 @@ function fixture() {
     removeChannelMember: vi.fn().mockResolvedValue({ ok: true, data: undefined }),
     changeChannelManager: vi.fn().mockResolvedValue({ ok: true, data: undefined }),
   }
-  const observed = vi.fn(), left = vi.fn()
-  const controller = createChannelMembers('org', 'channel', observed, deps, left)
-  return { deps, observed, left, controller }
+  const observed = vi.fn(), left = vi.fn(), refresh = vi.fn()
+  const controller = createChannelMembers('org', 'channel', observed, deps, left, refresh)
+  return { deps, observed, left, refresh, controller }
 }
 it('loads generated Member records, refreshes after add/remove, and forwards leave without restoring a list', async () => {
   const c = fixture(); await c.controller.load()
@@ -48,6 +48,7 @@ it('grants and revokes the Channel manager right, prevents double clicks while p
   await first
   expect(c.controller.get().busy).toBe(false)
   expect(c.deps.listChannelMembers).toHaveBeenCalledTimes(2)
+  expect(c.refresh).toHaveBeenCalledTimes(1)
   expect(c.controller.get().members).toEqual([
     { id: 'self', name: '本人', role: 'admin', manager: true },
     { id: 'other', name: '佐藤', role: 'member', manager: true },
@@ -60,6 +61,7 @@ it('grants and revokes the Channel manager right, prevents double clicks while p
   await c.controller.changeManager('other', false)
   expect(c.deps.changeChannelManager).toHaveBeenLastCalledWith('org', 'channel', 'other', { manager: false })
   expect(c.deps.listChannelMembers).toHaveBeenCalledTimes(3)
+  expect(c.refresh).toHaveBeenCalledTimes(2)
   expect(c.controller.get().members[1].manager).toBe(false)
 })
 it('C9 stops automatic Member work and fences late results while same-session late 401 is still observed', async () => {
@@ -104,6 +106,7 @@ it('explains every Channel manager PATCH refusal in Japanese and preserves the l
     expect(c.controller.get().error).not.toContain(String(status))
     expect(c.controller.get().members).toHaveLength(1)
     expect(c.deps.listChannelMembers).toHaveBeenCalledOnce()
+    expect(c.refresh).not.toHaveBeenCalled()
   }
 })
 it('times out loading after 10 seconds and never lets a late list replace the retry', async () => {
@@ -332,6 +335,7 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     const initialMembers: api.ChannelMember[] = [
       { id: 'self', name: '山田 太郎', role: 'owner', manager: true },
       { id: 'm2', name: '佐藤 花子', role: 'member', manager: false },
+      { id: 'g1', name: '鈴木 ゲスト', role: 'guest', manager: false },
     ]
     const deps = {
       listChannelMembers: vi.fn<typeof api.listChannelMembers>().mockResolvedValue({ ok: true, data: { members: initialMembers } }),
@@ -339,7 +343,8 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
       removeChannelMember: vi.fn<typeof api.removeChannelMember>().mockResolvedValue({ ok: true, data: undefined }),
       changeChannelManager: vi.fn<typeof api.changeChannelManager>().mockResolvedValue({ ok: true, data: undefined }),
     }
-    const controller = createChannelMembers('org-1', 'ch-1', vi.fn(), deps)
+    const refreshChannels = vi.fn()
+    const controller = createChannelMembers('org-1', 'ch-1', vi.fn(), deps, () => {}, refreshChannels)
     await controller.load()
     const model = channelMembersAdapter(controller)
 
@@ -364,16 +369,18 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     })
     flushSync()
     const rowsHidden = hostHidden.querySelectorAll('li')
-    expect(rowsHidden).toHaveLength(2)
+    expect(rowsHidden).toHaveLength(3)
     expect(rowsHidden[0].textContent).toContain('山田 太郎')
     expect(rowsHidden[0].textContent).toContain('チャンネル管理者')
     expect(rowsHidden[1].textContent).toContain('佐藤 花子')
     expect(rowsHidden[1].textContent).not.toContain('チャンネル管理者')
+    expect(rowsHidden[2].textContent).toContain('鈴木 ゲスト')
+    expect(rowsHidden[2].textContent).toContain('ゲスト')
     expect(hostHidden.querySelectorAll('button').map(b => b.textContent.trim())).toEqual(['退出する'])
     await unmount(instHidden)
     hostHidden.remove()
 
-    // 2. With can_manage_managers: grant/revoke buttons appear; cancel sends nothing; confirm sends PATCH and refreshes
+    // 2. With can_manage_managers: grant/revoke buttons appear for Member/Owner rows, but Guest row has no grant button; cancel sends nothing; confirm sends PATCH and refreshes
     const host = doc.createElement('div')
     doc.body.appendChild(host)
     const inst = mount(ChannelMembers, {
@@ -385,6 +392,8 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     const findButton = (text: string) => host.querySelectorAll('button').find(b => b.textContent.trim() === text)
     expect(findButton('チャンネル管理者を解除する')).toBeDefined()
     expect(findButton('チャンネル管理者にする')).toBeDefined()
+    expect(host.querySelectorAll('button').filter(b => b.textContent.trim() === 'チャンネル管理者にする')).toHaveLength(1)
+    expect(host.querySelectorAll('li')[2].querySelectorAll('button')).toHaveLength(0)
 
     // Click grant on 佐藤 花子 -> opens confirm Dialog, then click キャンセル -> sends nothing
     findButton('チャンネル管理者にする')!.click()
@@ -395,7 +404,7 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     expect(host.querySelector('[role="dialog"]')).toBeNull()
     expect(deps.changeChannelManager).not.toHaveBeenCalled()
 
-    // Click grant on 佐藤 花子 again -> confirm in Dialog -> holds pending (disables buttons against double click) -> resolves 204 -> refreshes list
+    // Click grant on 佐藤 花子 again -> confirm in Dialog -> holds pending (disables buttons against double click) -> resolves 204 -> refreshes list and capabilities
     let resolvePatch!: (r: api.Result<undefined>) => void
     deps.changeChannelManager.mockImplementationOnce(() => new Promise(r => { resolvePatch = r }))
     deps.listChannelMembers.mockResolvedValueOnce({
@@ -404,6 +413,7 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
         members: [
           { id: 'self', name: '山田 太郎', role: 'owner', manager: true },
           { id: 'm2', name: '佐藤 花子', role: 'member', manager: true },
+          { id: 'g1', name: '鈴木 ゲスト', role: 'guest', manager: true },
         ],
       },
     })
@@ -421,12 +431,15 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     expect(deps.changeChannelManager).toHaveBeenCalledTimes(1)
 
     resolvePatch({ ok: true, data: undefined })
-    for (let i = 0; i < 8; i++) await Promise.resolve()
+    for (let i = 0; i < 16; i++) await Promise.resolve()
     flushSync()
 
     expect(deps.listChannelMembers).toHaveBeenCalledTimes(2)
+    expect(refreshChannels).toHaveBeenCalledTimes(1)
     const rowsAfterGrant = host.querySelectorAll('li')
     expect(rowsAfterGrant[1].textContent).toContain('チャンネル管理者')
+    // If a Guest row somehow has manager: true, the revoke action remains available
+    expect(rowsAfterGrant[2].querySelector('button')?.textContent.trim()).toBe('チャンネル管理者を解除する')
 
     // 3. Each refusal shows its Japanese copy in the alert banner
     const refusals: Array<[number, string, string]> = [

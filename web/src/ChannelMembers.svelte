@@ -31,7 +31,7 @@
         <li>
           <span>{member.name}</span><Chip>{roleNames[member.role]}</Chip>
           {#if member.manager}<Chip>チャンネル管理者</Chip>{/if}
-          {#if channel.capabilities.can_manage_managers.allowed}
+          {#if channel.capabilities.can_manage_managers.allowed && (member.manager || member.role !== 'guest')}
             <Button variant="quiet" disabled={s.busy} ariaLabel={`${member.name}のチャンネル管理者を${member.manager ? '解除する' : '付与する'}`} onclick={() => managing = { member, manager: !member.manager }}>{member.manager ? 'チャンネル管理者を解除する' : 'チャンネル管理者にする'}</Button>
           {/if}
           {#if member.id === self ? channel.capabilities.can_leave.allowed : channel.capabilities.can_remove_members.allowed}

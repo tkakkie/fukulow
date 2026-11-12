@@ -177,7 +177,12 @@
   let navFocusBaseline: { revision: number; active: Element | null } = { revision: -1, active: null }
   const topicSummaryFocus = createTopicSummaryFocusController()
 
-  const channelMemberController = $derived(panelOpen && activePanelTab === 'members' && selected ? session.channelMembers?.(selected.id) : undefined)
+  const selectedChannelId = $derived(selected?.id)
+  const channelMemberController = $derived.by(() => {
+    if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId) return undefined
+    const open = session.channelMembers
+    return untrack(() => open?.(selectedChannelId))
+  })
   const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
   $effect(() => {
     const controller = channelMemberController
