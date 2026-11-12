@@ -27,6 +27,7 @@ const sessionEndedError = 'セッションが終了しました。'
 export function createChannels(api: ChannelsApi, onReselect?: (id: string) => void) {
   let state: ChannelsState = { status: 'loading', channels: [], selectedId: null }
   let generation = 0 // bumped by create(): a load that started earlier is stale
+  let loadSeq = 0 // bumped by load(): an earlier load's response is superseded
   let closed = false // the session ended: nothing from an earlier call may reach this state
   const listeners = new Set<() => void>()
   const set = (patch: Partial<ChannelsState>) => {
@@ -42,10 +43,11 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       return () => listeners.delete(l)
     },
     async load() {
+      const seq = ++loadSeq
       const mine = generation
       set({ status: 'loading' })
       const r = await api.listChannels()
-      if (closed) return
+      if (closed || seq !== loadSeq) return
       if (!r.ok) return set({ status: mine !== generation ? 'ready' : 'error' })
       if (mine !== generation) {
         // stale: read before a create committed; merge so neither side is lost

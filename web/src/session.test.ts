@@ -288,7 +288,7 @@ it('explicitly selecting the current C9 Channel reattempts it while another Orga
 
 it('a Member panel created during C9 recovers on explicit Channel re-selection', async () => {
   const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({
-    members: [{ id: 'me', name: '本人', role: 'admin' }],
+    members: [{ id: 'me', name: '本人', role: 'admin', manager: false }],
   }))
   const { net, session } = open()
   try {
@@ -311,7 +311,7 @@ it('a Member panel created during C9 recovers on explicit Channel re-selection',
     await settle()
     expect(session.sync.get().channels.A.state).toBe('ready')
     expect(panel.get()).toMatchObject({ unavailable: false, loading: false,
-      members: [{ id: 'me', name: '本人', role: 'admin' }] })
+      members: [{ id: 'me', name: '本人', role: 'admin', manager: false }] })
     expect(list).toHaveBeenCalledExactlyOnceWith('', 'A')
   } finally {
     session.close()
@@ -354,7 +354,7 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
     expect(vi.getTimerCount()).toBe(0)
     expect(session.sync.getTimeline('A').composer.get().draft).toBe('失わない下書き')
 
-    list.mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin' }] }))
+    list.mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin', manager: false }] }))
     session.channels.select('A')
     await settle()
     net.subscribed('A', 100)
@@ -368,6 +368,84 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
     session.close()
     list.mockRestore()
     vi.useRealTimers()
+  }
+})
+
+it('refreshes Channel capabilities from the server when the メンバー tab is (re)opened and after a successful changeManager', async () => {
+  const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({
+    members: [
+      { id: 'me', name: '本人', role: 'member', manager: true },
+      { id: 'other', name: '佐藤', role: 'owner', manager: true },
+    ],
+  }))
+  const patch = vi.spyOn(api, 'changeChannelManager').mockResolvedValue(ok(undefined))
+  const { net, session } = open()
+  const privateChannel = (allowed: boolean): api.Channel => ({
+    id: 'A',
+    name: 'A',
+    visibility: 'private',
+    capabilities: {
+      can_add_members: { allowed },
+      can_remove_members: { allowed },
+      can_manage_managers: { allowed },
+      can_leave: { allowed: true },
+    },
+  })
+  try {
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ channels: [privateChannel(false)] }))
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(session.channels.get().channels[0].capabilities.can_manage_managers.allowed).toBe(false)
+
+    // Opening the メンバー tab refreshes Channel records/capabilities from the server.
+    const firstTab = session.channelMembers('A')
+    expect(net.lists).toHaveLength(2)
+    net.lists[1].resolve(ok({ channels: [privateChannel(true)] }))
+    await settle()
+    expect(session.channels.get().channels[0].capabilities).toMatchObject({
+      can_add_members: { allowed: true },
+      can_remove_members: { allowed: true },
+      can_manage_managers: { allowed: true },
+    })
+
+    // A successful changeManager triggers both listChannelMembers and the Channel capability refresh.
+    list.mockResolvedValueOnce(ok({
+      members: [
+        { id: 'me', name: '本人', role: 'member', manager: false },
+        { id: 'other', name: '佐藤', role: 'owner', manager: true },
+      ],
+    }))
+    const changing = firstTab.changeManager('me', false)
+    await settle()
+    expect(patch).toHaveBeenCalledWith('', 'A', 'me', { manager: false })
+    expect(net.lists).toHaveLength(3)
+    net.lists[2].resolve(ok({ channels: [privateChannel(false)] }))
+    await changing
+    expect(firstTab.get().members[0].manager).toBe(false)
+    expect(session.channels.get().channels[0].capabilities).toMatchObject({
+      can_add_members: { allowed: false },
+      can_remove_members: { allowed: false },
+      can_manage_managers: { allowed: false },
+    })
+
+    // Closing and reopening the メンバー tab refreshes Channel capabilities from the server again.
+    firstTab.close()
+    const reopenedTab = session.channelMembers('A')
+    expect(net.lists).toHaveLength(4)
+    net.lists[3].resolve(ok({ channels: [privateChannel(true)] }))
+    await settle()
+    expect(reopenedTab.get().loading).toBe(false)
+    expect(session.channels.get().channels[0].capabilities).toMatchObject({
+      can_add_members: { allowed: true },
+      can_remove_members: { allowed: true },
+      can_manage_managers: { allowed: true },
+    })
+  } finally {
+    session.close()
+    list.mockRestore()
+    patch.mockRestore()
   }
 })
 
@@ -428,6 +506,7 @@ it('composes unread, replies and topics over a single sync instance and fences r
       capabilities: {
         can_add_members: { allowed: false },
         can_remove_members: { allowed: false },
+        can_manage_managers: { allowed: false },
         can_leave: { allowed: true },
       },
       as_of_seq: 100,

@@ -152,12 +152,18 @@ export type ReplyChainQuery = NonNullable<import('./api-schema').operations['rep
 export const listReplyChain = (organizationId: string, channelId: string, anchor: string, query: ReplyChainQuery = {}, f: typeof fetch = fetch) =>
   call<ReplyChainPage>(f, `${channelPath(organizationId, channelId)}/messages/${encodeURIComponent(anchor)}/chain${querySuffix(query)}`, { cache: 'no-store' }, true)
 
+export type ChannelMember = components['schemas']['ChannelMember']
+export type ChannelMemberList = components['schemas']['ChannelMemberList']
+export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelManagerRequest']
+
 export const listChannelMembers = (org: string, channel: string, f: typeof fetch = fetch) =>
-  call<components['schemas']['MemberList']>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, { cache: 'no-store' }, true)
+  call<ChannelMemberList>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, { cache: 'no-store' }, true)
 export const addChannelMember = (org: string, channel: string, body: components['schemas']['AddChannelMemberRequest'], f: typeof fetch = fetch) =>
   call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, json(body), false)
 export const removeChannelMember = (org: string, channel: string, member: string, f: typeof fetch = fetch) =>
   call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members/${encodeURIComponent(member)}`, { method: 'DELETE' }, false)
+export const changeChannelManager = (org: string, channel: string, member: string, body: ChangeChannelManagerRequest, f: typeof fetch = fetch) =>
+  call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members/${encodeURIComponent(member)}`, { ...json(body), method: 'PATCH' }, false)
 
 export type MemberList = components['schemas']['MemberList']
 
