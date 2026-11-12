@@ -1,5 +1,9 @@
 use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConnection};
 
+mod context;
+pub(crate) use context::set_organization;
+pub use context::{account, account_read_only, organization, organization_read_only};
+
 pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_RETURN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
@@ -52,7 +56,18 @@ pub async fn read_only<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    let mut guard = ReadOnlyConnection {
+    transaction(pool, true, body).await
+}
+
+async fn transaction<T, E>(
+    pool: &PgPool,
+    read_only: bool,
+    body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<sqlx::Error>,
+{
+    let mut guard = TransactionConnection {
         connection: pool.acquire().await?,
         finished: false,
     };
@@ -60,25 +75,34 @@ where
     // rollback-on-drop cannot recover a BEGIN cancelled before that response.
     sqlx::Executor::execute(
         &mut *guard.connection,
-        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        if read_only {
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        } else {
+            "BEGIN"
+        },
     )
     .await?;
     let result = body(&mut guard.connection).await;
-    // End the snapshot even on ordinary body errors; only incomplete work is discarded.
-    let rolled_back = sqlx::Executor::execute(&mut *guard.connection, "ROLLBACK").await;
-    guard.finished = rolled_back.is_ok();
+    // Read snapshots always roll back; writes commit only a successful body.
+    let end = if !read_only && result.is_ok() {
+        "COMMIT"
+    } else {
+        "ROLLBACK"
+    };
+    let finished = sqlx::Executor::execute(&mut *guard.connection, end).await;
+    guard.finished = finished.is_ok();
     // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
     let value = result?;
-    rolled_back?;
+    finished?;
     Ok(value)
 }
 
-struct ReadOnlyConnection {
+struct TransactionConnection {
     connection: PoolConnection<Postgres>,
     finished: bool,
 }
 
-impl Drop for ReadOnlyConnection {
+impl Drop for TransactionConnection {
     fn drop(&mut self) {
         if !self.finished {
             self.connection.close_on_drop();
@@ -175,4 +199,4 @@ pub async fn validate_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
