@@ -614,3 +614,29 @@ Limits: one deterministic process run per mode; heap includes controller metadat
 
 - The measured SQL itself is unchanged (pgbench per-statement averages: history 0.087 vs 0.088 ms, replay 0.072 vs 0.076 ms with one client); the added cost is the three extra round trips (BEGIN, `set_config`, COMMIT ≈ 0.08 ms per transaction on loopback). This is why #314 step 3b sets the context inside the same statement for single-statement hot reads.
 - Limits: loopback inside the container (no network latency; a real network multiplies the round-trip cost), one dataset, warm cache, no RLS yet, pgbench rather than the server. Not a guarantee. Raw outputs stay outside Git.
+
+## Sign-in admission under a credential flood (#196 C, 2026-11-13 JST)
+
+Reproduce from the repository root, one run at a time, nothing else running (add `LOAD_MALLOC_MMAP_THRESHOLD=131072` for the allocator check):
+
+```bash
+LOAD_PORT=18096 SIGNIN_CONCURRENCY=64 SIGNIN_RATE=500 SIGNIN_SECONDS=60 SIGNIN_READ_RATE=2 SIGNIN_ACCOUNTS=1000 SIGNIN_IP_POOL=10000 SIGNIN_CORRECT_EVERY=10 SIGNIN_TIMEOUT_SECONDS=45 SERVER_REF=<commit> make load-signin
+```
+
+Conditions: Apple M5, 10 CPUs, 32 GiB, macOS 27 / Darwin 27.0.0; Docker 29.9.3 (10 CPUs, 7.7 GiB); Node v26.13.0; app and PostgreSQL from `load/compose.yml`, release image built per commit. 500 sign-ins/s for 60 s from at most 64 client requests in flight, over 10,000 client IPs: half wrong passwords for known Accounts, 40% unknown emails, every tenth a correct password; plus 2 Organization B reads/s. Credentials are random per run and never logged. Base = f11ba03 (merge base), pre-fix = 47280c5/1a563cf (admission after the Account lookup), fixed = 9677ca6 (admission before the lookup). Runs alternated base/branch.
+
+| Run | Sign-ins sent | Correct succeeded | 503 | Success p95 (ms) | App RSS peak (MiB) | DB connections in use, peak | App CPU mean |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| base, 3 runs | 24,325–26,264 | 100% | 0 | 240–286 | 735–869 | 5–6 | 346–382% |
+| pre-fix, 3 runs | 29,996–30,000 | 81–87% | 3,900–5,553 | 132–170 | 870–1,440 | 7–20 | 358–379% |
+| fixed | 30,000 | 85.2% | 4,297 | 153 | 660 | 5 | 373% |
+| fixed + mmap threshold | 29,991 | 83.7% | 4,353 | 143 | 90 | 5 | 356% |
+
+Organization B reads succeeded 120/120 in every run, p95 ≤ 6.4 ms. Rejected sign-ins (429/503) answered in about 1 ms at p50. Base sent fewer sign-ins because its slower responses hit the 64 in-flight cap, so base queueing is under-reported. Base returned some 429 for unknown emails (key cap); the branch evicts idle email buckets instead.
+
+Results:
+- The branch sheds overload uniformly with 503: 13–19% of correct sign-ins are rejected under this flood, in exchange for success p95 about half of base and no unbounded queue.
+- Admission before the lookup removes the DB lookup from a 503; the pre-fix runs reached 15–20 pool connections twice, the fixed run stayed at 5 (single run; one pre-fix run also stayed at 7).
+- RSS: base also reached 735–869 MiB, so the growth is not new in this PR. Idle RSS 12 s after drain was 376–472 MiB without the threshold and 14 MiB with it; peak dropped from 660 to 90 MiB at equal throughput and CPU. Freed 19 MiB Argon2 blocks retained by glibc malloc explain it, not live request state.
+
+Limits: one host, loopback, short 60 s runs, one to three runs per variant; DB connection peaks varied between runs. The client caps in-flight requests at 64, so it does not model an attacker with unbounded concurrency. The allocator setting was tested only as a run-time environment variable, not as an image default.

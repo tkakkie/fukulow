@@ -15,6 +15,9 @@ services:
     ulimits:
       nofile: 65536
     environment:
+      # signin.ts adds MALLOC_MMAP_THRESHOLD_/MALLOC_ARENA_MAX in its app-only
+      # override when LOAD_MALLOC_MMAP_THRESHOLD/LOAD_MALLOC_ARENA_MAX are set.
+      # Keep them absent here so an unset control preserves glibc defaults.
       FUKULOW_ADDR: 0.0.0.0:8080
       DATABASE_URL: postgres://fukulow_app:${LOAD_APP_PASSWORD:?Set LOAD_APP_PASSWORD}@db:5432/fukulow
       FUKULOW_COOKIE_SECURE: "false"

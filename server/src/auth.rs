@@ -15,21 +15,22 @@ use crate::AppState;
 
 pub mod authorization;
 pub use authorization::{Action, Actor, Capability, OrganizationCapabilities, Resource, authorize};
+#[cfg(test)]
+mod admission_tests;
 mod cleanup;
 #[cfg(test)]
 mod credential_tests;
 pub mod invites;
 pub mod members;
 mod password;
-use password::{check_password, hash_password};
+use password::{PasswordWorkers, check_password, hash_password};
 mod session;
 mod throttle;
 pub use cleanup::SessionCleanup;
 pub use session::{SessionChanges, SubscriptionRecheck, SubscriptionScope};
 pub use throttle::SignInThrottle;
 
-// Bound Argon2 memory/CPU work independently from Tokio blocking-thread capacity.
-static PASSWORD_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+static PASSWORD_WORKERS: PasswordWorkers = PasswordWorkers::new();
 
 const COOKIE: &str = "fukulow_session";
 const SECURE_COOKIE: &str = "__Host-fukulow_session";
@@ -275,7 +276,8 @@ pub async fn setup_status(State(state): State<AppState>) -> Result<Response, Api
     (status = 409, description = "Setup already completed", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
-    (status = 500, description = "Database or password hashing failure while creating the first Organization and Owner", body = ErrorBody)))]
+    (status = 500, description = "Database or password hashing failure while creating the first Organization and Owner", body = ErrorBody),
+    (status = 503, description = "Argon2 queue is full or the one second admission wait expired; password admission unavailable; no setup writes", body = ErrorBody)))]
 pub async fn setup(
     State(state): State<AppState>,
     ApiJson(input): ApiJson<SetupRequest>,
@@ -286,7 +288,7 @@ pub async fn setup(
 async fn setup_with_workers(
     state: AppState,
     input: SetupRequest,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
 ) -> Result<Response, ApiError> {
     setup_with_hash(state, input, |password| hash_password(password, workers)).await
 }
@@ -404,15 +406,27 @@ impl ToSchema for RetryAfterSeconds {}
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts", body = ErrorBody,
         headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
-    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody)))]
+    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody),
+    (status = 503, description = "Argon2 queue is full or the one second admission wait expired; password admission unavailable; no Account Session created", body = ErrorBody)))]
 pub async fn sign_in(
     State(state): State<AppState>,
     peer: ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     ApiJson(input): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
+    web_sign_in_with_entropy(state, peer, headers, input, &PASSWORD_WORKERS, fill_random).await
+}
+
+async fn web_sign_in_with_entropy(
+    state: AppState,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    input: SignInRequest,
+    workers: &'static PasswordWorkers,
+    entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
+) -> Result<Response, ApiError> {
     let session =
-        sign_in_with_workers(state.clone(), peer, headers, input, &PASSWORD_WORKERS).await?;
+        sign_in_with_entropy(state.clone(), peer, headers, input, workers, entropy).await?;
     let mut response = (
         [
             (
@@ -439,7 +453,8 @@ pub async fn sign_in(
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts; budget shared with web sign-in", body = ErrorBody,
         headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
-    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody)))]
+    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody),
+    (status = 503, description = "Argon2 queue is full or the one second admission wait expired; password admission unavailable; no Account Session created", body = ErrorBody)))]
 pub async fn native_sign_in(
     State(state): State<AppState>,
     peer: ConnectInfo<std::net::SocketAddr>,
@@ -456,7 +471,7 @@ async fn sign_in_with_workers(
     peer: ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     input: SignInRequest,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
 ) -> Result<NativeSessionResponse, ApiError> {
     sign_in_with_entropy(state, peer, headers, input, workers, fill_random).await
 }
@@ -466,7 +481,7 @@ async fn sign_in_with_entropy(
     peer: ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     input: SignInRequest,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
     entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
 ) -> Result<NativeSessionResponse, ApiError> {
     authorization::require(Actor::Anonymous, Action::Public, Resource::Global)?;
@@ -482,6 +497,8 @@ async fn sign_in_with_entropy(
     attempt
         .account(email.clone())
         .map_err(ApiError::throttled)?;
+    // Admission covers lookup too, so overload does not turn into a DB flood.
+    let permit = workers.acquire().await?;
     let stored = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, password_hash FROM accounts WHERE email = $1",
     )
@@ -489,7 +506,7 @@ async fn sign_in_with_entropy(
     .fetch_optional(&state.pool)
     .await?;
     let (user_id, password_hash) = stored.unzip();
-    if !check_password(input.password, password_hash, attempt, workers).await? {
+    if !check_password(input.password, password_hash, attempt, permit).await? {
         return Err(ApiError::unauthorized());
     }
     let user_id = user_id.ok_or_else(ApiError::unauthorized)?;
@@ -891,9 +908,21 @@ mod tests {
     // The real app uses the process-global PASSWORD_WORKERS. These saturation tests
     // need an isolated semaphore so holding every permit cannot stall parallel tests.
     // This router uses the same handlers and extractors as crate::app, passing only
-    // that semaphore explicitly, and matches its JSON body limit. Other routes and
+    // those password workers explicitly, and matches its JSON body limit. Other routes and
     // the static fallback do not participate in setup or sign-in requests.
-    fn app_with_workers(state: AppState, workers: &'static tokio::sync::Semaphore) -> axum::Router {
+    pub(super) fn app_with_workers(
+        state: AppState,
+        workers: &'static PasswordWorkers,
+    ) -> axum::Router {
+        app_with_workers_and_entropy(state, workers, fill_random)
+    }
+
+    pub(super) fn app_with_workers_and_entropy(
+        state: AppState,
+        workers: &'static PasswordWorkers,
+        entropy: impl Fn(&mut [u8]) -> Result<(), ApiError> + Clone + Send + Sync + 'static,
+    ) -> axum::Router {
+        let web_entropy = entropy.clone();
         axum::Router::new()
             .route(
                 "/api/v1/setup",
@@ -903,13 +932,24 @@ mod tests {
             )
             .route(
                 "/api/v1/session",
-                axum::routing::post(
-                    move |State(state), peer, headers, ApiJson(input)| async move {
-                        sign_in_with_workers(state, peer, headers, input, workers)
+                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
+                    let entropy = web_entropy.clone();
+                    async move {
+                        web_sign_in_with_entropy(state, peer, headers, input, workers, entropy)
+                            .await
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/native/session",
+                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
+                    let entropy = entropy.clone();
+                    async move {
+                        sign_in_with_entropy(state, peer, headers, input, workers, entropy)
                             .await
                             .map(IntoResponse::into_response)
-                    },
-                ),
+                    }
+                }),
             )
             .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
             .with_state(state)
@@ -1013,9 +1053,14 @@ mod tests {
                     let mut attempt = throttle.begin(ip).unwrap();
                     attempt.account("owner@example.com".into()).unwrap();
                     assert!(
-                        check_password(password.into(), stored.clone(), attempt, &PASSWORD_WORKERS)
-                            .await
-                            .unwrap()
+                        check_password(
+                            password.into(),
+                            stored.clone(),
+                            attempt,
+                            PASSWORD_WORKERS.acquire().await.unwrap(),
+                        )
+                        .await
+                        .unwrap()
                     );
                 }
             }
@@ -1027,7 +1072,7 @@ mod tests {
                         "incorrect password".into(),
                         stored.clone(),
                         attempt,
-                        &PASSWORD_WORKERS
+                        PASSWORD_WORKERS.acquire().await.unwrap(),
                     )
                     .await
                     .unwrap()
@@ -1044,8 +1089,13 @@ mod tests {
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
         let peer: std::net::SocketAddr = "192.0.2.1:1234".parse().unwrap();
-        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-        let _workers = WORKERS.acquire_many(4).await.unwrap();
+        static WORKERS: PasswordWorkers = PasswordWorkers::new();
+        let _workers = WORKERS.running.acquire_many(4).await.unwrap();
+        let _queue = WORKERS
+            .waiting
+            .acquire_many(WORKERS.waiting.available_permits() as u32)
+            .await
+            .unwrap();
         for by_ip in [false, true] {
             let throttle = SignInThrottle::default();
             for _ in 0..if by_ip { 20 } else { 5 } {
@@ -1158,8 +1208,8 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-        let _workers = WORKERS.acquire_many(4).await.unwrap();
+        static WORKERS: PasswordWorkers = PasswordWorkers::new();
+        let _workers = WORKERS.running.acquire_many(4).await.unwrap();
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
             .execute(&mut *tx)
