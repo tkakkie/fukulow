@@ -117,6 +117,7 @@ jobs:
           node scripts/check-versions.ts
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       POSTGRES_PASSWORD: ci-compose-only
       POSTGRES_APP_PASSWORD: ci-compose-app-only
@@ -137,8 +138,13 @@ jobs:
             if (!url || !token) { throw new Error("Actions cache credentials are not available"); }
             core.exportVariable("ACTIONS_RESULTS_URL", url);
             core.exportVariable("ACTIONS_RUNTIME_TOKEN", token);
+      # Only main writes the layer cache: a PR export once hung for 17 minutes, and PRs read main's layers anyway.
       - name: Build image with GitHub Actions layer cache
-        run: docker buildx bake --load --file compose.yml --set "app.cache-from=type=gha,scope=docker" --set "app.cache-to=type=gha,scope=docker,mode=max"
+        timeout-minutes: 20
+        run: |
+          cache=(--set "app.cache-from=type=gha,scope=docker")
+          if [ "$GITHUB_EVENT_NAME" = push ]; then cache+=(--set "app.cache-to=type=gha,scope=docker,mode=max"); fi
+          docker buildx bake --load --file compose.yml "${cache[@]}"
         env:
           POSTGRES_PASSWORD: ci-compose-only
       - name: Both proxy profiles reject forwarded-IP spoofing
@@ -155,6 +161,7 @@ jobs:
           node scripts/check-db-upgrade.ts
         env:
           CHECK_COMPOSE_IMAGE: fukulow-app
+          CHECK_UPGRADE_CACHE_FROM: type=gha,scope=docker
       - run: docker compose --profile caddy up -d --no-build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
