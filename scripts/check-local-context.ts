@@ -1,8 +1,9 @@
-// Conservative raw-text guard for tracked Rust/SQL: require literal true as
-// set_config's third argument, reject non-LOCAL SET within 200 chars of a bare
-// fukulow word (fukulow_session or FUKULOW_WS are other identifiers),
-// and reject Unicode escape prefixes. No parsing, decoding or comment stripping:
+// Conservative raw-text guard for tracked Rust/SQL: allow only strict local
+// set_config calls and unambiguous SET forms; reject pg_settings and Unicode
+// escape prefixes. No parsing, decoding or comment stripping:
 // quotes are ordinary characters; false positives in comments/strings are accepted.
+// Dynamic SQL building keywords/function names at runtime (EXECUTE with
+// concatenation) is out of scope and must be covered by review.
 // Diagnostics contain only file:line, never matched text or bound data.
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -11,34 +12,21 @@ import { fileURLToPath } from 'node:url'
 
 export function violations(source: string): number[] {
   const offsets: number[] = []
-  for (const match of source.matchAll(/\bset_config\s*\(/gi)) {
-    const args: string[] = []
-    let start = match.index + match[0].length
-    let depth = 0
-    let closed = false
-    for (let i = start; i < source.length; i++) {
-      const char = source[i]
-      if (char === '(') depth++
-      if (char === ')' && depth === 0) {
-        args.push(source.slice(start, i).trim())
-        closed = true
-        break
-      }
-      if (char === ')') depth--
-      if (char === ',' && depth === 0) {
-        args.push(source.slice(start, i).trim())
-        start = i + 1
-      }
-    }
-    if (!closed || args.length !== 3 || !args[0] || !args[1] || !/^true$/i.test(args[2])) {
-      offsets.push(match.index)
-    }
+  const localCall = /set_config\([ \t\r\n]*'[A-Z0-9_.{}]+'[ \t\r\n]*,[ \t\r\n]*(?:\$[0-9]+|:[A-Z_][A-Z0-9_]*(?:::[A-Z_][A-Z0-9_]*)?|'[A-Z0-9_.]*')[ \t\r\n]*,[ \t\r\n]*true[ \t\r\n]*\)/iy
+  for (const match of source.matchAll(/\bset_config\b/gi)) {
+    localCall.lastIndex = match.index
+    if (!localCall.test(source)) offsets.push(match.index)
   }
   for (const match of source.matchAll(/\bSET\b/gi)) {
     const after = source.slice(match.index + match[0].length)
-    if (!/^\s+LOCAL\b/i.test(after) && /^[\s\S]{0,200}fukulow(?![\w])/i.test(after)) offsets.push(match.index)
+      .replace(/^[ \t\r\n]*(?:SESSION\b[ \t\r\n]*)?/i, '')
+    if (/^LOCAL\b/i.test(after)) continue
+    const identifier = /^[A-Z_][A-Z0-9_]*/i.exec(after)?.[0]
+    if (identifier?.toLowerCase() === 'fukulow' || /^(?:\/\*|--|\/\/|["']|U&|\$|\\)/i.test(after)) {
+      offsets.push(match.index)
+    }
   }
-  for (const match of source.matchAll(/U&['"]/gi)) offsets.push(match.index)
+  for (const match of source.matchAll(/pg_settings|U&['"]/gi)) offsets.push(match.index)
   return [...new Set(offsets.map(offset => source.slice(0, offset).split('\n').length))].sort((a, b) => a - b)
 }
 
