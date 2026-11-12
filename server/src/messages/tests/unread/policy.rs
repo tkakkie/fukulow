@@ -20,6 +20,7 @@ impl AccessCase {
                 organization: self.organization,
                 role: self.role,
                 channel_member: self.granted,
+                channel_manager: false,
             }
         } else {
             Actor::Anonymous

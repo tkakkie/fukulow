@@ -218,6 +218,10 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
         let organization = organization(&pool).await;
         let (reader, token) = member(&pool, organization).await;
         let channel = channel(&pool, organization, reader, true).await;
+        sqlx::query("UPDATE channel_members SET manager=true WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+            .bind(organization).bind(channel).bind(reader).execute(&pool).await.unwrap();
+        let old: Uuid = sqlx::query_scalar("SELECT grant_id FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+            .bind(organization).bind(channel).bind(reader).fetch_one(&pool).await.unwrap();
         let mut state = state(&pool);
         state.session_changes = SessionChanges::with_recheck_timing(
             Duration::from_millis(50),
@@ -232,6 +236,10 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
         sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(organization).bind(channel).bind(reader).execute(&pool).await.unwrap();
         if regrant {
             grant(&pool, organization, channel, reader).await;
+            let (new,right): (Uuid,bool) = sqlx::query_as("SELECT grant_id,manager FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+                .bind(organization).bind(channel).bind(reader).fetch_one(&pool).await.unwrap();
+            assert_ne!(old, new);
+            assert!(!right);
         }
         let start = tokio::time::Instant::now();
         access_lost(&mut socket, channel).await;
@@ -312,11 +320,18 @@ async fn ungranted_guest_cannot_join_existing_public_topic_but_explicit_grant_pe
 async fn effective_loss_http_denial_matrix_including_guest_mark_read_has_positive_controls(
     pool: PgPool,
 ) {
-    for case in ["guest_none", "guest_removed", "demoted", "private_removed"] {
+    for case in [
+        "guest_none",
+        "guest_removed",
+        "demoted",
+        "private_removed",
+        "owner_private",
+        "admin_private",
+    ] {
         let f = fixture(&pool).await;
         owner(&pool, &f).await;
         let (reader, token) = member(&pool, f.organization).await;
-        let c = if case == "private_removed" {
+        let c = if case == "private_removed" || case.ends_with("_private") {
             channel(&pool, f.organization, f.member, true).await
         } else {
             f.channel
@@ -325,6 +340,19 @@ async fn effective_loss_http_denial_matrix_including_guest_mark_read_has_positiv
             sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
                 .bind(f.organization)
                 .bind(reader)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        if case.ends_with("_private") {
+            sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2")
+                .bind(f.organization)
+                .bind(reader)
+                .bind(if case == "owner_private" {
+                    "owner"
+                } else {
+                    "admin"
+                })
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -440,9 +468,14 @@ async fn effective_loss_http_denial_matrix_including_guest_mark_read_has_positiv
         );
         let after:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM messages WHERE organization_id=$1 AND channel_id=$2),(SELECT count(*) FROM topics WHERE organization_id=$1 AND channel_id=$2),(SELECT seq FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2)").bind(f.organization).bind(c).fetch_one(&pool).await.unwrap();
         assert_eq!(before, after);
+        let mut socket = f.server.connect(&token).await;
+        subscribe(&mut socket, c, 0).await;
+        assert_eq!(event(&mut socket).await["code"], "channel_not_found");
         // Explicit grant permits all reads and HTTP mark-read, and establishes
         // the current committed baseline rather than reviving the old position.
         grant(&pool, f.organization, c, reader).await;
+        subscribe(&mut socket, c, before.2).await;
+        ready(&mut socket, c, before.2).await;
         for suffix in reads {
             assert_eq!(
                 request(

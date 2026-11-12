@@ -100,7 +100,7 @@ it('encodes Topic projection paths and generated query fields, preserving zero W
   for (const [, init] of f.mock.calls) expect(init).toMatchObject({ credentials: 'same-origin', cache: 'no-store' })
 })
 
-import { listReplyChain } from './api'
+import { addChannelMember, changeChannelManager, listChannelMembers, listReplyChain, removeChannelMember } from './api'
 
 it('encodes Reply chain anchors and exclusive continuation using generated query fields', async () => {
   const f = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'))
@@ -111,4 +111,28 @@ it('encodes Reply chain anchors and exclusive continuation using generated query
     '/api/v1/orgs/o/channels/c/messages/m/chain?after_seq=7',
   ])
   for (const [, init] of f.mock.calls) expect(init).toMatchObject({ credentials: 'same-origin', cache: 'no-store' })
+})
+
+it('encodes Channel Member list, add, remove and manager PATCH with 204 success', async () => {
+  const f = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response('{"members":[{"id":"m1","name":"田中","role":"member","manager":true}]}', { status: 200 }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+  expect(await listChannelMembers('o /1', 'c/2', f)).toEqual({
+    ok: true,
+    data: { members: [{ id: 'm1', name: '田中', role: 'member', manager: true }] },
+  })
+  expect(await addChannelMember('o /1', 'c/2', { member_id: 'm /3' }, f)).toEqual({ ok: true, data: undefined })
+  expect(await removeChannelMember('o /1', 'c/2', 'm /3', f)).toEqual({ ok: true, data: undefined })
+  expect(await changeChannelManager('o /1', 'c/2', 'm /3', { manager: true }, f)).toEqual({ ok: true, data: undefined })
+  expect(await changeChannelManager('o', 'c', 'm1', { manager: false }, f)).toEqual({ ok: true, data: undefined })
+  expect(f.mock.calls.map(([path, init]) => [path, init?.method ?? 'GET', init?.body])).toEqual([
+    ['/api/v1/orgs/o%20%2F1/channels/c%2F2/members', 'GET', undefined],
+    ['/api/v1/orgs/o%20%2F1/channels/c%2F2/members', 'POST', '{"member_id":"m /3"}'],
+    ['/api/v1/orgs/o%20%2F1/channels/c%2F2/members/m%20%2F3', 'DELETE', undefined],
+    ['/api/v1/orgs/o%20%2F1/channels/c%2F2/members/m%20%2F3', 'PATCH', '{"manager":true}'],
+    ['/api/v1/orgs/o/channels/c/members/m1', 'PATCH', '{"manager":false}'],
+  ])
 })

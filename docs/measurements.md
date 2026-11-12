@@ -548,6 +548,58 @@ Peak retained records: 100,000 before, 1,000 after. At 100,000 Messages, absolut
 
 Limits: one deterministic process run per mode; heap includes controller metadata, Topic baseline identity bookkeeping and the test runtime, so it is not a per-Message byte estimate or an allocation/latency benchmark. Upstream sync and Topic caches, browser rendering and network scheduling are excluded. Baselines refresh every 1,000 Messages here; missing/stale scope baselines, a held aggregate or a long visit intentionally retain wider windows. The bound depends on those windows, not a fixed record cap. Separate regression tests cover baseline subtraction after local reads, held Topic positions, unresolved and advancing visits, duplicate replay, and seeded equivalence with shared events and out-of-order/backward baselines (pruned counts may be null until a post-position refetch recovers). Shared contract fixtures are unchanged.
 
+## RLS baseline before tenant RLS (#314 step 2, 2026-11-12)
+
+- Purpose: the "before" side for #314 step 5 (same harness, dataset and plans after RLS). Source: main f11ba03, clean tree, no RLS policies. Apple M5, 10 CPUs, 32 GiB; Docker Desktop 29.9.3 VM 10 CPUs / 7.748 GiB; PostgreSQL 18.6 (image e3d24f69…, defaults: shared_buffers 128MB, work_mem 4MB); k6 1.8.2; host Node 26.13.0; Rust 1.99.0 release image. Shared machine, no other suite or AI worker running.
+- Load reproduce: `CHANNELS=1 SUBSCRIBERS=20 PUBLISHERS=2 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=30 READY_TIMEOUT_SECONDS=15 DRAIN_TIMEOUT_SECONDS=10 LOAD_RESULT_DIR="$LOAD_ARTIFACTS" make load-record`, three sequential runs, fresh isolated DB each, app connects as `fukulow_app`.
+
+| Run | Sends (accepted) | Deliveries / missing / errors | Delivery ms median / p95 / p99 / max | Send HTTP ms median / p95 / p99 | Top-level queries per send | Peak CPU app / db % |
+|---|---:|---|---|---|---:|---|
+| 1 | 600 (600) | 12,000 / 0 / 0 | 8 / 13 / 16 / 46 | 7 / 11 / 13 | 9.008 | 6.49 / 10.95 |
+| 2 | 600 (600) | 12,000 / 0 / 0 | 9 / 12 / 16 / 50 | 7 / 11 / 13 | 9.008 | 6.90 / 12.62 |
+| 3 | 600 (600) | 12,000 / 0 / 0 | 9 / 13 / 17 / 47 | 7 / 11 / 14 | 9.008 | 6.91 / 12.96 |
+
+- All 1,244 checks passed in each run; 13.035 statements per send including BEGIN/COMMIT and nested. Highest total SQL time per run: Message INSERT, sequence upsert, session AUTH, fan-out `member_access`.
+- Plans reproduce: fresh PostgreSQL 18.6, `sqlx migrate run`, `deploy/db-roles.sql` + `deploy/db-grants.sql`, then `psql -f load/hot-plans/seed.sql` as owner and `psql -X [-v generic=1] -f load/hot-plans/plans.sql` as `fukulow_app` six times per mode; medians of passes 2–6. Without `generic`, the `auto.*` sections run timeline and Unread counts six more times in the same session, then explain under default `plan_cache_mode`. Dataset: Org A 10,000 Members (every 50th a guest), 40 public + 10 private Channels, measured Channel 100,000 Messages (70% in 2,000 Topics), 2,000 Messages elsewhere; Org B 1,000 Members, 10 Channels × 5,000; 406,800 Channel read positions at the last 100 Messages; the measured Member also has all 2,000 Topic positions at that cut-off (hot-Channel Unread 100). Writes rolled back.
+
+| Query (Execution Time, ms) | Custom plan | Forced generic |
+|---|---:|---:|
+| AUTH session lookup | 0.024 | 0.025 |
+| Visibility check (VIS) / watermark shared lock / watermark | 0.020 / 0.012 / 0.008 | 0.022 / 0.018 / 0.008 |
+| Send: Member FOR SHARE / Channel public / idempotency lookup / reply parent | 0.021 / 0.005 / 0.012 / 0.041 | 0.024 / 0.006 / 0.022 / 0.039 |
+| Send: Channel advisory lock / sequence upsert / Topic join / Topic id | 0.006 / 0.049 / 0.042 / 0.007 | 0.008 / 0.053 / 0.039 / 0.009 |
+| Send: Message INSERT / Topic record | 0.197 / 0.035 | 0.196 / 0.035 |
+| History latest page / old page (51 rows) | 0.033 / 0.036 | 0.037 / 0.036 |
+| Timeline latest page (51 of 2,000 Topics) | 37.659 | 144.048 |
+| Timeline single Topic | 0.137 | 7.921 |
+| Replay 50 after cursor | 0.053 | 0.060 |
+| Fan-out `member_access`, 1,024 candidates / `access_rows`, 1,024 subscriptions | 0.978 / 2.442 | 1.077 / 2.568 |
+| Unread: visible Channel list / counts for 50 Channels | 0.624 / 20.623 | 0.704 / 3.973 |
+| Mark-read: position FOR UPDATE / Channel update / Topic exists / Topic upsert | 0.014 / 0.043 / 0.013 / 0.029 | 0.011 / 0.035 / 0.013 / 0.028 |
+
+- Default `plan_cache_mode` (what SQLx's cached statements get) used the generic plan after the repeated executions: timeline 141.150 ms (range 140.588–141.706) with 644,699 shared-buffer hits (custom: 5,566) via Incremental Sort + GroupAggregate over all 70,000 Topic Messages; Unread counts 3.868 ms (3,814 hits, same as custom). Step 5 compares custom, generic and `auto.*`. Tracked in #326.
+- Limits: single machine, one dataset shape, warm cache, single-session EXPLAIN without concurrency; EXPLAIN timing overhead included; small-load run only (20 sockets), not capacity. Not a guarantee. Raw outputs stay outside Git in `/private/tmp/fukulow-314-baseline` (plans in `v2/`; load artifacts hold server logs and a source patch: do not attach publicly).
+
+### Transaction-local Organization setting cost (#314, 2026-11-13)
+
+- Purpose: the cost of running each hot query inside a transaction that first sets `fukulow.organization_id` locally (the #314 helper), still without RLS. Same machine, PostgreSQL 18.6 and `hot-plans` dataset as above; source main 1069a9f.
+- Plans reproduce: `psql -X [-v generic=1] -v org_context=1 -f load/hot-plans/plans.sql` as `fukulow_app`, six passes per mode, medians of passes 2–6, compared with passes without `org_context` taken in the same session. Execution Time of every measured statement stays within run-to-run noise (custom → custom+context: VIS 0.017 → 0.022, history latest 0.034 → 0.032, replay 0.050 → 0.056, timeline latest 33.900 → 34.086, fan-out `member_access` 0.952 → 0.961, Unread counts 19.478 → 19.660 ms; generic plans likewise). The `set_config` statement itself: median 0.002–0.003 ms, max 0.007 ms.
+- Latency reproduce: `LATENCY_SECONDS=30 node load/hot-latency.ts`, with `HOTPLANS_CONTAINER` naming the throwaway container and the app role's test-only password in the libpq password variable (pgbench inside the container, prepared statements, per-transaction logs), three runs; medians of the three.
+
+| Script | Clients | Context | Transactions/s | p50 / p95 / p99 ms (p95 range) |
+|---|---:|---|---:|---|
+| History latest page | 1 | none | 11,560 | 0.086 / 0.092 / 0.100 (0.088–0.094) |
+| History latest page | 1 | BEGIN, set, query, COMMIT | 5,934 | 0.167 / 0.180 / 0.189 (0.177–0.180) |
+| History latest page | 8 | none | 73,987 | 0.075 / 0.192 / 0.233 (0.184–0.195) |
+| History latest page | 8 | BEGIN, set, query, COMMIT | 52,262 | 0.096 / 0.309 / 0.380 (0.305–0.320) |
+| Replay 50 after cursor | 1 | none | 13,704 | 0.070 / 0.080 / 0.086 (0.080–0.081) |
+| Replay 50 after cursor | 1 | BEGIN, set, query, COMMIT | 6,394 | 0.155 / 0.167 / 0.180 (0.165–0.169) |
+| Replay 50 after cursor | 8 | none | 80,462 | 0.070 / 0.173 / 0.216 (0.166–0.174) |
+| Replay 50 after cursor | 8 | BEGIN, set, query, COMMIT | 55,191 | 0.091 / 0.295 / 0.374 (0.281–0.295) |
+
+- The measured SQL itself is unchanged (pgbench per-statement averages: history 0.087 vs 0.088 ms, replay 0.072 vs 0.076 ms with one client); the added cost is the three extra round trips (BEGIN, `set_config`, COMMIT ≈ 0.08 ms per transaction on loopback). This is why #314 step 3b sets the context inside the same statement for single-statement hot reads.
+- Limits: loopback inside the container (no network latency; a real network multiplies the round-trip cost), one dataset, warm cache, no RLS yet, pgbench rather than the server. Not a guarantee. Raw outputs stay outside Git.
+
 ## Sustained write throughput (#309, 2026-11-13 JST)
 
 Reproduce from the repository root, one mode at a time, nothing else running:

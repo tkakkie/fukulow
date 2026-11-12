@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 28 operations document shutdown, including readiness.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 187;
+// All 29 operations document shutdown, including readiness and manager PATCH.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 197;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -105,7 +105,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 28);
+        assert_eq!(operations, 29);
     }
 }
 
@@ -143,7 +143,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 28);
+    assert_eq!(requests.len(), 29);
     requests.extend(
         [
             "/",
@@ -1013,6 +1013,10 @@ fn channel_membership_paths_capabilities_and_channel_only_loss_contract_are_gene
             "/api/v1/orgs/{org}/channels/{id}/members/{member_id}",
             "delete",
         ),
+        (
+            "/api/v1/orgs/{org}/channels/{id}/members/{member_id}",
+            "patch",
+        ),
     ] {
         let operation = &doc["paths"][path][method];
         assert!(operation.is_object());
@@ -1042,12 +1046,74 @@ fn channel_membership_paths_capabilities_and_channel_only_loss_contract_are_gene
             .len(),
         1
     );
-    for name in ["can_add_members", "can_remove_members", "can_leave"] {
+    for name in [
+        "can_add_members",
+        "can_remove_members",
+        "can_leave",
+        "can_manage_managers",
+    ] {
         assert!(
             schemas["ChannelCapabilities"]["properties"]
                 .get(name)
                 .is_some()
         );
+        assert!(
+            schemas["ChannelCapabilities"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(name))
+        );
+    }
+    assert_eq!(
+        schemas["ChangeChannelManagerRequest"]["properties"]["manager"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        schemas["ChangeChannelManagerRequest"]["required"],
+        json!(["manager"])
+    );
+    assert_eq!(
+        schemas["ChannelMember"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["id", "manager", "name", "role"]
+    );
+    assert!(
+        schemas["ChannelMember"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("manager"))
+    );
+    assert_eq!(
+        doc["paths"]["/api/v1/orgs/{org}/channels/{id}/members"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ChannelMemberList"
+    );
+    let patch = &doc["paths"]["/api/v1/orgs/{org}/channels/{id}/members/{member_id}"]["patch"];
+    assert_eq!(
+        patch["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ChangeChannelManagerRequest"
+    );
+    for (status, errors) in [
+        (
+            "400",
+            &["channel_manager_private_only", "channel_manager_guest"][..],
+        ),
+        ("403", &["forbidden"][..]),
+        ("404", &["member_not_found", "channel_grant_not_found"][..]),
+        ("409", &["last_channel_manager"][..]),
+    ] {
+        assert_eq!(
+            patch["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorBody"
+        );
+        let description = patch["responses"][status]["description"].as_str().unwrap();
+        for error in errors {
+            assert!(description.contains(error));
+        }
     }
     assert_eq!(
         schemas["Member"]["properties"]

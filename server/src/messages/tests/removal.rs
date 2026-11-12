@@ -101,8 +101,10 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
                 }
             })
         };
+        // #311 excludes new Member SHARE locks before touching grants. Removal
+        // may now wait on its target Member before it reaches the DELETE.
         tokio::time::timeout(Duration::from_secs(2),async {loop {
-            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'DELETE FROM channel_members%' OR query LIKE 'UPDATE users SET role=%'))").fetch_one(&pool).await.unwrap();
+            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'DELETE FROM channel_members%' OR query LIKE 'UPDATE users SET role=%' OR query LIKE 'SELECT name,role,membership_revision%FOR NO KEY UPDATE'))").fetch_one(&pool).await.unwrap();
             if blocked {break;} tokio::task::yield_now().await;
         }}).await.unwrap();
         assert!(!revoke.is_finished());
