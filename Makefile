@@ -1,4 +1,4 @@
-.PHONY: api load load-record load-throughput load-image
+.PHONY: api load load-record load-throughput load-image load-signin
 api:
 	cargo run --locked --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
@@ -43,3 +43,20 @@ load-throughput:
 
 load-image:
 	@echo $(call shell_quote,$(K6_IMAGE))
+
+# Isolated sign-in before/after measurement; test-only seed, no external credentials.
+# SERVER_REF: archive/build any local git ref; omit for this working tree (incl. edits).
+# LOAD_APP_IMAGE: existing server image instead of a source build (exclusive with SERVER_REF).
+# LOAD_PORT=18096; LOAD_RESULT_DIR defaults to OS temp, must be outside this checkout.
+# SIGNIN_CONCURRENCY=64: maximum in-flight sign-ins; SIGNIN_RATE=100: offered starts/s.
+# SIGNIN_SECONDS=60; SIGNIN_READ_RATE=2: Organization B authenticated GETs/s (cap 4 in flight).
+# SIGNIN_ACCOUNTS=1000: each known/correct seed pool; SIGNIN_CORRECT_EVERY=10: every Nth is correct.
+# Remaining attempts alternate wrong known / unique unknown emails; SIGNIN_IP_POOL=10000.
+# IPs rotate through a trusted synthetic header in this disposable stack only; pool=1 tests IP throttle.
+# SIGNIN_TIMEOUT_SECONDS=45 bounds requests/drain. At concurrency cap, starts are counted as dropped.
+# Artifacts: metadata.json + results.json (status 0 = transport failure), no response bodies/credentials.
+# Latency is full HTTP round trip, nearest-rank p50/p95/p99, all/success/per-status/per-kind.
+# CPU/RSS + admin pg_stat_activity sample about every 2s during scheduling/drain; sampled peaks only.
+# DB in-use = app-role client connections incl. idle; active is also reported, sampler excluded.
+load-signin:
+	node load/signin.ts

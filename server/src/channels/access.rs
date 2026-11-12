@@ -216,34 +216,32 @@ impl auth::SubscriptionRecheck for AccessChanges {
 }
 
 async fn check_entries(pool: &sqlx::PgPool, entries: &[Arc<Entry>]) -> Result<(), sqlx::Error> {
-    for batch in entries.chunks(1000) {
-        let rows = access_rows(pool, batch).await?;
-        for (entry, (visible, grant, current)) in batch.iter().zip(rows) {
-            // A public shortcut is continuous without its redundant grant. A
-            // subscription originally dependent on a grant retains its lifetime.
-            let mut captured = entry.grant.lock().unwrap_or_else(|e| e.into_inner());
-            let lost = !visible || (captured.is_some() && grant.is_some() && *captured != grant);
-            if !current {
-                entry.status.send_if_modified(|status| {
-                    if *status < 2 {
-                        *status = 3;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            } else if lost {
-                entry.status.send_if_modified(|status| {
-                    if *status == 0 {
-                        *status = 1;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            } else {
-                *captured = grant;
-            }
+    let rows = access_rows(pool, entries).await?;
+    for (entry, (visible, grant, current)) in entries.iter().zip(rows) {
+        // A public shortcut is continuous without its redundant grant. A
+        // subscription originally dependent on a grant retains its lifetime.
+        let mut captured = entry.grant.lock().unwrap_or_else(|e| e.into_inner());
+        let lost = !visible || (captured.is_some() && grant.is_some() && *captured != grant);
+        if !current {
+            entry.status.send_if_modified(|status| {
+                if *status < 2 {
+                    *status = 3;
+                    true
+                } else {
+                    false
+                }
+            });
+        } else if lost {
+            entry.status.send_if_modified(|status| {
+                if *status == 0 {
+                    *status = 1;
+                    true
+                } else {
+                    false
+                }
+            });
+        } else {
+            *captured = grant;
         }
     }
     Ok(())
@@ -252,22 +250,79 @@ async fn access_rows(
     pool: &sqlx::PgPool,
     entries: &[Arc<Entry>],
 ) -> Result<Vec<(bool, Option<Uuid>, bool)>, sqlx::Error> {
+    let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for (index, entry) in entries.iter().enumerate() {
+        groups
+            .entry(entry.organization)
+            .or_default()
+            .push((index, entry));
+    }
+    let sql = access_rows_sql();
+    let mut rows = vec![(false, None, false); entries.len()];
+    for (organization, group) in groups {
+        let selected: Vec<_> = group.iter().map(|(_, entry)| (*entry).clone()).collect();
+        let scoped = if selected.len() <= 1000 {
+            crate::database::organization_statement(
+                pool,
+                &sql,
+                async |connection: &mut sqlx::PgConnection, sql: &str| {
+                    let sql = format!("{sql} ORDER BY n");
+                    access_rows_in(connection, &selected, &sql).await
+                },
+            )
+            .await?
+        } else {
+            crate::database::organization_read_only(
+                pool,
+                organization,
+                async |tx: &mut sqlx::PgConnection| {
+                    let mut rows = Vec::with_capacity(selected.len());
+                    for batch in selected.chunks(1000) {
+                        rows.extend(access_rows_in(tx, batch, &sql).await?);
+                    }
+                    Ok::<_, sqlx::Error>(rows)
+                },
+            )
+            .await?
+        };
+        for ((index, _), row) in group.into_iter().zip(scoped) {
+            rows[index] = row;
+        }
+    }
+    Ok(rows)
+}
+
+fn access_rows_sql() -> String {
     let public_roles = auth::authorization::channel_roles_sql(false);
     let explicit_roles = auth::authorization::channel_roles_sql(true);
-    let sql = format!("SELECT COALESCE((c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL), false),
-        CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL
-        FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::uuid[]) WITH ORDINALITY r(organization_id,member_id,revision,channel_id,n)
-        LEFT JOIN ({}) u ON u.organization_id=r.organization_id AND u.id=r.member_id AND u.membership_revision=r.revision
-        LEFT JOIN channels c ON c.organization_id=r.organization_id AND c.id=r.channel_id AND u.id IS NOT NULL
+    format!("SELECT COALESCE((c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL), false),
+        CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL, r.n
+        FROM unnest($2::uuid[], $3::bigint[], $4::uuid[]) WITH ORDINALITY r(member_id,revision,channel_id,n)
+        LEFT JOIN ({}) u ON u.organization_id=$1 AND u.id=r.member_id AND u.membership_revision=r.revision
+        LEFT JOIN channels c ON c.organization_id=$1 AND c.id=r.channel_id AND u.id IS NOT NULL
         LEFT JOIN channel_members cm ON cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision
-        ORDER BY r.n", auth::members::ACTIVE_SCOPED_MEMBERS_SQL);
-    sqlx::query_as(&sql)
-        .bind(entries.iter().map(|e| e.organization).collect::<Vec<_>>())
+        ORDER BY r.n", auth::members::ACTIVE_SCOPED_MEMBERS_SQL)
+}
+
+async fn access_rows_in(
+    connection: &mut sqlx::PgConnection,
+    entries: &[Arc<Entry>],
+    sql: &str,
+) -> Result<Vec<(bool, Option<Uuid>, bool)>, sqlx::Error> {
+    use sqlx::Row;
+    let Some(first) = entries.first() else {
+        return Ok(Vec::new());
+    };
+    let rows = sqlx::query(sql)
+        .bind(first.organization)
         .bind(entries.iter().map(|e| e.member.0).collect::<Vec<_>>())
         .bind(entries.iter().map(|e| e.member.1).collect::<Vec<_>>())
         .bind(entries.iter().map(|e| e.channel).collect::<Vec<_>>())
-        .fetch_all(pool)
-        .await
+        .fetch_all(connection)
+        .await?;
+    rows.iter()
+        .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -320,5 +375,78 @@ mod tests {
             None
         );
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[sqlx::test]
+    async fn mixed_organization_access_rows_keep_input_order(pool: sqlx::PgPool) {
+        let pools = crate::test_support::TestPools::new(pool).await;
+        let mut organizations = [Uuid::new_v4(), Uuid::new_v4()];
+        organizations.sort();
+        let member = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        for (index, organization) in organizations.iter().enumerate() {
+            let account = Uuid::new_v4();
+            sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Context')")
+                .bind(organization)
+                .execute(&pools.admin)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO accounts (id,email,password_hash) VALUES ($1,$2,'unused')")
+                .bind(account)
+                .bind(format!("{account}@example.com"))
+                .execute(&pools.admin)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Member','member')")
+                .bind(organization).bind(member).bind(account).execute(&pools.admin).await.unwrap();
+            sqlx::query("INSERT INTO channels (organization_id,id,name,visibility) VALUES ($1,$2,'Channel',$3)")
+                .bind(organization).bind(channel).bind(if index == 0 {"private"} else {"public"})
+                .execute(&pools.admin).await.unwrap();
+        }
+        crate::database::tests::context::context_policies(&pools.admin).await;
+        let entry = |organization, revision| {
+            Arc::new(Entry {
+                organization,
+                member: (member, revision),
+                channel,
+                grant: Mutex::new(None),
+                status: watch::channel(0).0,
+            })
+        };
+        // Both Organizations span several query chunks, interleaved in reverse
+        // Organization order with stale epochs and different visibility results.
+        let entries: Vec<_> = (0..2001)
+            .flat_map(|_| {
+                [
+                    entry(organizations[1], 0),
+                    entry(organizations[0], 0),
+                    entry(organizations[1], 1),
+                ]
+            })
+            .collect();
+        let (counted, transactions) =
+            crate::database::tests::context::counted_pool(&pools.app).await;
+        assert_eq!(
+            access_rows(&counted, &entries).await.unwrap(),
+            [
+                (true, None, true),
+                (false, None, true),
+                (false, None, false),
+            ]
+            .repeat(2001)
+        );
+        use std::sync::atomic::Ordering;
+        assert_eq!(transactions.swap(0, Ordering::SeqCst), organizations.len());
+        check_entries(&counted, &entries).await.unwrap();
+        assert_eq!(transactions.load(Ordering::SeqCst), organizations.len());
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| *e.status.borrow())
+                .collect::<Vec<_>>(),
+            [0, 1, 3].repeat(2001)
+        );
+        counted.close().await;
+        pools.app.close().await;
     }
 }

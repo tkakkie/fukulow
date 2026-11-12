@@ -137,7 +137,7 @@ pub async fn list_messages(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization_id = auth.identity.organization.organization_id;
-    crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
+    crate::database::organization_read_only(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
         match channels::is_visible(
             &mut *tx,
             organization_id,
@@ -221,7 +221,7 @@ pub async fn send_message(
     let auth = auth.ok_or(MessageError::OrganizationUnavailable)?;
     let organization_id = auth.identity.organization.organization_id;
     let sender = (auth.identity.member.id, auth.membership_revision);
-    require_visible(&state.pool, organization_id, sender, channel_id).await?;
+    require_visible_scoped(&state.pool, organization_id, sender, channel_id).await?;
     let waiter = state
         .message_delivery
         .admission(&state.pool)
@@ -354,6 +354,19 @@ impl IntoResponse for MessageError {
     }
 }
 
+pub(crate) async fn require_visible_scoped(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: (Uuid, i64),
+    channel: Uuid,
+) -> Result<(), MessageError> {
+    match channels::is_visible_scoped(pool, organization, member, channel).await? {
+        Some(true) => Ok(()),
+        Some(false) => Err(MessageError::NotFound),
+        None => Err(MessageError::OrganizationUnavailable),
+    }
+}
+
 pub(crate) async fn require_visible<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     organization_id: Uuid,
@@ -436,7 +449,7 @@ async fn persist_admitted(
     input: SendMessageRequest,
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
-    let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", None).await?;
+    let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", Some(organization_id)).await?;
     match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
         .await?
     {
@@ -518,15 +531,22 @@ async fn persist_admitted(
     }
     tx.rollback().await?;
     // The unique-key conflict implies a committed winner; absence is an invariant failure.
-    let message = existing(pool, organization_id, sender, input.client_message_id)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
-    let name_key = if message.reply_to.is_none() {
-        topics::name_key(pool, organization_id, message.topic_id).await?
-    } else {
-        None
-    };
-    canonical(message, channel_id, &input, name_key)
+    crate::database::organization_read_only(
+        pool,
+        organization_id,
+        async |tx: &mut sqlx::PgConnection| {
+            let message = existing(&mut *tx, organization_id, sender, input.client_message_id)
+                .await?
+                .ok_or(sqlx::Error::RowNotFound)?;
+            let name_key = if message.reply_to.is_none() {
+                topics::name_key(&mut *tx, organization_id, message.topic_id).await?
+            } else {
+                None
+            };
+            canonical(message, channel_id, &input, name_key)
+        },
+    )
+    .await
 }
 
 pub(crate) use delivery::LiveQueue;
@@ -564,18 +584,25 @@ pub(crate) async fn replay_page(
     after: i64,
     through: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-         FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
-         ORDER BY seq ASC LIMIT $5",
+    let sql = "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
+             ORDER BY seq ASC LIMIT $5";
+    crate::database::organization_statement(
+        pool,
+        sql,
+        async |tx: &mut sqlx::PgConnection, sql: &str| {
+            let sql = format!("{sql} ORDER BY seq");
+            sqlx::query_as(&sql)
+                .bind(organization)
+                .bind(channel)
+                .bind(after)
+                .bind(through)
+                .bind(REPLAY_PAGE_SIZE)
+                .fetch_all(tx)
+                .await
+        },
     )
-    .bind(organization)
-    .bind(channel)
-    .bind(after)
-    .bind(through)
-    .bind(REPLAY_PAGE_SIZE)
-    .fetch_all(pool)
     .await
 }
 
@@ -603,16 +630,24 @@ pub(crate) async fn authorized_replay_page(
         ) m ON true ORDER BY m.seq"#,
         channels::member_visibility_sql(false)
     );
-    let rows = sqlx::query(&sql)
-        .bind(organization)
-        .bind(member.0)
-        .bind(member.1)
-        .bind(channel)
-        .bind(after)
-        .bind(through)
-        .bind(REPLAY_PAGE_SIZE)
-        .fetch_all(pool)
-        .await?;
+    let rows = crate::database::organization_statement(
+        pool,
+        &sql,
+        async |tx: &mut sqlx::PgConnection, sql: &str| {
+            let sql = format!("{sql} ORDER BY seq");
+            sqlx::query(&sql)
+                .bind(organization)
+                .bind(member.0)
+                .bind(member.1)
+                .bind(channel)
+                .bind(after)
+                .bind(through)
+                .bind(REPLAY_PAGE_SIZE)
+                .fetch_all(tx)
+                .await
+        },
+    )
+    .await?;
     match rows
         .first()
         .ok_or(sqlx::Error::RowNotFound)?

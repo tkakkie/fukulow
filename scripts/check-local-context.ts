@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url'
 
 export function violations(source: string): number[] {
   const offsets: number[] = []
-  const localCall = /set_config\([ \t\r\n]*'[A-Z0-9_.{}]+'[ \t\r\n]*,[ \t\r\n]*(?:\$[0-9]+|:[A-Z_][A-Z0-9_]*(?:::[A-Z_][A-Z0-9_]*)?|'[A-Z0-9_.]*')[ \t\r\n]*,[ \t\r\n]*true[ \t\r\n]*\)/iy
+  // The UUID-to-text form keeps one typed Organization bind in statement reads.
+  const localCall = /set_config\([ \t\r\n]*'[A-Z0-9_.{}]+'[ \t\r\n]*,[ \t\r\n]*(?:\$[0-9]+(?:::uuid::text)?|:[A-Z_][A-Z0-9_]*(?:::[A-Z_][A-Z0-9_]*)?|'[A-Z0-9_.]*')[ \t\r\n]*,[ \t\r\n]*true[ \t\r\n]*\)/iy
   for (const match of source.matchAll(/\bset_config\b/gi)) {
     localCall.lastIndex = match.index
     if (!localCall.test(source)) offsets.push(match.index)

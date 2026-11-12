@@ -21,6 +21,26 @@ pub(crate) async fn at(
     statement: &str,
     work: impl AsyncFnOnce(&PgPool) -> Result<(), sqlx::Error>,
 ) {
+    interrupted(admin, app, statement, false, work).await;
+}
+
+/// Keep the response stalled through the owner's deadline and replacement acquire.
+pub(crate) async fn at_deadline(
+    admin: &PgPool,
+    app: &PgPool,
+    statement: &str,
+    work: impl AsyncFnOnce(&PgPool) -> Result<(), sqlx::Error>,
+) {
+    interrupted(admin, app, statement, true, work).await;
+}
+
+async fn interrupted(
+    admin: &PgPool,
+    app: &PgPool,
+    statement: &str,
+    deadline: bool,
+    work: impl AsyncFnOnce(&PgPool) -> Result<(), sqlx::Error>,
+) {
     tokio::time::timeout(Duration::from_secs(15), async {
         let options = app.connect_options();
         let upstream = (options.get_host().to_owned(), options.get_port());
@@ -80,9 +100,9 @@ pub(crate) async fn at(
                                 if frames.len() < length { break; }
                                 if frames[0] == b'C' && pending_hold.swap(false, Ordering::SeqCst) {
                                     let _ = hold.send(true);
-                                }
-                                while *gate.borrow_and_update() {
-                                    if gate.changed().await.is_err() { return Ok(()); }
+                                    while *gate.borrow_and_update() {
+                                        if gate.changed().await.is_err() { return Ok(()); }
+                                    }
                                 }
                                 client_write.write_all(&frames[..length]).await?;
                                 frames.drain(..length);
@@ -123,10 +143,19 @@ pub(crate) async fn at(
             result = &mut pending => panic!("response escaped the relay gate ({statement}): {result:?}"),
             () = executed => {}
         }
-        drop(pending);
-        hold.send(false).unwrap();
-        let next_pid = super::context::clean(&single).await;
+        if deadline {
+            assert!(matches!(pending.await, Err(sqlx::Error::PoolTimedOut)));
+            assert_eq!(single.size(), 0, "deadline must free the permit before graceful cleanup");
+        } else {
+            drop(pending);
+            hold.send(false).unwrap();
+        }
+        // 3 s covers a fresh connect+auth on a loaded runner and stays below SQLx's
+        // 5 s graceful-close hold, so a regressed (retained) slot still times out.
+        let next_pid = tokio::time::timeout(Duration::from_secs(3), super::context::clean(&single))
+            .await.expect("replacement acquire must succeed while the old transport stays stalled");
         assert_ne!(next_pid, pid, "interrupted {statement} must discard the connection");
+        hold.send(false).unwrap();
         single.close().await;
         drop(relays);
     }).await.expect("interrupted transaction recovery must not hang");

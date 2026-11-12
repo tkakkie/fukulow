@@ -76,7 +76,14 @@ pub(super) async fn lock(
          SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) \
          FROM timeout"
     };
-    sqlx::query(sql)
+    // Context setup shares the barrier round trip; the later sequence read
+    // still gets a fresh READ COMMITTED snapshot after the lock is acquired.
+    let sql = if shared {
+        crate::database::organization_statement_sql(sql)
+    } else {
+        sql.to_owned()
+    };
+    sqlx::query(&sql)
         .bind(organization)
         .bind(channel)
         .execute(&mut *tx)
