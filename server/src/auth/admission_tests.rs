@@ -93,6 +93,141 @@ async fn assert_no_sessions(pool: &sqlx::PgPool) {
     assert_eq!(count, 0);
 }
 
+fn assert_failure_budgets_available(throttle: &SignInThrottle, email: &str) {
+    let ip = "192.0.2.1".parse().unwrap();
+    for n in 0..20 {
+        let mut attempt = throttle.begin(ip).unwrap();
+        attempt
+            .account(if n < 5 {
+                email.to_owned()
+            } else {
+                format!("other-{n}@example.com")
+            })
+            .unwrap();
+        attempt.failed();
+    }
+    assert!(throttle.begin(ip).is_err());
+    let mut rejected = throttle.begin("192.0.2.2".parse().unwrap()).unwrap();
+    assert!(rejected.account(email.into()).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejected_sign_in_skips_account_lookup_for_full_and_expired_admission() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    // A lookup against this pool deterministically fails with 500. With the old
+    // lookup-first order, neither the full-queue nor expiry case can return 503.
+    pool.close().await;
+    let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
+    let _held = workers.running.acquire_many(4).await.unwrap();
+    let capacity = workers.waiting.available_permits();
+    for full in [true, false] {
+        let queued = if full {
+            Some(workers.waiting.acquire_many(capacity as u32).await.unwrap())
+        } else {
+            None
+        };
+        for path in ["/api/v1/session", "/api/v1/native/session"] {
+            for email in ["owner@example.com", "unknown@example.com"] {
+                let state = AppState::for_test(pool.clone());
+                let calls = Arc::new(AtomicUsize::new(0));
+                let app = app_counting_entropy(state.clone(), workers, calls.clone());
+                let start = tokio::time::Instant::now();
+                let response = app
+                    .oneshot(request(path, email, "incorrect password"))
+                    .await
+                    .unwrap();
+                assert_unavailable(response).await;
+                assert_eq!(
+                    start.elapsed(),
+                    if full {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(1)
+                    }
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert_eq!(state.sign_in_throttle.pending_counts(), (0, 0));
+                assert_failure_budgets_available(&state.sign_in_throttle, email);
+            }
+        }
+        drop(queued);
+        assert_eq!(workers.waiting.available_permits(), capacity);
+    }
+}
+
+#[tokio::test]
+async fn lookup_error_releases_admission_and_throttle_without_token_entropy() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    pool.close().await;
+    let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
+    for path in ["/api/v1/session", "/api/v1/native/session"] {
+        let state = AppState::for_test(pool.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let response = app_counting_entropy(state.clone(), workers, calls.clone())
+            .oneshot(request(path, "owner@example.com", "incorrect password"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        assert_eq!(workers.running.available_permits(), 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.sign_in_throttle.pending_counts(), (0, 0));
+        assert_failure_budgets_available(&state.sign_in_throttle, "owner@example.com");
+    }
+}
+
+#[sqlx::test]
+async fn cancelled_lookup_releases_admission_and_throttle_without_token_entropy(
+    pool: sqlx::PgPool,
+) {
+    let state = credential_tests::fixture(pool.clone()).await;
+    let isolated = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let connection = isolated.acquire().await.unwrap();
+    let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
+    for path in ["/api/v1/session", "/api/v1/native/session"] {
+        let state = AppState {
+            pool: isolated.clone(),
+            sign_in_throttle: SignInThrottle::default(),
+            ..state.clone()
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn(
+            app_counting_entropy(state.clone(), workers, calls.clone()).oneshot(request(
+                path,
+                "owner@example.com",
+                "incorrect password",
+            )),
+        );
+        // The only DB connection is held: acquisition of the execution permit
+        // proves this request reached lookup without starting password work.
+        without_time_advance(async {
+            while workers.running.available_permits() != 3 {
+                assert!(!task.is_finished());
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert_eq!(state.sign_in_throttle.pending_counts(), (1, 1));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(workers.running.available_permits(), 4);
+        assert_eq!(state.sign_in_throttle.pending_counts(), (0, 0));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_failure_budgets_available(&state.sign_in_throttle, "owner@example.com");
+        assert_no_sessions(&pool).await;
+    }
+    drop(connection);
+    isolated.close().await;
+}
+
 #[sqlx::test]
 async fn full_queue_returns_same_503_for_known_and_unknown_accounts(pool: sqlx::PgPool) {
     let state = credential_tests::fixture(pool.clone()).await;
@@ -325,9 +460,12 @@ async fn password_admission_rejections_preserve_known_and_unknown_failure_budget
             let mut attempt = throttle.begin("192.0.2.1".parse().unwrap()).unwrap();
             attempt.account("test@example.com".into()).unwrap();
             let start = tokio::time::Instant::now();
-            let error = check_password("incorrect password".into(), stored, attempt, workers)
-                .await
-                .unwrap_err();
+            let error = async {
+                let permit = workers.acquire().await?;
+                check_password("incorrect password".into(), stored, attempt, permit).await
+            }
+            .await
+            .unwrap_err();
             assert_unavailable(error.into_response()).await;
             assert_eq!(
                 start.elapsed(),
@@ -375,7 +513,8 @@ async fn cancelled_password_work_retains_capacity_and_finishes_throttle_accounti
             started.send(()).unwrap();
             gate.recv_timeout(Duration::from_secs(60)).unwrap();
         }));
-        let task = tokio::spawn(check_password(password.into(), stored, attempt, workers));
+        let permit = workers.acquire().await.unwrap();
+        let task = tokio::spawn(check_password(password.into(), stored, attempt, permit));
         tokio::time::timeout(Duration::from_secs(30), running)
             .await
             .unwrap()

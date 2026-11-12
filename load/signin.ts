@@ -4,8 +4,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir, cpus, totalmem, platform, arch } from 'node:os';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import { workload, type Config } from './signin-workload.ts';
-import { summarize, type Sample } from './signin-summary.ts';
+import { resourceSample, summarize, type Sample } from './signin-summary.ts';
 import type { NativeSessionResponse, SetupRequest } from '../web/src/api-schema.d.ts';
 const exec = promisify(execFile);
 function integer(key: string, fallback: number, max = 1_000_000) {
@@ -13,6 +14,16 @@ function integer(key: string, fallback: number, max = 1_000_000) {
   if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > max) throw new Error(`Invalid ${key}`);
   return Number(value);
 }
+function allocatorSetting(key: string) {
+  const value = process.env[key];
+  if (value !== undefined && (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value)))) {
+    throw new Error(`Invalid ${key}`);
+  }
+  return value;
+}
+const allocator = { MALLOC_MMAP_THRESHOLD_:allocatorSetting('LOAD_MALLOC_MMAP_THRESHOLD'),
+  MALLOC_ARENA_MAX:allocatorSetting('LOAD_MALLOC_ARENA_MAX') };
+const idleMs = 12000;
 const config: Config = { concurrency: integer('SIGNIN_CONCURRENCY', 64), seconds: integer('SIGNIN_SECONDS', 60),
   rate: integer('SIGNIN_RATE', 100), readRate: integer('SIGNIN_READ_RATE', 2), accounts: integer('SIGNIN_ACCOUNTS', 1000),
   ipPool: integer('SIGNIN_IP_POOL', 10000, 16_777_216), correctEvery: integer('SIGNIN_CORRECT_EVERY', 10),
@@ -35,7 +46,8 @@ const override = `${scratch}/compose.json`;
 // Only this disposable stack trusts synthetic client IPs, allowing password admission
 // to be exercised without one generator IP exhausting the throttle after 20 failures.
 writeFileSync(override, JSON.stringify({services:{app:{environment:{
-  FUKULOW_CLIENT_IP_HEADER:'x-load-client-ip', FUKULOW_TRUSTED_PROXIES:'0.0.0.0/0,::/0' }}}}));
+  FUKULOW_CLIENT_IP_HEADER:'x-load-client-ip', FUKULOW_TRUSTED_PROXIES:'0.0.0.0/0,::/0',
+  ...allocator }}}}));
 const compose = ['compose','-p',project,'-f',resolve('load/compose.yml'),'-f',override];
 const command = (file: string, args: string[], input?: string) => execFileSync(file,args,
   {env, input, encoding:'utf8', stdio:['pipe','pipe','pipe'], maxBuffer:32*1024*1024}).trim();
@@ -45,6 +57,7 @@ const controller = new AbortController();
 const interrupt = () => controller.abort();
 process.on('SIGINT',interrupt); process.on('SIGTERM',interrupt);
 const samples: Sample[] = [];
+let postIdleSample: Sample | null = null;
 const samplingErrors: string[] = [];
 let timer: ReturnType<typeof setInterval> | undefined;
 let sampling: Promise<void> | undefined;
@@ -101,6 +114,7 @@ try {
   if (read.status !== 200) throw new Error('Organization B preflight failed');
   await read.arrayBuffer();
   writeFileSync(`${output}/metadata.json`, JSON.stringify({project,config,port,node:process.version,
+    allocator:Object.fromEntries(Object.entries(allocator).map(([key,value]) => [key,value ?? null])), postDrainIdleMs:idleMs,
     serverRef:process.env.SERVER_REF ?? null, serverCommit,
     serverDirty:process.env.SERVER_REF || process.env.LOAD_APP_IMAGE ? null : command('git',['status','--porcelain']),
     imageTag:env.LOAD_APP_IMAGE, appImage:docker('inspect','--format','{{.Image}}',app), dbImage:docker('inspect','--format','{{.Image}}',db),
@@ -108,10 +122,10 @@ try {
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
     harness:Object.fromEntries(['load/signin.ts','load/signin-workload.ts','load/signin-summary.ts','load/compose.yml'].map(path =>
       [path,createHash('sha256').update(readFileSync(path)).digest('hex')])),
-    sampling:'During scheduling and drain; CPU 100% = one core; RSS /proc/1/status; pg_stat_activity app-role client backends excluding sampler; sampled peaks can miss spikes',
+    sampling:'During scheduling and drain, plus a separate sample after 12 s idle; CPU 100% = one core; VmRSS/RssAnon/Threads from /proc/1/status; pg_stat_activity app-role client backends excluding sampler; sampled peaks can miss spikes',
     transport:'host loopback published HTTP; synthetic trusted client IPs in disposable app only'}, null,2));
-  const sample = () => {
-    if (sampling) return;
+  const sample = (postIdle = false) => {
+    if (sampling) return sampling;
     const at = new Date().toISOString();
     sampling = Promise.all([
       exec('docker',['stats','--no-stream','--format','{{.CPUPerc}}',app],{env}),
@@ -119,19 +133,22 @@ try {
       exec('docker',[...compose,'exec','-T','db','psql','-X','-U','fukulow','-d','fukulow','-Atc',
         `SELECT count(*),count(*) FILTER (WHERE state='active') FROM pg_stat_activity WHERE datname=current_database() AND usename='fukulow_app' AND backend_type='client backend' AND pid<>pg_backend_pid()`],{env}),
     ]).then(([cpu,rss,connections]) => {
-      const [used,active] = connections.stdout.trim().split('|').map(Number);
-      const rssValue = rss.stdout.match(/^VmRSS:\s+(\d+)/m)?.[1];
-      const cpuPercent = Number(cpu.stdout.trim().replace('%',''));
-      if (!rssValue || ![used,active,cpuPercent].every(Number.isFinite)) throw new Error('Invalid resource sample');
-      samples.push({at,cpuPercent,rssKiB:Number(rssValue),connections:used,active});
+      const value = resourceSample(at,cpu.stdout,rss.stdout,connections.stdout);
+      if (postIdle) postIdleSample=value;
+      else samples.push(value);
     }).catch(() => { samplingErrors.push(`Resource sample failed at ${at}`); }).finally(() => { sampling=undefined; });
+    return sampling;
   };
   phase = 'workload';
-  sample(); timer=setInterval(sample,1000);
+  sample(); timer=setInterval(() => { sample(); },1000);
   result = await workload(base,password,identity.token,organization,config,controller.signal);
   clearInterval(timer); timer=undefined; await sampling;
   if (controller.signal.aborted || !samples.length || samplingErrors.length || !result.attempts.length) throw new Error('Incomplete measurement');
-  console.log('SIGNIN_SUMMARY '+JSON.stringify(summarize(result.attempts,samples)));
+  phase = 'post-drain idle';
+  await delay(idleMs,undefined,{signal:controller.signal});
+  await sample(true);
+  if (controller.signal.aborted || !postIdleSample || samplingErrors.length) throw new Error('Incomplete idle measurement');
+  console.log('SIGNIN_SUMMARY '+JSON.stringify(summarize(result.attempts,samples,postIdleSample)));
 } catch {
   // Child-process errors can include environment/SQL. Never serialize raw errors.
   failed=true;
@@ -139,8 +156,8 @@ try {
 } finally {
   if (timer) clearInterval(timer);
   await sampling;
-  writeFileSync(`${output}/results.json`,JSON.stringify({complete:!failed,phase,config,...result,samples,samplingErrors,
-    summary:summarize(result?.attempts ?? [],samples)},null,2));
+  writeFileSync(`${output}/results.json`,JSON.stringify({complete:!failed,phase,config,...result,samples,postIdleSample,samplingErrors,
+    summary:summarize(result?.attempts ?? [],samples,postIdleSample)},null,2));
   try { docker(...compose,'down','--volumes'); } catch { cleanupErrors.push('Compose cleanup failed'); }
   if (!process.env.LOAD_APP_IMAGE) {
     try { if (docker('image','ls','-q',env.LOAD_APP_IMAGE)) docker('image','rm',env.LOAD_APP_IMAGE); }

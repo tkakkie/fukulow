@@ -495,6 +495,8 @@ async fn sign_in_with_entropy(
     attempt
         .account(email.clone())
         .map_err(ApiError::throttled)?;
+    // Admission covers lookup too, so overload does not turn into a DB flood.
+    let permit = workers.acquire().await?;
     let stored = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, password_hash FROM accounts WHERE email = $1",
     )
@@ -502,7 +504,7 @@ async fn sign_in_with_entropy(
     .fetch_optional(&state.pool)
     .await?;
     let (user_id, password_hash) = stored.unzip();
-    if !check_password(input.password, password_hash, attempt, workers).await? {
+    if !check_password(input.password, password_hash, attempt, permit).await? {
         return Err(ApiError::unauthorized());
     }
     let user_id = user_id.ok_or_else(ApiError::unauthorized)?;
@@ -1039,9 +1041,14 @@ mod tests {
                     let mut attempt = throttle.begin(ip).unwrap();
                     attempt.account("owner@example.com".into()).unwrap();
                     assert!(
-                        check_password(password.into(), stored.clone(), attempt, &PASSWORD_WORKERS)
-                            .await
-                            .unwrap()
+                        check_password(
+                            password.into(),
+                            stored.clone(),
+                            attempt,
+                            PASSWORD_WORKERS.acquire().await.unwrap(),
+                        )
+                        .await
+                        .unwrap()
                     );
                 }
             }
@@ -1053,7 +1060,7 @@ mod tests {
                         "incorrect password".into(),
                         stored.clone(),
                         attempt,
-                        &PASSWORD_WORKERS
+                        PASSWORD_WORKERS.acquire().await.unwrap(),
                     )
                     .await
                     .unwrap()
@@ -1072,6 +1079,11 @@ mod tests {
         let peer: std::net::SocketAddr = "192.0.2.1:1234".parse().unwrap();
         static WORKERS: PasswordWorkers = PasswordWorkers::new();
         let _workers = WORKERS.running.acquire_many(4).await.unwrap();
+        let _queue = WORKERS
+            .waiting
+            .acquire_many(WORKERS.waiting.available_permits() as u32)
+            .await
+            .unwrap();
         for by_ip in [false, true] {
             let throttle = SignInThrottle::default();
             for _ in 0..if by_ip { 20 } else { 5 } {

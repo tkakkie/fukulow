@@ -15,6 +15,19 @@ pub(super) struct PasswordWorkers {
     pub(super) on_start: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
+pub(super) struct PasswordPermit {
+    _running: SemaphorePermit<'static>,
+    #[cfg(test)]
+    workers: &'static PasswordWorkers,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for PasswordPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordPermit").finish_non_exhaustive()
+    }
+}
+
 impl PasswordWorkers {
     pub(super) const fn new() -> Self {
         Self {
@@ -25,7 +38,16 @@ impl PasswordWorkers {
         }
     }
 
-    pub(super) async fn acquire(&self) -> Result<SemaphorePermit<'_>, ApiError> {
+    pub(super) async fn acquire(&'static self) -> Result<PasswordPermit, ApiError> {
+        let permit = self.acquire_running().await?;
+        Ok(PasswordPermit {
+            _running: permit,
+            #[cfg(test)]
+            workers: self,
+        })
+    }
+
+    async fn acquire_running(&self) -> Result<SemaphorePermit<'_>, ApiError> {
         if let Ok(permit) = self.running.try_acquire() {
             return Ok(permit);
         }
@@ -72,23 +94,22 @@ pub(super) async fn check_password(
     password: String,
     stored: Option<String>,
     attempt: throttle::Attempt,
-    workers: &'static PasswordWorkers,
+    permit: PasswordPermit,
 ) -> Result<bool, ApiError> {
-    check_password_with_hash(password, stored, attempt, workers, hash_password_sync).await
+    check_password_with_hash(password, stored, attempt, permit, hash_password_sync).await
 }
 
 async fn check_password_with_hash(
     password: String,
     stored: Option<String>,
     attempt: throttle::Attempt,
-    workers: &'static PasswordWorkers,
+    permit: PasswordPermit,
     dummy_hash: impl FnOnce(&[u8]) -> Result<String, ApiError> + Send + 'static,
 ) -> Result<bool, ApiError> {
-    let permit = workers.acquire().await?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         #[cfg(test)]
-        if let Some(on_start) = workers.on_start.lock().unwrap().take() {
+        if let Some(on_start) = _permit.workers.on_start.lock().unwrap().take() {
             on_start();
         }
         let valid = match stored {
@@ -222,7 +243,7 @@ mod tests {
                 password.clone(),
                 None,
                 attempt,
-                &super::super::PASSWORD_WORKERS,
+                super::super::PASSWORD_WORKERS.acquire().await.unwrap(),
             )
             .await
             .unwrap()
@@ -260,7 +281,7 @@ mod tests {
                 "correct horse battery staple".into(),
                 None,
                 attempt,
-                &super::super::PASSWORD_WORKERS,
+                super::super::PASSWORD_WORKERS.acquire().await.unwrap(),
                 move |password| {
                     hash_password_sync_with_entropy(password, |bytes| {
                         observed.fetch_add(1, Ordering::SeqCst);
@@ -300,7 +321,7 @@ mod tests {
                         "incorrect password".into(),
                         None,
                         attempt,
-                        &super::super::PASSWORD_WORKERS,
+                        super::super::PASSWORD_WORKERS.acquire().await.unwrap(),
                     )
                     .await
                     .unwrap()
@@ -319,7 +340,7 @@ mod tests {
                         "incorrect password".into(),
                         None,
                         attempt,
-                        &super::super::PASSWORD_WORKERS,
+                        super::super::PASSWORD_WORKERS.acquire().await.unwrap(),
                     )
                     .await
                     .unwrap()

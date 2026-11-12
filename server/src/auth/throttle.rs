@@ -420,7 +420,7 @@ mod tests {
                 password.into(),
                 Some(stored),
                 attempt,
-                &crate::auth::PASSWORD_WORKERS
+                crate::auth::PASSWORD_WORKERS.acquire().await.unwrap(),
             )
             .await
             .unwrap()
