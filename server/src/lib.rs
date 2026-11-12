@@ -93,8 +93,14 @@ pub fn app(state: AppState) -> Router {
             state.message_delivery.channel_access.clone(),
         ));
     let cookie_secure = state.cookie_secure;
+    let readiness = Readiness {
+        pool: state.pool.clone(),
+        sessions: state.session_changes.clone(),
+        flight: Default::default(),
+    };
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/ready", get(ready).with_state(readiness))
         .route("/api/v1/setup", get(auth::setup_status).post(auth::setup))
         .route(
             "/api/v1/session",
@@ -320,6 +326,59 @@ async fn health() -> Result<&'static str, auth::ApiError> {
     Ok("ok")
 }
 
+#[derive(Clone)]
+struct Readiness {
+    pool: sqlx::PgPool,
+    sessions: auth::SessionChanges,
+    flight: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<bool>>>>>,
+}
+
+impl Readiness {
+    async fn check(&self) -> bool {
+        let mut flight = self.flight.lock().await;
+        let mut result = match flight.as_ref() {
+            Some(result) if result.borrow().is_none() && result.has_changed().is_ok() => {
+                result.clone()
+            }
+            _ => {
+                let (sender, result) = tokio::sync::watch::channel(None);
+                let pool = self.pool.clone();
+                let sessions = self.sessions.clone();
+                // The bounded check outlives any individual HTTP caller. Completed
+                // results are replaced on the next call, never cached across checks.
+                tokio::spawn(async move {
+                    let healthy = sessions.fallback_available()
+                        && database::ready(&pool).await
+                        && sessions.fallback_available();
+                    let _ = sender.send(Some(healthy));
+                });
+                *flight = Some(result.clone());
+                result
+            }
+        };
+        drop(flight);
+        matches!(result.wait_for(|value| value.is_some()).await, Ok(value) if *value == Some(true))
+    }
+}
+
+#[utoipa::path(get, path = "/api/v1/ready", responses(
+    (status = 200, description = "Database check succeeded, connection cleanup completed and the fallback supervisor has not observed an abnormal worker exit (not a progress watchdog); returns plain-text ok", body = String, content_type = "text/plain"),
+    (status = 503, description = "Readiness unavailable: error not_ready (Retry-After: 1); database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit", body = auth::ErrorBody)
+))]
+async fn ready(State(readiness): State<Readiness>) -> Response {
+    if readiness.check().await {
+        return "ok".into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        axum::Json(auth::ErrorBody {
+            error: "not_ready".into(),
+        }),
+    )
+        .into_response()
+}
+
 async fn static_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     // Undefined API endpoints are never the SPA.
@@ -364,6 +423,7 @@ fn is_hashed_asset(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod readiness;
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;

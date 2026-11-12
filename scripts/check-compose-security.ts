@@ -59,6 +59,10 @@ async function check(profile: string) {
       await delay(1000)
     }
     const app = proxy('ps', '-q', 'app')
+    assert.equal(request('/api/v1/ready').status, 404, 'readiness must stay internal')
+    assert.equal(request('/api/v1/ready?check=1').status, 404, 'query strings must not bypass the exact-path block')
+    assert.deepEqual(request('/api/v1/health'), { status: 200, body: 'ok' })
+    run(['exec', app, 'fukulow-server', 'probe'])
     const [state] = JSON.parse(run(['inspect', app]))
     assert.equal(state.Config.User, '10001:10001')
     assert.equal(run(['exec', app, 'id', '-u']), '10001')

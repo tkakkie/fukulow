@@ -3033,6 +3033,52 @@
         ]
       }
     },
+    "/api/v1/ready": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "Database check succeeded, connection cleanup completed and the fallback supervisor has not observed an abnormal worker exit (not a progress watchdog); returns plain-text ok",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Readiness unavailable: error not_ready (Retry-After: 1); database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/session": {
       "post": {
         "tags": [

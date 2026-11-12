@@ -87,6 +87,15 @@ impl Default for SessionChanges {
 }
 
 impl SessionChanges {
+    /// Not started is normal; reuse the supervisor's latched exit state.
+    pub(crate) fn fallback_available(&self) -> bool {
+        !self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unavailable
+    }
+
     pub fn set_subscription_recheck(&self, check: Arc<dyn SubscriptionRecheck>) {
         *self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()) = Some(check);
     }

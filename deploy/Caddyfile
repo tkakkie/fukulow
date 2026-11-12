@@ -6,6 +6,7 @@
 		not host localhost 127.0.0.1 [::1]
 	}
 	header @hsts Strict-Transport-Security "max-age=31536000"
+	respond /api/v1/ready 404
 	reverse_proxy app:8080 {
 		flush_interval -1
 	}

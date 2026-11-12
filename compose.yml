@@ -5,6 +5,12 @@ services:
     image: fukulow-app
     build: .
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "fukulow-server", "probe"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     environment:
       FUKULOW_ADDR: 0.0.0.0:8080
