@@ -6,10 +6,10 @@ async fn fallback_close(socket: &mut Client, code: u16) {
         .unwrap()
         .unwrap()
         .unwrap();
-    let tungstenite::Message::Close(Some(close)) = frame else {
-        panic!("expected close")
+    let tungstenite::Message::Close(Some(close)) = &frame else {
+        panic!("expected Close(code={code}), got {frame:?}")
     };
-    assert_eq!(u16::from(close.code), code);
+    assert_eq!(u16::from(close.code), code, "got {frame:?}");
 }
 
 pub(super) async fn another_session(pool: &PgPool, organization: Uuid, member: Uuid) -> String {

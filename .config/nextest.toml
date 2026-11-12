@@ -1,0 +1,11 @@
+# These tests assert wall-clock capacity: 1s watermark admission / bounded storm
+# progress, or 100-200ms fallback checks. Reserve all slots so unrelated tests do
+# not turn their healthy paths into overload; keep production limits/assertions.
+[[profile.default.overrides]]
+filter = '''
+test(=realtime::tests::watermark::simultaneous_normal_subscriptions_have_no_internal_error_closes)
+| test(=realtime::tests::watermark::unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organizations_and_channels)
+| test(=realtime::tests::access_loss::fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_closed)
+| test(=realtime::tests::session::fallback_database_failure_closes_with_internal_error)
+'''
+threads-required = "num-test-threads"
