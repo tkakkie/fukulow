@@ -14,6 +14,9 @@ use uuid::Uuid;
 
 const PASSWORD: &str = "correct horse battery staple";
 
+#[path = "support/pools.rs"]
+mod test_support;
+
 fn router(pool: &PgPool) -> Router {
     router_with_cookie_security(pool, true)
 }
@@ -293,7 +296,8 @@ async fn setup_status_after_setup_is_public_and_reveals_only_boolean(pool: PgPoo
 
 #[sqlx::test]
 async fn setup_works_once_and_is_atomic(pool: PgPool) {
-    let app = router(&pool);
+    let pools = test_support::TestPools::new(pool).await;
+    let app = router(&pools.app);
     let (a, b) = tokio::join!(
         request(&app, "POST", "/api/v1/setup", setup_input(), &[]),
         request(&app, "POST", "/api/v1/setup", setup_input(), &[])
@@ -321,13 +325,14 @@ async fn setup_works_once_and_is_atomic(pool: PgPool) {
         "SELECT count(*) OVER (), a.password_hash, u.role FROM users u JOIN accounts a ON a.id = u.account_id WHERE u.organization_id = $1",
     )
     .bind(organization_id)
-    .fetch_one(&pool)
+    .fetch_one(&pools.admin)
     .await
     .unwrap();
     assert_eq!(count, 1);
     assert!(hash.starts_with("$argon2id$"));
     assert!(!hash.contains(PASSWORD));
     assert_eq!(role, "owner");
+    pools.app.close().await;
 }
 
 #[tokio::test]

@@ -202,7 +202,9 @@ async fn channel_json_rejections_use_error_body() {
 
 #[sqlx::test]
 async fn private_channel_is_listed_only_for_its_creator(pool: PgPool) {
-    let app = router(&pool);
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let pool = pools.admin;
+    let app = router(&pools.app);
     let organization_id = organization(&pool).await;
     let creator_id = Uuid::new_v4();
     let creator = member(&pool, organization_id, creator_id, "member").await;
@@ -234,6 +236,7 @@ async fn private_channel_is_listed_only_for_its_creator(pool: PgPool) {
             creator_id
         )]
     );
+    pools.app.close().await;
 }
 
 #[sqlx::test]

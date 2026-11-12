@@ -6,6 +6,9 @@ pub mod openapi;
 pub mod realtime;
 pub mod shutdown;
 
+#[cfg(test)]
+mod test_support;
+
 use axum::{
     Router,
     extract::{Request, State},
