@@ -204,6 +204,7 @@ pub async fn accept_invite(
             organization: org,
             role: issuer_role,
             channel_member: false,
+            channel_manager: false,
         },
         Action::Invite(role),
         Resource::Organization(org),

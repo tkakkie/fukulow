@@ -61,6 +61,7 @@ pub(crate) async fn current_actor(
         organization,
         role,
         channel_member: false,
+        channel_manager: false,
     };
     authorization::require(actor, action, Resource::Organization(organization))?;
     Ok(actor)
@@ -96,6 +97,7 @@ pub async fn list_members(State(state): State<AppState>, auth: Auth) -> Result<R
             organization: auth.identity.organization.organization_id,
             role,
             channel_member: false,
+            channel_manager: false,
         },
         Action::ReadOrganization,
         Resource::Organization(auth.identity.organization.organization_id),
@@ -119,7 +121,7 @@ pub async fn list_members(State(state): State<AppState>, auth: Auth) -> Result<R
     (status=401, description="Account Session ended", body=ErrorBody),
     (status=403, description="forbidden: caller is not an Owner", body=ErrorBody),
     (status=404, description="organization_unavailable or member_not_found", body=ErrorBody),
-    (status=409, description="last_owner: the last active Owner cannot be demoted (takes precedence over last_channel_manager); last_channel_manager: a private Channel cannot lose its last usable Owner/Admin grantee (no Channel details)", body=ErrorBody),
+    (status=409, description="last_owner: the last active Owner cannot be demoted (takes precedence over last_channel_manager); last_channel_manager: a private Channel cannot lose its last usable manager (no Channel details)", body=ErrorBody),
     (status=413, description="Request too large", body=ErrorBody),
     (status=415, description="Expected application/json", body=ErrorBody),
     (status=500, description="Database failure", body=ErrorBody)))]
@@ -186,7 +188,9 @@ pub(crate) async fn active_target(
     organization: Uuid,
     id: Uuid,
 ) -> Result<(Member, i64), ApiError> {
-    let row: (String,Role,i64) = sqlx::query_as("SELECT name,role,membership_revision FROM users WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL")
+    // Guest changes clear Channel rights before updating Role. Exclude new
+    // sends' Member SHARE locks now, before taking any grant UPDATE lock.
+    let row: (String,Role,i64) = sqlx::query_as("SELECT name,role,membership_revision FROM users WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL FOR NO KEY UPDATE")
         .bind(organization).bind(id).fetch_optional(connection).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
     Ok((
         Member {

@@ -39,20 +39,23 @@ pub struct ChannelCapabilities {
     pub can_add_members: Capability,
     pub can_remove_members: Capability,
     pub can_leave: Capability,
+    pub can_manage_managers: Capability,
 }
 
 impl ChannelCapabilities {
-    fn for_visible(organization: Uuid, role: Role, public: bool) -> Self {
+    fn for_visible(organization: Uuid, role: Role, public: bool, manager: bool) -> Self {
         let actor = Actor::Member {
             organization,
             role,
             channel_member: true,
+            channel_manager: manager,
         };
         let resource = Resource::Channel {
             organization,
             public,
         };
         Self {
+            can_manage_managers: authorize(actor, Action::ManageChannelManagers, resource),
             can_remove_members: authorize(actor, Action::RemoveChannelMembers, resource),
             can_leave: authorize(actor, Action::LeaveChannel, resource),
             can_add_members: authorize(
@@ -60,6 +63,7 @@ impl ChannelCapabilities {
                     organization,
                     role,
                     channel_member: true,
+                    channel_manager: manager,
                 },
                 Action::AddChannelMembers,
                 Resource::Channel {
@@ -93,7 +97,7 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     let visible = visible_channel_sql();
     // The LEFT JOIN retains one empty row for an active Member with no visible Channels.
     let sql = format!(
-        "SELECT c.id, c.name, c.visibility, u.role FROM ({}) u \
+        "SELECT c.id, c.name, c.visibility, u.role, EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision AND cm.manager) FROM ({}) u \
          LEFT JOIN channels c ON c.organization_id = $1 \
          AND ({visible}) WHERE u.id = $2 AND u.membership_revision = $3 \
          ORDER BY lower(c.name COLLATE \"C\"), c.id",
@@ -106,6 +110,7 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
             Option<String>,
             Option<ChannelVisibility>,
             Role,
+            bool,
         ),
     >(&sql)
     .bind(auth.identity.organization.organization_id)
@@ -118,12 +123,13 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     }
     let channels = rows
         .into_iter()
-        .filter_map(|(id, name, visibility, role)| {
+        .filter_map(|(id, name, visibility, role, manager)| {
             let visibility = visibility?;
             let capabilities = ChannelCapabilities::for_visible(
                 auth.identity.organization.organization_id,
                 role,
                 matches!(visibility, ChannelVisibility::Public),
+                manager,
             );
             Some(Channel {
                 id: id?,
@@ -213,13 +219,14 @@ pub async fn create_channel(
             organization_id,
             role,
             matches!(channel.2, ChannelVisibility::Public),
+            matches!(channel.2, ChannelVisibility::Private),
         ),
         visibility: channel.2,
     };
     if matches!(channel.visibility, ChannelVisibility::Private) {
         sqlx::query(
-            "INSERT INTO channel_members (organization_id, channel_id, member_id, membership_revision) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO channel_members (organization_id, channel_id, member_id, membership_revision, manager) \
+             VALUES ($1, $2, $3, $4, true)",
         )
         .bind(organization_id)
         .bind(channel.id)
@@ -301,6 +308,7 @@ pub(crate) async fn is_visible_for_write(
             organization: organization_id,
             role,
             channel_member: false,
+            channel_manager: false,
         },
         Action::ReadChannel,
         Resource::Channel {
@@ -320,6 +328,7 @@ pub(crate) async fn is_visible_for_write(
                 organization: organization_id,
                 role,
                 channel_member: grant.is_some(),
+                channel_manager: false,
             },
             Action::ReadChannel,
             Resource::Channel {

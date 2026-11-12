@@ -546,11 +546,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Usable Channel grants: Member id, name and Role only",
+            "description": "Usable Channel grants: Member id, name, Role and manager right; no email",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemberList"
+                  "$ref": "#/components/schemas/ChannelMemberList"
                 }
               }
             }
@@ -691,7 +691,7 @@
             }
           },
           "403": {
-            "description": "forbidden: requires Owner/Admin with Channel access",
+            "description": "forbidden: requires Owner/Admin with access or a usable private Channel manager right",
             "content": {
               "application/json": {
                 "schema": {
@@ -837,7 +837,7 @@
             }
           },
           "403": {
-            "description": "forbidden: removing others requires Owner/Admin with access",
+            "description": "forbidden: removing others requires Owner/Admin with access or a usable private Channel manager right",
             "content": {
               "application/json": {
                 "schema": {
@@ -858,6 +858,170 @@
           },
           "409": {
             "description": "last_channel_manager or last_channel_grant: private Channel protection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "crate::channels::members"
+        ],
+        "operationId": "change_manager",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "member_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeChannelManagerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Manager right updated or already current; grant lifetime and access unchanged"
+          },
+          "400": {
+            "description": "Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden: requires a usable manager, including for no-ops",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable, channel not found, member_not_found (unknown/foreign/inactive), or channel_grant_not_found (absent/stale)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "last_channel_manager",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Requires application/json",
             "content": {
               "application/json": {
                 "schema": {
@@ -2846,7 +3010,7 @@
             }
           },
           "409": {
-            "description": "last_owner: the last active Owner cannot be demoted (takes precedence over last_channel_manager); last_channel_manager: a private Channel cannot lose its last usable Owner/Admin grantee (no Channel details)",
+            "description": "last_owner: the last active Owner cannot be demoted (takes precedence over last_channel_manager); last_channel_manager: a private Channel cannot lose its last usable manager (no Channel details)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3566,6 +3730,18 @@
           }
         }
       },
+      "ChangeChannelManagerRequest": {
+        "type": "object",
+        "required": [
+          "manager"
+        ],
+        "properties": {
+          "manager": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "ChangeRoleRequest": {
         "type": "object",
         "required": [
@@ -3629,13 +3805,17 @@
         "required": [
           "can_add_members",
           "can_remove_members",
-          "can_leave"
+          "can_leave",
+          "can_manage_managers"
         ],
         "properties": {
           "can_add_members": {
             "$ref": "#/components/schemas/Capability"
           },
           "can_leave": {
+            "$ref": "#/components/schemas/Capability"
+          },
+          "can_manage_managers": {
             "$ref": "#/components/schemas/Capability"
           },
           "can_remove_members": {
@@ -3653,6 +3833,44 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/UnreadChannel"
+            }
+          }
+        }
+      },
+      "ChannelMember": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "role",
+          "manager"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "manager": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "ChannelMemberList": {
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChannelMember"
             }
           }
         }

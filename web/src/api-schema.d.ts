@@ -106,7 +106,7 @@ export interface paths {
         delete: operations["remove"];
         options?: never;
         head?: never;
-        patch?: never;
+        patch: operations["change_manager"];
         trace?: never;
     };
     "/api/v1/orgs/{org}/channels/{id}/messages": {
@@ -464,6 +464,9 @@ export interface components {
             allowed: boolean;
             reason?: string | null;
         };
+        ChangeChannelManagerRequest: {
+            manager: boolean;
+        };
         ChangeRoleRequest: {
             role: components["schemas"]["Role"];
         };
@@ -488,10 +491,21 @@ export interface components {
         ChannelCapabilities: {
             can_add_members: components["schemas"]["Capability"];
             can_leave: components["schemas"]["Capability"];
+            can_manage_managers: components["schemas"]["Capability"];
             can_remove_members: components["schemas"]["Capability"];
         };
         ChannelList: {
             channels: components["schemas"]["UnreadChannel"][];
+        };
+        ChannelMember: {
+            /** Format: uuid */
+            id: string;
+            manager: boolean;
+            name: string;
+            role: components["schemas"]["Role"];
+        };
+        ChannelMemberList: {
+            members: components["schemas"]["ChannelMember"][];
         };
         /** @enum {string} */
         ChannelVisibility: "public" | "private";
@@ -866,11 +880,14 @@ export type Account = components['schemas']['Account'];
 export type AccountIdentity = components['schemas']['AccountIdentity'];
 export type AddChannelMemberRequest = components['schemas']['AddChannelMemberRequest'];
 export type Capability = components['schemas']['Capability'];
+export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelManagerRequest'];
 export type ChangeRoleRequest = components['schemas']['ChangeRoleRequest'];
 export type Channel = components['schemas']['Channel'];
 export type ChannelAccessLost = components['schemas']['ChannelAccessLost'];
 export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
 export type ChannelList = components['schemas']['ChannelList'];
+export type ChannelMember = components['schemas']['ChannelMember'];
+export type ChannelMemberList = components['schemas']['ChannelMemberList'];
 export type ChannelVisibility = components['schemas']['ChannelVisibility'];
 export type ClientMessage = components['schemas']['ClientMessage'];
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest'];
@@ -1286,13 +1303,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Usable Channel grants: Member id, name and Role only */
+            /** @description Usable Channel grants: Member id, name, Role and manager right; no email */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MemberList"];
+                    "application/json": components["schemas"]["ChannelMemberList"];
                 };
             };
             /** @description Invalid ids */
@@ -1387,7 +1404,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description forbidden: requires Owner/Admin with Channel access */
+            /** @description forbidden: requires Owner/Admin with access or a usable private Channel manager right */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1485,7 +1502,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description forbidden: removing others requires Owner/Admin with access */
+            /** @description forbidden: removing others requires Owner/Admin with access or a usable private Channel manager right */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1505,6 +1522,117 @@ export interface operations {
             };
             /** @description last_channel_manager or last_channel_grant: private Channel protection */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    change_manager: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+                member_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangeChannelManagerRequest"];
+            };
+        };
+        responses: {
+            /** @description Manager right updated or already current; grant lifetime and access unchanged */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: requires a usable manager, including for no-ops */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable, channel not found, member_not_found (unknown/foreign/inactive), or channel_grant_not_found (absent/stale) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description last_channel_manager */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Requires application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2722,7 +2850,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description last_owner: the last active Owner cannot be demoted (takes precedence over last_channel_manager); last_channel_manager: a private Channel cannot lose its last usable Owner/Admin grantee (no Channel details) */
+            /** @description last_owner: the last active Owner cannot be demoted (takes precedence over last_channel_manager); last_channel_manager: a private Channel cannot lose its last usable manager (no Channel details) */
             409: {
                 headers: {
                     [name: string]: unknown;

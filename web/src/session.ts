@@ -142,12 +142,15 @@ export function createSession(options: SessionOptions) {
       const controller = createChannelMembers(organizationId, channel, r => {
         if (!r.ok && r.kind === 'http' && r.status === 401) notifyEnded()
         else if (!closed && api.isOrganizationUnavailable(r)) terminate()
-      }, api, () => { void sync.channelUnavailable(channel) })
+      }, api, () => { void sync.channelUnavailable(channel) }, () => channels.load())
       memberControllers.set(channel, controller)
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
       memberAvailability.set(channel, lost)
       if (lost) controller.unavailable()
-      else void controller.load()
+      else {
+        void controller.load()
+        void channels.load()
+      }
       return controller
     },
     close() {

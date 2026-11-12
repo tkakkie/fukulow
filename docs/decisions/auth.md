@@ -39,6 +39,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
 - #293 A (planned, #314): RLS is defense in depth on every organization_id table for fukulow_app (NOBYPASSRLS). USING and WITH CHECK compare organization_id to transaction-local fukulow.organization_id; unset fails closed. SQL organization_id predicates and authorize stay.
 - #293 (planned) Single-Organization table access runs only in a transaction that first ran set_config('fukulow.organization_id', org, true) with the authenticated Organization; no session-level setting, so commit, rollback or abort leaves no Organization on a pooled connection.
+- #314 context helpers own BEGIN, bound local settings and cleanup before/after a closure; send BEGIN accepts optional Organization context. Owned guards discard unconfirmed cleanup, including cancellation before BEGIN's response; existing callers remain unscoped.
 - #293 (planned) exceptions stay narrow, never BYPASSRLS: accounts/account_sessions have no RLS; /me uses a SELECT-only policy for the caller's own Members; setup uses a boolean-only SECURITY DEFINER function; fallback rechecks run one transaction per Organization.
 - #293 (planned) Owner jobs (migrations, pg_dump, restore drill) run as the superuser owner and bypass RLS by design; ENABLE without FORCE. RLS tests must connect as a non-superuser role, because CI tests connect as postgres. Merge needs before/after hot-path measurements.
 - #294 A (planned, #315): a Guest lists only themself and active Members with a usable grant on a Channel the Guest can access; other Roles keep the full list. Sender names come from #301's author lookup scoped to readable Messages, never by widening the list.
@@ -64,7 +65,9 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 Entries that also govern this area, listed by the start of the entry in that part.
 
 - [messages](messages.md): `#231 rejects Role demotion with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
-- [messages](messages.md): `#292 (planned, #311): a private`, `#292 (planned) The right lives`, `#292 (planned) last_channel_manager counts`
+- [messages](messages.md): `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`
 - [messages](messages.md): `#142/#144 triggers mirror Channel visibility, including`, `#144 Role/grant changes reconcile positions under`, `DeferredOrganizationAuth rejects Session/database errors before reading`
 - [realtime](realtime.md): `Message persistence and sign-out finish regardless`, `#57 item 4: auth owns the`
 - [web](web.md): `Capabilities ({allowed, reason?}) come from authorize:`
+
+- [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`, `#311 The private-Channel trigger locks its Channel row`
