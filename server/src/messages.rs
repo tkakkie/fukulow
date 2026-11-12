@@ -436,7 +436,7 @@ async fn persist_admitted(
     input: SendMessageRequest,
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
-    let mut tx = commit::Transaction::begin(pool, permit, "BEGIN").await?;
+    let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", None).await?;
     match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
         .await?
     {
@@ -540,7 +540,8 @@ async fn latest_seq(
     // A post-failure subscription must not snapshot behind an unresolved COMMIT.
     // Take a fresh READ COMMITTED snapshot *after* acquiring the shared barrier.
     let mut tx =
-        commit::Transaction::begin(pool, permit, "BEGIN ISOLATION LEVEL READ COMMITTED").await?;
+        commit::Transaction::begin(pool, permit, "BEGIN ISOLATION LEVEL READ COMMITTED", None)
+            .await?;
     commit::lock(tx.connection()?, organization, channel, true).await?;
     let sql = "SELECT seq FROM channel_message_sequences \
                    WHERE organization_id = $1 AND channel_id = $2";
