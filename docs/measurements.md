@@ -584,7 +584,7 @@ Limits: one deterministic process run per mode; heap includes controller metadat
 
 - Purpose: the cost of running each hot query inside a transaction that first sets `fukulow.organization_id` locally (the #314 helper), still without RLS. Same machine, PostgreSQL 18.6 and `hot-plans` dataset as above; source main 1069a9f.
 - Plans reproduce: `psql -X [-v generic=1] -v org_context=1 -f load/hot-plans/plans.sql` as `fukulow_app`, six passes per mode, medians of passes 2–6, compared with passes without `org_context` taken in the same session. Execution Time of every measured statement stays within run-to-run noise (custom → custom+context: VIS 0.017 → 0.022, history latest 0.034 → 0.032, replay 0.050 → 0.056, timeline latest 33.900 → 34.086, fan-out `member_access` 0.952 → 0.961, Unread counts 19.478 → 19.660 ms; generic plans likewise). The `set_config` statement itself: median 0.002–0.003 ms, max 0.007 ms.
-- Latency reproduce: `HOTPLANS_CONTAINER=<container> PGPASSWORD=<app test password> LATENCY_SECONDS=30 node load/hot-latency.ts` (pgbench inside the container, prepared statements, per-transaction logs), three runs; medians of the three.
+- Latency reproduce: `LATENCY_SECONDS=30 node load/hot-latency.ts`, with `HOTPLANS_CONTAINER` naming the throwaway container and the app role's test-only password in the libpq password variable (pgbench inside the container, prepared statements, per-transaction logs), three runs; medians of the three.
 
 | Script | Clients | Context | Transactions/s | p50 / p95 / p99 ms (p95 range) |
 |---|---:|---|---:|---|
