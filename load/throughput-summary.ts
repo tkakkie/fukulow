@@ -10,10 +10,14 @@ export function throughputPlan(rates: string | undefined, seconds: string | unde
 }
 
 export function classifySend(status: number, retryAfter?: string): {
-  outcome: 'accepted' | 'rejected503' | 'other'; invalidRetryAfter: boolean;
+  outcome: 'accepted' | 'rejected429' | 'rejected503' | 'other'; invalidRetryAfter: boolean;
 } {
-  return { outcome: status >= 200 && status < 300 ? 'accepted' : status === 503 ? 'rejected503' : 'other',
-    invalidRetryAfter: status === 503 && !/^[1-9]\d*$/.test(retryAfter ?? '') };
+  return { outcome: status >= 200 && status < 300 ? 'accepted' : status === 429 ? 'rejected429' : status === 503 ? 'rejected503' : 'other',
+    invalidRetryAfter: (status === 429 || status === 503) && !/^[1-9]\d*$/.test(retryAfter ?? '') };
+}
+
+export function selectSender(index: number, members: number, channels: number) {
+  return { member: index % members, channel: Math.floor(index / members) % channels };
 }
 
 type Metrics = Record<string, { values: Record<string, number> }>;
@@ -25,6 +29,7 @@ export function throughputReport(data: unknown, steps: Step[]) {
     const attempted = value('throughput_attempted', step) ?? 0;
     const accepted = value('throughput_accepted', step) ?? 0;
     const inWindow = value('throughput_accepted_in_window', step) ?? 0;
+    const rejected429 = value('throughput_429', step) ?? 0;
     const rejected503 = value('throughput_503', step) ?? 0;
     const otherErrors = value('throughput_other', step) ?? 0;
     return { ...step, attempted, accepted, acceptedInWindow: inWindow, acceptedTail: accepted - inWindow,
@@ -33,13 +38,14 @@ export function throughputReport(data: unknown, steps: Step[]) {
       // Attribute the drain to this step too, so queued completions cannot inflate its rate.
       acceptedIncludingDrainPerSecond: accepted / Math.max(step.seconds, (value('throughput_completion_ms', step, 'max') ?? 0) / 1000),
       acceptedLatencyMs: Object.fromEntries(['med', 'p(95)', 'p(99)'].map(stat => [stat === 'med' ? 'p50' : stat === 'p(95)' ? 'p95' : 'p99', accepted ? value('throughput_accepted_ms', step, stat) : null])),
+      rejected429, rejected429Rate: attempted ? rejected429 / attempted : null,
       rejected503, rejected503Rate: attempted ? rejected503 / attempted : null,
       otherErrors, otherErrorRate: attempted ? otherErrors / attempted : null,
       invalidRetryAfter: value('throughput_invalid_retry_after', step) ?? 0,
-      retryAfterSeconds: { min: rejected503 ? value('throughput_retry_after', step, 'min') : null,
-        max: rejected503 ? value('throughput_retry_after', step, 'max') : null },
+      retryAfterSeconds: { min: rejected429 + rejected503 ? value('throughput_retry_after', step, 'min') : null,
+        max: rejected429 + rejected503 ? value('throughput_retry_after', step, 'max') : null },
       droppedIterations: value('dropped_iterations', step) ?? 0,
-      incomplete: attempted - accepted - rejected503 - otherErrors,
+      incomplete: attempted - accepted - rejected429 - rejected503 - otherErrors,
     };
   });
   return { steps: rows, offered: rows.reduce((n, step) => n + step.attempted, 0),

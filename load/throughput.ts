@@ -8,7 +8,7 @@ import { positiveInteger } from './delivery.ts';
 import { organizationPath, signInPath } from './compat.ts';
 import { baseUrl, params, requireStatus, revoke, seed, uuid, type Setup } from './seed.ts';
 import { summaryForReport } from './summary.ts';
-import { classifySend, throughputPlan, throughputReport } from './throughput-summary.ts';
+import { classifySend, selectSender, throughputPlan, throughputReport } from './throughput-summary.ts';
 
 const mode = __ENV.THROUGHPUT_SCENARIO || 'many';
 if (!['many', 'hot'].includes(mode)) throw new Error('THROUGHPUT_SCENARIO must be many or hot');
@@ -25,6 +25,7 @@ if (maxVUs < preAllocatedVUs) throw new Error('THROUGHPUT_MAX_VUS must be at lea
 const attempted = new Counter('throughput_attempted');
 const accepted = new Counter('throughput_accepted');
 const inWindow = new Counter('throughput_accepted_in_window');
+const rejected429 = new Counter('throughput_429');
 const rejected = new Counter('throughput_503');
 const other = new Counter('throughput_other');
 const invalidRetry = new Counter('throughput_invalid_retry_after');
@@ -32,7 +33,7 @@ const retry = new Trend('throughput_retry_after');
 const latency = new Trend('throughput_accepted_ms', true);
 const completion = new Trend('throughput_completion_ms', true);
 const counters = ['throughput_attempted', 'throughput_accepted', 'throughput_accepted_in_window',
-  'throughput_503', 'throughput_other', 'throughput_invalid_retry_after', 'dropped_iterations'];
+  'throughput_429', 'throughput_503', 'throughput_other', 'throughput_invalid_retry_after', 'dropped_iterations'];
 export const options: Options = {
   scenarios: Object.fromEntries(steps.map(step => [step.name, { executor: 'constant-arrival-rate',
     rate: step.rate, timeUnit: '1s', duration: `${step.seconds}s`, startTime: `${step.startSeconds}s`,
@@ -79,9 +80,9 @@ export function setup(): Setup {
 export default function(data: Setup): void {
   const step = steps.find(step => step.name === execution.scenario.name)!;
   const index = execution.scenario.iterationInTest;
-  // Rotate Members independently of Channels (200 Channels is divisible by four).
-  const token = data.tokens[(index + Math.floor(index / data.channelIds.length)) % data.tokens.length];
-  const channel = data.channelIds[index % data.channelIds.length];
+  const selection = selectSender(index, data.tokens.length, data.channelIds.length);
+  const token = data.tokens[selection.member];
+  const channel = data.channelIds[selection.channel];
   const body: SendMessageRequest = { client_message_id: uuid(), body: 'Load test message' };
   attempted.add(1);
   const started = Date.now();
@@ -91,11 +92,12 @@ export default function(data: Setup): void {
   const outcome = classifySend(response.status, response.headers['Retry-After']);
   accepted.add(Number(outcome.outcome === 'accepted'));
   inWindow.add(Number(outcome.outcome === 'accepted' && elapsed <= step.seconds * 1000));
+  rejected429.add(Number(outcome.outcome === 'rejected429'));
   rejected.add(Number(outcome.outcome === 'rejected503'));
   other.add(Number(outcome.outcome === 'other'));
   invalidRetry.add(Number(outcome.invalidRetryAfter));
   if (outcome.outcome === 'accepted') latency.add(Date.now() - started);
-  if (outcome.outcome === 'rejected503' && !outcome.invalidRetryAfter) retry.add(Number(response.headers['Retry-After']));
+  if ((outcome.outcome === 'rejected429' || outcome.outcome === 'rejected503') && !outcome.invalidRetryAfter) retry.add(Number(response.headers['Retry-After']));
   completion.add(elapsed);
 }
 
