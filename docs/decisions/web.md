@@ -27,5 +27,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [process](process.md): `Web boundary check (#48, #60): Workers/SharedWorkers`, `Web storage is forbidden everywhere. A`, `Hand-written API types are review-enforced, not`
 - [auth](auth.md): `#197 app-wide CSP allows external same-origin`, `#197 Vite manifest outputs alone get`
-- [messages](messages.md): `#138: opt-in Topic composition bootstraps sync`, `#292 last_channel_manager counts both kinds`, `#140 keeps one opt-in chain per`, `#140 composes over sync (or Topic`
+- [messages](messages.md): `#138: opt-in Topic composition bootstraps sync`, `#292 (planned, #311): a private`, `#292 (planned) The right lives`, `#292 (planned) last_channel_manager counts`, `#140 keeps one opt-in chain per`, `#140 composes over sync (or Topic`
 - [realtime](realtime.md): `#148 fixtures for behaviour not implemented`, `#161: queue-cap rejection and 30 s`, `A dropped connection or response timeout`

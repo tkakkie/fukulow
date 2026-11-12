@@ -28,7 +28,7 @@ Private Channel managers (#292; planned in #311, not implemented yet; until then
 - The right belongs to one grant lifetime: removal, leave and a Role change to Guest end it. Stale renewal, re-grant and reactivation create or renew grants without it. Guests cannot hold it. Owner/Admin -> Member keeps it.
 - 409 `last_channel_manager` applies when revoking the right, removal, leave, a Role change or Membership deactivation (#237) would take a private Channel from at least one usable manager to none. Channels without one are not required to gain one; `last_channel_grant` is unchanged.
 - Existing private Channels are not backfilled: no creator was recorded, and nothing is deployed yet.
-- The member list shows the right. The endpoint, Capability name and error values are fixed by #311's PR, which updates this section. Until then the web never creates private Channels (#298).
+- #311 will add the right to the Channel member list (today it returns id/name/Role only). The endpoint, Capability name and error values are fixed by #311's PR, which updates this section. Until then the web never creates private Channels (#298).
 
 ## Setup
 - `FUKULOW_SETUP_TOKEN` is required in every mode (Compose, docker run, standalone binary). Unset, whitespace-only or the former published example (`setup-token-local-test-only`, also with surrounding whitespace) fails startup with a Result error, regardless of `FUKULOW_COOKIE_SECURE`. `.env.example` leaves it empty; generate a secret with `openssl rand -base64 32`. Development and tests explicitly supply their own test-only values. The server never generates or logs the token; accepted values retain their exact bytes.
