@@ -2,7 +2,7 @@
 
 ## Terms (English in code/API, Japanese in UI)
 Account/アカウント, Organization/組織, Member/メンバー, Role (Owner/オーナー, Admin/管理者, Member/メンバー, Guest/ゲスト), Invite/招待,
-Channel/チャンネル (public/private), Topic/トピック, Message/メッセージ, Reply/返信, Reply chain/返信のつながり,
+Channel/チャンネル (public/private), Channel manager/チャンネル管理者, Topic/トピック, Message/メッセージ, Reply/返信, Reply chain/返信のつながり,
 Move to topic/トピックに移動, Direct message (DM)/ダイレクトメッセージ, Mention/メンション, Unread/未読,
 Reaction/リアクション, Attachment/添付ファイル, Search/検索, Notification/通知, Edit/編集, Delete/削除,
 Archive/アーカイブ, Sign in/ログイン, Settings/設定.
