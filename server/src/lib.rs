@@ -363,7 +363,7 @@ impl Readiness {
 
 #[utoipa::path(get, path = "/api/v1/ready", responses(
     (status = 200, description = "Database check succeeded, connection cleanup completed and the fallback supervisor has not observed an abnormal worker exit (not a progress watchdog); returns plain-text ok", body = String, content_type = "text/plain"),
-    (status = 503, description = "Readiness unavailable: error not_ready; database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit", body = auth::ErrorBody)
+    (status = 503, description = "Readiness unavailable: error not_ready (Retry-After: 1); database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit", body = auth::ErrorBody)
 ))]
 async fn ready(State(readiness): State<Readiness>) -> Response {
     if readiness.check().await {

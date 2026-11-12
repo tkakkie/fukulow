@@ -2870,7 +2870,7 @@ export interface operations {
                     "text/plain": string;
                 };
             };
-            /** @description Readiness unavailable: error not_ready; database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Readiness unavailable: error not_ready (Retry-After: 1); database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
