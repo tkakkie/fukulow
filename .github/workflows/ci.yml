@@ -142,6 +142,7 @@ jobs:
       - name: Build image with GitHub Actions layer cache
         timeout-minutes: 20
         run: |
+          set -euo pipefail
           cache=(--set "app.cache-from=type=gha,scope=docker")
           if [ "$GITHUB_EVENT_NAME" = push ]; then cache+=(--set "app.cache-to=type=gha,scope=docker,mode=max"); fi
           docker buildx bake --load --file compose.yml "${cache[@]}"
