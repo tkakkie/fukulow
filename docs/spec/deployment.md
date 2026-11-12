@@ -108,6 +108,6 @@ Run each command only after its predecessor succeeds; keep stderr private.
 
 ### Recovery window
 
-RPO target: 24 h, not a guarantee (#296), measured from the newest verified off-VPS backup; no RTO target. Daily backup, off-VPS copy, hash verification and alerts (failure, or newest verified off-VPS backup 24 h old) are automated by #316; until then they are manual. WAL archiving and PITR are out of scope. Daily gap: interval + dump/copy lag, longer with failures/lost VPS-only copies. Assess loss from newest verified accessible off-VPS snapshot, never job start; later writes may be lost. Measure representative recovery hardware before estimating downtime.
+RPO target: 24 h, not a guarantee (#296), measured from the newest verified off-VPS backup; no RTO target. Daily backup, off-VPS copy, hash verification and alerts (failure, or newest verified off-VPS backup 24 h old) are automated by #316; until then they are manual. WAL archiving and PITR are deferred beyond the first dogfooding deploy (#285). Daily gap: interval + dump/copy lag, longer with failures/lost VPS-only copies. Assess loss from newest verified accessible off-VPS snapshot, never job start; later writes may be lost. Measure representative recovery hardware before estimating downtime.
 
 Initial drill conditions, result and timing limits: [measurements: backup restore drill](../measurements.md#backup-restore-drill-198-c).

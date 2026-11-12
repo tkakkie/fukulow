@@ -48,9 +48,9 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - k6 bumps are manual (Dependabot does not see `K6_IMAGE` in Makefile): keep the exact tag, type-check and smoke-test each bump; `@types/k6` versions need not match runtime; digest pinning deferred (#20).
 - #295 A: top-level modules may form an explicit DAG instead of a total order, fixed only after checking real dependencies, table ownership and authorization boundaries. The checker keeps every current capability and adds allowed, denied and cycle fixtures.
 - #295 The checker change and each module move are separate small PRs that change no API, OpenAPI, WebSocket, authorization, DB access or Unread behaviour. DM #151 needs no move first (checked 2026-11-12), so moves wait for a later Sprint.
-- #296 B: RPO is a 24 h target, not a guarantee, measured from the newest verified off-VPS backup. Daily backup, off-VPS copy and hash verification are automated (#316) with alerts on failure or a 24 h old backup; retention, secret rules and the monthly drill stay.
+- #296 B: RPO is a 24 h target, not a guarantee, measured from the newest verified off-VPS backup. Daily backup, off-VPS copy and hash verification are to be automated (#316; manual until then) with alerts on failure or a 24 h old backup; retention, secret rules and the monthly drill stay.
 - #296 WAL archiving and PITR are future requirements: the first deploy (#285) is dogfooding. Any new external service or paid storage needs maintainer approval of its setup and cost before implementation.
-- #297 A: toolchains (rust-toolchain.toml, .node-version/engines) and images stay exact; libraries are pinned by committed lockfiles, manifests may use ranges, and resolved versions change only in reviewed PRs. Reason: lockfiles give reproducibility without churn.
+- #297 A: toolchains (rust-toolchain.toml, .node-version/engines) and images stay exact; libraries are pinned by committed lockfiles, manifests may use ranges (not Playwright, exact for its image), and resolved versions change only in reviewed PRs. Reason: lockfiles give reproducibility without churn.
 
 ## Entries in other parts
 
