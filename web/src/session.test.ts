@@ -288,7 +288,7 @@ it('explicitly selecting the current C9 Channel reattempts it while another Orga
 
 it('a Member panel created during C9 recovers on explicit Channel re-selection', async () => {
   const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({
-    members: [{ id: 'me', name: '本人', role: 'admin' }],
+    members: [{ id: 'me', name: '本人', role: 'admin', manager: false }],
   }))
   const { net, session } = open()
   try {
@@ -311,7 +311,7 @@ it('a Member panel created during C9 recovers on explicit Channel re-selection',
     await settle()
     expect(session.sync.get().channels.A.state).toBe('ready')
     expect(panel.get()).toMatchObject({ unavailable: false, loading: false,
-      members: [{ id: 'me', name: '本人', role: 'admin' }] })
+      members: [{ id: 'me', name: '本人', role: 'admin', manager: false }] })
     expect(list).toHaveBeenCalledExactlyOnceWith('', 'A')
   } finally {
     session.close()
@@ -354,7 +354,7 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
     expect(vi.getTimerCount()).toBe(0)
     expect(session.sync.getTimeline('A').composer.get().draft).toBe('失わない下書き')
 
-    list.mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin' }] }))
+    list.mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin', manager: false }] }))
     session.channels.select('A')
     await settle()
     net.subscribed('A', 100)
@@ -428,6 +428,7 @@ it('composes unread, replies and topics over a single sync instance and fences r
       capabilities: {
         can_add_members: { allowed: false },
         can_remove_members: { allowed: false },
+        can_manage_managers: { allowed: false },
         can_leave: { allowed: true },
       },
       as_of_seq: 100,

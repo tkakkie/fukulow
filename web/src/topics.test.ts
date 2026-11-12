@@ -882,6 +882,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
     capabilities: {
       can_add_members: { allowed: false },
       can_remove_members: { allowed: false },
+      can_manage_managers: { allowed: false },
       can_leave: { allowed: false },
     },
   }
@@ -1180,7 +1181,7 @@ it('creates a Topic via topic_name from the Topic composer during main paging ex
 
 it('recovers C9 Topic state by selecting a different Channel and back', async () => {
   const c = topicClient()
-  const channel = (id: string): Channel => ({ id, name: id, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: true } } })
+  const channel = (id: string): Channel => ({ id, name: id, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true } } })
   const session = createSession({ selfId: 'me', onEnded: vi.fn(), topicsApi: c.topicsApi,
     channelsApi: { listChannels: async () => ok({ channels: [channel('A'), channel('B')] }), createChannel: async () => ok(channel('B')) },
     sync: { api: { listMessages: c.listMessages, sendMessage: c.sendMessage },
