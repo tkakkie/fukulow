@@ -150,7 +150,9 @@ async fn interrupted(
             drop(pending);
             hold.send(false).unwrap();
         }
-        let next_pid = tokio::time::timeout(Duration::from_millis(500), super::context::clean(&single))
+        // 3 s covers a fresh connect+auth on a loaded runner and stays below SQLx's
+        // 5 s graceful-close hold, so a regressed (retained) slot still times out.
+        let next_pid = tokio::time::timeout(Duration::from_secs(3), super::context::clean(&single))
             .await.expect("replacement acquire must succeed while the old transport stays stalled");
         assert_ne!(next_pid, pid, "interrupted {statement} must discard the connection");
         hold.send(false).unwrap();
