@@ -1,4 +1,4 @@
-.PHONY: api load load-record load-image load-signin
+.PHONY: api load load-record load-throughput load-image load-signin
 api:
 	cargo run --locked --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
@@ -8,6 +8,7 @@ LOAD_DOCKER_NETWORK ?= host
 # Default Compose Caddy endpoint; set BASE_URL to the deployed FUKULOW_DOMAIN URL.
 BASE_URL ?= https://localhost
 LOAD_NOFILE ?= 65536
+LOAD_SCRIPT ?= load/scenario.ts
 LOAD_CONTAINER_NAME ?=
 
 # Quote make-expanded values as single shell arguments, including embedded apostrophes.
@@ -28,11 +29,17 @@ load:
 		-e DURATION_SECONDS -e PUBLISH_INTERVAL_MS -e READY_TIMEOUT_SECONDS -e DRAIN_TIMEOUT_SECONDS \
 		-e CHANNEL_VISIBILITY -e SOCKETS_PER_SESSION -e LOAD_MEASURE \
 		-e LOAD_LEGACY -e LOAD_ALLOW_REJECTIONS -e LOAD_RECONNECT -e LOAD_RECONNECT_STORM -e CONNECT_BATCH \
-		-e CONNECT_INTERVAL_MS -e REQUEST_TIMEOUT_SECONDS -e PUBLISH_CHANNELS $(call shell_quote,$(K6_IMAGE)) run load/scenario.ts
+		-e CONNECT_INTERVAL_MS -e REQUEST_TIMEOUT_SECONDS -e PUBLISH_CHANNELS \
+		-e THROUGHPUT_SCENARIO -e THROUGHPUT_RATES -e THROUGHPUT_STEP_SECONDS -e THROUGHPUT_MEMBERS \
+		-e THROUGHPUT_VUS -e THROUGHPUT_MAX_VUS $(call shell_quote,$(K6_IMAGE)) run $(call shell_quote,$(LOAD_SCRIPT))
 
 # Isolated Docker baseline with resource/SQL snapshots; artifacts default to /private/tmp.
 load-record:
 	node load/record.ts
+
+# Stepped open-model writes; THROUGHPUT_SCENARIO=many (default) or hot.
+load-throughput:
+	LOAD_SCRIPT=load/throughput.ts node load/record.ts
 
 load-image:
 	@echo $(call shell_quote,$(K6_IMAGE))

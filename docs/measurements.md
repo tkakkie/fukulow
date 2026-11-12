@@ -640,3 +640,30 @@ Results:
 - RSS: base also reached 735–869 MiB, so the growth is not new in this PR. Idle RSS 12 s after drain was 376–472 MiB without the threshold and 14 MiB with it; peak dropped from 660 to 90 MiB at equal throughput and CPU. Freed 19 MiB Argon2 blocks retained by glibc malloc explain it, not live request state.
 
 Limits: one host, loopback, short 60 s runs, one to three runs per variant; DB connection peaks varied between runs. The client caps in-flight requests at 64, so it does not model an attacker with unbounded concurrency. The allocator setting was tested only as a run-time environment variable, not as an image default.
+
+## Sustained write throughput (#309, 2026-11-13 JST)
+
+Reproduce from the repository root, one mode at a time, nothing else running:
+
+```bash
+THROUGHPUT_SCENARIO=many THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput
+THROUGHPUT_SCENARIO=hot THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput
+```
+
+Conditions: server and harness 6f95221 (clean). Apple M5, 10 CPUs, 32 GiB; Docker Desktop 29.9.3 VM with 10 CPUs and 7.748 GiB; k6 1.8.2 on the same host; HTTP without TLS or proxy; fresh database per mode. k6 constant-arrival-rate steps of 60 s each, 4 Members, no subscribers. `many` routes over 200 public Channels and `hot` sends to 1. Sends per second accepted inside each step's window:
+
+| Offered/s | many: accepted/s | many: p50/p95/p99 ms | hot: accepted/s | hot: p50/p95/p99 ms |
+| ---: | ---: | --- | ---: | --- |
+| 50 | 50 | 3 / 5 / 6 | 50 | 3 / 4 / 6 |
+| 100 | 100 | 2 / 4 / 5 | 100 | 2 / 4 / 5 |
+| 250 | 250 | 1 / 3 / 5 | 250 | 1 / 2 / 3 |
+| 500 | 500 | 1 / 2 / 3 | 500 | 1 / 2 / 3 |
+| 1,000 | 998* | 1 / 2 / 6 | 998* | 1 / 4 / 42 |
+| 2,000 | 1,996* | 1 / 4 / 8 | 1,788* | 54 / 64 / 75 |
+| 4,000 | 3,968* | 5 / 21 / 36 | 1,749* | 55 / 68 / 85 |
+
+\* k6 dropped iterations: `many` 145 / 225 / 1,881, `hot` 115 / 12,654 / 134,985. k6 drops an iteration when all 100 VUs are busy, so these steps did not run at their offered rate; dropped iterations alone cannot tell generator capacity from server response time. There were zero 429, 503, other errors and incomplete requests in any step. Both modes ran 8 top-level queries and 12 statements (including nested FK checks) per send. Peak sampled CPU, where 100% is one core: `many` app 165%, DB 254%, generator 137%; `hot` app 61%, DB 66%, generator 40%. Peak app RSS was 141 / 122 MiB.
+
+Result: across many Channels, one node sustained about 4,000 accepted sends/s with p95 21 ms. At 4,000/s the generator used 137% CPU on the shared host and server p95 stayed low, so the generator likely set that ceiling, but this run cannot prove it. So the `docs/spec.md` "thousands of writes/s per node" target holds for spread writes on this host. One hot Channel reached about 1,750 accepted sends/s under these conditions (at most 100 VUs): p50 jumps to about 55 ms while app and DB CPU stay low. The leading hypothesis is the one-send-at-a-time-per-Channel serialization (about 0.57 ms per send), a per-Channel limit rather than a node limit; this run does not isolate it.
+
+Limits: one run per mode on a shared single host, with the generator competing for the same CPUs. At most 100 VUs means at most 100 requests in flight, so open bursts larger than that (the #57 2,048-send burst that returned 87% 503) are not exercised here. 17-byte bodies, one Organization, no WebSocket fan-out load and no TLS. The server ceiling for `many` is unmeasured. Raw artifacts stay outside Git (`LOAD_RESULT_DIR`).
