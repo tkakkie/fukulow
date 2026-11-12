@@ -32,12 +32,13 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 - Tier 1, review: Organization data is always scoped by `organization_id`; documented global operations (e.g. setup existence check) are exceptions; do not force a fake scope onto them.
 - Tier 1, review: changing permissions, tenant scoping or real-time delivery needs a denial test per denial the rule defines; cross-Organization alone is not enough (e.g. private Channel non-member).
 - Tier 2: `docs/spec.md` terms everywhere, no synonyms; errors as `ErrorBody`; SQL only in the table's owning module; indexes in the migration that needs them; no N+1 on hot paths; small files/functions; comments only for non-obvious reasons.
-- Tier 2: Rust, TypeScript, SQL, short bash (`#!/usr/bin/env bash`, `set -euo pipefail`, bash 3.2; over ~20 lines or sharing variables -> TypeScript); others need maintainer approval. Exact patch versions. Details: `docs/workflow.md` §8.
+- Tier 2: Rust, TypeScript, SQL, short bash (`#!/usr/bin/env bash`, `set -euo pipefail`, bash 3.2; over ~20 lines or sharing variables -> TypeScript); others need maintainer approval. Toolchains (Rust, Node) and images: exact versions. Libraries: lockfile-pinned; manifest ranges allowed; changed only by reviewed PRs. Details: `docs/workflow.md` §8.
 - Sending a message is idempotent (client-generated id); reconnect uses per-channel sequence numbers.
 - No new dependency, abstraction or doc without a reason in the PR.
 
 ## Boundaries
 - One crate; modules `realtime` -> `messages` -> `channels` -> `auth`, no reverse edges. Split crates only when build time, deps or parallel work hurt.
+- Approved (#295): an explicit DAG of top-level modules replaces this order once the checker enforces it (allowed, denied and cycle fixtures). Until then the order above holds; moves come in small behaviour-preserving PRs.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.
 - (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure protocol: `step(state, input) -> {state, effects}`, no clock, randomness, I/O, Svelte; vitest-testable. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
