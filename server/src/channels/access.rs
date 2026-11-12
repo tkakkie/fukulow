@@ -216,34 +216,32 @@ impl auth::SubscriptionRecheck for AccessChanges {
 }
 
 async fn check_entries(pool: &sqlx::PgPool, entries: &[Arc<Entry>]) -> Result<(), sqlx::Error> {
-    for batch in entries.chunks(1000) {
-        let rows = access_rows(pool, batch).await?;
-        for (entry, (visible, grant, current)) in batch.iter().zip(rows) {
-            // A public shortcut is continuous without its redundant grant. A
-            // subscription originally dependent on a grant retains its lifetime.
-            let mut captured = entry.grant.lock().unwrap_or_else(|e| e.into_inner());
-            let lost = !visible || (captured.is_some() && grant.is_some() && *captured != grant);
-            if !current {
-                entry.status.send_if_modified(|status| {
-                    if *status < 2 {
-                        *status = 3;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            } else if lost {
-                entry.status.send_if_modified(|status| {
-                    if *status == 0 {
-                        *status = 1;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            } else {
-                *captured = grant;
-            }
+    let rows = access_rows(pool, entries).await?;
+    for (entry, (visible, grant, current)) in entries.iter().zip(rows) {
+        // A public shortcut is continuous without its redundant grant. A
+        // subscription originally dependent on a grant retains its lifetime.
+        let mut captured = entry.grant.lock().unwrap_or_else(|e| e.into_inner());
+        let lost = !visible || (captured.is_some() && grant.is_some() && *captured != grant);
+        if !current {
+            entry.status.send_if_modified(|status| {
+                if *status < 2 {
+                    *status = 3;
+                    true
+                } else {
+                    false
+                }
+            });
+        } else if lost {
+            entry.status.send_if_modified(|status| {
+                if *status == 0 {
+                    *status = 1;
+                    true
+                } else {
+                    false
+                }
+            });
+        } else {
+            *captured = grant;
         }
     }
     Ok(())
@@ -265,7 +263,13 @@ async fn access_rows(
         let scoped = crate::database::organization_read_only(
             pool,
             organization,
-            async |tx: &mut sqlx::PgConnection| access_rows_in(tx, &selected).await,
+            async |tx: &mut sqlx::PgConnection| {
+                let mut rows = Vec::with_capacity(selected.len());
+                for batch in selected.chunks(1000) {
+                    rows.extend(access_rows_in(tx, batch).await?);
+                }
+                Ok::<_, sqlx::Error>(rows)
+            },
         )
         .await?;
         for ((index, _), row) in group.into_iter().zip(scoped) {
@@ -385,28 +389,40 @@ mod tests {
                 status: watch::channel(0).0,
             })
         };
-        // Reverse Organization order and interleave a stale epoch of the first Member.
-        let entries = [
-            entry(organizations[1], 0),
-            entry(organizations[0], 0),
-            entry(organizations[1], 1),
-        ];
+        // Both Organizations span several query chunks, interleaved in reverse
+        // Organization order with stale epochs and different visibility results.
+        let entries: Vec<_> = (0..2001)
+            .flat_map(|_| {
+                [
+                    entry(organizations[1], 0),
+                    entry(organizations[0], 0),
+                    entry(organizations[1], 1),
+                ]
+            })
+            .collect();
+        let (counted, transactions) =
+            crate::database::tests::context::counted_pool(&pools.app).await;
         assert_eq!(
-            access_rows(&pools.app, &entries).await.unwrap(),
-            vec![
+            access_rows(&counted, &entries).await.unwrap(),
+            [
                 (true, None, true),
                 (false, None, true),
                 (false, None, false),
             ]
+            .repeat(2001)
         );
-        check_entries(&pools.app, &entries).await.unwrap();
+        use std::sync::atomic::Ordering;
+        assert_eq!(transactions.swap(0, Ordering::SeqCst), organizations.len());
+        check_entries(&counted, &entries).await.unwrap();
+        assert_eq!(transactions.load(Ordering::SeqCst), organizations.len());
         assert_eq!(
             entries
                 .iter()
                 .map(|e| *e.status.borrow())
                 .collect::<Vec<_>>(),
-            vec![0, 1, 3]
+            [0, 1, 3].repeat(2001)
         );
+        counted.close().await;
         pools.app.close().await;
     }
 }

@@ -54,7 +54,10 @@ async fn denied(
 async fn foreign_organization_channel_member_endpoints_deny_without_changes_with_owner_controls(
     pool: PgPool,
 ) {
-    let app = router(&pool);
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let pool = pools.admin;
+    crate::database::tests::context::context_policies(&pool).await;
+    let app = router(&pools.app);
     let org = organization(&pool).await;
     let foreign = organization(&pool).await;
     let owner = Uuid::new_v4();
@@ -101,6 +104,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
             .bind(org).bind(channel).bind(target).fetch_one(&pool).await.unwrap();
         assert_eq!(granted, method == "POST", "{method}");
     }
+    pools.app.close().await;
 }
 
 #[sqlx::test]

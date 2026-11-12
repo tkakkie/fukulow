@@ -162,6 +162,99 @@ async fn chunked_pass_checks_exact_keys_and_excludes_expired_sessions(pool: PgPo
 }
 
 #[sqlx::test]
+async fn multi_chunk_recheck_uses_one_transaction_per_organization(pool: PgPool) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let (_, active) = fixture(&pools.admin).await;
+    let (_, expired) = fixture(&pools.admin).await;
+    let (_, inactive) = fixture(&pools.admin).await;
+    sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE token_hash=$1")
+        .bind(&expired.token_hash).execute(&pools.admin).await.unwrap();
+    sqlx::query("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND account_id=$2")
+        .bind(inactive.identity.organization.organization_id).bind(inactive.account_id)
+        .execute(&pools.admin).await.unwrap();
+    crate::database::tests::context::context_policies(&pools.admin).await;
+    let mut keys = Vec::new();
+    let mut expected = HashMap::new();
+    for i in 0..(2 * BATCH_SIZE + 1) {
+        for (auth, code) in [
+            (&active, None),
+            (&expired, Some(4001)),
+            (&inactive, Some(4003)),
+        ] {
+            let hash = if i % 2 == 0 {
+                auth.token_hash.clone()
+            } else {
+                i.to_be_bytes().to_vec()
+            };
+            let key = (auth.identity.organization.organization_id, hash);
+            if let Some(code) = if i % 2 == 0 { code } else { Some(4001) } {
+                expected.insert(key.clone(), code);
+            }
+            keys.push((key.0, key.1, 0));
+        }
+    }
+    let (counted, transactions) = crate::database::tests::context::counted_pool(&pools.app).await;
+    assert_eq!(
+        check(&counted, &keys, Instant::now() + CHECK_TIMEOUT)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(transactions.load(std::sync::atomic::Ordering::SeqCst), 3);
+    counted.close().await;
+    pools.app.close().await;
+}
+
+#[sqlx::test]
+async fn later_organization_failure_applies_no_partial_session_revocations(pool: PgPool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let changes = SessionChanges::default();
+    let registrations: Vec<_> = [Uuid::new_v4(), Uuid::new_v4()]
+        .into_iter()
+        .flat_map(|org| (0..BATCH_SIZE + 1).map(move |i| (org, i.to_be_bytes().to_vec())))
+        .map(|key| changes.register(key))
+        .collect();
+    let acquisitions = Arc::new(AtomicUsize::new(0));
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .test_before_acquire(false)
+        .before_acquire({
+            let acquisitions = acquisitions.clone();
+            move |_, _| {
+                let later = acquisitions.fetch_add(1, Ordering::SeqCst) > 0;
+                Box::pin(async move {
+                    if later {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(true)
+                })
+            }
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    pass(
+        &changes.sessions,
+        &single,
+        Instant::now() + Duration::from_secs(1),
+        &changes.gate,
+    )
+    .await;
+    assert_eq!(
+        acquisitions.load(Ordering::SeqCst),
+        2,
+        "first Organization must finish before the second stalls"
+    );
+    for registration in registrations {
+        let status = *registration.changed.borrow();
+        assert!(status.failed);
+        assert!(!status.revoked);
+        assert!(!status.membership_revoked);
+    }
+    single.close().await;
+}
+
+#[sqlx::test]
 async fn timed_out_pass_latches_errors_and_releases_its_pool_connection(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     let isolated = sqlx::postgres::PgPoolOptions::new()
@@ -213,6 +306,56 @@ async fn timed_out_pass_latches_errors_and_releases_its_pool_connection(pool: Pg
         1
     );
     held.rollback().await.unwrap();
+}
+
+#[sqlx::test]
+async fn deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled(pool: PgPool) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    for statement in [
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "SELECT set_config('fukulow.organization_id', $1, true)",
+        "ROLLBACK",
+    ] {
+        crate::database::tests::interrupted::at_deadline(
+            &pools.admin,
+            &pools.app,
+            statement,
+            async |single: &PgPool| {
+                check(
+                    single,
+                    &[(Uuid::new_v4(), vec![1; 32], 0)],
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await?;
+                Ok(())
+            },
+        )
+        .await;
+    }
+    pools.app.close().await;
+}
+
+#[sqlx::test]
+async fn unconfirmed_cleanup_frees_fallback_pool_slot_synchronously(pool: PgPool) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    crate::database::tests::interrupted::failed_rollback(
+        &pools.app,
+        async |single: &PgPool, pid| {
+            assert!(
+                check(
+                    single,
+                    &[(Uuid::new_v4(), vec![1; 32], 0)],
+                    Instant::now() + CHECK_TIMEOUT
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(single.size(), 0);
+            assert_ne!(crate::database::tests::context::clean(single).await, pid);
+        },
+    )
+    .await;
+    pools.app.close().await;
 }
 
 #[sqlx::test]

@@ -42,4 +42,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [web](web.md): `a Member panel created during C9 recovers on explicit Channel re-selection`
 - [deployment](deployment.md): `channel_list_database_failure_returns_generic_500`, `channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated`
 
-- [auth](auth.md): `handlers_and_fanout_require_authenticated_context`
+- [auth](auth.md): `handlers_and_fanout_require_authenticated_context`, `multi_chunk_recheck_uses_one_transaction_per_organization`

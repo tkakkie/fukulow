@@ -45,6 +45,41 @@ pub(crate) async fn pools(pool: PgPool) -> TestPools {
     TestPools::new(super::startup_pool(&pool).await).await
 }
 
+/// Each healthy helper transaction checks out once; count both reused and new sockets.
+pub(crate) async fn counted_pool(
+    pool: &PgPool,
+) -> (PgPool, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let count = Arc::new(AtomicUsize::new(0));
+    let counted = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .test_before_acquire(false)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .before_acquire({
+            let count = count.clone();
+            move |_, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(true) })
+            }
+        })
+        .after_connect({
+            let count = count.clone();
+            move |_, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            }
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    count.store(0, Ordering::SeqCst);
+    (counted, count)
+}
+
 pub(crate) async fn settings(tx: &mut PgConnection) -> (Option<String>, Option<String>) {
     sqlx::query_as(
         "SELECT NULLIF(current_setting('fukulow.organization_id', true), ''), \

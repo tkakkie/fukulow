@@ -1,6 +1,7 @@
 use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConnection};
 
 mod context;
+pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
 pub use context::{account, account_read_only, organization, organization_read_only};
 
@@ -56,25 +57,33 @@ pub async fn read_only<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    transaction(pool, true, body).await
+    transaction(pool, true, Discard::Close, body).await
+}
+
+enum Discard {
+    Close,
+    Detach,
 }
 
 async fn transaction<T, E>(
     pool: &PgPool,
     read_only: bool,
+    discard: Discard,
     body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
 ) -> Result<T, E>
 where
     E: From<sqlx::Error>,
 {
     let mut guard = TransactionConnection {
-        connection: pool.acquire().await?,
+        connection: None,
         finished: false,
+        discard,
     };
+    let connection = guard.connection.insert(pool.acquire().await?);
     // SQLx 0.8.6 records transaction depth only after BEGIN's response, so its
     // rollback-on-drop cannot recover a BEGIN cancelled before that response.
     sqlx::Executor::execute(
-        &mut *guard.connection,
+        &mut **connection,
         if read_only {
             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
         } else {
@@ -82,14 +91,14 @@ where
         },
     )
     .await?;
-    let result = body(&mut guard.connection).await;
+    let result = body(connection).await;
     // Read snapshots always roll back; writes commit only a successful body.
     let end = if !read_only && result.is_ok() {
         "COMMIT"
     } else {
         "ROLLBACK"
     };
-    let finished = sqlx::Executor::execute(&mut *guard.connection, end).await;
+    let finished = sqlx::Executor::execute(&mut **connection, end).await;
     guard.finished = finished.is_ok();
     // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
     let value = result?;
@@ -98,14 +107,22 @@ where
 }
 
 struct TransactionConnection {
-    connection: PoolConnection<Postgres>,
+    connection: Option<PoolConnection<Postgres>>,
     finished: bool,
+    discard: Discard,
 }
 
 impl Drop for TransactionConnection {
     fn drop(&mut self) {
-        if !self.finished {
-            self.connection.close_on_drop();
+        if !self.finished
+            && let Some(mut connection) = self.connection.take()
+        {
+            match self.discard {
+                Discard::Close => connection.close_on_drop(),
+                // SQLx graceful close can retain the permit for five seconds.
+                // Deadline-bound workers must free it synchronously instead.
+                Discard::Detach => drop(connection.detach()),
+            }
         }
     }
 }

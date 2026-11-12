@@ -191,21 +191,19 @@ async fn check(
 ) -> Result<HashMap<SessionKey, u16>, sqlx::Error> {
     tokio::time::timeout_at(bound, async {
         let mut ended = HashMap::new();
-        for batch in keys.chunks(BATCH_SIZE) {
-            let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
-            for key in batch {
-                groups.entry(key.0).or_default().push(key.clone());
-            }
-            for (organization, keys) in groups {
-                ended.extend(
-                    crate::database::organization_read_only(
-                        pool,
-                        organization,
-                        async |tx: &mut PgConnection| query(tx, &keys).await,
-                    )
-                    .await?,
-                );
-            }
+        let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for key in keys {
+            groups.entry(key.0).or_default().push(key.clone());
+        }
+        for (organization, keys) in groups {
+            ended.extend(
+                crate::database::organization_read_only_detached(
+                    pool,
+                    organization,
+                    async |tx: &mut PgConnection| query(tx, &keys).await,
+                )
+                .await?,
+            );
         }
         Ok(ended)
     })

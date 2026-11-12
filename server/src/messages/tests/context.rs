@@ -2,6 +2,88 @@ use super::*;
 use crate::auth::{SubscriptionRecheck, SubscriptionScope};
 
 #[sqlx::test]
+async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let (_, org, _, channel, token) = fixture(&pools.admin).await;
+    crate::database::tests::context::context_policies(&pools.admin).await;
+    let app = router(&pools.app);
+    let key = Uuid::new_v4();
+    let intent = json!({"client_message_id":key,"body":"Topic root","topic_name":"Context"});
+    let mut held = pools.admin.begin().await.unwrap();
+    super::super::commit::lock(&mut held, org, channel, false)
+        .await
+        .unwrap();
+    let mut sends = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        // Independent process-local admission permits the cross-process race.
+        let app = router(&pools.app);
+        let token = token.clone();
+        let intent = intent.clone();
+        sends.spawn(async move { sent(&app, &token, channel, intent).await });
+    }
+    // Both preflight lookups must see no Message before the winner commits.
+    // The loser then necessarily exercises the post-conflict canonical lookup.
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%135%'")
+                .fetch_one(&pools.admin).await.unwrap();
+            if waiting == 2 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    held.rollback().await.unwrap();
+    let root = sends.join_next().await.unwrap().unwrap();
+    assert_eq!(sends.join_next().await.unwrap().unwrap(), root);
+    assert_eq!(root["seq"], 1);
+    let reply = sent(
+        &app,
+        &token,
+        channel,
+        json!({"client_message_id":Uuid::new_v4(),"body":"Reply","reply_to":root["id"]}),
+    )
+    .await;
+    assert_eq!(reply["topic_id"], root["topic_id"]);
+    let topic = root["topic_id"].as_str().unwrap();
+    for (suffix, field, count) in [
+        ("topics".to_owned(), "topics", 1),
+        (format!("topics/{topic}/messages"), "messages", 2),
+        (
+            format!("messages/{}/chain", reply["id"].as_str().unwrap()),
+            "messages",
+            2,
+        ),
+    ] {
+        let response = request(
+            &app,
+            "GET",
+            &format!("/api/v1/channels/{channel}/{suffix}"),
+            &token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{suffix}");
+        assert_eq!(
+            body(response).await[field].as_array().unwrap().len(),
+            count,
+            "{suffix}"
+        );
+    }
+    for suffix in ["read".to_owned(), format!("topics/{topic}/read")] {
+        let response = request(
+            &app,
+            "PUT",
+            &format!("/api/v1/channels/{channel}/{suffix}"),
+            &token,
+            json!({"read_seq":2}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{suffix}");
+        assert_eq!(body(response).await["read_seq"], 2);
+    }
+    pools.app.close().await;
+}
+
+#[sqlx::test]
 async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, org, sender, channel, token) = fixture(&pools.admin).await;
