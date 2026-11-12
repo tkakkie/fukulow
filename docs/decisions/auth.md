@@ -55,7 +55,8 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
-- [messages](messages.md): `#231 rejects Role demotion with 409`, `#292 (implemented by #311): a private`, `#292 The right lives and dies`, `#292 last_channel_manager counts both kinds`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
+- [messages](messages.md): `#231 rejects Role demotion with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
+- [messages](messages.md): `#292 (implemented by #311): a private`, `#292 The right lives and dies`, `#292 last_channel_manager counts both kinds`
 - [messages](messages.md): `#142/#144 triggers mirror Channel visibility, including`, `#144 Role/grant changes reconcile positions under`, `DeferredOrganizationAuth rejects Session/database errors before reading`
 - [realtime](realtime.md): `Message persistence and sign-out finish regardless`, `#57 item 4: auth owns the`
 - [web](web.md): `Capabilities ({allowed, reason?}) come from authorize:`
