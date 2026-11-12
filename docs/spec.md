@@ -7,6 +7,8 @@ Move to topic/トピックに移動, Direct message (DM)/ダイレクトメッ�
 Reaction/リアクション, Attachment/添付ファイル, Search/検索, Notification/通知, Edit/編集, Delete/削除,
 Archive/アーカイブ, Sign in/ログイン, Settings/設定.
 
+Channel manager/チャンネル管理者 names the private Channel grant right (`manager`), independent of Organization Role. A usable manager also includes an Owner/Admin with a usable grant; neither kind bypasses Channel access.
+
 ## Model
 - A channel's timeline shows messages that have no topic (topic = null).
 - Reply: a message may reply to another message. Replies form a chain, shown together in a right-side panel.
@@ -19,7 +21,7 @@ Sign in, organization, channels, topics, reply chains, DM, unread/mention, basic
 Later: attachments, reactions, push notifications, bots/webhooks, multiple organizations UI, OIDC.
 
 ## Parts
-- [Accounts](spec/accounts.md): Accounts and Memberships; Members, Roles and Invites; Setup.
+- [Accounts](spec/accounts.md): Accounts and Memberships; Members, Roles and Invites; Channel membership and Channel managers; Setup.
 - [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability; Operations: backup and restore (#198 C).
 - [Realtime](spec/realtime.md): Real-time sync contract.
 

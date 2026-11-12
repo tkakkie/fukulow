@@ -27,6 +27,20 @@ async fn private(app: &Router, token: &str, name: &str) -> Uuid {
     .unwrap()
 }
 
+// #231's Role-only cases model grants predating #311 (no backfill).
+async fn legacy_private(pool: &PgPool, app: &Router, token: &str, name: &str) -> Uuid {
+    let id = private(app, token, name).await;
+    sqlx::query(
+        "UPDATE channel_members SET manager=false WHERE channel_id=$1 AND organization_id=$2",
+    )
+    .bind(id)
+    .bind(Uuid::parse_str(token.split_once('.').unwrap().0).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
 async fn all_state(pool: &PgPool) -> Value {
     let auth: Value = sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id,id) FROM users u),(SELECT jsonb_agg(to_jsonb(s) ORDER BY token_hash) FROM account_sessions s),(SELECT jsonb_agg(to_jsonb(c) ORDER BY organization_id,id) FROM channels c))")
         .fetch_one(pool).await.unwrap();
@@ -64,7 +78,7 @@ async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgP
     let org = organization(&pool).await;
     let target = Uuid::new_v4();
     let tt = member(&pool, org, target, "owner").await;
-    let channel = private(&app, &tt, "Last Owner's private Channel").await;
+    let channel = legacy_private(&pool, &app, &tt, "Last Owner's private Channel").await;
     let inactive = Uuid::new_v4();
     member(&pool, org, inactive, "owner").await;
     sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
@@ -131,14 +145,14 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
         let ot = member(&pool, org, Uuid::new_v4(), "owner").await;
         let target = Uuid::new_v4();
         let tt = member(&pool, org, target, "admin").await;
-        let secret = private(&app, &tt, "Secret managed Channel").await;
+        let secret = legacy_private(&pool, &app, &tt, "Secret managed Channel").await;
         for role in ["member", "guest"] {
             let id = Uuid::new_v4();
             member(&pool, org, id, role).await;
             grant(&pool, org, secret, id).await;
         }
         if multiple {
-            let companion = private(&app, &tt, "Another secret Channel").await;
+            let companion = legacy_private(&pool, &app, &tt, "Another secret Channel").await;
             let other = Uuid::new_v4();
             member(&pool, org, other, "admin").await;
             grant(&pool, org, companion, other).await;
@@ -202,7 +216,7 @@ async fn role_demotion_counts_only_usable_scoped_managers_with_allowed_controls(
     for stale in [false, true] {
         let target = Uuid::new_v4();
         let tt = member(&pool, org, target, "owner").await;
-        let channel = private(&app, &tt, &format!("Usable managers {stale}")).await;
+        let channel = legacy_private(&pool, &app, &tt, &format!("Usable managers {stale}")).await;
         let other = Uuid::new_v4();
         member(&pool, org, other, "admin").await;
         grant(&pool, org, channel, other).await;
@@ -225,7 +239,7 @@ async fn role_demotion_counts_only_usable_scoped_managers_with_allowed_controls(
         let foreign = organization(&pool).await;
         let ft = member(&pool, foreign, target, "owner").await;
         member(&pool, foreign, other, "admin").await;
-        let fc = private(&app, &ft, "Foreign managed").await;
+        let fc = legacy_private(&pool, &app, &ft, "Foreign managed").await;
         grant(&pool, foreign, fc, other).await;
         assert_eq!(
             change(&app, &ot, target, "admin").await.status(),
@@ -253,7 +267,13 @@ async fn role_demotion_counts_only_usable_scoped_managers_with_allowed_controls(
                 .unwrap();
         assert_eq!(role, "owner");
         // A private Channel that already has no usable manager gains no rule.
-        private(&app, &tt, &format!("Unmanaged from creation {stale}")).await;
+        legacy_private(
+            &pool,
+            &app,
+            &tt,
+            &format!("Unmanaged from creation {stale}"),
+        )
+        .await;
         assert_eq!(
             change(&app, &ot, target, "guest").await.status(),
             StatusCode::OK
@@ -269,7 +289,7 @@ async fn role_demotion_counts_only_usable_scoped_managers_with_allowed_controls(
     // A stale target grant is not a manager even if the target is currently Admin.
     let stale = Uuid::new_v4();
     let st = member(&pool, org, stale, "admin").await;
-    let sc = private(&app, &st, "Stale target").await;
+    let sc = legacy_private(&pool, &app, &st, "Stale target").await;
     sqlx::query("UPDATE channel_members SET membership_revision=-1 WHERE organization_id=$1 AND channel_id=$2")
         .bind(org).bind(sc).execute(&pool).await.unwrap();
     assert_eq!(
@@ -327,17 +347,21 @@ async fn private_creation_racing_creator_demotion_preserves_its_manager(pool: Pg
             .await
             .unwrap()
             .unwrap();
-        let managers: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members cm JOIN users u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=$2 AND u.deactivated_at IS NULL AND u.role IN ('owner','admin')")
+        let managers: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members cm JOIN users u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=$2 AND u.deactivated_at IS NULL AND (u.role IN ('owner','admin') OR cm.manager)")
             .bind(org).bind(channel).fetch_one(&pool).await.unwrap();
         assert_eq!(
             managers, 1,
             "concurrent demotion orphaned the private Channel"
         );
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            body(response).await,
-            json!({"error":"last_channel_manager"})
-        );
+        if role == "guest" {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                body(response).await,
+                json!({"error":"last_channel_manager"})
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 }
 
@@ -352,7 +376,7 @@ async fn role_demotion_races_with_demotion_removal_and_leave_preserve_a_manager(
             let at = member(&pool, org, a, "admin").await;
             let b = Uuid::new_v4();
             let bt = member(&pool, org, b, "admin").await;
-            let c = private(&app, &at, "Concurrent").await;
+            let c = legacy_private(&pool, &app, &at, "Concurrent").await;
             grant(&pool, org, c, b).await;
             let reader = Uuid::new_v4();
             member(&pool, org, reader, "guest").await;
@@ -426,8 +450,8 @@ async fn role_demotion_locks_organization_then_channels_in_order_before_members(
     let owner = Uuid::new_v4();
     let ot = member(&pool, org, owner, "owner").await;
     let mut channels = [
-        private(&app, &tt, "Lock one").await,
-        private(&app, &tt, "Lock two").await,
+        legacy_private(&pool, &app, &tt, "Lock one").await,
+        legacy_private(&pool, &app, &tt, "Lock two").await,
     ];
     channels.sort();
     for token in [tt, ot] {

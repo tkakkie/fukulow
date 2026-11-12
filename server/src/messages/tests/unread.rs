@@ -274,6 +274,21 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
     let hidden: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
         .bind(org).bind(private).bind(viewer_id).fetch_one(&pool).await.unwrap();
     assert_eq!(hidden, 0);
+    // Validate the historical backfill above before bringing its schema forward
+    // for current handlers (which now also project Channel manager rights).
+    let mut later =
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.file_name().unwrap().to_str().unwrap() > "202611110199_unread.sql")
+            .collect::<Vec<_>>();
+    later.sort();
+    for path in later {
+        sqlx::raw_sql(&std::fs::read_to_string(path).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     assert_eq!(
         channels(&app, &viewer).await["channels"][0]["unread_count"],
         0

@@ -11,6 +11,7 @@ pub enum Actor {
         organization: Uuid,
         role: Role,
         channel_member: bool,
+        channel_manager: bool,
     },
 }
 
@@ -25,6 +26,7 @@ pub enum Action {
     ReadChannel,
     AddChannelMembers,
     RemoveChannelMembers,
+    ManageChannelManagers,
     LeaveChannel,
 }
 
@@ -68,6 +70,7 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
                 organization,
                 role,
                 channel_member,
+                channel_manager,
             },
             action,
             Resource::Channel {
@@ -76,11 +79,13 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
             },
         ) if organization == target => {
             let visible = channel_member || (public && !matches!(role, Role::Guest));
+            let manages = visible
+                && (matches!(role, Role::Owner | Role::Admin)
+                    || (!public && channel_member && channel_manager && role != Role::Guest));
             match action {
                 Action::ReadChannel => visible,
-                Action::AddChannelMembers | Action::RemoveChannelMembers => {
-                    visible && matches!(role, Role::Owner | Role::Admin)
-                }
+                Action::AddChannelMembers | Action::RemoveChannelMembers => manages,
+                Action::ManageChannelManagers => !public && manages,
                 Action::LeaveChannel => visible,
                 _ => false,
             }
@@ -114,6 +119,7 @@ impl OrganizationCapabilities {
             organization,
             role,
             channel_member: false,
+            channel_manager: false,
         };
         let resource = Resource::Organization(organization);
         Self {
@@ -130,6 +136,7 @@ impl Auth {
             organization: self.identity.organization.organization_id,
             role: self.identity.member.role,
             channel_member: false,
+            channel_manager: false,
         }
     }
     pub(crate) fn require(&self, action: Action) -> Result<(), ApiError> {
@@ -144,6 +151,14 @@ impl Auth {
 // Channels composes this policy projection with its owned SQL in the same snapshot.
 // Deriving both sets from authorize keeps SQL and resource Capabilities in agreement.
 pub(crate) fn channel_roles_sql(explicit: bool) -> String {
+    policy_roles_sql(Action::ReadChannel, !explicit, explicit, false)
+}
+
+pub(crate) fn channel_manager_roles_sql(right: bool) -> String {
+    policy_roles_sql(Action::ManageChannelManagers, false, true, right)
+}
+
+fn policy_roles_sql(action: Action, public: bool, explicit: bool, right: bool) -> String {
     let organization = Uuid::nil();
     ALL_ROLES
         .into_iter()
@@ -153,11 +168,12 @@ pub(crate) fn channel_roles_sql(explicit: bool) -> String {
                     organization,
                     role: *role,
                     channel_member: explicit,
+                    channel_manager: right,
                 },
-                Action::ReadChannel,
+                action,
                 Resource::Channel {
                     organization,
-                    public: !explicit,
+                    public,
                 },
             )
             .allowed
@@ -175,6 +191,87 @@ pub(crate) fn channel_roles_sql(explicit: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_manager_policy_and_sql_projection_cover_every_role_right_and_visibility() {
+        let organization = Uuid::new_v4();
+        for role in ALL_ROLES {
+            for right in [false, true] {
+                let roles = channel_manager_roles_sql(right);
+                let name = match role {
+                    Role::Owner => "'owner'",
+                    Role::Admin => "'admin'",
+                    Role::Member => "'member'",
+                    Role::Guest => "'guest'",
+                };
+                assert_eq!(
+                    roles.split(',').any(|r| r == name),
+                    role != Role::Guest && (right || matches!(role, Role::Owner | Role::Admin))
+                );
+                for public in [false, true] {
+                    for granted in [false, true] {
+                        let actor = Actor::Member {
+                            organization,
+                            role,
+                            channel_member: granted,
+                            channel_manager: right,
+                        };
+                        let resource = Resource::Channel {
+                            organization,
+                            public,
+                        };
+                        let visible = granted || (public && role != Role::Guest);
+                        let manages = visible
+                            && (matches!(role, Role::Owner | Role::Admin)
+                                || (!public && granted && right && role == Role::Member));
+                        for action in [
+                            Action::AddChannelMembers,
+                            Action::RemoveChannelMembers,
+                            Action::ManageChannelManagers,
+                        ] {
+                            assert_eq!(
+                                authorize(actor, action, resource).allowed,
+                                manages
+                                    && (!matches!(action, Action::ManageChannelManagers)
+                                        || !public)
+                            );
+                            assert!(
+                                !authorize(
+                                    actor,
+                                    action,
+                                    Resource::Channel {
+                                        organization: Uuid::new_v4(),
+                                        public
+                                    }
+                                )
+                                .allowed
+                            );
+                            for actor in [Actor::Anonymous, Actor::Account] {
+                                assert!(!authorize(actor, action, resource).allowed);
+                            }
+                        }
+                        // Management never widens access or changes leave policy.
+                        assert_eq!(
+                            authorize(actor, Action::ReadChannel, resource).allowed,
+                            visible
+                        );
+                        assert_eq!(
+                            authorize(actor, Action::LeaveChannel, resource).allowed,
+                            visible
+                        );
+                        assert!(
+                            !authorize(
+                                actor,
+                                Action::ManageChannelManagers,
+                                Resource::Organization(organization)
+                            )
+                            .allowed
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn shared_role_list_contains_every_variant_exactly_once() {
@@ -201,6 +298,7 @@ mod tests {
                 organization: org,
                 role,
                 channel_member: false,
+                channel_manager: false,
             };
             assert!(
                 authorize(actor, Action::ReadOrganization, Resource::Organization(org)).allowed
@@ -226,6 +324,7 @@ mod tests {
                         organization: org,
                         role,
                         channel_member: explicit,
+                        channel_manager: false,
                     };
                     let resource = Resource::Channel {
                         organization: org,

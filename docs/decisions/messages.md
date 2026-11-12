@@ -3,12 +3,17 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
-- #149 usable managers (Owner/Admin with access; #292 adds Channel managers once #311 ships) add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
+- #149 usable managers (Owner/Admin with access or usable Channel manager right, #311) add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
 - #231 rejects Role demotion with 409 last_channel_manager if any private Channel loses its last usable manager; all Channels change atomically and no Channel details leak. Reuse #149 locks/check via auth's injected guard to preserve module direction. Already unmanaged Channels stay allowed.
-- #292 (planned, #311): a private Channel's creator gets a Channel manager right on their grant, independent of Role; usable manager = usable grant with Owner/Admin Role or the right. Reason: a Member's private Channel must be able to add people without giving Owner/Admin implicit access.
-- #292 (planned) The right lives and dies with its grant: removal, leave or a change to Guest ends it; renewal, re-grant and reactivation never restore it. Reason: no right outlives the access it came with (#146, #149).
-- #292 (planned) last_channel_manager counts both kinds of usable manager for revoke, remove, leave, Role and Membership changes (#149/#231/#237); authorize, SQL rechecks and Capabilities share one rule. Reason: one count keeps a managed Channel managed.
-- #292 (planned) Guests cannot hold the right. Reason: Guests get least privilege and never add Members (#294).
+- #292/#311: a private Channel's creator gets a Channel manager right on their grant, independent of Role; usable manager = usable grant with Owner/Admin Role or the right. Reason: a Member's private Channel must be able to add people without giving Owner/Admin implicit access.
+- #292/#311 The right lives and dies with its grant: removal, leave or a change to Guest ends it; renewal, re-grant and reactivation never restore it. Reason: no right outlives the access it came with (#146, #149).
+- #292/#311 last_channel_manager counts both kinds of usable manager for revoke, remove, leave and Role changes (#149/#231); #237 must reuse it for Membership changes; authorize, SQL rechecks and Capabilities share one rule. Reason: one count keeps a managed Channel managed.
+- #292/#311 Guests cannot hold the right. Reason: Guests get least privilege and never add Members (#294).
+- #311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id} {manager:bool} and can_manage_managers control the right. No-op requests reauthorize and validate targets, preventing stale UI state from granting authority.
+- #311 Manager PATCH uses 400 channel_manager_private_only/channel_manager_guest, 404 member_not_found/channel_grant_not_found, 409 last_channel_manager. Inaccessible Channels keep 404 channel not found, preventing existence leaks.
+- #311 Target Member NO KEY UPDATE precedes grant changes, including Guest right clearing before the Role UPDATE. Reason: a new send must not take Member SHARE and wait on a grant while Role change waits back on that Member.
+- #311 The private-Channel trigger locks its Channel row through COMMIT, so a manager flag and a public visibility transition cannot both commit, including direct SQL; a plain cross-table check would race.
+- #311 Right-only updates skip Unread triggers; the right changes no access, grant_id or subscription. Guest changes clear rights before Role reconciliation, preserving grant -> Unread lock order across Channels.
 - #292 No backfill for existing private Channels: no creator was recorded, guessing could grant a right nobody chose, and nothing is deployed yet. Channels without a usable manager stay allowed as before (#149).
 - #149 grant_id is a durable UUID per grant lifetime; re-grant/renewal cannot revive an old subscription after a lost fast signal. Public non-Guests keep continuous access when a redundant grant is removed.
 - #149 fast subscription rechecks/failures target Organization+Channel for grants or Organization+Member for Role/activation; no-op grants skip them. Only the 30 s fallback scans all, avoiding cross-tenant work/failure propagation.
