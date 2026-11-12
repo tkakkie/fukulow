@@ -3,8 +3,12 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
-- #149 Owner/Admin with access add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
+- #149 usable managers (Owner/Admin with access, or #292 Channel managers) add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
 - #231 rejects Role demotion with 409 last_channel_manager if any private Channel loses its last usable manager; all Channels change atomically and no Channel details leak. Reuse #149 locks/check via auth's injected guard to preserve module direction. Already unmanaged Channels stay allowed.
+- #292 (implemented by #311): a private Channel's creator gets a Channel manager right on their grant, independent of Role. A usable manager is a usable grant with Owner/Admin Role or the right. Owner/Admin without a grant get no management and no Message access.
+- #292 The right lives and dies with its grant: removal, leave or a change to Guest ends it; renewal, re-grant and reactivation never restore it, and Guests cannot hold it. Reason: no right outlives the access it came with (#146, #149).
+- #292 last_channel_manager counts both kinds of usable manager for revoke, remove, leave, Role and Membership changes (#149/#231/#237), under #149's lock order; authorize, SQL rechecks and Capabilities share one rule.
+- #292 No backfill for existing private Channels: no creator was recorded, guessing could grant a right nobody chose, and nothing is deployed yet. Channels without a usable manager stay allowed as before (#149).
 - #149 grant_id is a durable UUID per grant lifetime; re-grant/renewal cannot revive an old subscription after a lost fast signal. Public non-Guests keep continuous access when a redundant grant is removed.
 - #149 fast subscription rechecks/failures target Organization+Channel for grants or Organization+Member for Role/activation; no-op grants skip them. Only the 30 s fallback scans all, avoiding cross-tenant work/failure propagation.
 - #149 subscriptions follow the current access path: public non-Guests ignore redundant grants; a Role change requiring a grant captures its lifetime. Reason: continuous access must survive promotion and redundant removal.
