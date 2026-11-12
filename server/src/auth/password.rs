@@ -160,7 +160,7 @@ mod tests {
     // Observe only registered passwords, so parallel password tests cannot interfere.
     static HASH_CALLS: Mutex<BTreeMap<Vec<u8>, usize>> = Mutex::new(BTreeMap::new());
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn queue_is_bounded_and_cancellation_releases_waiters() {
         let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
         let held = workers
@@ -173,14 +173,12 @@ mod tests {
             let workers: &'static PasswordWorkers = workers;
             tasks.push(tokio::spawn(async move { workers.acquire().await }));
         }
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while workers.waiting.available_permits() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let rejected = tokio::time::timeout(Duration::from_millis(100), workers.acquire())
+        let watchdog = std::time::Instant::now();
+        while workers.waiting.available_permits() != 0 {
+            assert!(watchdog.elapsed() < Duration::from_secs(30), "test stalled");
+            tokio::task::yield_now().await;
+        }
+        let rejected = tokio::time::timeout(Duration::ZERO, workers.acquire())
             .await
             .expect("a full queue must reject immediately");
         assert_eq!(rejected.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);

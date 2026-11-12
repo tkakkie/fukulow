@@ -412,17 +412,19 @@ pub async fn sign_in(
     headers: HeaderMap,
     ApiJson(input): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
-    web_sign_in_with_workers(state, peer, headers, input, &PASSWORD_WORKERS).await
+    web_sign_in_with_entropy(state, peer, headers, input, &PASSWORD_WORKERS, fill_random).await
 }
 
-async fn web_sign_in_with_workers(
+async fn web_sign_in_with_entropy(
     state: AppState,
     peer: ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     input: SignInRequest,
     workers: &'static PasswordWorkers,
+    entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
 ) -> Result<Response, ApiError> {
-    let session = sign_in_with_workers(state.clone(), peer, headers, input, workers).await?;
+    let session =
+        sign_in_with_entropy(state.clone(), peer, headers, input, workers, entropy).await?;
     let mut response = (
         [
             (
@@ -898,6 +900,15 @@ mod tests {
         state: AppState,
         workers: &'static PasswordWorkers,
     ) -> axum::Router {
+        app_with_workers_and_entropy(state, workers, fill_random)
+    }
+
+    pub(super) fn app_with_workers_and_entropy(
+        state: AppState,
+        workers: &'static PasswordWorkers,
+        entropy: impl Fn(&mut [u8]) -> Result<(), ApiError> + Clone + Send + Sync + 'static,
+    ) -> axum::Router {
+        let web_entropy = entropy.clone();
         axum::Router::new()
             .route(
                 "/api/v1/setup",
@@ -907,21 +918,24 @@ mod tests {
             )
             .route(
                 "/api/v1/session",
-                axum::routing::post(
-                    move |State(state), peer, headers, ApiJson(input)| async move {
-                        web_sign_in_with_workers(state, peer, headers, input, workers).await
-                    },
-                ),
+                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
+                    let entropy = web_entropy.clone();
+                    async move {
+                        web_sign_in_with_entropy(state, peer, headers, input, workers, entropy)
+                            .await
+                    }
+                }),
             )
             .route(
                 "/api/v1/native/session",
-                axum::routing::post(
-                    move |State(state), peer, headers, ApiJson(input)| async move {
-                        sign_in_with_workers(state, peer, headers, input, workers)
+                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
+                    let entropy = entropy.clone();
+                    async move {
+                        sign_in_with_entropy(state, peer, headers, input, workers, entropy)
                             .await
                             .map(IntoResponse::into_response)
-                    },
-                ),
+                    }
+                }),
             )
             .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
             .with_state(state)

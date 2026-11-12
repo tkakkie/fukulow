@@ -1,7 +1,15 @@
 use super::*;
 use axum::body::{Body, to_bytes};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{
+    future::{Future, poll_fn},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::Poll,
+    time::Duration,
+};
 use tower::ServiceExt;
 
 fn request(path: &str, email: &str, password: &str) -> Request {
@@ -34,14 +42,47 @@ async fn assert_unavailable(response: Response) {
     );
 }
 
-async fn wait_for_queue(workers: &PasswordWorkers, available: usize) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while workers.waiting.available_permits() != available {
-            tokio::task::yield_now().await;
+// Keep the runtime runnable while SQLx/blocking work completes, so paused time
+// cannot auto-advance to a pool timeout or admission deadline during external I/O.
+async fn without_time_advance<F: Future>(future: F) -> F::Output {
+    let watchdog = std::time::Instant::now();
+    let mut future = std::pin::pin!(future);
+    poll_fn(|cx| {
+        assert!(watchdog.elapsed() < Duration::from_secs(30), "test stalled");
+        match future.as_mut().poll(cx) {
+            Poll::Ready(output) => Poll::Ready(output),
+            Poll::Pending => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
         }
     })
     .await
-    .unwrap();
+}
+
+async fn wait_for_queue<T>(
+    workers: &PasswordWorkers,
+    available: usize,
+    task: &tokio::task::JoinHandle<T>,
+) {
+    without_time_advance(async {
+        while workers.waiting.available_permits() != available {
+            assert!(!task.is_finished(), "request bypassed the admission queue");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+fn app_counting_entropy(
+    state: AppState,
+    workers: &'static PasswordWorkers,
+    calls: Arc<AtomicUsize>,
+) -> axum::Router {
+    tests::app_with_workers_and_entropy(state, workers, move |bytes| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        fill_random(bytes)
+    })
 }
 
 async fn assert_no_sessions(pool: &sqlx::PgPool) {
@@ -59,21 +100,26 @@ async fn full_queue_returns_same_503_for_known_and_unknown_accounts(pool: sqlx::
     let held = workers.running.acquire_many(4).await.unwrap();
     let capacity = workers.waiting.available_permits();
     let queued = workers.waiting.acquire_many(capacity as u32).await.unwrap();
-    let app = tests::app_with_workers(state.clone(), workers);
+    let entropy_calls = Arc::new(AtomicUsize::new(0));
+    let app = app_counting_entropy(state.clone(), workers, entropy_calls.clone());
+    tokio::time::pause();
     for path in ["/api/v1/session", "/api/v1/native/session"] {
         for email in ["owner@example.com", "unknown@example.com"] {
-            let response = tokio::time::timeout(
-                Duration::from_millis(500),
-                app.clone()
-                    .oneshot(request(path, email, "incorrect password")),
-            )
+            let start = tokio::time::Instant::now();
+            let response = without_time_advance(app.clone().oneshot(request(
+                path,
+                email,
+                "incorrect password",
+            )))
             .await
-            .expect("a full queue must reject immediately")
             .unwrap();
+            assert_eq!(start.elapsed(), Duration::ZERO);
             assert_unavailable(response).await;
+            assert_eq!(entropy_calls.load(Ordering::SeqCst), 0);
             assert_eq!(state.sign_in_throttle.pending_counts(), (0, 0));
         }
     }
+    tokio::time::resume();
     assert_no_sessions(&pool).await;
     drop(queued);
     assert_eq!(workers.waiting.available_permits(), capacity);
@@ -87,22 +133,33 @@ async fn expired_wait_returns_503_without_spending_failure_budget(pool: sqlx::Pg
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
     let held = workers.running.acquire_many(4).await.unwrap();
     let capacity = workers.waiting.available_permits();
-    let app = tests::app_with_workers(state.clone(), workers);
+    let entropy_calls = Arc::new(AtomicUsize::new(0));
+    let app = app_counting_entropy(state.clone(), workers, entropy_calls.clone());
+    tokio::time::pause();
     for path in ["/api/v1/session", "/api/v1/native/session"] {
-        let start = tokio::time::Instant::now();
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            app.clone()
-                .oneshot(request(path, "owner@example.com", "incorrect password")),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_unavailable(response).await;
-        assert!(start.elapsed() >= Duration::from_secs(1));
-        assert_eq!(workers.waiting.available_permits(), capacity);
-        assert_eq!(state.sign_in_throttle.pending_counts(), (0, 0));
+        for email in ["owner@example.com", "unknown@example.com"] {
+            let start = tokio::time::Instant::now();
+            let task = tokio::spawn(app.clone().oneshot(request(
+                path,
+                email,
+                "incorrect password",
+            )));
+            wait_for_queue(workers, capacity - 1, &task).await;
+            tokio::time::advance(Duration::from_millis(999)).await;
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+            assert_eq!(workers.waiting.available_permits(), capacity - 1);
+            // Tokio rounds timer deadlines up to its next millisecond tick.
+            tokio::time::advance(Duration::from_millis(2)).await;
+            let response = without_time_advance(task).await.unwrap().unwrap();
+            assert_unavailable(response).await;
+            assert_eq!(start.elapsed(), Duration::from_millis(1001));
+            assert_eq!(entropy_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(workers.waiting.available_permits(), capacity);
+            assert_eq!(state.sign_in_throttle.pending_counts(), (0, 0));
+        }
     }
+    tokio::time::resume();
     assert_no_sessions(&pool).await;
     // Rejected admission must leave all five credential failures available.
     for _ in 0..5 {
@@ -122,6 +179,7 @@ async fn successful_and_unknown_sign_ins_share_bounded_workers(pool: sqlx::PgPoo
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
     let capacity = workers.waiting.available_permits();
     let app = tests::app_with_workers(state.clone(), workers);
+    tokio::time::pause();
     for path in ["/api/v1/session", "/api/v1/native/session"] {
         for email in ["owner@example.com", "unknown@example.com"] {
             let held = workers.running.acquire_many(4).await.unwrap();
@@ -130,10 +188,10 @@ async fn successful_and_unknown_sign_ins_share_bounded_workers(pool: sqlx::PgPoo
                 email,
                 "correct horse battery staple",
             )));
-            wait_for_queue(workers, capacity - 1).await;
+            wait_for_queue(workers, capacity - 1, &task).await;
             assert_eq!(state.sign_in_throttle.pending_counts(), (1, 1));
             drop(held);
-            let response = task.await.unwrap().unwrap();
+            let response = without_time_advance(task).await.unwrap().unwrap();
             assert_eq!(workers.running.available_permits(), 4);
             assert_eq!(workers.waiting.available_permits(), capacity);
             assert_eq!(state.sign_in_throttle.pending_counts(), (0, 0));
@@ -160,6 +218,7 @@ async fn successful_and_unknown_sign_ins_share_bounded_workers(pool: sqlx::PgPoo
             }
         }
     }
+    tokio::time::resume();
 }
 
 #[sqlx::test]
@@ -181,14 +240,14 @@ async fn cancelled_running_sign_in_retains_permits_and_accounts_failures(pool: s
         let (release, gate) = std::sync::mpsc::channel();
         *workers.on_start.lock().unwrap() = Some(Box::new(move || {
             started.send(()).unwrap();
-            gate.recv_timeout(Duration::from_secs(10)).unwrap();
+            gate.recv_timeout(Duration::from_secs(60)).unwrap();
         }));
         let task = tokio::spawn(app.clone().oneshot(request(
             "/api/v1/native/session",
             email,
             password,
         )));
-        tokio::time::timeout(Duration::from_secs(5), running)
+        tokio::time::timeout(Duration::from_secs(30), running)
             .await
             .unwrap()
             .unwrap();
@@ -198,7 +257,7 @@ async fn cancelled_running_sign_in_retains_permits_and_accounts_failures(pool: s
         assert_eq!(state.sign_in_throttle.pending_counts(), (1, 1));
         assert_no_sessions(&pool).await;
         release.send(()).unwrap();
-        let completed = tokio::time::timeout(Duration::from_secs(5), workers.running.acquire())
+        let completed = tokio::time::timeout(Duration::from_secs(30), workers.running.acquire())
             .await
             .unwrap()
             .unwrap();
@@ -314,10 +373,10 @@ async fn cancelled_password_work_retains_capacity_and_finishes_throttle_accounti
         let (release, gate) = std::sync::mpsc::channel();
         *workers.on_start.lock().unwrap() = Some(Box::new(move || {
             started.send(()).unwrap();
-            gate.recv_timeout(Duration::from_secs(10)).unwrap();
+            gate.recv_timeout(Duration::from_secs(60)).unwrap();
         }));
         let task = tokio::spawn(check_password(password.into(), stored, attempt, workers));
-        tokio::time::timeout(Duration::from_secs(5), running)
+        tokio::time::timeout(Duration::from_secs(30), running)
             .await
             .unwrap()
             .unwrap();
@@ -326,7 +385,7 @@ async fn cancelled_password_work_retains_capacity_and_finishes_throttle_accounti
         assert_eq!(workers.running.available_permits(), 0);
         assert_eq!(throttle.pending_counts(), (1, 1));
         release.send(()).unwrap();
-        let completed = tokio::time::timeout(Duration::from_secs(5), workers.running.acquire())
+        let completed = tokio::time::timeout(Duration::from_secs(30), workers.running.acquire())
             .await
             .unwrap()
             .unwrap();
