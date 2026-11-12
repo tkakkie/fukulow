@@ -21,12 +21,16 @@ impl Transaction {
         pool: &PgPool,
         permit: Permit,
         sql: &str,
+        organization: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
         let mut tx = Self {
             connection: Some(pool.acquire().await?),
             _permit: permit,
         };
         tx.connection()?.execute(sql).await?;
+        if let Some(organization) = organization {
+            crate::database::set_organization(tx.connection()?, organization).await?;
+        }
         Ok(tx)
     }
 
@@ -145,6 +149,9 @@ pub(crate) fn pause_commit(key: Uuid) -> std::sync::Arc<super::delivery::Publica
     COMMIT_GATES.lock().unwrap().insert(key, gate.clone());
     gate
 }
+
+#[cfg(test)]
+mod context;
 
 #[cfg(test)]
 mod tests {
