@@ -4,7 +4,9 @@ import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { cpus, totalmem, platform, arch } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { sampledCpuPeaks, type ResourceSample } from './throughput-summary.ts';
 const execAsync = promisify(execFile);
+const throughputMode = process.env.LOAD_SCRIPT === 'load/throughput.ts';
 
 // Artifacts belong outside the checkout: they contain machine-specific measurements.
 const project = `fukulow-load-${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -26,8 +28,8 @@ const env = { ...inherited, LOAD_PROJECT: project, LOAD_PORT: port, LOAD_DB_PASS
   LOAD_APP_IMAGE: process.env.LOAD_APP_IMAGE || `${project}-app`,
   LOAD_SERVER_SOURCE: resolve(process.env.LOAD_SERVER_SOURCE || '.'),
   LOAD_EMAIL: 'baseline@example.invalid', LOAD_PASSWORD: randomUUID(), LOAD_MEASURE: '1',
-  LOAD_RECONNECT_STORM: process.env.LOAD_RECONNECT_STORM || '0' };
-const compose = ['compose', '-p', project, '-f', 'load/compose.yml'];
+  LOAD_RECONNECT_STORM: throughputMode ? '0' : (process.env.LOAD_RECONNECT_STORM || '0') };
+const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'load/compose.yml'];
 const command = (file: string, args: string[]) => execFileSync(file, args, { env, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).trim();
 const docker = (...args: string[]) => command('docker', args);
 const sql = (query: string) => docker(...compose, 'exec', '-T', 'db', 'psql', '-U', 'fukulow', '-d', 'fukulow', '-Atc', query);
@@ -39,7 +41,8 @@ const statsQuery = `SELECT coalesce(json_agg(t), '[]') FROM (
 const databaseQuery = `SELECT row_to_json(t) FROM (SELECT numbackends, xact_commit, xact_rollback,
   blks_read, blks_hit, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted,
   temp_bytes, deadlocks FROM pg_stat_database WHERE datname = current_database()) t`;
-const resources: unknown[] = [];
+const resources: ResourceSample[] = [];
+const resourceNames: Record<string, string> = { generator: env.LOAD_CONTAINER_NAME };
 type Statement = { queryid: string; toplevel: boolean; query: string; calls: number; total_exec_time: number };
 type Snapshot = { at: string; completedAt: number; statements: Statement[]; database: unknown };
 const snapshots: Record<string, Snapshot> = {};
@@ -47,11 +50,12 @@ let timer: ReturnType<typeof setInterval> | undefined;
 let sampling: Promise<void> | undefined;
 let log = '';
 let summary: unknown;
+let throughput: ReturnType<typeof import('./throughput-summary.ts').throughputReport> | undefined;
 let storm: unknown;
 let restart: Promise<void> | undefined;
 let restartMs: number | undefined;
 let progress: unknown;
-let rate: { startedAt: number; offered: number; [key: string]: unknown } | undefined;
+let rate: { startedAt?: number; offered: number; [key: string]: unknown } | undefined;
 let measurementError: unknown;
 let exitCode = 1;
 let primaryError: unknown;
@@ -73,18 +77,21 @@ try {
   sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
   const app = docker(...compose, 'ps', '-q', 'app');
   const db = docker(...compose, 'ps', '-q', 'db');
+  resourceNames.app = docker('inspect', '--format', '{{.Name}}', app).replace(/^\//, '');
+  resourceNames.db = docker('inspect', '--format', '{{.Name}}', db).replace(/^\//, '');
   writeFileSync(`${output}/server-source.patch`, command('git', ['-C', env.LOAD_SERVER_SOURCE, 'diff', 'HEAD']));
   const metadata = {
     hostNode: process.version,
     harness: Object.fromEntries(['Makefile', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
-      'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
+      'load/seed.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
       [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
     serverDirty: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'status', '--porcelain']),
     configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
       'SOCKETS_PER_SESSION', 'CONNECT_BATCH', 'CONNECT_INTERVAL_MS', 'READY_TIMEOUT_SECONDS', 'DRAIN_TIMEOUT_SECONDS',
-      'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'LOAD_RECONNECT_STORM', 'REQUEST_TIMEOUT_SECONDS'].map(key => [key, env[key as keyof typeof env] ?? null])),
+      'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'LOAD_RECONNECT_STORM', 'REQUEST_TIMEOUT_SECONDS',
+      'LOAD_SCRIPT', 'THROUGHPUT_SCENARIO', 'THROUGHPUT_RATES', 'THROUGHPUT_STEP_SECONDS', 'THROUGHPUT_MEMBERS', 'THROUGHPUT_VUS', 'THROUGHPUT_MAX_VUS'].map(key => [key, env[key as keyof typeof env] ?? null])),
     project, port, started: new Date().toISOString(), platform: platform(), arch: arch(),
     hostCpuModel: cpus()[0]?.model, hostCpus: cpus().length, hostMemory: totalmem(),
     docker: JSON.parse(docker('info', '--format', '{"ServerVersion":{{json .ServerVersion}},"NCPU":{{json .NCPU}},"MemTotal":{{json .MemTotal}},"OperatingSystem":{{json .OperatingSystem}}}')),
@@ -139,6 +146,10 @@ try {
         if (typeof message === 'string' && message.startsWith('LOAD_RECONNECT_STORM ')) storm = JSON.parse(message.slice(21));
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
         if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) progress = JSON.parse(message.slice(14));
+        if (line.startsWith('LOAD_THROUGHPUT ')) {
+          throughput = JSON.parse(line.slice(16));
+          if (throughput) rate = { offered: throughput.offered, accepted: throughput.accepted };
+        }
         if (line.startsWith('LOAD_SUMMARY ')) summary = JSON.parse(line.slice(13));
       } catch (error) { measurementError = String(error); }
     }
@@ -155,11 +166,14 @@ try {
   if (primaryError) throw primaryError;
   if (timer) clearInterval(timer);
   await sampling;
-  if (rate && Number(rate.elapsedMs) < Number(rate.duration) * 1000) {
+  if (!throughputMode && rate && Number(rate.elapsedMs) < Number(rate.duration) * 1000) {
     throw new Error('Scheduling window ended before its configured deadline');
   }
-  if (rate && snapshots.before?.completedAt >= rate.startedAt) {
+  if (!throughputMode && rate && (rate.startedAt === undefined || snapshots.before?.completedAt >= rate.startedAt)) {
     throw new Error('SQL baseline snapshot missed the start of publishing');
+  }
+  if (throughputMode && (!throughput || throughput.steps.some(step => step.incomplete !== 0 || step.attempted === 0))) {
+    throw new Error('Incomplete throughput steps (interrupted requests or no arrivals)');
   }
   if (!summary || !rate || !snapshots.before || !snapshots.after || !resources.length || measurementError) {
     throw new Error(`Incomplete measurement: ${String(measurementError ?? 'missing artifact')}`);
@@ -190,8 +204,10 @@ try {
       topLevelStatementsPerSend: (topLevelCalls ?? 0) / rate.offered,
       topLevelQueriesPerSend: (queries ?? 0) / rate.offered,
       topLevelQueriesPerAcceptedSend: (queries ?? 0) / Number(rate.accepted ?? rate.offered) };
-    writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, storm, restartMs, summary, snapshots, statementDeltas, sqlPerSend,
-      resources, progress, measurementError }, null, 2));
+    writeFileSync(`${output}/results.json`, JSON.stringify({ exitCode, rate, throughput, storm, restartMs, summary, snapshots, statementDeltas, sqlPerSend,
+      resources, cpuPeakPercent: sampledCpuPeaks(resources, resourceNames),
+      cpuSamplingScope: 'whole generator run including provisioning, boundaries, idle/drain and teardown; 100% is one core',
+      progress, measurementError }, null, 2));
   });
   attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));
   attempt(() => writeFileSync(`${output}/database.log`, docker(...compose, 'logs', '--no-color', 'db')));
