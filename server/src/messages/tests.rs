@@ -516,7 +516,9 @@ async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
 
 #[sqlx::test]
 async fn committed_send_retry_returns_canonical_message_without_sequence_allocation(pool: PgPool) {
-    let (app, _, sender, channel_id, token) = fixture(&pool).await;
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let (_, _, sender, channel_id, token) = fixture(&pools.admin).await;
+    let app = router(&pools.app);
     let key = Uuid::new_v4();
     // The first response is not used to choose the retry key, simulating a lost response.
     let first_response = send(&app, &token, channel_id, input(key, "hello\n世界")).await;
@@ -534,6 +536,7 @@ async fn committed_send_retry_returns_canonical_message_without_sequence_allocat
         list(&app, &token, channel_id, "").await["messages"],
         json!([retry, next])
     );
+    pools.app.close().await;
 }
 
 #[sqlx::test]

@@ -189,10 +189,13 @@ async fn channel(pool: &PgPool, organization: Uuid, member: Uuid, private: bool)
     channel
 }
 async fn fixture(pool: &PgPool) -> Fixture {
-    let organization = organization(pool).await;
-    let (member, token) = member(pool, organization).await;
-    let channel = channel(pool, organization, member, false).await;
-    let state = state(pool);
+    fixture_with_app_pool(pool, pool).await
+}
+async fn fixture_with_app_pool(admin: &PgPool, app_pool: &PgPool) -> Fixture {
+    let organization = organization(admin).await;
+    let (member, token) = member(admin, organization).await;
+    let channel = channel(admin, organization, member, false).await;
+    let state = state(app_pool);
     let app = crate::app(state.clone());
     let server = Server::start(app.clone()).await;
     Fixture {
@@ -462,7 +465,9 @@ async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(po
 async fn live_delivery_denies_other_organization_and_private_nonmember_with_positive_controls(
     pool: PgPool,
 ) {
-    let f = fixture(&pool).await;
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let pool = pools.admin;
+    let f = fixture_with_app_pool(&pool, &pools.app).await;
     let private = channel(&pool, f.organization, f.member, true).await;
     let (_, nonmember_token) = member(&pool, f.organization).await;
     let other = organization(&pool).await;
@@ -514,13 +519,16 @@ async fn live_delivery_denies_other_organization_and_private_nonmember_with_posi
     ready(&mut authorized, f.channel, 1).await;
     post(&f, private).await;
     silent(&mut authorized).await;
+    pools.app.close().await;
 }
 
 #[sqlx::test]
 async fn replay_denies_other_organization_and_private_nonmember_with_positive_controls(
     pool: PgPool,
 ) {
-    let f = fixture(&pool).await;
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let pool = pools.admin;
+    let f = fixture_with_app_pool(&pool, &pools.app).await;
     let private = channel(&pool, f.organization, f.member, true).await;
     let secret = post(&f, private).await;
     let public = post(&f, f.channel).await;
@@ -550,6 +558,7 @@ async fn replay_denies_other_organization_and_private_nonmember_with_positive_co
     subscribe(&mut owner, private, 0).await;
     assert_eq!(event(&mut owner).await["message"], secret);
     ready(&mut owner, private, 1).await;
+    pools.app.close().await;
 }
 
 #[sqlx::test]
