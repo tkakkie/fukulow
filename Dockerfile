@@ -11,12 +11,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml server/Cargo.toml
 # Dependency-only layer: cached until Cargo.toml/Cargo.lock change.
 RUN mkdir -p server/src && echo "" > server/src/lib.rs && echo "fn main() {}" > server/src/main.rs \
- && cargo build --release -p fukulow-server && rm -rf server/src
+ && cargo build --locked --release -p fukulow-server && rm -rf server/src
 COPY server/ server/
 COPY deploy/db-*.sql deploy/
 RUN find server/src -name "*.rs" -exec touch {} +
 COPY --from=web /app/web/dist web/dist
-RUN cargo build --release -p fukulow-server
+RUN cargo build --locked --release -p fukulow-server
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN groupadd --gid 10001 fukulow \

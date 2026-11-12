@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
 import { checkDecisionDocs, checkDecisions, MAX_DECISION_LENGTH, checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -774,14 +774,17 @@ describe('reconciliation with the cargo test list', () => {
     expect(checker(r, [main('tests::real')])('server/src/lib.rs::real')[0]).toContain('src/lib.rs')
   })
 
-  it('parses stdout only: stderr from cargo is never merged into the list (negative)', () => {
+  it('uses locked Cargo arguments and parses stdout only, never stderr (negative)', () => {
     const bin = mkdtempSync(join(tmpdir(), 'inv-fakecargo-'))
-    writeFileSync(join(bin, 'cargo'), '#!/bin/sh\necho "real: test"\necho "from_stderr: test" >&2\n', { mode: 0o755 })
+    writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nprintf "%s\\n" "$@" > cargo-args\necho "real: test"\necho "from_stderr: test" >&2\n', { mode: 0o755 })
     const r = makeRoot({ 'server/Cargo.toml': '[package]\nname = "x"\n', 'server/src/lib.rs': '' })
     const saved = process.env.PATH
     process.env.PATH = `${bin}:${saved}`
     try {
       expect(cargoList(r)).toEqual([{ binary: 'src/lib.rs', name: 'real' }])
+      expect(readFileSync(join(r, 'cargo-args'), 'utf8').trim().split('\n')).toEqual([
+        'test', '--locked', '-p', 'x', '--lib', '--', '--list',
+      ])
     } finally {
       process.env.PATH = saved
     }

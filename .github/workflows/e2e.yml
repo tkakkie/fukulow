@@ -30,7 +30,7 @@ jobs:
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build
+      - run: cargo build --locked
       - name: Provision least-privilege connection and run one-shot migrations
         env:
           POSTGRES_APP_PASSWORD: ci-e2e-app-only
