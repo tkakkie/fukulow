@@ -9,7 +9,7 @@ Always this file. Default: search headings/keywords, read only matches; split do
 | Task | Read first |
 |---|---|
 | Behaviour change | `docs/spec.md` index, relevant parts |
-| Auth, permissions, tenant scoping, real-time delivery, API contract, migrations | related decisions; `docs/invariants.md` index, then the parts for those areas (required) |
+| Auth, permissions, tenant scoping, real-time delivery, API contract, migrations | `docs/decisions.md` and `docs/invariants.md` indexes, then the parts for those areas (required) |
 | Web UI (components, layout, styles, copy, keyboard) | `docs/ui.md`, in full |
 | Performance, load tests, regression checks, comparing results | related `docs/measurements.md` section only; never otherwise |
 | Implementing / PRs, reviews, labels, sweeps, conflicts, merges | "Workflow essentials" / matching `docs/workflow.md` section |

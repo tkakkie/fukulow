@@ -57,7 +57,7 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [auth](auth.md): `sign_out_burst_over_1024_keeps_unrelated_sessions_open`, `failed_check_result_cannot_fail_reconnected_epoch`, `latched_membership_at_connect_yields_4003_and_session_end_wins`, `secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie`
 - [channels](channels.md): `notification_rechecks_public_visibility_after_http_response`, `guest_visibility_requires_explicit_current_grants_and_role_is_read_afresh`, `observed_loss_blocks_new_frame_handoff_but_allows_only_the_inflight_frame`, `noop_grant_mutations_skip_subscription_rechecks`, `fast_subscription_rechecks_and_failures_are_scoped`

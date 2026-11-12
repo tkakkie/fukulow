@@ -23,7 +23,7 @@ Web UI shell: sign-in/session UI, navigation, tokens, timeline, a11y, setup. Wri
 
 ## Rows in other parts
 
-Rows that also govern this area, listed by a test name from the row in that part.
+Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [messages](messages.md): `treats admission 503 as retryable and preserves the send key`, `an admission refusal cannot restore a draft after the Account Session store was cleared`
 - [topics](topics.md): `retains Topic window, baselines and paging cursors across C9 loss and same-Channel recovery with replay`
