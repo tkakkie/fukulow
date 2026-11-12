@@ -78,7 +78,7 @@ jobs:
         with: { tool: cargo-nextest@0.9.151 }
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
       # #338: many tests wait on timeouts and sleeps, so more threads than the 4 vCPUs (being measured).
-      - run: cargo nextest run --locked --no-fail-fast --test-threads 12
+      - run: cargo nextest run --locked --no-fail-fast --test-threads 8
       - run: cargo test --locked --doc # nextest does not run doctests
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
