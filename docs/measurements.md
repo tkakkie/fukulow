@@ -547,3 +547,30 @@ Each process warms one controller first, takes its starting `process.memoryUsage
 Peak retained records: 100,000 before, 1,000 after. At 100,000 Messages, absolute post-GC heaps were 33,752,248 / 11,654,504 bytes (growth 21.452 / 0.377 MiB). This supports retaining the active baseline/aggregate/visit windows rather than all collected session history.
 
 Limits: one deterministic process run per mode; heap includes controller metadata, Topic baseline identity bookkeeping and the test runtime, so it is not a per-Message byte estimate or an allocation/latency benchmark. Upstream sync and Topic caches, browser rendering and network scheduling are excluded. Baselines refresh every 1,000 Messages here; missing/stale scope baselines, a held aggregate or a long visit intentionally retain wider windows. The bound depends on those windows, not a fixed record cap. Separate regression tests cover baseline subtraction after local reads, held Topic positions, unresolved and advancing visits, duplicate replay, and seeded equivalence with shared events and out-of-order/backward baselines (pruned counts may be null until a post-position refetch recovers). Shared contract fixtures are unchanged.
+
+## Sustained write throughput (#309, 2026-11-13 JST)
+
+Reproduce from the repository root, one mode at a time, nothing else running:
+
+```bash
+THROUGHPUT_SCENARIO=many THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput
+THROUGHPUT_SCENARIO=hot THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput
+```
+
+Conditions: server and harness 6f95221 (clean). Apple M5, 10 CPUs, 32 GiB; Docker Desktop 29.9.3 VM with 10 CPUs and 7.748 GiB; k6 1.8.2 on the same host; HTTP without TLS or proxy; fresh database per mode. k6 constant-arrival-rate steps of 60 s each, 4 Members, no subscribers. `many` routes over 200 public Channels and `hot` sends to 1. Sends per second accepted inside each step's window:
+
+| Offered/s | many: accepted/s | many: p50/p95/p99 ms | hot: accepted/s | hot: p50/p95/p99 ms |
+| ---: | ---: | --- | ---: | --- |
+| 50 | 50 | 3 / 5 / 6 | 50 | 3 / 4 / 6 |
+| 100 | 100 | 2 / 4 / 5 | 100 | 2 / 4 / 5 |
+| 250 | 250 | 1 / 3 / 5 | 250 | 1 / 2 / 3 |
+| 500 | 500 | 1 / 2 / 3 | 500 | 1 / 2 / 3 |
+| 1,000 | 998* | 1 / 2 / 6 | 998* | 1 / 4 / 42 |
+| 2,000 | 1,996* | 1 / 4 / 8 | 1,788* | 54 / 64 / 75 |
+| 4,000 | 3,968* | 5 / 21 / 36 | 1,749* | 55 / 68 / 85 |
+
+\* k6 dropped iterations (generator-limited): `many` 145 / 225 / 1,881, `hot` 115 / 12,654 / 134,985. There were zero 429, 503, other errors and incomplete requests in any step. Both modes ran 8 top-level queries and 12 statements (including nested FK checks) per send. Peak sampled CPU, where 100% is one core: `many` app 165%, DB 254%, generator 137%; `hot` app 61%, DB 66%, generator 40%. Peak app RSS was 141 / 122 MiB.
+
+Result: across many Channels, one node sustained about 4,000 accepted sends/s with p95 21 ms, and the generator, not the server, set that ceiling. So the `docs/spec.md` "thousands of writes/s per node" target holds for spread writes on this host. One hot Channel saturates near 1,750 sends/s: p50 jumps to about 55 ms while app and DB CPU stay low, which is the one-send-at-a-time-per-Channel serialization (about 0.57 ms per send). That is a per-Channel design limit, not a node limit.
+
+Limits: one run per mode on a shared single host, with the generator competing for the same CPUs. At most 100 VUs means at most 100 requests in flight, so open bursts larger than that (the #57 2,048-send burst that returned 87% 503) are not exercised here. 17-byte bodies, one Organization, no WebSocket fan-out load and no TLS. The server ceiling for `many` is above 4,000/s but unmeasured. Raw artifacts stay outside Git (`LOAD_RESULT_DIR`).
