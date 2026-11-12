@@ -96,17 +96,19 @@ async fn send_context_cancelled_begin_setting_work_and_cleanup_discard(pool: PgP
 #[sqlx::test]
 async fn send_context_failed_rollback_discards_connection(pool: PgPool) {
     let pools = pools(pool).await;
-    let mut tx = begin(&pools.app, Uuid::new_v4()).await;
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(tx.connection().unwrap())
-        .await
-        .unwrap();
-    sqlx::query("SELECT pg_terminate_backend($1, 5000)")
-        .bind(pid)
-        .execute(&pools.admin)
-        .await
-        .unwrap();
-    assert!(tx.rollback().await.is_err());
-    assert_ne!(clean(&pools.app).await, pid);
+    interrupted::failed_rollback(&pools.app, async |single: &PgPool, pid| {
+        let tx = begin(single, Uuid::new_v4()).await;
+        let error = tx.rollback().await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("22012")
+        );
+        assert_ne!(
+            clean(single).await,
+            pid,
+            "failed send ROLLBACK must discard a live backend"
+        );
+    })
+    .await;
     pools.app.close().await;
 }

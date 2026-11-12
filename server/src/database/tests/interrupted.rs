@@ -131,3 +131,82 @@ pub(crate) async fn at(
         drop(relays);
     }).await.expect("interrupted transaction recovery must not hang");
 }
+
+/// Fail ROLLBACK after PostgreSQL has completed it, without killing the backend.
+/// The control proves SQLx's health check reuses this exact error/connection;
+/// only the transaction owner's explicit discard can change the PID afterward.
+pub(crate) async fn failed_rollback(app: &PgPool, work: impl AsyncFnOnce(&PgPool, i32)) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let options = app.connect_options();
+        let upstream = (options.get_host().to_owned(), options.get_port());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let armed = Arc::new(AtomicBool::new(true));
+        let relay_armed = armed.clone();
+        let mut relays = JoinSet::new();
+        relays.spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                let (mut client, _) = listener.accept().await.unwrap();
+                let mut server = TcpStream::connect((upstream.0.as_str(), upstream.1))
+                    .await
+                    .unwrap();
+                let armed = relay_armed.clone();
+                connections.spawn(async move {
+                    // SSL is disabled below, so the first frame is StartupMessage.
+                    let length = client.read_u32().await?;
+                    let mut startup = vec![0; length as usize - 4];
+                    client.read_exact(&mut startup).await?;
+                    server.write_u32(length).await?;
+                    server.write_all(&startup).await?;
+                    let (mut client_read, mut client_write) = client.split();
+                    let (mut server_read, mut server_write) = server.split();
+                    let requests = async {
+                        loop {
+                            let Ok(tag) = client_read.read_u8().await else {
+                                break Ok::<(), std::io::Error>(());
+                            };
+                            let length = client_read.read_u32().await?;
+                            let mut payload = vec![0; length as usize - 4];
+                            client_read.read_exact(&mut payload).await?;
+                            if tag == b'Q' && payload == b"ROLLBACK\0"
+                                && armed.swap(false, Ordering::SeqCst)
+                            {
+                                payload = b"ROLLBACK; SELECT 1 / 0\0".to_vec();
+                            }
+                            server_write.write_u8(tag).await?;
+                            server_write.write_u32(payload.len() as u32 + 4).await?;
+                            server_write.write_all(&payload).await?;
+                        }
+                    };
+                    tokio::select! {
+                        result = requests => result,
+                        result = tokio::io::copy(&mut server_read, &mut client_write) => result.map(|_| ()),
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        });
+        let single = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.as_ref().clone().host("127.0.0.1").port(address.port())
+                .ssl_mode(PgSslMode::Disable))
+            .await.unwrap();
+        let mut connection = single.acquire().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection).await.unwrap();
+        sqlx::Executor::execute(&mut *connection, "BEGIN").await.unwrap();
+        let error = sqlx::Executor::execute(&mut *connection, "ROLLBACK").await.unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("22012"));
+        assert!(!armed.load(Ordering::SeqCst), "control must inject the cleanup error");
+        connection.return_to_pool().await;
+        drop(connection);
+        assert_eq!(super::context::clean(&single).await, pid,
+            "SQLx must reuse the live backend after the control's cleanup error");
+        armed.store(true, Ordering::SeqCst);
+        work(&single, pid).await;
+        assert!(!armed.load(Ordering::SeqCst), "owner must encounter the cleanup error");
+        single.close().await;
+        drop(relays);
+    }).await.expect("failed rollback recovery must not hang");
+}

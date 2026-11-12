@@ -174,23 +174,94 @@ async fn context_helpers_cancelled_begin_setting_work_and_cleanup_discard(pool: 
 async fn context_helpers_failed_rollback_preserves_body_error_and_discards(pool: PgPool) {
     let pools = pools(pool).await;
     for variant in VARIANTS {
-        let pid = clean(&pools.app).await;
-        let id = Uuid::new_v4();
-        let result = variant
-            .run(&pools.app, id, async |tx: &mut PgConnection| {
-                inside(tx, id, variant.organization()).await;
-                sqlx::query("SELECT pg_terminate_backend($1, 5000)")
-                    .bind(pid)
-                    .execute(&pools.admin)
-                    .await?;
-                Err::<(), _>(sqlx::Error::RowNotFound)
-            })
-            .await;
-        assert!(
-            matches!(result, Err(sqlx::Error::RowNotFound)),
-            "{result:?}"
+        super::interrupted::failed_rollback(&pools.app, async |single: &PgPool, pid| {
+            let id = Uuid::new_v4();
+            let result = variant
+                .run(single, id, async |tx: &mut PgConnection| {
+                    inside(tx, id, variant.organization()).await;
+                    Err::<(), _>(sqlx::Error::RowNotFound)
+                })
+                .await;
+            assert!(
+                matches!(result, Err(sqlx::Error::RowNotFound)),
+                "{result:?}"
+            );
+            assert_ne!(
+                clean(single).await,
+                pid,
+                "failed ROLLBACK must discard a live backend"
+            );
+        })
+        .await;
+    }
+    pools.app.close().await;
+}
+
+// TEMP objects stay on the admin connection; the restricted app role has no DDL.
+async fn deferred_violation(tx: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE context_deferred (
+            organization_id uuid NOT NULL,
+            value integer UNIQUE DEFERRABLE INITIALLY DEFERRED
+         );
+         INSERT INTO context_deferred VALUES (gen_random_uuid(), 1), (gen_random_uuid(), 1);",
+    )
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn context_helpers_failed_commit_discards_live_connection(pool: PgPool) {
+    let pools = pools(pool).await;
+    assert_eq!(pools.admin.options().get_max_connections(), 1);
+    for variant in [Variant::Organization, Variant::Account] {
+        // Control: a deferred COMMIT error leaves a live, reusable SQLx connection.
+        let mut connection = pools.admin.acquire().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::Executor::execute(&mut *connection, "BEGIN")
+            .await
+            .unwrap();
+        deferred_violation(&mut connection).await.unwrap();
+        let error = sqlx::Executor::execute(&mut *connection, "COMMIT")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("23505")
         );
-        assert_ne!(clean(&pools.app).await, pid);
+        connection.return_to_pool().await;
+        drop(connection);
+        assert_eq!(
+            clean(&pools.admin).await,
+            pid,
+            "SQLx must reuse a backend after a deferred COMMIT error"
+        );
+
+        let result = variant
+            .run(
+                &pools.admin,
+                Uuid::new_v4(),
+                async |tx: &mut PgConnection| deferred_violation(tx).await,
+            )
+            .await;
+        assert_eq!(
+            result
+                .unwrap_err()
+                .as_database_error()
+                .unwrap()
+                .code()
+                .as_deref(),
+            Some("23505")
+        );
+        assert_ne!(
+            clean(&pools.admin).await,
+            pid,
+            "failed COMMIT must discard a live backend"
+        );
     }
     pools.app.close().await;
 }
