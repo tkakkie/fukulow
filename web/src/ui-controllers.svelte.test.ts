@@ -260,7 +260,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
 
     // Loaded Messages, Composer draft and failed pending send remain visible and discardable
     expect(ch.timeline.messages).toEqual([record(1, 'general')])
-    expect(ch.timeline.draft).toBe('入力途中の下書き')
+    expect(ch.composer.draft).toBe('入力途中の下書き')
     expect(ch.timeline.pending).toEqual([
       { clientMessageId: pendingId, body: '送信確認待ちのメッセージ', status: 'failed', retryable: false },
     ])

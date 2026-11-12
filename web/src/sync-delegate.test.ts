@@ -88,6 +88,8 @@ it.each(['channel_not_found', 'subscription_limit', 403, 404, 500] as const)(
     expect(t.get()).toMatchObject({
       status: refusal === 500 ? 'error' : 'unavailable',
       messages: [record(100)],
+    })
+    expect(t.composer.get()).toMatchObject({
       draft: 'unsent draft',
     })
     await client.sync.close()

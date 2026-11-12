@@ -39,6 +39,9 @@ export type TopicComposerState = {
   draft: string
   composerError: string | null
 }
+export type ChannelComposerState = TopicComposerState & {
+  topicDraft: string
+}
 export type TimelineState = {
   status: 'loading' | 'ready' | 'unavailable' | 'error'
   messages: Message[]
@@ -46,9 +49,6 @@ export type TimelineState = {
   hasOlder: boolean
   loadingOlder: boolean
   olderError: boolean
-  draft: string
-  topicDraft: string
-  composerError: string | null
 }
 
 /** Max Message body length in Unicode scalar values (API rule; a test compares it to openapi.json). */
@@ -87,8 +87,7 @@ export function topicNameError(name: string): string | null {
   return null
 }
 
-type ChannelExtra = { olderError: boolean; draft: string; topicDraft: string; composerError: string | null }
-const emptyExtra: ChannelExtra = { olderError: false, draft: '', topicDraft: '', composerError: null }
+const emptyComposer: ChannelComposerState = { draft: '', topicDraft: '', composerError: null }
 const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
@@ -107,10 +106,14 @@ export function createSync(options: SyncOptions) {
   let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
-  const listeners = new Set<() => void>()
+  const listeners = new Set<(changedChannels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
+  const composerListeners = new Map<string, Set<() => void>>()
+  const topicComposerListeners = new Map<string, Set<() => void>>()
+  const replyComposerListeners = new Map<string, Set<() => void>>()
   const timelines = new Map<string, ReturnType<typeof timeline>>()
-  const extras = new Map<string, ChannelExtra>()
+  const olderErrors = new Set<string>()
+  const composers = new Map<string, ChannelComposerState>()
   const topicExtras = new Map<string, TopicComposerState>()
   const replyExtras = new Map<string, TopicComposerState>()
   const pendingTopics = new Map<string, string>()
@@ -126,37 +129,41 @@ export function createSync(options: SyncOptions) {
   const topicKey = (channel: string, topicId: string) => JSON.stringify([channel, topicId])
   const replyKey = (channel: string, replyRootId: string, topicId: string | null) =>
     JSON.stringify([channel, topicId, replyRootId])
-  const getExtra = (channel: string): ChannelExtra => {
-    const existing = extras.get(channel)
+  const getComposer = (channel: string): ChannelComposerState => {
+    const existing = composers.get(channel)
     if (existing) return existing
     const draft = options.drafts?.get(draftTarget(channel)) ?? ''
     const topicDraft = options.drafts?.getTopicDraft(draftTarget(channel)) ?? ''
-    if (!draft && !topicDraft) return emptyExtra
-    const extra = { ...emptyExtra, draft, topicDraft }
-    extras.set(channel, extra)
+    if (!draft && !topicDraft) return emptyComposer
+    const extra = { ...emptyComposer, draft, topicDraft }
+    composers.set(channel, extra)
     return extra
   }
-  function putExtra(channel: string, patch: Partial<ChannelExtra>): boolean {
-    const prev = getExtra(channel)
+  function putComposer(channel: string, patch: Partial<ChannelComposerState>): boolean {
+    const prev = getComposer(channel)
     if (
-      (patch.olderError === undefined || patch.olderError === prev.olderError) &&
       (patch.draft === undefined || patch.draft === prev.draft) &&
       (patch.topicDraft === undefined || patch.topicDraft === prev.topicDraft) &&
       (patch.composerError === undefined || patch.composerError === prev.composerError)
     ) {
       return false
     }
-    const olderError = patch.olderError ?? prev.olderError
     const draft = patch.draft ?? prev.draft
     const topicDraft = patch.topicDraft ?? prev.topicDraft
     const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
-    if (!olderError && draft === '' && topicDraft === '' && composerError === null) extras.delete(channel)
-    else extras.set(channel, { olderError, draft, topicDraft, composerError })
+    if (draft === '' && topicDraft === '' && composerError === null) composers.delete(channel)
+    else composers.set(channel, { draft, topicDraft, composerError })
     if (patch.draft !== undefined || patch.topicDraft !== undefined) options.drafts?.set(draftTarget(channel), draft, topicDraft)
     return true
   }
-  function setExtra(channel: string, patch: Partial<ChannelExtra>) {
-    if (putExtra(channel, patch)) channelListeners.get(channel)?.forEach(l => l())
+  function setComposer(channel: string, patch: Partial<ChannelComposerState>) {
+    if (putComposer(channel, patch)) composerListeners.get(channel)?.forEach(l => l())
+  }
+  function putOlderError(channel: string, value: boolean): boolean {
+    if (olderErrors.has(channel) === value) return false
+    if (value) olderErrors.add(channel)
+    else olderErrors.delete(channel)
+    return true
   }
   const getTopicExtra = (channel: string, topicId: string): TopicComposerState => {
     const key = topicKey(channel, topicId)
@@ -185,7 +192,7 @@ export function createSync(options: SyncOptions) {
     return true
   }
   function setTopicExtra(channel: string, topicId: string, patch: Partial<TopicComposerState>) {
-    if (putTopicExtra(channel, topicId, patch)) channelListeners.get(channel)?.forEach(l => l())
+    if (putTopicExtra(channel, topicId, patch)) topicComposerListeners.get(topicKey(channel, topicId))?.forEach(l => l())
   }
   const getReplyExtra = (channel: string, replyRootId: string, topicId: string | null): TopicComposerState => {
     const key = replyKey(channel, replyRootId, topicId)
@@ -224,12 +231,14 @@ export function createSync(options: SyncOptions) {
     topicId: string | null,
     patch: Partial<TopicComposerState>,
   ) {
-    if (putReplyExtra(channel, replyRootId, topicId, patch)) channelListeners.get(channel)?.forEach(l => l())
+    if (putReplyExtra(channel, replyRootId, topicId, patch)) {
+      replyComposerListeners.get(replyKey(channel, replyRootId, topicId))?.forEach(l => l())
+    }
   }
   function clearOlderError(channel: string, prev: ChannelState | undefined, next: ChannelState | undefined): boolean {
     return ((prev?.older === undefined && next?.older !== undefined) ||
       !next?.watched || next.state === 'unavailable' || next.cursor === null || !next.hasOlder) &&
-      putExtra(channel, { olderError: false })
+      putOlderError(channel, false)
   }
 
   function dispatch(input: Input): Promise<void> {
@@ -245,17 +254,16 @@ export function createSync(options: SyncOptions) {
     const result = step(state, input)
     state = result.state
     const extraChanged = new Set<string>()
+    const changedComposers = new Set<string>()
+    const changedTopicComposers = new Set<string>()
+    const changedReplyComposers = new Set<string>()
     if (input.type === 'session_start' || input.type === 'session_replaced' || input.type === 'stop') {
-      for (const channel of extras.keys()) extraChanged.add(channel)
-      for (const key of topicExtras.keys()) {
-        const [channel] = JSON.parse(key) as [string, string]
-        extraChanged.add(channel)
-      }
-      for (const key of replyExtras.keys()) {
-        const [channel] = JSON.parse(key) as [string, string | null, string]
-        extraChanged.add(channel)
-      }
-      extras.clear()
+      for (const channel of olderErrors) extraChanged.add(channel)
+      for (const channel of composers.keys()) changedComposers.add(channel)
+      for (const key of topicExtras.keys()) changedTopicComposers.add(key)
+      for (const key of replyExtras.keys()) changedReplyComposers.add(key)
+      olderErrors.clear()
+      composers.clear()
       topicExtras.clear()
       replyExtras.clear()
       pendingTopics.clear()
@@ -272,18 +280,20 @@ export function createSync(options: SyncOptions) {
             const extra = replyExtras.get(key) ?? emptyTopicExtra
             if (extra.draft === draft) return
             replyExtras.set(key, { ...extra, draft })
+            replyComposerListeners.get(key)?.forEach(listener => listener())
           } else if (target.topicId != null) {
             const key = topicKey(target.channelId, target.topicId)
             const extra = topicExtras.get(key) ?? emptyTopicExtra
             if (extra.draft === draft) return
             topicExtras.set(key, { ...extra, draft })
+            topicComposerListeners.get(key)?.forEach(listener => listener())
           } else {
-            const extra = extras.get(target.channelId) ?? emptyExtra
+            const extra = composers.get(target.channelId) ?? emptyComposer
             const topicDraft = options.drafts?.getTopicDraft(target) ?? ''
             if (extra.draft === draft && extra.topicDraft === topicDraft) return
-            extras.set(target.channelId, { ...extra, draft, topicDraft })
+            composers.set(target.channelId, { ...extra, draft, topicDraft })
+            composerListeners.get(target.channelId)?.forEach(listener => listener())
           }
-          channelListeners.get(target.channelId)?.forEach(listener => listener())
         })
       }
     } else {
@@ -291,7 +301,7 @@ export function createSync(options: SyncOptions) {
         const req = previous.requests[input.request]
         if (req?.type === 'history' && req.page === 'before' && !req.stale) {
           const next = state.channels[req.channel]
-          if (state.running && next && next.state !== 'unavailable' && putExtra(req.channel, { olderError: true })) {
+          if (state.running && next && next.state !== 'unavailable' && putOlderError(req.channel, true)) {
             extraChanged.add(req.channel)
           }
         }
@@ -306,12 +316,21 @@ export function createSync(options: SyncOptions) {
         }
       }
     }
-    if (state !== previous) listeners.forEach(l => l())
+    if (state !== previous) listeners.forEach(l => l(result.changedChannels))
     for (const channel of result.changedChannels) {
       channelListeners.get(channel)?.forEach(l => l())
     }
     for (const channel of extraChanged) {
       if (!result.changedChannels.has(channel)) channelListeners.get(channel)?.forEach(l => l())
+    }
+    for (const channel of changedComposers) {
+      composerListeners.get(channel)?.forEach(l => l())
+    }
+    for (const key of changedTopicComposers) {
+      topicComposerListeners.get(key)?.forEach(l => l())
+    }
+    for (const key of changedReplyComposers) {
+      replyComposerListeners.get(key)?.forEach(l => l())
     }
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
@@ -457,11 +476,13 @@ export function createSync(options: SyncOptions) {
     let draftRevision = 0
     let snapshot: TimelineState
     let last: ChannelState | undefined | null = null
-    let lastExtra: ChannelExtra | null = null
+    let lastOlderError: boolean | null = null
     const topicComposers = new Map<string, ReturnType<typeof createTopicComposer>>()
     const replyComposers = new Map<string, ReturnType<typeof createReplyComposer>>()
     const listeners = new Set<() => void>()
+    const compListeners = new Set<() => void>()
     channelListeners.set(channel, listeners)
+    composerListeners.set(channel, compListeners)
     async function send(
       body: string,
       target: Pick<SendMessageRequest, 'reply_to' | 'topic_name'> = {},
@@ -490,8 +511,21 @@ export function createSync(options: SyncOptions) {
     function createTopicComposer(topicId: string) {
       let topicDraftRevision = 0
       const target = draftTarget(channel, topicId)
+      const key = topicKey(channel, topicId)
       return {
         get: (): TopicComposerState => getTopicExtra(channel, topicId),
+        subscribe(listener: () => void) {
+          let tcListeners = topicComposerListeners.get(key)
+          if (!tcListeners) {
+            tcListeners = new Set()
+            topicComposerListeners.set(key, tcListeners)
+          }
+          tcListeners.add(listener)
+          return () => {
+            tcListeners.delete(listener)
+            if (tcListeners.size === 0 && topicComposerListeners.get(key) === tcListeners) topicComposerListeners.delete(key)
+          }
+        },
         setDraft(draft: string) {
           if (draft === getTopicExtra(channel, topicId).draft) return
           topicDraftRevision++
@@ -514,7 +548,7 @@ export function createSync(options: SyncOptions) {
             return false
           }
           const revision = topicDraftRevision
-          putTopicExtra(channel, topicId, { draft: '', composerError: null })
+          setTopicExtra(channel, topicId, { draft: '', composerError: null })
           const storeRevision = options.drafts?.revision(target)
           const restore = () => {
             if (
@@ -535,7 +569,7 @@ export function createSync(options: SyncOptions) {
           if (p?.state !== 'failed') return false
           const current = getTopicExtra(channel, topicId).draft
           topicDraftRevision++
-          putTopicExtra(channel, topicId, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
+          setTopicExtra(channel, topicId, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
           void dispatch({ type: 'user_discard', channel, clientMessageId })
           return true
         },
@@ -544,8 +578,21 @@ export function createSync(options: SyncOptions) {
     function createReplyComposer(replyRootId: string, topicId: string | null) {
       let replyDraftRevision = 0
       const target = draftTarget(channel, topicId, replyRootId)
+      const key = replyKey(channel, replyRootId, topicId)
       return {
         get: (): TopicComposerState => getReplyExtra(channel, replyRootId, topicId),
+        subscribe(listener: () => void) {
+          let rcListeners = replyComposerListeners.get(key)
+          if (!rcListeners) {
+            rcListeners = new Set()
+            replyComposerListeners.set(key, rcListeners)
+          }
+          rcListeners.add(listener)
+          return () => {
+            rcListeners.delete(listener)
+            if (rcListeners.size === 0 && replyComposerListeners.get(key) === rcListeners) replyComposerListeners.delete(key)
+          }
+        },
         setDraft(draft: string) {
           if (draft === getReplyExtra(channel, replyRootId, topicId).draft) return
           replyDraftRevision++
@@ -563,7 +610,7 @@ export function createSync(options: SyncOptions) {
             return false
           }
           const revision = replyDraftRevision
-          putReplyExtra(channel, replyRootId, topicId, { draft: '', composerError: null })
+          setReplyExtra(channel, replyRootId, topicId, { draft: '', composerError: null })
           const storeRevision = options.drafts?.revision(target)
           const restore = () => {
             if (
@@ -589,7 +636,7 @@ export function createSync(options: SyncOptions) {
           if (p?.state !== 'failed') return false
           const current = getReplyExtra(channel, replyRootId, topicId).draft
           replyDraftRevision++
-          putReplyExtra(channel, replyRootId, topicId, {
+          setReplyExtra(channel, replyRootId, topicId, {
             draft: current ? `${current}\n${p.body}` : p.body,
             composerError: null,
           })
@@ -603,7 +650,7 @@ export function createSync(options: SyncOptions) {
           const existing = getReplyExtra(channel, replyRootId, topicId).draft
           const fromComposer = replyComposers.get(replyKey(channel, fromReplyRootId, fromTopicId))
           if (fromComposer) fromComposer.setDraft('')
-          else putReplyExtra(channel, fromReplyRootId, fromTopicId, { draft: '', composerError: null })
+          else setReplyExtra(channel, fromReplyRootId, fromTopicId, { draft: '', composerError: null })
           replyDraftRevision++
           setReplyExtra(channel, replyRootId, topicId, {
             draft: existing ? `${existing}\n${tempDraft}` : tempDraft,
@@ -615,10 +662,10 @@ export function createSync(options: SyncOptions) {
     return {
       get(): TimelineState {
         const c = state.channels[channel]
-        const extra = getExtra(channel)
-        if (last === c && lastExtra === extra) return snapshot
+        const olderError = olderErrors.has(channel)
+        if (last === c && lastOlderError === olderError) return snapshot
         last = c
-        lastExtra = extra
+        lastOlderError = olderError
         snapshot = {
           // Content visibility depends on the base; subscription confirmation drives the separate live indicator.
           status: c?.state === 'unavailable' ? 'unavailable' : c?.historyError ? 'error' : c && c.cursor !== null ? 'ready' : 'loading',
@@ -633,57 +680,58 @@ export function createSync(options: SyncOptions) {
             retryable: p.state !== 'failed',
           })),
           hasOlder: c?.hasOlder ?? false, loadingOlder: c?.older !== undefined,
-          olderError: extra.olderError,
-          draft: extra.draft,
-          topicDraft: extra.topicDraft,
-          composerError: extra.composerError,
+          olderError,
         }
         return snapshot
       },
       subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+      composer: {
+        get: (): ChannelComposerState => getComposer(channel),
+        subscribe(listener: () => void) { compListeners.add(listener); return () => { compListeners.delete(listener) } },
+      },
       loadLatest: () => dispatch({ type: 'refresh', channel }),
       loadOlder: () => dispatch({ type: 'load_older', channel }),
       setDraft(draft: string) {
-        if (draft === getExtra(channel).draft) return
+        if (draft === getComposer(channel).draft) return
         draftRevision++
-        setExtra(channel, { draft, composerError: null })
+        setComposer(channel, { draft, composerError: null })
       },
       setTopicDraft(topicDraft: string) {
-        if (topicDraft === getExtra(channel).topicDraft) return
+        if (topicDraft === getComposer(channel).topicDraft) return
         draftRevision++
-        setExtra(channel, { topicDraft, composerError: null })
+        setComposer(channel, { topicDraft, composerError: null })
       },
       async submit() {
-        const current = getExtra(channel)
+        const current = getComposer(channel)
         const text = current.draft
         const topicName = current.topicDraft
         if (!text.trim()) return false
         if (topicName.length > 0) {
           const nameError = topicNameError(topicName)
           if (nameError !== null) {
-            setExtra(channel, { composerError: nameError })
+            setComposer(channel, { composerError: nameError })
             return false
           }
         }
         const error = messageBodyError(text)
         if (error !== null) {
-          setExtra(channel, { composerError: error })
+          setComposer(channel, { composerError: error })
           return false
         }
         if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
           return false
         }
         const revision = draftRevision
-        putExtra(channel, { draft: '', topicDraft: '', composerError: null })
+        setComposer(channel, { draft: '', topicDraft: '', composerError: null })
         const storeRevision = options.drafts?.revision(draftTarget(channel))
         const restore = () => {
           if (
             draftRevision === revision &&
             options.drafts?.revision(draftTarget(channel)) === storeRevision &&
-            getExtra(channel).draft === '' &&
-            getExtra(channel).topicDraft === ''
+            getComposer(channel).draft === '' &&
+            getComposer(channel).topicDraft === ''
           ) {
-            setExtra(channel, { draft: text, topicDraft: topicName })
+            setComposer(channel, { draft: text, topicDraft: topicName })
           }
         }
         const accepted = await send(text, topicName ? { topic_name: topicName } : {}, restore)
@@ -696,9 +744,9 @@ export function createSync(options: SyncOptions) {
         if (!state.running) return false
         const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
         if (p?.state !== 'failed') return false
-        const current = getExtra(channel)
+        const current = getComposer(channel)
         draftRevision++
-        putExtra(channel, {
+        setComposer(channel, {
           draft: current.draft ? `${current.draft}\n${p.body}` : p.body,
           topicDraft: p.topic_name ?? '',
           composerError: null,
@@ -723,7 +771,7 @@ export function createSync(options: SyncOptions) {
 
   return {
     get: () => state,
-    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    subscribe(listener: (changedChannels: ReadonlySet<string>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),
     replaceSession: (selfId: string) => dispatch({ type: 'session_replaced', selfId }),
     watch: (channel: string) => dispatch({ type: 'watch', channel }),
@@ -734,7 +782,7 @@ export function createSync(options: SyncOptions) {
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     hasUnsavedChanges(): boolean {
       if (options.drafts?.hasDrafts()) return true
-      for (const extra of extras.values()) {
+      for (const extra of composers.values()) {
         if (extra.draft.length > 0 || extra.topicDraft.length > 0) return true
       }
       for (const extra of topicExtras.values()) {

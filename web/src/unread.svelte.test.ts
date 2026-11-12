@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { unreadAdapter } from './unread.svelte'
-import { flush, msg, ok, unreadClient } from './unread-test-helpers'
+import { flush, msg, ok, row, unreadClient } from './unread-test-helpers'
 import { mount, settle } from './adapter-test-helpers.svelte'
 import { createReplySync } from './reply-sync'
 import { createUnreadSync } from './unread-sync'
@@ -72,4 +72,79 @@ it.each(['Topics', 'Topics and Replies'] as const)('%s composition clears Unread
   await settle()
   expect(view.last.main.position).toBeNull(); expect(vi.getTimerCount()).toBe(0)
   release(); await view.unmount()
+})
+it('notifies only the changed Channel and leaves other Channels reference-equal; multi-Channel changes notify only affected Channels', async () => {
+  const c = unreadClient()
+  c.rows.push(row({ id: 'B', name: 'B', unread_count: 2, main_unread_count: 2 }), row({ id: 'C', name: 'C', unread_count: 1, main_unread_count: 1 }))
+  await c.boot()
+  await c.sync.watch('B')
+  await c.sync.watch('C')
+  await flush()
+  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'B', caught_up_seq: 3 })
+  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'C', caught_up_seq: 3 })
+  await settle()
+
+  const adapterA = unreadAdapter(c.unread, 'A')
+  const adapterB = unreadAdapter(c.unread, 'B')
+  const adapterC = unreadAdapter(c.unread, 'C')
+  const snapA0 = adapterA.state
+  const snapB0 = adapterB.state
+  const snapC0 = adapterC.state
+  const viewA = await mount(() => adapterA.state)
+  const viewB = await mount(() => adapterB.state)
+  const viewC = await mount(() => adapterC.state)
+  const listenerA = vi.fn()
+  const listenerB = vi.fn()
+  const listenerC = vi.fn()
+  const unsubA = c.unread.subscribe(listenerA, 'A')
+  const unsubB = c.unread.subscribe(listenerB, 'B')
+  const unsubC = c.unread.subscribe(listenerC, 'C')
+
+  // Single-Channel change on A (message, enter/presented/leave) notifies only A; B and C stay ===.
+  c.event(msg(4, null, 'other', 'A'))
+  await settle()
+  expect(listenerA).toHaveBeenCalledTimes(1)
+  expect(listenerB).not.toHaveBeenCalled()
+  expect(listenerC).not.toHaveBeenCalled()
+  expect(viewA.values).toHaveLength(2)
+  expect(viewB.values).toHaveLength(1)
+  expect(viewC.values).toHaveLength(1)
+  expect(adapterA.state).not.toBe(snapA0)
+  expect(adapterB.state).toBe(snapB0)
+  expect(adapterC.state).toBe(snapC0)
+
+  const idA = (await adapterA.enter())!
+  adapterA.visibility(true)
+  adapterA.presented(idA, [1])
+  await settle()
+  adapterA.leave(idA)
+  await settle()
+  expect(listenerB).not.toHaveBeenCalled()
+  expect(listenerC).not.toHaveBeenCalled()
+  expect(adapterB.state).toBe(snapB0)
+  expect(adapterC.state).toBe(snapC0)
+
+  // Multi-Channel refresh where A and B change while C stays identical notifies exactly A and B.
+  const callsABefore = listenerA.mock.calls.length
+  const snapA1 = adapterA.state
+  c.rows[0] = row({ id: 'A', name: 'A', as_of_seq: 10, read_seq: 1, main_unread_count: 5, unread_count: 7 })
+  c.rows[1] = row({ id: 'B', name: 'B', as_of_seq: 10, read_seq: 0, main_unread_count: 4, unread_count: 4 })
+  await c.unread.refresh()
+  await settle()
+  expect(listenerA.mock.calls.length).toBeGreaterThan(callsABefore)
+  expect(listenerB).toHaveBeenCalledTimes(1)
+  expect(listenerC).not.toHaveBeenCalled()
+  expect(viewB.values).toHaveLength(2)
+  expect(viewC.values).toHaveLength(1)
+  expect(adapterA.state).not.toBe(snapA1)
+  expect(adapterB.state).not.toBe(snapB0)
+  expect(adapterC.state).toBe(snapC0)
+
+  unsubA()
+  unsubB()
+  unsubC()
+  await viewA.unmount()
+  await viewB.unmount()
+  await viewC.unmount()
+  await c.sync.close()
 })

@@ -1161,7 +1161,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(dialog!.getAttribute('aria-label')).toBe('入力中の下書きを置き換えますか？')
     expect(buttonsByText(dialog!, '置き換える')).toHaveLength(1)
     expect(buttonsByText(dialog!, 'キャンセル')).toHaveLength(1)
-    expect(ch.timeline.draft).toBe('入力途中の大事な下書き')
+    expect(ch.composer.draft).toBe('入力途中の大事な下書き')
     expect(ch.timeline.pending).toHaveLength(1)
 
     // 2. Clicking キャンセル closes the dialog and preserves both the draft and the failed Message
@@ -1171,7 +1171,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     expect(host.querySelector('[role="dialog"]')).toBeNull()
-    expect(ch.timeline.draft).toBe('入力途中の大事な下書き')
+    expect(ch.composer.draft).toBe('入力途中の大事な下書き')
     expect(textarea.value).toBe('入力途中の大事な下書き')
     expect(ch.timeline.pending).toHaveLength(1)
     expect(buttonsByText(host, '編集して送り直す')).toHaveLength(1)
@@ -1186,7 +1186,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     expect(host.querySelector('[role="dialog"]')).toBeNull()
-    expect(ch.timeline.draft).toBe('拒否されたメッセージ本文')
+    expect(ch.composer.draft).toBe('拒否されたメッセージ本文')
     expect(textarea.value).toBe('拒否されたメッセージ本文')
     expect(ch.timeline.pending).toHaveLength(0)
     expect(buttonsByText(host, '編集して送り直す')).toHaveLength(0)
@@ -6076,6 +6076,145 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(topicScrollEl.scrollTop).toBe(300)
     expect(host.querySelector(`#main-content [data-message-id="${topicMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
     expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: 't1' }, body: { read_seq: 14 } })
+
+    navigation.destroy()
+    await unmount(instance)
+    sessionModel.close()
+  })
+
+  it('subscribes to Unread per Channel in Workspace/ChannelList and does not re-read timeline when typing in Timeline composer', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    let c2UnreadReads = 0
+    let c1TimelineReads = 0
+    const baseSync = syncAdapter(rawSession.sync)
+    const c1Channel = baseSync.channel('c1')
+    const wrappedC1: typeof c1Channel = {
+      ...c1Channel,
+      get timeline() {
+        c1TimelineReads++
+        return c1Channel.timeline
+      },
+      get composer() {
+        return c1Channel.composer
+      },
+      get live() {
+        return c1Channel.live
+      },
+    }
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: {
+        ...baseSync,
+        get unavailable() {
+          return baseSync.unavailable
+        },
+        channel: (id: string) => (id === 'c1' ? wrappedC1 : baseSync.channel(id)),
+      },
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) {
+          const base = unreadAdapter(rawSession.unread, id)
+          a =
+            id === 'c2'
+              ? {
+                  ...base,
+                  get state() {
+                    c2UnreadReads++
+                    return base.state
+                  },
+                }
+              : base
+          unreadAdapters.set(id, a)
+        }
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+    net.pages.c1 = ok({ messages: [record(1, 'c1')], has_more: false })
+    net.pages.c2 = ok({ messages: [record(1, 'c2')], has_more: false })
+    net.unreadChannels.c1 = {
+      ...channel('c1', 'general'),
+      as_of_seq: 1,
+      read_seq: 0,
+      unread_count: 1,
+      main_unread_count: 1,
+    }
+    net.unreadChannels.c2 = {
+      ...channel('c2', 'random'),
+      as_of_seq: 1,
+      read_seq: 0,
+      unread_count: 2,
+      main_unread_count: 2,
+    }
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'random')] }))
+    await settle()
+    net.subscribed('c1', 1)
+    await settle()
+
+    testWin.innerWidth = 1280
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+    await settle()
+    flushSync()
+
+    const c2ReadsBefore = c2UnreadReads
+    // Live message on c1 changes c1's Unread -> must NOT re-read c2's Unread in Workspace/ChannelList.
+    net.event({ type: 'message', message: { ...record(2, 'c1'), sender: 'other', body: 'c1新着' } })
+    await settle()
+    flushSync()
+    expect(c2UnreadReads).toBe(c2ReadsBefore)
+
+    // Typing in c1's Composer -> must NOT re-read c1's timeline in Workspace/Timeline.
+    const c1TimelineReadsBefore = c1TimelineReads
+    const c1TimelineRefBefore = c1Channel.timeline
+    c1Channel.setDraft('キーストロークテスト')
+    c1Channel.setTopicDraft('トピック名テスト')
+    await settle()
+    flushSync()
+    expect(c1TimelineReads).toBe(c1TimelineReadsBefore)
+    expect(c1Channel.timeline).toBe(c1TimelineRefBefore)
+    const textarea = host.querySelector('#main-content textarea') as unknown as { value: string } | null
+    expect(textarea?.value).toBe('キーストロークテスト')
 
     navigation.destroy()
     await unmount(instance)

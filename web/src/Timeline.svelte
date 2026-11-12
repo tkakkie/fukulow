@@ -75,6 +75,7 @@
 
   const currentChannelId = $derived(channelId)
   const s = $derived(channel.timeline)
+  const cState = $derived(channel.composer)
   const tState = $derived(topics ? topics.state : null)
   const rState = $derived(replies ? replies.state : null)
   const uState = $derived(unread ? unread.state : null)
@@ -424,7 +425,7 @@
   }
 
   function handleRestoreRequest(clientMessageId: string) {
-    const decision = decideEditAndResend(clientMessageId, s.draft, s.topicDraft)
+    const decision = decideEditAndResend(clientMessageId, cState.draft, cState.topicDraft)
     if (decision.action === 'restore_now') {
       if (channel.restore(clientMessageId)) {
         focusTarget(composerRef)
@@ -442,13 +443,13 @@
     const canRestore = !targetUnavailable && Boolean(target)
     confirmReplaceDraftWithFailedSend(
       id,
-      s.draft,
+      cState.draft,
       canRestore,
       (draft) => channel.setDraft(draft),
       (targetId) => channel.restore(targetId),
       composerRef,
       {
-        currentTopicDraft: s.topicDraft,
+        currentTopicDraft: cState.topicDraft,
         setTopicDraft: (topicDraft) => channel.setTopicDraft(topicDraft),
       },
     )
@@ -628,9 +629,9 @@
       bind:textareaRef={composerRef}
       bind:topicInputRef
       allowTopicName={Boolean(topics)}
-      value={s.draft}
-      topicValue={s.topicDraft}
-      error={s.composerError}
+      value={cState.draft}
+      topicValue={cState.topicDraft}
+      error={cState.composerError}
       disabled={targetUnavailable}
       oninput={(b) => channel.setDraft(b)}
       ontopicinput={(t) => channel.setTopicDraft(t)}

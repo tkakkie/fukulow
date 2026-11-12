@@ -24,7 +24,7 @@ it('a timed-out send cannot restore its draft after stop and a late 409', async 
   await sync.close()
   net.sends[0].resolve({ ok: false, kind: 'http', status: 409 })
   await settle()
-  expect(a.get().draft).toBe('')
+  expect(a.composer.get().draft).toBe('')
   expect(drafts.hasDrafts()).toBe(false)
   expect(vi.getTimerCount()).toBe(0)
 })
@@ -55,7 +55,7 @@ it('a stalled transport drops its submitted draft entry at the deadline and cann
   await sync.close()
   net.sends[0].resolve({ ok: false, kind: 'http', status: 409 })
   await settle()
-  expect(a.get().draft).toBe('')
+  expect(a.composer.get().draft).toBe('')
   expect(drafts.hasDrafts()).toBe(false)
   expect(vi.getTimerCount()).toBe(0)
 })
@@ -97,7 +97,7 @@ it('a send ACK, refusal and late refusal after settlement preserve text typed af
       const a = sync.getTimeline('A')
       a.setDraft('送信する本文')
       const sending = a.submit()
-      expect(a.get().draft).toBe('')
+      expect(a.composer.get().draft).toBe('')
       if (edit !== 'untouched') a.setDraft('送信後の新しい下書き')
       if (edit === 'typed then cleared') a.setDraft('')
       const message = sentBy('me', 1, net.sends[0].body.client_message_id, '送信する本文')
@@ -106,7 +106,7 @@ it('a send ACK, refusal and late refusal after settlement preserve text typed af
       expect(await sending).toBe(true)
       await settle()
       const expected = edit === 'new text' ? '送信後の新しい下書き' : ''
-      expect(a.get().draft, outcome).toBe(expected)
+      expect(a.composer.get().draft, outcome).toBe(expected)
       expect(drafts.get({ organizationId: 'o', channelId: 'A' }), outcome).toBe(expected)
       expect(drafts.hasDrafts(), outcome).toBe(expected !== '')
       expect(a.get().pending, outcome).toHaveLength(outcome === 'refusal' ? 1 : 0)
@@ -132,7 +132,7 @@ it.each(['untouched', 'typed then cleared', 'new text'] as const)(
     if (edit === 'typed then cleared') a.setDraft('')
     expect(await sending).toBe(false)
     const expected = edit === 'untouched' ? '送信する本文' : edit === 'new text' ? '送信後の新しい下書き' : ''
-    expect(a.get().draft).toBe(expected)
+    expect(a.composer.get().draft).toBe(expected)
     expect(drafts.get({ organizationId: 'o', channelId: 'A' })).toBe(expected)
     expect(drafts.hasDrafts()).toBe(expected !== '')
     expect(net.sends).toHaveLength(0)
@@ -227,7 +227,7 @@ it('validates whitespace-only bodies with trim but sends surrounding whitespace 
   t.setDraft(untrimmed)
   expect(await t.submit()).toBe(true)
   expect(sendMessage).toHaveBeenCalledWith('A', { client_message_id: 'c1', body: untrimmed })
-  expect(t.get().draft).toBe('')
+  expect(t.composer.get().draft).toBe('')
   await sync.close()
 })
 
@@ -258,11 +258,11 @@ it('restores only non-retryable failed sends into the Composer draft for editing
 
   // Same-key retryable (unknown) sends must not be restored under a new id (C6).
   expect(t.restore('c2')).toBe(false)
-  expect(t.get().draft).toBe('')
+  expect(t.composer.get().draft).toBe('')
 
   t.setDraft('prefix')
   expect(t.restore('c1')).toBe(true)
-  expect(t.get().draft).toBe('prefix\nrejected text')
+  expect(t.composer.get().draft).toBe('prefix\nrejected text')
   expect(t.get().pending).toEqual([
     { clientMessageId: 'c2', body: 'unknown outcome', status: 'failed', retryable: true },
   ])
@@ -301,8 +301,8 @@ it('restores a refused send together with its Topic intent and replaces any conf
 
   t.setTopicDraft('Different topic')
   expect(t.restore('c1')).toBe(true)
-  expect(t.get().draft).toBe('body for original')
-  expect(t.get().topicDraft).toBe('Original topic')
+  expect(t.composer.get().draft).toBe('body for original')
+  expect(t.composer.get().topicDraft).toBe('Original topic')
 
   // 2. Refused Channel-root send restored while user typed a Topic name clears topicDraft
   t.setTopicDraft('')
@@ -311,8 +311,8 @@ it('restores a refused send together with its Topic intent and replaces any conf
   t.setTopicDraft('Different topic')
   t.setDraft('')
   expect(t.restore('c2')).toBe(true)
-  expect(t.get().draft).toBe('root body')
-  expect(t.get().topicDraft).toBe('')
+  expect(t.composer.get().draft).toBe('root body')
+  expect(t.composer.get().topicDraft).toBe('')
   await sync.close()
 })
 
@@ -366,7 +366,7 @@ it('tracks unsaved drafts and pending sends across all Channels for session-leve
   // Draft in Channel A while viewing Channel B still marks the session dirty
   a.setDraft('書きかけのメッセージ')
   await sync.watch('B')
-  expect(b.get().draft).toBe('')
+  expect(b.composer.get().draft).toBe('')
   expect(b.get().pending).toEqual([])
   expect(sync.hasUnsavedChanges()).toBe(true)
 
@@ -407,18 +407,23 @@ it('no-op extra patches and dispatches leaving olderError false notify no Channe
   b.setDraft('bad\0')
   expect(await b.submit()).toBe(false)
   const bSnapshot = b.get()
-  expect(bSnapshot.composerError).not.toBeNull()
+  const bComposer = b.composer.get()
+  expect(bComposer.composerError).not.toBeNull()
   const bListener = vi.fn()
+  const bComposerListener = vi.fn()
   b.subscribe(bListener)
+  b.composer.subscribe(bComposerListener)
 
   await sync.watch('A')
   expect(await b.submit()).toBe(false)
   b.setDraft('bad\0')
   expect(bListener).not.toHaveBeenCalled()
+  expect(bComposerListener).not.toHaveBeenCalled()
   expect(b.get()).toBe(bSnapshot)
+  expect(b.composer.get()).toBe(bComposer)
 
   b.setDraft('fixed')
-  expect(b.get()).toMatchObject({ draft: 'fixed', composerError: null })
+  expect(b.composer.get()).toMatchObject({ draft: 'fixed', composerError: null })
 
   const c = sync.getTimeline('C')
   c.setDraft('draft C')
@@ -432,5 +437,214 @@ it('no-op extra patches and dispatches leaving olderError false notify no Channe
   closeSocket(4001)
   expect(c.get()).toBe(cBeforeWatch)
   expect(d.get()).toBe(dEmpty)
+  await sync.close()
+})
+
+it('typing in composer notifies composer subscribers without changing timeline state reference or notifying timeline subscribers', async () => {
+  const sendMessage = vi.fn().mockImplementation(async (channel: string, body: { client_message_id: string; body: string }) => ({
+    ok: true,
+    data: { ...record(2, channel), sender: 'me', client_message_id: body.client_message_id, body: body.body },
+  }))
+  const sync = createSync({
+    selfId: 'me',
+    newId: () => 'c1',
+    connect: handlers => {
+      handlers.onReady()
+      return { send() {}, close() {} }
+    },
+    api: {
+      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [record(1, 'A')], has_more: false } }),
+      sendMessage,
+    },
+  })
+  await sync.start()
+  await sync.watch('A')
+
+  const a = sync.getTimeline('A')
+  const before = a.get()
+  const timelineListener = vi.fn()
+  const composerListener = vi.fn()
+  const topicComposerListener = vi.fn()
+  const replyComposerListener = vi.fn()
+  a.subscribe(timelineListener)
+  a.composer.subscribe(composerListener)
+  a.topic('T').subscribe(topicComposerListener)
+  a.reply('r1', 'T').subscribe(replyComposerListener)
+
+  a.setDraft('hello')
+  a.setTopicDraft('Topic Name')
+  expect(timelineListener).not.toHaveBeenCalled()
+  expect(composerListener).toHaveBeenCalledTimes(2)
+  expect(topicComposerListener).not.toHaveBeenCalled()
+  expect(replyComposerListener).not.toHaveBeenCalled()
+  expect(a.get()).toBe(before)
+  expect(a.composer.get()).toEqual({ draft: 'hello', topicDraft: 'Topic Name', composerError: null })
+
+  a.topic('T').setDraft('topic draft')
+  expect(timelineListener).not.toHaveBeenCalled()
+  expect(composerListener).toHaveBeenCalledTimes(2)
+  expect(topicComposerListener).toHaveBeenCalledTimes(1)
+  expect(a.get()).toBe(before)
+
+  a.reply('r1', 'T').setDraft('reply draft')
+  expect(timelineListener).not.toHaveBeenCalled()
+  expect(replyComposerListener).toHaveBeenCalledTimes(1)
+  expect(a.get()).toBe(before)
+
+  expect(await a.submit()).toBe(true)
+  expect(a.composer.get()).toEqual({ draft: '', topicDraft: '', composerError: null })
+  expect(timelineListener).toHaveBeenCalled()
+  expect(a.get().messages.map(m => m.seq)).toEqual([1, 2])
+  await sync.close()
+})
+
+it('Topic and Reply composer listener maps delete their entry after the last unsubscribe and re-register on resubscribe', async () => {
+  const sync = createSync({
+    selfId: 'me',
+    connect: handlers => {
+      handlers.onReady()
+      return { send() {}, close() {} }
+    },
+    api: {
+      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [record(1, 'A')], has_more: false } }),
+      sendMessage: vi.fn(),
+    },
+  })
+  await sync.start()
+  const a = sync.getTimeline('A')
+  const topicKey = JSON.stringify(['A', 'T'])
+  const replyKey = JSON.stringify(['A', 'T', 'r1'])
+
+  const setSpy = vi.spyOn(Map.prototype, 'set')
+  const deleteSpy = vi.spyOn(Map.prototype, 'delete')
+  try {
+    const tc = a.topic('T')
+    const rc = a.reply('r1', 'T')
+    // Creating the composer without subscribing does not register a listener map entry.
+    expect(setSpy.mock.calls.some(([k, v]) => k === topicKey && v instanceof Set)).toBe(false)
+    expect(setSpy.mock.calls.some(([k, v]) => k === replyKey && v instanceof Set)).toBe(false)
+
+    const t1 = vi.fn()
+    const t2 = vi.fn()
+    const r1 = vi.fn()
+    const r2 = vi.fn()
+    const unsubT1 = tc.subscribe(t1)
+    const unsubT2 = tc.subscribe(t2)
+    const unsubR1 = rc.subscribe(r1)
+    const unsubR2 = rc.subscribe(r2)
+
+    const topicMapIndex = setSpy.mock.calls.findIndex(([k, v]) => k === topicKey && v instanceof Set)
+    const replyMapIndex = setSpy.mock.calls.findIndex(([k, v]) => k === replyKey && v instanceof Set)
+    expect(topicMapIndex).toBeGreaterThanOrEqual(0)
+    expect(replyMapIndex).toBeGreaterThanOrEqual(0)
+    const topicListenerMap = setSpy.mock.instances[topicMapIndex] as Map<string, Set<() => void>>
+    const replyListenerMap = setSpy.mock.instances[replyMapIndex] as Map<string, Set<() => void>>
+    expect(topicListenerMap.has(topicKey)).toBe(true)
+    expect(replyListenerMap.has(replyKey)).toBe(true)
+
+    // First unsubscribe leaves one active listener; entry stays and still receives updates.
+    unsubT1()
+    unsubR1()
+    expect(topicListenerMap.has(topicKey)).toBe(true)
+    expect(replyListenerMap.has(replyKey)).toBe(true)
+    tc.setDraft('first topic edit')
+    rc.setDraft('first reply edit')
+    expect(t1).not.toHaveBeenCalled()
+    expect(t2).toHaveBeenCalledTimes(1)
+    expect(r1).not.toHaveBeenCalled()
+    expect(r2).toHaveBeenCalledTimes(1)
+
+    // Last unsubscribe deletes the map entry completely.
+    deleteSpy.mockClear()
+    unsubT2()
+    unsubR2()
+    expect(deleteSpy.mock.calls.some(([k], i) => k === topicKey && deleteSpy.mock.results[i]?.value === true)).toBe(true)
+    expect(deleteSpy.mock.calls.some(([k], i) => k === replyKey && deleteSpy.mock.results[i]?.value === true)).toBe(true)
+    expect(topicListenerMap.has(topicKey)).toBe(false)
+    expect(replyListenerMap.has(replyKey)).toBe(false)
+
+    tc.setDraft('unobserved topic edit')
+    rc.setDraft('unobserved reply edit')
+    expect(t2).toHaveBeenCalledTimes(1)
+    expect(r2).toHaveBeenCalledTimes(1)
+
+    // Resubscribing re-registers the map entry and receives subsequent updates.
+    const t3 = vi.fn()
+    const r3 = vi.fn()
+    const unsubT3 = tc.subscribe(t3)
+    const unsubR3 = rc.subscribe(r3)
+    expect(topicListenerMap.has(topicKey)).toBe(true)
+    expect(replyListenerMap.has(replyKey)).toBe(true)
+
+    tc.setDraft('resubscribed topic edit')
+    rc.setDraft('resubscribed reply edit')
+    expect(t3).toHaveBeenCalledTimes(1)
+    expect(r3).toHaveBeenCalledTimes(1)
+
+    unsubT3()
+    unsubR3()
+    expect(topicListenerMap.has(topicKey)).toBe(false)
+    expect(replyListenerMap.has(replyKey)).toBe(false)
+  } finally {
+    setSpy.mockRestore()
+    deleteSpy.mockRestore()
+  }
+  await sync.close()
+})
+
+it('multiple handles for the same Topic or Reply key share one listener Set across subscribe and unsubscribe', async () => {
+  const sync = createSync({
+    selfId: 'me',
+    connect: handlers => {
+      handlers.onReady()
+      return { send() {}, close() {} }
+    },
+    api: {
+      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [record(1, 'A')], has_more: false } }),
+      sendMessage: vi.fn(),
+    },
+  })
+  await sync.start()
+  const a = sync.getTimeline('A')
+
+  const tc1 = a.topic('T')
+  const tc2 = a.topic('T')
+  const rc1 = a.reply('r1', 'T')
+  const rc2 = a.reply('r1', 'T')
+
+  const t1 = vi.fn()
+  const t2 = vi.fn()
+  const r1 = vi.fn()
+  const r2 = vi.fn()
+  const unsubT1 = tc1.subscribe(t1)
+  const unsubT2 = tc2.subscribe(t2)
+  const unsubR1 = rc1.subscribe(r1)
+  const unsubR2 = rc2.subscribe(r2)
+
+  tc1.setDraft('first topic draft')
+  rc1.setDraft('first reply draft')
+  expect(t1).toHaveBeenCalledTimes(1)
+  expect(t2).toHaveBeenCalledTimes(1)
+  expect(r1).toHaveBeenCalledTimes(1)
+  expect(r2).toHaveBeenCalledTimes(1)
+
+  unsubT1()
+  unsubR1()
+  tc2.setDraft('second topic draft')
+  rc2.setDraft('second reply draft')
+  expect(t1).toHaveBeenCalledTimes(1)
+  expect(t2).toHaveBeenCalledTimes(2)
+  expect(r1).toHaveBeenCalledTimes(1)
+  expect(r2).toHaveBeenCalledTimes(2)
+
+  unsubT2()
+  unsubR2()
+  tc1.setDraft('third topic draft')
+  rc1.setDraft('third reply draft')
+  expect(t1).toHaveBeenCalledTimes(1)
+  expect(t2).toHaveBeenCalledTimes(2)
+  expect(r1).toHaveBeenCalledTimes(1)
+  expect(r2).toHaveBeenCalledTimes(2)
+
   await sync.close()
 })

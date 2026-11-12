@@ -352,7 +352,7 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
     expect(watch).toHaveBeenCalledTimes(2)
     expect(list).toHaveBeenCalledOnce()
     expect(vi.getTimerCount()).toBe(0)
-    expect(session.sync.getTimeline('A').get().draft).toBe('失わない下書き')
+    expect(session.sync.getTimeline('A').composer.get().draft).toBe('失わない下書き')
 
     list.mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin' }] }))
     session.channels.select('A')
@@ -363,7 +363,7 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
     expect(list).toHaveBeenCalledTimes(2)
     expect(session.sync.get().channels.A.state).toBe('ready')
     expect(panel.get().unavailable).toBe(false)
-    expect(session.sync.getTimeline('A').get().draft).toBe('失わない下書き')
+    expect(session.sync.getTimeline('A').composer.get().draft).toBe('失わない下書き')
   } finally {
     session.close()
     list.mockRestore()

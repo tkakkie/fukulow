@@ -452,14 +452,14 @@ it('Account Session drafts survive Organization re-selection and A to B to A wit
   await openChannelA(s)
   s.auth.session!.sync.channel('A').setDraft('組織Aの下書き')
   await s.auth.selectOrganization('other')
-  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('')
+  expect(s.auth.session!.sync.channel('A').composer.draft).toBe('')
   s.auth.session!.sync.channel('A').setDraft('組織Bの下書き')
   await s.auth.selectOrganization('o')
-  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('組織Aの下書き')
+  expect(s.auth.session!.sync.channel('A').composer.draft).toBe('組織Aの下書き')
   await s.auth.selectOrganization('o')
-  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('組織Aの下書き')
+  expect(s.auth.session!.sync.channel('A').composer.draft).toBe('組織Aの下書き')
   await s.auth.selectOrganization('other')
-  expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('組織Bの下書き')
+  expect(s.auth.session!.sync.channel('A').composer.draft).toBe('組織Bの下書き')
   await s.auth.signOut()
 })
 
@@ -485,9 +485,9 @@ it('sign-out, expiry, 401 and Account replacement drop every Organization draft'
     // Check before signing in again: that must not mask a failure to clear on Session end.
     expect(s.auth.hasUnsavedChanges(), end).toBe(false)
     if (end !== 'Account replacement') await signInAs(s, 'm1')
-    expect(s.auth.session!.sync.channel('A').timeline.draft, end).toBe('')
+    expect(s.auth.session!.sync.channel('A').composer.draft, end).toBe('')
     await s.auth.selectOrganization('other')
-    expect(s.auth.session!.sync.channel('A').timeline.draft, end).toBe('')
+    expect(s.auth.session!.sync.channel('A').composer.draft, end).toBe('')
     await s.auth.signOut()
   }
 })
@@ -519,7 +519,7 @@ it.each(['sign-out', '4001', '401', 'Account change'] as const)(
       expect(s.auth.hasUnsavedChanges()).toBe(false)
       if (end !== 'Account change') await signInAs(s, 'm1')
       const current = s.auth.session!.sync.channel('A')
-      expect(current.timeline.draft).toBe('')
+      expect(current.composer.draft).toBe('')
       // Retained old adapters must not restore, insert or erase the new Session's drafts.
       expect(old.restore(send.body.client_message_id)).toBe(false)
       old.setDraft('古いセッションの下書き')
@@ -528,7 +528,7 @@ it.each(['sign-out', '4001', '401', 'Account change'] as const)(
       old.setDraft('')
       expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe('新しいセッションの下書き')
       await s.auth.selectOrganization('o')
-      expect(s.auth.session!.sync.channel('A').timeline.draft).toBe('新しいセッションの下書き')
+      expect(s.auth.session!.sync.channel('A').composer.draft).toBe('新しいセッションの下書き')
       await s.auth.signOut()
     }
   },
@@ -571,9 +571,9 @@ it('a late refusal after an Organization switch restores only its unedited draft
     const expected = edit === 'untouched' ? '送信する本文' : edit === 'new text' ? '編集中の下書き' : ''
     expect(s.stores[0].get({ organizationId: 'o', channelId: 'A' }), edit).toBe(expected)
     expect(s.stores.at(-1)!.get({ organizationId: 'other', channelId: 'A' }), edit).toBe('組織Bの下書き')
-    expect(s.auth.session!.sync.channel('A').timeline.draft, edit).toBe('組織Bの下書き')
+    expect(s.auth.session!.sync.channel('A').composer.draft, edit).toBe('組織Bの下書き')
     await s.auth.selectOrganization('o')
-    expect(s.auth.session!.sync.channel('A').timeline.draft, edit).toBe(expected)
+    expect(s.auth.session!.sync.channel('A').composer.draft, edit).toBe(expected)
     expect(s.auth.hasUnsavedChanges()).toBe(true)
     await s.auth.signOut()
   }
@@ -607,7 +607,8 @@ async function returnWithPendingSend(timedOut = false, target: 'channel' | 'new 
   await current.loadOlder()
   await settle()
   const composer = await mount(() => target === 'topic'
-    ? { ...current.timeline, ...current.topic('T').composer } : current.timeline)
+    ? { ...current.timeline, ...current.composer, ...current.topic('T').composer }
+    : { ...current.timeline, ...current.composer })
   expect(composer.last).toMatchObject({ draft: '', olderError: true, pending: [] })
   // Closing cancels the old wait; cancellation alone never restores text.
   expect(await pending).toBe(true)
@@ -664,7 +665,7 @@ it.each(['new topic', 'topic'] as const)(
     await settle()
     expect(composer.last).toMatchObject({ draft: '送信する本文', olderError: true, pending: [] })
     expect(composer.last.topicDraft).toBe(target === 'new topic' ? '仕様相談' : '')
-    expect(current.timeline.draft).toBe(target === 'topic' ? 'チャンネルに残す下書き' : '送信する本文')
+    expect(current.composer.draft).toBe(target === 'topic' ? 'チャンネルに残す下書き' : '送信する本文')
     expect(current.topic('other-topic').composer.draft).toBe('')
     expect(s.stores.at(-1)!.get({ organizationId: 'other', channelId: 'A' })).toBe('組織Bの下書き')
     await composer.unmount()
@@ -672,8 +673,8 @@ it.each(['new topic', 'topic'] as const)(
     await s.auth.selectOrganization('other')
     await s.auth.selectOrganization('o')
     const reopened = s.auth.session!.sync.channel('A')
-    expect(target === 'topic' ? reopened.topic('T').composer.draft : reopened.timeline.draft).toBe('送信する本文')
-    expect(reopened.timeline.topicDraft).toBe(target === 'new topic' ? '仕様相談' : '')
+    expect(target === 'topic' ? reopened.topic('T').composer.draft : reopened.composer.draft).toBe('送信する本文')
+    expect(reopened.composer.topicDraft).toBe(target === 'new topic' ? '仕様相談' : '')
     await s.auth.signOut()
   },
 )
@@ -725,17 +726,17 @@ it('Topic drafts and Channel topicDraft survive Organization switches, including
   // A Topic name alone is still an unsaved draft, outside the old controller.
   expect(s.auth.hasUnsavedChanges()).toBe(true)
   await s.auth.selectOrganization('o')
-  expect(s.auth.session!.sync.channel('A').timeline).toMatchObject({ draft: '', topicDraft: '仕様相談' })
+  expect(s.auth.session!.sync.channel('A').composer).toMatchObject({ draft: '', topicDraft: '仕様相談' })
   s.auth.session!.sync.channel('A').topic('T').setDraft('トピックの下書き')
   await s.auth.selectOrganization('other')
   expect(s.auth.hasUnsavedChanges()).toBe(true)
   const other = s.auth.session!.sync.channel('A')
-  expect(other.timeline.topicDraft).toBe('')
+  expect(other.composer.topicDraft).toBe('')
   expect(other.topic('T').composer.draft).toBe('')
   other.setTopicDraft('組織Bのトピック')
   other.topic('T').setDraft('組織Bの下書き')
   await s.auth.selectOrganization('o')
-  expect(s.auth.session!.sync.channel('A').timeline).toMatchObject({ draft: '', topicDraft: '仕様相談' })
+  expect(s.auth.session!.sync.channel('A').composer).toMatchObject({ draft: '', topicDraft: '仕様相談' })
   expect(s.auth.session!.sync.channel('A').topic('T').composer.draft).toBe('トピックの下書き')
   await s.auth.signOut()
 })
@@ -776,7 +777,8 @@ it.each(['new topic', 'topic'] as const)(
       if (end === 'sign-out' || end === '4001' || end === '401') await signInAs(s, 'm1')
       await s.auth.selectOrganization('o')
       const current = s.auth.session!.sync.channel('A')
-      expect(current.timeline, end).toMatchObject({ draft: '', topicDraft: '', pending: [] })
+      expect(current.timeline, end).toMatchObject({ pending: [] })
+      expect(current.composer, end).toMatchObject({ draft: '', topicDraft: '' })
       expect(current.topic('T').composer.draft, end).toBe('')
       // Old adapters may not insert or erase the current Account Session's Topic intent.
       if (end !== 'settled' && end !== 'Channel access lost') {
@@ -786,7 +788,7 @@ it.each(['new topic', 'topic'] as const)(
         oldComposer.setDraft('古い本文')
         await s.auth.selectOrganization('other')
         await s.auth.selectOrganization('o')
-        expect(s.auth.session!.sync.channel('A').timeline.topicDraft, end).toBe('新しいトピック')
+        expect(s.auth.session!.sync.channel('A').composer.topicDraft, end).toBe('新しいトピック')
         expect(s.auth.session!.sync.channel('A').topic('T').composer.draft, end).toBe('新しい本文')
       }
       await s.auth.signOut()
