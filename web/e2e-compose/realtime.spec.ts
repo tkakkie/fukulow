@@ -1,22 +1,20 @@
 import { expect, test, type Page, type WebSocket as ObservedWebSocket } from '@playwright/test'
 import type { components, ServerEvent } from '../src/api-schema.d.ts'
-import { secretSafe } from '../e2e/helpers.ts'
+import { owner, secretSafe, type SetupStatus } from './helpers.ts'
 
 type Message = components['schemas']['Message']
 
-// Empty DB -> setup -> sign in -> create channel -> post -> appears live in a second browser context.
-const owner = { email: 'owner@example.com', password: 'correct horse battery' }
-
 async function signIn(page: Page) {
   await page.goto('/')
-  await page.getByLabel('メールアドレス').fill(owner.email)
-  await page.getByLabel('パスワード').fill(owner.password)
-  await page.getByRole('button', { name: 'ログイン' }).click()
+  await page.getByLabel('メールアドレス', { exact: true }).fill(owner.email)
+  await page.getByLabel('パスワード', { exact: true }).fill(owner.password)
+  await page.getByRole('button', { name: 'ログイン', exact: true }).click()
   await expect(page.getByText('Acme / Alice さん')).toBeVisible()
 }
 
 test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and sign-out', async ({ browser, baseURL }) => {
   expect(new URL(baseURL!).protocol).toBe('https:')
+  const channelName = `general-${crypto.randomUUID().slice(0, 8)}`
   // Browser A and B are independent contexts (own cookies, own sessions).
   const a = await (await browser.newContext({ baseURL, ignoreHTTPSErrors: true })).newPage()
   const b = await (await browser.newContext({ baseURL, ignoreHTTPSErrors: true })).newPage()
@@ -51,7 +49,11 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
     if (event.type === 'message') echoes.push(event.message)
   }))
 
-  // A: fresh instance -> setup (signs in automatically) -> channel through the product UI.
+  // A: fresh or already set-up instance -> setup or sign-in -> channel through the product UI.
+  const setupRes = await secretSafe(() => a.request.get('/api/v1/setup'))
+  expect(setupRes.ok()).toBe(true)
+  const { setup_required } = (await secretSafe(() => setupRes.json())) as SetupStatus
+
   const first = await a.goto('/')
   const headers = first!.headers()
   expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")
@@ -72,21 +74,27 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
     expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
     expect(response.headers()['content-encoding']).toBe('gzip')
   }
-  await a.getByLabel('組織名').fill('Acme')
-  await a.getByLabel('オーナーの名前').fill('Alice')
-  await a.getByLabel('メールアドレス').fill(owner.email)
-  await a.getByLabel('パスワード（12文字以上）').fill(owner.password)
-  if (!process.env.E2E_SETUP_TOKEN) throw new Error('Set E2E_SETUP_TOKEN for the disposable stack')
-  await secretSafe(() => a.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN!))
-  await a.getByRole('button', { name: 'セットアップして開始' }).click()
+  if (setup_required) {
+    await a.getByLabel('組織名', { exact: true }).fill('Acme')
+    await a.getByLabel('オーナーの名前', { exact: true }).fill('Alice')
+    await a.getByLabel('メールアドレス', { exact: true }).fill(owner.email)
+    await a.getByLabel('パスワード（12文字以上）', { exact: true }).fill(owner.password)
+    if (!process.env.E2E_SETUP_TOKEN) throw new Error('Set E2E_SETUP_TOKEN for the disposable stack')
+    await secretSafe(() => a.getByLabel('セットアップトークン').fill(process.env.E2E_SETUP_TOKEN!))
+    await a.getByRole('button', { name: 'セットアップして開始', exact: true }).click()
+  } else {
+    await a.getByLabel('メールアドレス', { exact: true }).fill(owner.email)
+    await a.getByLabel('パスワード', { exact: true }).fill(owner.password)
+    await a.getByRole('button', { name: 'ログイン', exact: true }).click()
+  }
   await expect(a.getByText('Acme / Alice さん')).toBeVisible()
-  await a.getByLabel('チャンネル名').fill('general')
-  await a.getByRole('button', { name: 'チャンネルを作成' }).click()
-  await expect(a.getByRole('heading', { name: 'general' })).toBeVisible()
+  await a.getByLabel('チャンネル名', { exact: true }).fill(channelName)
+  await a.getByRole('button', { name: 'チャンネルを作成', exact: true }).click()
+  await expect(a.getByRole('heading', { name: channelName, exact: true })).toBeVisible()
 
   // B: own session, same channel; wait until its WebSocket is subscribed before A posts.
   await signIn(b)
-  await b.getByRole('button', { name: '# general' }).click()
+  await b.getByRole('button', { name: `# ${channelName}`, exact: true }).click()
   await expect(b.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
   await expect(a.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
 
