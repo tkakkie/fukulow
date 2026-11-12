@@ -51,6 +51,59 @@ async fn denied(
 }
 
 #[sqlx::test]
+async fn foreign_organization_channel_member_endpoints_deny_without_changes_with_owner_controls(
+    pool: PgPool,
+) {
+    let app = router(&pool);
+    let org = organization(&pool).await;
+    let foreign = organization(&pool).await;
+    let owner = Uuid::new_v4();
+    let token = member(&pool, org, owner, "owner").await;
+    let foreign_token = member(&pool, foreign, owner, "owner").await;
+    let target = Uuid::new_v4();
+    member(&pool, org, target, "member").await;
+    let channel = create(&app, &token, "Managed", "private").await;
+    let channel = Uuid::parse_str(channel["id"].as_str().unwrap()).unwrap();
+    let path = format!("/api/v1/orgs/{org}/channels/{channel}/members");
+    for method in ["GET", "POST", "DELETE"] {
+        let path = if method == "DELETE" {
+            format!("{path}/{target}")
+        } else {
+            path.clone()
+        };
+        let input = json!({"member_id":target});
+        let before = snapshot(&pool).await;
+        let response = request(&app, method, &path, &foreign_token, input.clone()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method}");
+        assert_eq!(
+            body(response).await,
+            json!({"error":"organization_unavailable"}),
+            "{method}"
+        );
+        assert_eq!(snapshot(&pool).await, before, "{method}");
+        let response = request(&app, method, &path, &token, input).await;
+        assert_eq!(
+            response.status(),
+            if method == "GET" {
+                StatusCode::OK
+            } else {
+                StatusCode::NO_CONTENT
+            },
+            "{method}"
+        );
+        if method == "GET" {
+            assert_eq!(
+                body(response).await,
+                json!({"members":[{"id":owner,"name":"Member","role":"owner"}]})
+            );
+        }
+        let granted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3)")
+            .bind(org).bind(channel).bind(target).fetch_one(&pool).await.unwrap();
+        assert_eq!(granted, method == "POST", "{method}");
+    }
+}
+
+#[sqlx::test]
 async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let app = crate::app(state.clone());
