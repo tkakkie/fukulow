@@ -32,19 +32,23 @@ export function throughputReport(data: unknown, steps: Step[]) {
     const rejected429 = value('throughput_429', step) ?? 0;
     const rejected503 = value('throughput_503', step) ?? 0;
     const otherErrors = value('throughput_other', step) ?? 0;
+    const droppedIterations = value('dropped_iterations', step) ?? 0;
     return { ...step, attempted, accepted, acceptedInWindow: inWindow, acceptedTail: accepted - inWindow,
       offeredSendsPerSecond: attempted / step.seconds,
       acceptedSendsPerSecond: inWindow / step.seconds,
       // Attribute the drain to this step too, so queued completions cannot inflate its rate.
       acceptedIncludingDrainPerSecond: accepted / Math.max(step.seconds, (value('throughput_completion_ms', step, 'max') ?? 0) / 1000),
       acceptedLatencyMs: Object.fromEntries(['med', 'p(95)', 'p(99)'].map(stat => [stat === 'med' ? 'p50' : stat === 'p(95)' ? 'p95' : 'p99', accepted ? value('throughput_accepted_ms', step, stat) : null])),
+      completionMs: { p95: value('throughput_completion_ms', step, 'p(95)'),
+        p99: value('throughput_completion_ms', step, 'p(99)') },
       rejected429, rejected429Rate: attempted ? rejected429 / attempted : null,
       rejected503, rejected503Rate: attempted ? rejected503 / attempted : null,
       otherErrors, otherErrorRate: attempted ? otherErrors / attempted : null,
       invalidRetryAfter: value('throughput_invalid_retry_after', step) ?? 0,
       retryAfterSeconds: { min: rejected429 + rejected503 ? value('throughput_retry_after', step, 'min') : null,
         max: rejected429 + rejected503 ? value('throughput_retry_after', step, 'max') : null },
-      droppedIterations: value('dropped_iterations', step) ?? 0,
+      // Keep diagnostic results, but this step cannot establish capacity at its configured rate.
+      droppedIterations, generatorLimited: droppedIterations > 0,
       incomplete: attempted - accepted - rejected429 - rejected503 - otherErrors,
     };
   });

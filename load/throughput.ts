@@ -42,8 +42,8 @@ export const options: Options = {
   summaryTrendStats: ['min', 'med', 'max', 'p(95)', 'p(99)'],
   systemTags: ['status', 'method', 'name', 'scenario', 'expected_response'],
   thresholds: {
-    checks: ['rate==1'], throughput_accepted: ['count>0'], throughput_other: ['count==0'],
-    throughput_invalid_retry_after: ['count==0'], dropped_iterations: ['count==0'],
+    checks: ['rate==1'], throughput_other: ['count==0'],
+    throughput_invalid_retry_after: ['count==0'],
     ...Object.fromEntries(steps.flatMap(step => [
       ...counters.map(metric => [`${metric}{scenario:${step.name}}`, ['count>=0']]),
       ...['throughput_accepted_ms', 'throughput_completion_ms', 'throughput_retry_after']

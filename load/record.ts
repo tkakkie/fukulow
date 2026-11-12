@@ -5,6 +5,7 @@ import { cpus, totalmem, platform, arch } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { sampledCpuPeaks, type ResourceSample } from './throughput-summary.ts';
+import { requireSuccessfulRun } from './summary.ts';
 const execAsync = promisify(execFile);
 const throughputMode = process.env.LOAD_SCRIPT === 'load/throughput.ts';
 
@@ -166,6 +167,7 @@ try {
   if (primaryError) throw primaryError;
   if (timer) clearInterval(timer);
   await sampling;
+  requireSuccessfulRun(exitCode, summary);
   if (!throughputMode && rate && Number(rate.elapsedMs) < Number(rate.duration) * 1000) {
     throw new Error('Scheduling window ended before its configured deadline');
   }
