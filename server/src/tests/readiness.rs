@@ -1,6 +1,10 @@
 use super::*;
 use axum::body::to_bytes;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use std::sync::atomic::Ordering;
+
+mod relay;
+use relay::Relay;
 
 async fn request(router: &Router, path: &str) -> Response {
     router
@@ -43,14 +47,14 @@ async fn readiness_acquire_timeout_recovers_without_changing_liveness(pool: PgPo
         .unwrap();
     let router = app(AppState::for_test(single.clone()));
     assert_ready(&router).await;
-    let connection = single.acquire().await.unwrap();
+    let mut connection = single.acquire().await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), assert_not_ready(&router))
         .await
         .expect("readiness must bound pool acquisition");
     let live = request(&router, "/api/v1/health").await;
     assert_eq!(live.status(), StatusCode::OK);
     assert_eq!(to_bytes(live.into_body(), 1024).await.unwrap(), "ok");
-    drop(connection);
+    connection.return_to_pool().await;
     assert_ready(&router).await;
     single.close().await;
     assert_not_ready(&router).await;
@@ -58,105 +62,213 @@ async fn readiness_acquire_timeout_recovers_without_changing_liveness(pool: PgPo
 
 #[sqlx::test(migrations = false)]
 async fn readiness_query_timeout_releases_slot_limits_flood_and_recovers(pool: PgPool) {
-    use sqlx::postgres::PgSslMode;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
-        sync::{Notify, watch},
-        task::JoinSet,
-    };
-
     tokio::time::timeout(Duration::from_secs(10), async {
-        let options = pool.connect_options();
-        let upstream = (options.get_host().to_owned(), options.get_port());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (hold, gate) = watch::channel(false);
-        let blocked = std::sync::Arc::new(Notify::new());
-        let observed = blocked.clone();
-        let mut relays = JoinSet::new();
-        relays.spawn(async move {
-            let mut connections = JoinSet::new();
-            loop {
-                let (mut client, _) = listener.accept().await.unwrap();
-                let mut server = TcpStream::connect((upstream.0.as_str(), upstream.1))
-                    .await
-                    .unwrap();
-                let mut gate = gate.clone();
-                let observed = observed.clone();
-                connections.spawn(async move {
-                    let (mut client_read, mut client_write) = client.split();
-                    let (mut server_read, mut server_write) = server.split();
-                    let requests = tokio::io::copy(&mut client_read, &mut server_write);
-                    let responses = async {
-                        let mut bytes = [0; 8192];
-                        loop {
-                            let count = server_read.read(&mut bytes).await?;
-                            if count == 0 {
-                                return Ok::<_, std::io::Error>(());
-                            }
-                            while *gate.borrow_and_update() {
-                                observed.notify_one();
-                                if gate.changed().await.is_err() {
-                                    return Ok(());
-                                }
-                            }
-                            client_write.write_all(&bytes[..count]).await?;
-                        }
-                    };
-                    tokio::select! { _ = requests => {}, _ = responses => {} }
-                });
-                while connections.try_join_next().is_some() {}
-            }
-        });
-        let single = PgPoolOptions::new()
-            .max_connections(1)
-            .test_before_acquire(false)
-            .connect_with(
-                options
-                    .as_ref()
-                    .clone()
-                    .host("127.0.0.1")
-                    .port(address.port())
-                    .ssl_mode(PgSslMode::Disable),
-            )
-            .await
-            .unwrap();
-        let router = app(AppState::for_test(single.clone()));
+        let relay = Relay::new(&pool, 1).await;
+        let router = app(AppState::for_test(relay.pool.clone()));
         assert_ready(&router).await;
-        let mut connection = single.acquire().await.unwrap();
+        relay.hold.send(true).unwrap();
+        let mut checks = tokio::task::JoinSet::new();
+        checks.spawn({
+            let router = router.clone();
+            async move { assert_not_ready(&router).await }
+        });
+        relay.blocked.notified().await;
+        for _ in 0..16 {
+            let router = router.clone();
+            checks.spawn(async move { assert_not_ready(&router).await });
+        }
+        while let Some(result) = checks.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(
+            relay.pool.size(),
+            0,
+            "query timeout must release the pool slot"
+        );
+        relay.hold.send(false).unwrap();
+        assert_ready(&router).await;
+        relay.pool.close().await;
+    })
+    .await
+    .expect("readiness query timeout and recovery must not hang");
+}
+
+#[sqlx::test(migrations = false)]
+async fn readiness_overlapping_healthy_callers_share_one_check(pool: PgPool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // Spare pool capacity would expose accidentally independent checks.
+        let relay = Relay::new(&pool, 4).await;
+        let router = app(AppState::for_test(relay.pool.clone()));
+        assert_ready(&router).await;
+        let before = relay.returns.load(Ordering::SeqCst);
+        relay.hold.send(true).unwrap();
+        let first = tokio::spawn({
+            let router = router.clone();
+            async move { assert_ready(&router).await }
+        });
+        relay.blocked.notified().await;
+        let mut calls = Vec::new();
+        for _ in 0..16 {
+            let mut call = Box::pin(assert_ready(&router));
+            // Poll each caller into the same flight before releasing the DB reply.
+            std::future::poll_fn(|cx| {
+                assert!(call.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            calls.push(call);
+        }
+        assert!(!first.is_finished());
+        relay.hold.send(false).unwrap();
+        first.await.unwrap();
+        for call in calls {
+            call.await;
+        }
+        assert_eq!(relay.returns.load(Ordering::SeqCst) - before, 1);
+        assert_eq!(relay.pool.size() as usize, relay.pool.num_idle());
+        relay.pool.close().await;
+    })
+    .await
+    .expect("overlapping healthy checks must complete together");
+}
+
+#[sqlx::test(migrations = false)]
+async fn readiness_bounds_return_ping_without_accumulating_connections(pool: PgPool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let relay = Relay::new(&pool, 4).await;
+        let router = app(AppState::for_test(relay.pool.clone()));
+        for _ in 0..4 {
+            assert_ready(&router).await;
+            relay.stall_return.store(true, Ordering::SeqCst);
+            let check = tokio::spawn({
+                let router = router.clone();
+                async move { assert_not_ready(&router).await }
+            });
+            relay.blocked.notified().await;
+            assert!(!check.is_finished(), "admission must cover the return ping");
+            check.await.unwrap();
+            assert_eq!(relay.pool.size(), 0, "stalled returns must not accumulate");
+            relay.hold.send(false).unwrap();
+        }
+        assert_ready(&router).await;
+        relay.pool.close().await;
+    })
+    .await
+    .expect("pool return must have its own deadline");
+}
+
+#[sqlx::test(migrations = false)]
+async fn readiness_cancelled_query_detaches_connection(pool: PgPool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let relay = Relay::new(&pool, 1).await;
+        assert!(database::ready(&relay.pool).await);
+        relay.hold.send(true).unwrap();
+        let check = tokio::spawn({
+            let pool = relay.pool.clone();
+            async move { database::ready(&pool).await }
+        });
+        relay.blocked.notified().await;
+        check.abort();
+        assert!(check.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            relay.pool.size(),
+            0,
+            "cancelled query must detach immediately"
+        );
+        relay.hold.send(false).unwrap();
+        assert!(database::ready(&relay.pool).await);
+        relay.pool.close().await;
+    })
+    .await
+    .expect("cancellation must release the pool slot");
+}
+
+#[sqlx::test(migrations = false)]
+async fn readiness_cancelled_return_releases_connection(pool: PgPool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let relay = Relay::new(&pool, 1).await;
+        relay.stall_return.store(true, Ordering::SeqCst);
+        let check = tokio::spawn({
+            let pool = relay.pool.clone();
+            async move { database::ready(&pool).await }
+        });
+        relay.blocked.notified().await;
+        check.abort();
+        assert!(check.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            relay.pool.size(),
+            0,
+            "cancelled return must release immediately"
+        );
+        relay.hold.send(false).unwrap();
+        assert!(database::ready(&relay.pool).await);
+        relay.pool.close().await;
+    })
+    .await
+    .expect("cancellation must also bound return cleanup");
+}
+
+#[sqlx::test(migrations = false)]
+async fn readiness_query_error_detaches_connection(pool: PgPool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let relay = Relay::new(&pool, 1).await;
+        let mut connection = relay.pool.acquire().await.unwrap();
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *connection)
             .await
             .unwrap();
         connection.return_to_pool().await;
-        drop(connection);
-        hold.send(true).unwrap();
-        let check = tokio::spawn({
-            let router = router.clone();
-            async move { assert_not_ready(&router).await }
-        });
-        blocked.notified().await;
-        // Concurrent public probes must not queue more pool acquisitions behind this one.
-        tokio::time::timeout(Duration::from_millis(100), assert_not_ready(&router))
-            .await
-            .expect("concurrent readiness must reject immediately");
-        check.await.unwrap();
-        assert_eq!(
-            single.size(),
-            0,
-            "query timeout must immediately release the pool slot"
-        );
-        hold.send(false).unwrap();
-        assert_ready(&router).await;
-        let new_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&single)
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(&pool)
             .await
             .unwrap();
-        assert_ne!(pid, new_pid, "timed-out socket must be discarded");
-        single.close().await;
-        drop(relays);
+        assert!(terminated);
+        assert!(!database::ready(&relay.pool).await);
+        assert_eq!(
+            relay.pool.size(),
+            0,
+            "query errors must detach synchronously"
+        );
+        assert!(database::ready(&relay.pool).await);
+        relay.pool.close().await;
     })
     .await
-    .expect("readiness query timeout and recovery must not hang");
+    .expect("query errors must release the pool slot");
+}
+
+#[sqlx::test(migrations = false)]
+async fn readiness_cancelled_caller_keeps_shared_check_until_cleanup(pool: PgPool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let relay = Relay::new(&pool, 4).await;
+        let router = app(AppState::for_test(relay.pool.clone()));
+        assert_ready(&router).await;
+        let before = relay.returns.load(Ordering::SeqCst);
+        relay.hold.send(true).unwrap();
+        let caller = tokio::spawn({
+            let router = router.clone();
+            async move { assert_ready(&router).await }
+        });
+        relay.blocked.notified().await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            relay.pool.size(),
+            1,
+            "caller cancellation must keep the shared check running"
+        );
+        let mut next = Box::pin(assert_ready(&router));
+        std::future::poll_fn(|cx| {
+            assert!(next.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        relay.hold.send(false).unwrap();
+        next.await;
+        assert_eq!(relay.returns.load(Ordering::SeqCst) - before, 1);
+        assert_eq!(relay.pool.size() as usize, relay.pool.num_idle());
+        relay.pool.close().await;
+    })
+    .await
+    .expect("caller cancellation must preserve single flight");
 }

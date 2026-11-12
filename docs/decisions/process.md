@@ -3,8 +3,8 @@
 Product, stack, delivery, project rules, CI and AI process. Writing rules and the other parts: [index](../decisions.md).
 
 ## Product, stack and delivery
-- #198 A: readiness acquire/query each get 200 ms, allowing brief local DB jitter but failing fast on outages. Single flight caps shared FIFO-pool use at one slot without send/watermark permits; a query timeout detaches the socket to release its slot immediately.
-- #198 A: use the existing server binary's one-second HTTP probe command: the final image has no HTTP client. It reaches the configured app port via loopback for wildcard binds, avoiding a dependency or published port; unhealthy alone never triggers Compose restart.
+- #198 A: acquire/query/return each get 200 ms for local DB jitter and fast failure. Coalesced checks hold admission through bounded return; query errors/cancellation detach. One FIFO-pool slot, no send/watermark permits; this avoids unbounded SQLx Drop pings.
+- #198 A: reuse the binary for a one-second HTTP probe; no client exists in the image. A separate runtime skips blocking-resolver shutdown waits. Try resolved addresses, map wildcards to loopback; no dependency/port. Proxies hide /ready; unhealthy alone never restarts Compose.
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.
 - Reverse proxy is optional: the app speaks plain HTTP; Caddy (default) or nginx via compose profile. Reason: Caddy gave trouble in ribbitto and may limit performance.
 - #194 C: use UID/GID 10001 and root-owned runtime files; the app needs only network/DB access. Pin external images by tag + multi-platform digest for reproducibility; weekly Docker/Compose Dependabot updates retain reviewed upgrades. Bound local logs to 10m x 3 per container.

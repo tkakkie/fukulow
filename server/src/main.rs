@@ -3,18 +3,19 @@ use sqlx::postgres::PgPoolOptions;
 
 mod probe;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command: Vec<String> = std::env::args().skip(1).collect();
+    if command.as_slice() == ["probe"] {
+        let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+        return probe::execute(&addr).map_err(|_| "Readiness probe failed".into());
+    }
+    server_main(command)
+}
+
+#[tokio::main]
+async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match command.as_slice() {
         [] => {}
-        [command] if command == "probe" => {
-            let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
-            probe::run(&addr)
-                .await
-                .map_err(|_| "Readiness probe failed")?;
-            return Ok(());
-        }
         [command] if command == "migrate" => {
             let pool = migration_pool().await?;
             fukulow_server::database::migrate_and_grant(&pool).await?;

@@ -2861,7 +2861,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Database and session fallback worker are available; returns plain-text ok */
+            /** @description Database check succeeded, connection cleanup completed and the fallback supervisor has not observed an abnormal worker exit (not a progress watchdog); returns plain-text ok */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2870,7 +2870,7 @@ export interface operations {
                     "text/plain": string;
                 };
             };
-            /** @description Readiness unavailable: error not_ready; database check failed or timed out, fallback worker stopped, or another readiness check is in flight; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Readiness unavailable: error not_ready; database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

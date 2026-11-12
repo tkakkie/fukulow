@@ -93,7 +93,7 @@ pub fn app(state: AppState) -> Router {
     let readiness = Readiness {
         pool: state.pool.clone(),
         sessions: state.session_changes.clone(),
-        permit: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        flight: Default::default(),
     };
     Router::new()
         .route("/api/v1/health", get(health))
@@ -327,20 +327,43 @@ async fn health() -> Result<&'static str, auth::ApiError> {
 struct Readiness {
     pool: sqlx::PgPool,
     sessions: auth::SessionChanges,
-    permit: std::sync::Arc<tokio::sync::Semaphore>,
+    flight: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<bool>>>>>,
+}
+
+impl Readiness {
+    async fn check(&self) -> bool {
+        let mut flight = self.flight.lock().await;
+        let mut result = match flight.as_ref() {
+            Some(result) if result.borrow().is_none() && result.has_changed().is_ok() => {
+                result.clone()
+            }
+            _ => {
+                let (sender, result) = tokio::sync::watch::channel(None);
+                let pool = self.pool.clone();
+                let sessions = self.sessions.clone();
+                // The bounded check outlives any individual HTTP caller. Completed
+                // results are replaced on the next call, never cached across checks.
+                tokio::spawn(async move {
+                    let healthy = sessions.fallback_available()
+                        && database::ready(&pool).await
+                        && sessions.fallback_available();
+                    let _ = sender.send(Some(healthy));
+                });
+                *flight = Some(result.clone());
+                result
+            }
+        };
+        drop(flight);
+        matches!(result.wait_for(|value| value.is_some()).await, Ok(value) if *value == Some(true))
+    }
 }
 
 #[utoipa::path(get, path = "/api/v1/ready", responses(
-    (status = 200, description = "Database and session fallback worker are available; returns plain-text ok", body = String, content_type = "text/plain"),
-    (status = 503, description = "Readiness unavailable: error not_ready; database check failed or timed out, fallback worker stopped, or another readiness check is in flight", body = auth::ErrorBody)
+    (status = 200, description = "Database check succeeded, connection cleanup completed and the fallback supervisor has not observed an abnormal worker exit (not a progress watchdog); returns plain-text ok", body = String, content_type = "text/plain"),
+    (status = 503, description = "Readiness unavailable: error not_ready; database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit", body = auth::ErrorBody)
 ))]
 async fn ready(State(readiness): State<Readiness>) -> Response {
-    // One short FIFO pool acquisition at a time, independent of send/watermark budgets.
-    if let Ok(_permit) = readiness.permit.try_acquire()
-        && readiness.sessions.fallback_available()
-        && database::ready(&readiness.pool).await
-        && readiness.sessions.fallback_available()
-    {
+    if readiness.check().await {
         return "ok".into_response();
     }
     (
