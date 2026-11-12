@@ -43,7 +43,7 @@ test('shared Member panel adds, confirms removal and leave, explains protection 
     // The last manager cannot leave even while a Guest grant remains.
     await panel.getByRole('button', { name: 'Aliceとしてチャンネルを退出' }).click()
     await page.getByRole('dialog').getByRole('button', { name: '退出する', exact: true }).click()
-    await expect(panel.getByRole('alert')).toContainText('最後のオーナーまたは管理者')
+    await expect(panel.getByRole('alert')).toContainText('このチャンネルを管理できる最後のメンバー')
     const guest = await guestContext.newPage()
     await guest.goto('/')
     await guest.getByLabel('メールアドレス', { exact: true }).fill(email)
