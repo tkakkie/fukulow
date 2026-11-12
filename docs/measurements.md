@@ -547,3 +547,34 @@ Each process warms one controller first, takes its starting `process.memoryUsage
 Peak retained records: 100,000 before, 1,000 after. At 100,000 Messages, absolute post-GC heaps were 33,752,248 / 11,654,504 bytes (growth 21.452 / 0.377 MiB). This supports retaining the active baseline/aggregate/visit windows rather than all collected session history.
 
 Limits: one deterministic process run per mode; heap includes controller metadata, Topic baseline identity bookkeeping and the test runtime, so it is not a per-Message byte estimate or an allocation/latency benchmark. Upstream sync and Topic caches, browser rendering and network scheduling are excluded. Baselines refresh every 1,000 Messages here; missing/stale scope baselines, a held aggregate or a long visit intentionally retain wider windows. The bound depends on those windows, not a fixed record cap. Separate regression tests cover baseline subtraction after local reads, held Topic positions, unresolved and advancing visits, duplicate replay, and seeded equivalence with shared events and out-of-order/backward baselines (pruned counts may be null until a post-position refetch recovers). Shared contract fixtures are unchanged.
+
+## RLS baseline before tenant RLS (#314 step 2, 2026-11-12)
+
+- Purpose: the "before" side for #314 step 5 (same harness, dataset and plans after RLS). Source: main f11ba03, clean tree, no RLS policies. Apple M5, 10 CPUs, 32 GiB; Docker Desktop 29.9.3 VM 10 CPUs / 7.748 GiB; PostgreSQL 18.6 (image e3d24f69…, defaults: shared_buffers 128MB, work_mem 4MB); k6 1.8.2; host Node 26.13.0; Rust 1.99.0 release image. Shared machine, no other suite or AI worker running.
+- Load reproduce: `CHANNELS=1 SUBSCRIBERS=20 PUBLISHERS=2 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=30 READY_TIMEOUT_SECONDS=15 DRAIN_TIMEOUT_SECONDS=10 LOAD_RESULT_DIR="$LOAD_ARTIFACTS" make load-record`, three sequential runs, fresh isolated DB each, app connects as `fukulow_app`.
+
+| Run | Sends (accepted) | Deliveries / missing / errors | Delivery ms median / p95 / p99 / max | Send HTTP ms median / p95 / p99 | Top-level queries per send | Peak CPU app / db % |
+|---|---:|---|---|---|---:|---|
+| 1 | 600 (600) | 12,000 / 0 / 0 | 8 / 13 / 16 / 46 | 7 / 11 / 13 | 9.008 | 6.49 / 10.95 |
+| 2 | 600 (600) | 12,000 / 0 / 0 | 9 / 12 / 16 / 50 | 7 / 11 / 13 | 9.008 | 6.90 / 12.62 |
+| 3 | 600 (600) | 12,000 / 0 / 0 | 9 / 13 / 17 / 47 | 7 / 11 / 14 | 9.008 | 6.91 / 12.96 |
+
+- All 1,244 checks passed in each run; 13.035 statements per send including BEGIN/COMMIT and nested. Highest total SQL time per run: Message INSERT, sequence upsert, session AUTH, fan-out `member_access`.
+- Plans reproduce: fresh PostgreSQL 18.6, `sqlx migrate run`, `deploy/db-roles.sql` + `deploy/db-grants.sql`, then `psql -f load/hot-plans/seed.sql` as owner and `psql -X [-v generic=1] -f load/hot-plans/plans.sql` as `fukulow_app` six times per mode; medians of passes 2–6. Dataset: Org A 10,000 Members (every 50th a guest), 40 public + 10 private Channels, measured Channel 100,000 Messages (70% in 2,000 Topics), 2,000 Messages elsewhere; Org B 1,000 Members, 10 Channels × 5,000; 406,800 Channel read positions, each Channel 100 unread. Writes rolled back.
+
+| Query (Execution Time, ms) | Custom plan | Forced generic |
+|---|---:|---:|
+| AUTH session lookup | 0.022 | 0.025 |
+| Visibility check (VIS) / watermark | 0.015 / 0.007 | 0.018 / 0.009 |
+| Send: Member FOR SHARE / Channel public / idempotency lookup / reply parent | 0.018 / 0.005 / 0.023 / 0.041 | 0.021 / 0.006 / 0.011 / 0.039 |
+| Send: sequence upsert / Topic join / Topic id / Message INSERT / Topic record | 0.042 / 0.039 / 0.004 / 0.186 / 0.033 | 0.047 / 0.040 / 0.009 / 0.210 / 0.033 |
+| History latest page / old page (51 rows) | 0.036 / 0.038 | 0.036 / 0.037 |
+| Timeline latest page (51 of 2,000 Topics) | 35.599 | 226.659 |
+| Timeline single Topic | 0.142 | 7.980 |
+| Replay 50 after cursor | 0.050 | 0.069 |
+| Fan-out `member_access`, 1,024 candidates / `access_rows`, 1,024 subscriptions | 0.972 / 2.500 | 1.081 / 2.615 |
+| Unread: visible Channel list / counts for 50 Channels | 0.664 / 33.304 | 0.683 / 16.543 |
+| Mark-read: position FOR UPDATE / Channel update / Topic exists / Topic upsert | 0.017 / 0.045 / 0.014 / 0.084 | 0.020 / 0.042 / 0.014 / 0.078 |
+
+- Default `plan_cache_mode` (what SQLx's cached statements get) switched the timeline to the generic plan after five executions: 223.280 ms, 504,699 shared-buffer hits (custom: 5,542) via Incremental Sort + GroupAggregate over all 70,000 Topic Messages; Unread counts took 16.133 ms. Step 5 compares both modes.
+- Limits: single machine, one dataset shape, warm cache, single-session EXPLAIN without concurrency; EXPLAIN timing overhead included; small-load run only (20 sockets), not capacity. Not a guarantee. Raw outputs stay outside Git in `/private/tmp/fukulow-314-baseline` (load artifacts hold server logs and a source patch: do not attach publicly).
