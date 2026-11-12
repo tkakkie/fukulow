@@ -2,36 +2,43 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { violations } from './check-local-context.ts'
 
-test('allows local context and unrelated settings in SQL and decoded Rust literals', () => {
-  for (const sql of [
-    "SET LOCAL fukulow.organization_id = 'id';",
-    "-- comment\nSET LOCAL fukulow.organization_id = 'id';",
-    "set local fukulow.account_id TO 'id';",
-    "SELECT set_config('fukulow.organization_id'::text, $1, true);",
-    "SELECT set_config('fukulow.account_id', concat('a,b', upper('c')), true);",
-    "SELECT set_config('fukulow.account_id', concat(')', 'true'), true);",
-    "SELECT set_config('fukulow.account_id', ',', true);",
-    "SELECT set_config('fukulow.account_id', $$), true$$, true);",
-    "SET lock_timeout = '5s'; SELECT set_config('lock_timeout', '5s', false);",
-    "SELECT set_config('fukulow.organization_id', $1, (true)::pg_catalog.boolean); SELECT other($1, false);",
-    "-- SET fukulow.organization_id = 'id';\n/* SET SESSION fukulow.account_id = 'id'; */",
-    "SELECT 'SET fukulow.organization_id = ''id''';",
-    "SELECT 'set_config(''fukulow.organization_id'', $1, false)';",
-    "SELECT 'it''s -- inert'; /* outer /* nested */ SET fukulow.account_id = 'id' */",
-    "SELECT '-- comment';\nSET LOCAL fukulow.organization_id = 'id';",
+test('allows literal local settings and read-only or unrelated settings', () => {
+  for (const source of [
+    "SET LOCAL fukulow.organization_id = 'x';",
+    "set\n local fukulow.account_id TO 'x';",
+    "SELECT set_config('fukulow.organization_id', $1, true);",
+    "SELECT SET_CONFIG(\n 'fukulow.organization_id',\n $1,\n TRUE\n);",
+    "SELECT set_config('fukulow.account_id', concat($1, upper($2)), true);",
+    "SELECT set_config('lock_timeout', $1, true);",
+    "SELECT current_setting('fukulow.organization_id', true);",
+    'SET search_path = public;',
+    'RESET search_path;',
   ]) {
-    assert.deepEqual(violations(sql), [], sql)
-    assert.deepEqual(violations(`sqlx::query(${JSON.stringify(sql)});`, 'rust'), [], sql)
-    assert.deepEqual(violations(`sqlx::query(r##"${sql}"##);`, 'rust'), [], sql)
+    assert.deepEqual(violations(source), [], source)
+    assert.deepEqual(violations(`sqlx::query("${source}");`), [], source)
+    assert.deepEqual(violations(`sqlx::query(r##"${source}"##);`), [], source)
   }
 })
 
-test('rejects executable session settings with comments, casts and multiline arguments', () => {
-  for (const sql of [
+test('rejects round 2 split literals, executable bodies, Unicode names and dynamic keys', () => {
+  for (const source of [
+    `sqlx::query(concat!("SET ", "fukulow.organization_id = 'id'"));`,
+    `sqlx::query(concat!("SET ",\n "fukulow.organization_id = 'id'"));`,
+    "DO 'BEGIN SET fukulow.organization_id = ''id''; END';",
+    `SET U&"fukulow.organization_id" = 'id';`,
+    String.raw`SET U&"\0066ukulow.organization_id" = 'id';`,
+    "set_config('fukulow.' || 'organization_id', v, false)",
+  ]) assert.deepEqual(violations(source), [1], source)
+})
+
+test('rejects round 1 session settings, casts, escaped keys and dollar bodies', () => {
+  for (const source of [
     "SET fukulow.organization_id = 'id';",
     "SET SESSION fukulow.account_id TO 'id';",
-    'SET "fukulow.organization_id" = \'id\';',
-    'sEt /* comment */ SeSsIoN "fukulow"."organization_id" = \'id\';',
+    `SET "fukulow.organization_id" = 'id';`,
+    `sEt /* comment */ SeSsIoN "fukulow"."organization_id" = 'id';`,
+    "ALTER ROLE app SET fukulow.organization_id = 'id';",
+    "ALTER DATABASE app SET fukulow.organization_id = 'id';",
     "SELECT set_config('fukulow.organization_id', $1, false);",
     "SELECT set_config('fukulow.organization_id'::text, $1, false);",
     "SELECT set_config(('fukulow.account_id')::pg_catalog.text, $1, false);",
@@ -44,43 +51,71 @@ test('rejects executable session settings with comments, casts and multiline arg
     "SELECT set_config('fukulow.organization_id', $1, $2);",
     "SELECT set_config($1, $2, false);",
     String.raw`SELECT set_config(E'\x66ukulow.organization_id', $1, false);`,
+    String.raw`sqlx::query("SET\nSESSION\tfukulow.organization_id = 'id'")`,
     "-- comment\rSET fukulow.organization_id = 'id';",
     "DO $$ BEGIN SET fukulow.organization_id = 'id'; END $$;",
   ]) {
-    assert.deepEqual(violations(sql), [1], sql)
-    assert.deepEqual(violations(`sqlx::query(${JSON.stringify(sql)});`, 'rust'), [1], sql)
-    assert.deepEqual(violations(`sqlx::query(r#"${sql}"#);`, 'rust'), [1], sql)
+    assert.deepEqual(violations(source), [1], source)
+    assert.deepEqual(violations(`sqlx::query("${source}");`), [1], source)
+    assert.deepEqual(violations(`sqlx::query(r#"${source}"#);`), [1], source)
   }
 })
 
-test('decodes Rust escapes before SQL comments and preserves physical diagnostic lines', () => {
-  assert.deepEqual(violations(String.raw`sqlx::query("-- comment\nSET fukulow.organization_id = 'id'")`, 'rust'), [1])
-  assert.deepEqual(violations(String.raw`sqlx::query("SET\nSESSION\tfukulow.organization_id = 'id'")`, 'rust'), [1])
-  assert.deepEqual(violations(String.raw`sqlx::query("\x53ET fukulow.\u{6f}rganization_id = 'id'")`, 'rust'), [1])
-  assert.deepEqual(violations('sqlx::query(r###"-- comment\nSET fukulow.organization_id = \'id\'"###)', 'rust'), [2])
-  assert.deepEqual(violations('sqlx::query("SELECT 1;\\\n   SET fukulow.organization_id = \'id\'")', 'rust'), [2])
+test('requires exactly three arguments and literal true for every setting name', () => {
+  for (const args of [
+    "'lock_timeout', $1, false",
+    "'fukulow.' || 'organization_id', v, false",
+    "key(), nested($1, other($2, $3)), false",
+    "'key', $1, (true)",
+    "'key', $1, true::boolean",
+    "'key', $1, 'true'",
+    "'key', $1, true /* comment */",
+    "'key', $1, true OR false",
+    "'key', $1, true_value",
+    "'key', $1",
+    "'key', $1,",
+    "'key', $1, true, false",
+    ', $1, true',
+    "'key', , true",
+  ]) assert.deepEqual(violations(`set_config(${args})`), [1], args)
+  for (const source of ["set_config(", "set_config('key', $1, true", "set_config('key', nested($1, $2), true"]) {
+    assert.deepEqual(violations(source), [1], source)
+  }
+  assert.deepEqual(violations('set_config(key($1, $2), nested($3, other($4)), true)'), [])
+  assert.deepEqual(violations('set_config(key, set_config(other, $1, false), true)'), [1])
 })
 
-test('separates Rust comments, character literals, raw strings and SQL tokens', () => {
-  const source = String.raw`
-// sqlx::query("SET fukulow.organization_id = 'id'");
-/* outer /* nested */ "SET fukulow.account_id = 'id'" */
-let quote = '"';
-let apostrophe = '\'';
-let lifetime: &'static str = "SELECT 'SET fukulow.organization_id = ''id''';";
-sqlx::query(r#"SELECT '/*'; -- comment
-SET LOCAL fukulow.organization_id = 'id'"#);
-sqlx::query("-- comment\nSELECT set_config('fukulow.organization_id'::text, $1, false)");
-`
-  assert.deepEqual(violations(source, 'rust'), [9])
+test('rejects all Unicode escape prefixes case-insensitively', () => {
+  for (const source of ["SELECT U&'anything';", 'SELECT u&"anything";', "SET LOCAL U&'anything';"]) {
+    assert.deepEqual(violations(source), [1], source)
+  }
 })
 
-test('reports every violation line without matching across calls', () => {
-  assert.deepEqual(violations("\nSET fukulow.organization_id = 'id';\nSELECT set_config('fukulow.account_id', $1, false);"), [2, 3])
+test('checks each SET independently within the 200-character window', () => {
+  assert.deepEqual(violations(`SET${' '.repeat(200)}fukulow`), [1])
+  assert.deepEqual(violations(`SET${' '.repeat(201)}fukulow`), [])
+  assert.deepEqual(violations('SET locality fukulow'), [1])
+  assert.deepEqual(violations("SET LOCAL fukulow.account_id = 'x';\nSET fukulow.organization_id = 'x';"), [2])
 })
 
-test('documents conservative matches for non-query Rust strings and dollar bodies', () => {
-  assert.deepEqual(violations('let explanation = "SET fukulow.organization_id";', 'rust'), [1])
-  assert.deepEqual(violations("SELECT $$SET fukulow.organization_id = 'id'$$;"), [1])
-  assert.deepEqual(violations(String.raw`SELECT set_config(E'lock\x5ftimeout', '5s', false);`), [1])
+test('documents accepted false positives: comments, inert strings and quoted punctuation', () => {
+  for (const source of [
+    '-- SET fukulow',
+    '// SET fukulow',
+    '/* SET fukulow */',
+    `let explanation = "SET fukulow.organization_id";`,
+    "SELECT 'SET fukulow.organization_id = ''id''';",
+    "-- set_config('anything', $1, false)",
+    "SELECT 'set_config(''anything'', $1, false)';",
+    "SELECT set_config('key', 'a,b', true);",
+    "SELECT set_config('key', ')', true);",
+    'SET search_path = public; -- fukulow',
+    'SET /* comment */ LOCAL fukulow.organization_id = 1;',
+  ]) assert.deepEqual(violations(source), [1], source)
+})
+
+test('returns sorted unique physical line numbers for all matches', () => {
+  assert.deepEqual(violations("\nSET U&\"fukulow.organization_id\" = 'id';\nset_config(key, $1, false);\nu&'value'"), [2, 3, 4])
+  assert.deepEqual(violations('sqlx::query(r###"-- comment\nSET fukulow.organization_id = \'id\'"###)'), [2])
+  assert.deepEqual(violations('sqlx::query("SELECT 1;\\\n   SET fukulow.organization_id = \'id\'")'), [2])
 })
