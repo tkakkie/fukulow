@@ -156,7 +156,7 @@ pub async fn topic_history(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization = auth.identity.organization.organization_id;
-    require_visible(
+    require_visible_scoped(
         &state.pool,
         organization,
         (auth.identity.member.id, auth.membership_revision),
@@ -164,7 +164,7 @@ pub async fn topic_history(
     )
     .await?;
     let w = watermark(&state, organization, channel).await?;
-    crate::database::read_only(&state.pool, async |tx: &mut sqlx::PgConnection| {
+    crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
         require_visible(
             &mut *tx,
             organization,

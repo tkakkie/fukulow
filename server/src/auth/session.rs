@@ -290,12 +290,17 @@ async fn deadline(
     revision: i64,
 ) -> Result<(Option<Instant>, bool), sqlx::Error> {
     let checked_at = Instant::now();
-    let row = tokio::time::timeout(CHECK_TIMEOUT, sqlx::query_as::<_, (f64, bool)>(
+    let row = tokio::time::timeout(
+        CHECK_TIMEOUT,
+        crate::database::organization_read_only(pool, key.0, async |tx: &mut sqlx::PgConnection| {
+            sqlx::query_as::<_, (f64, bool)>(
         "SELECT EXTRACT(EPOCH FROM (s.expires_at - clock_timestamp()))::float8, \
          COALESCE(u.deactivated_at IS NULL AND u.membership_revision = $4 AND u.account_id = $3, false) \
          FROM account_sessions s LEFT JOIN users u ON u.account_id = s.account_id AND u.organization_id = $1 \
          WHERE s.token_hash = $2 AND s.expires_at > clock_timestamp()"
-    ).bind(key.0).bind(&key.1).bind(account).bind(revision).fetch_optional(pool)).await.map_err(|_| sqlx::Error::PoolTimedOut)??;
+    ).bind(key.0).bind(&key.1).bind(account).bind(revision).fetch_optional(tx).await
+        }),
+    ).await.map_err(|_| sqlx::Error::PoolTimedOut)??;
     Ok(match row {
         Some((seconds, active)) if seconds.is_finite() && seconds > 0.0 => (
             Some(

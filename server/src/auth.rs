@@ -15,21 +15,22 @@ use crate::AppState;
 
 pub mod authorization;
 pub use authorization::{Action, Actor, Capability, OrganizationCapabilities, Resource, authorize};
+#[cfg(test)]
+mod admission_tests;
 mod cleanup;
 #[cfg(test)]
 mod credential_tests;
 pub mod invites;
 pub mod members;
 mod password;
-use password::{check_password, hash_password};
+use password::{PasswordWorkers, check_password, hash_password};
 mod session;
 mod throttle;
 pub use cleanup::SessionCleanup;
 pub use session::{SessionChanges, SubscriptionRecheck, SubscriptionScope};
 pub use throttle::SignInThrottle;
 
-// Bound Argon2 memory/CPU work independently from Tokio blocking-thread capacity.
-static PASSWORD_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+static PASSWORD_WORKERS: PasswordWorkers = PasswordWorkers::new();
 
 const COOKIE: &str = "fukulow_session";
 const SECURE_COOKIE: &str = "__Host-fukulow_session";
@@ -240,6 +241,7 @@ fn email(value: &str) -> Result<String, ApiError> {
 
 // Global bootstrap is a tenant-scope exception: only existence is exposed.
 async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<bool, sqlx::Error> {
+    // #314 step 4 replaces this global bootstrap read with a SECURITY DEFINER function.
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organizations)")
         .fetch_one(executor)
         .await
@@ -274,7 +276,8 @@ pub async fn setup_status(State(state): State<AppState>) -> Result<Response, Api
     (status = 409, description = "Setup already completed", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
-    (status = 500, description = "Database or password hashing failure while creating the first Organization and Owner", body = ErrorBody)))]
+    (status = 500, description = "Database or password hashing failure while creating the first Organization and Owner", body = ErrorBody),
+    (status = 503, description = "Argon2 queue is full or the one second admission wait expired; password admission unavailable; no setup writes", body = ErrorBody)))]
 pub async fn setup(
     State(state): State<AppState>,
     ApiJson(input): ApiJson<SetupRequest>,
@@ -285,7 +288,7 @@ pub async fn setup(
 async fn setup_with_workers(
     state: AppState,
     input: SetupRequest,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
 ) -> Result<Response, ApiError> {
     setup_with_hash(state, input, |password| hash_password(password, workers)).await
 }
@@ -328,36 +331,37 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
         ));
     }
     let password_hash = hash_password(input.password).await?;
-    let mut tx = state.pool.begin().await?;
-    // Global bootstrap is a tenant-scope exception. The table lock also
-    // serializes setup across processes and concurrent first requests.
-    sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
-        .execute(&mut *tx)
-        .await?;
-    if organization_exists(&mut *tx).await? {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "setup already completed",
-            None,
-        ));
-    }
     let organization_id = Uuid::new_v4();
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, $2)")
-        .bind(organization_id)
-        .bind(organization_name)
-        .execute(&mut *tx)
-        .await?;
-    let account_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, $3)")
-        .bind(account_id)
-        .bind(&email)
-        .bind(password_hash)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, $4, 'owner')")
-        .bind(organization_id).bind(id).bind(account_id).bind(name).execute(&mut *tx).await?;
-    tx.commit().await?;
+    let id = crate::database::organization(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
+        // Global bootstrap is a tenant-scope exception. The table lock also
+        // serializes setup across processes and concurrent first requests.
+        sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
+        if organization_exists(&mut *tx).await? {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "setup already completed",
+                None,
+            ));
+        }
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, $2)")
+            .bind(organization_id)
+            .bind(organization_name)
+            .execute(&mut *tx)
+            .await?;
+        let account_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, $3)")
+            .bind(account_id)
+            .bind(&email)
+            .bind(password_hash)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, $4, 'owner')")
+            .bind(organization_id).bind(id).bind(account_id).bind(name).execute(&mut *tx).await?;
+        Ok::<_, ApiError>(id)
+    }).await?;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -402,15 +406,27 @@ impl ToSchema for RetryAfterSeconds {}
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts", body = ErrorBody,
         headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
-    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody)))]
+    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody),
+    (status = 503, description = "Argon2 queue is full or the one second admission wait expired; password admission unavailable; no Account Session created", body = ErrorBody)))]
 pub async fn sign_in(
     State(state): State<AppState>,
     peer: ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     ApiJson(input): ApiJson<SignInRequest>,
 ) -> Result<Response, ApiError> {
+    web_sign_in_with_entropy(state, peer, headers, input, &PASSWORD_WORKERS, fill_random).await
+}
+
+async fn web_sign_in_with_entropy(
+    state: AppState,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    input: SignInRequest,
+    workers: &'static PasswordWorkers,
+    entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
+) -> Result<Response, ApiError> {
     let session =
-        sign_in_with_workers(state.clone(), peer, headers, input, &PASSWORD_WORKERS).await?;
+        sign_in_with_entropy(state.clone(), peer, headers, input, workers, entropy).await?;
     let mut response = (
         [
             (
@@ -437,7 +453,8 @@ pub async fn sign_in(
     (status = 415, description = "Expected application/json", body = ErrorBody),
     (status = 429, description = "Too many failed or in-flight sign-in attempts; budget shared with web sign-in", body = ErrorBody,
         headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
-    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody)))]
+    (status = 500, description = "Database, password verification, or credential generation failure while signing in", body = ErrorBody),
+    (status = 503, description = "Argon2 queue is full or the one second admission wait expired; password admission unavailable; no Account Session created", body = ErrorBody)))]
 pub async fn native_sign_in(
     State(state): State<AppState>,
     peer: ConnectInfo<std::net::SocketAddr>,
@@ -454,7 +471,7 @@ async fn sign_in_with_workers(
     peer: ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     input: SignInRequest,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
 ) -> Result<NativeSessionResponse, ApiError> {
     sign_in_with_entropy(state, peer, headers, input, workers, fill_random).await
 }
@@ -464,7 +481,7 @@ async fn sign_in_with_entropy(
     peer: ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     input: SignInRequest,
-    workers: &'static tokio::sync::Semaphore,
+    workers: &'static PasswordWorkers,
     entropy: impl FnOnce(&mut [u8]) -> Result<(), ApiError>,
 ) -> Result<NativeSessionResponse, ApiError> {
     authorization::require(Actor::Anonymous, Action::Public, Resource::Global)?;
@@ -480,6 +497,8 @@ async fn sign_in_with_entropy(
     attempt
         .account(email.clone())
         .map_err(ApiError::throttled)?;
+    // Admission covers lookup too, so overload does not turn into a DB flood.
+    let permit = workers.acquire().await?;
     let stored = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, password_hash FROM accounts WHERE email = $1",
     )
@@ -487,7 +506,7 @@ async fn sign_in_with_entropy(
     .fetch_optional(&state.pool)
     .await?;
     let (user_id, password_hash) = stored.unzip();
-    if !check_password(input.password, password_hash, attempt, workers).await? {
+    if !check_password(input.password, password_hash, attempt, permit).await? {
         return Err(ApiError::unauthorized());
     }
     let user_id = user_id.ok_or_else(ApiError::unauthorized)?;
@@ -543,20 +562,22 @@ async fn account_identity(
     pool: &sqlx::PgPool,
     account_id: Uuid,
 ) -> Result<AccountIdentity, ApiError> {
-    let email = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
-        .bind(account_id)
-        .fetch_one(pool)
-        .await?;
-    let organizations = sqlx::query_as::<_, (Uuid, String, Role)>(
-        "SELECT o.organization_id, o.name, u.role FROM organizations o JOIN users u USING (organization_id) WHERE u.account_id = $1 AND u.deactivated_at IS NULL ORDER BY o.organization_id"
-    ).bind(account_id).fetch_all(pool).await?.into_iter().map(|(organization_id,name,role)|Organization{organization_id,name,capabilities: OrganizationCapabilities::for_member(organization_id,role)}).collect();
-    Ok(AccountIdentity {
-        account: Account {
-            id: account_id,
-            email,
-        },
-        organizations,
-    })
+    crate::database::account_read_only(pool, account_id, async |tx: &mut sqlx::PgConnection| {
+        let email = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let organizations = sqlx::query_as::<_, (Uuid, String, Role)>(
+            "SELECT o.organization_id, o.name, u.role FROM organizations o JOIN users u USING (organization_id) WHERE u.account_id = $1 AND u.deactivated_at IS NULL ORDER BY o.organization_id"
+        ).bind(account_id).fetch_all(&mut *tx).await?.into_iter().map(|(organization_id,name,role)|Organization{organization_id,name,capabilities: OrganizationCapabilities::for_member(organization_id,role)}).collect();
+        Ok(AccountIdentity {
+            account: Account {
+                id: account_id,
+                email,
+            },
+            organizations,
+        })
+    }).await
 }
 
 pub struct AccountAuth {
@@ -607,26 +628,33 @@ impl FromRequestParts<AppState> for Auth {
             .ok_or_else(ApiError::bad_request)?
             .parse()
             .map_err(|_| ApiError::bad_request())?;
-        let row = sqlx::query_as::<
-            _,
-            (
-                Uuid,
-                Option<Uuid>,
-                Option<String>,
-                Option<Role>,
-                Option<String>,
-                Option<i64>,
-            ),
-        >(
-            "SELECT s.account_id, u.id, u.name, u.role, o.name, u.membership_revision \
+        let row = crate::database::organization_read_only(
+            &state.pool,
+            organization,
+            async |tx: &mut sqlx::PgConnection| {
+                sqlx::query_as::<
+                    _,
+                    (
+                        Uuid,
+                        Option<Uuid>,
+                        Option<String>,
+                        Option<Role>,
+                        Option<String>,
+                        Option<i64>,
+                    ),
+                >(
+                    "SELECT s.account_id, u.id, u.name, u.role, o.name, u.membership_revision \
              FROM account_sessions s LEFT JOIN users u ON u.account_id = s.account_id \
              AND u.organization_id = $2 AND u.deactivated_at IS NULL \
              LEFT JOIN organizations o ON o.organization_id = u.organization_id \
              WHERE s.token_hash = $1 AND s.expires_at > now()",
+                )
+                .bind(&token_hash)
+                .bind(organization)
+                .fetch_optional(tx)
+                .await
+            },
         )
-        .bind(&token_hash)
-        .bind(organization)
-        .fetch_optional(&state.pool)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
         let unavailable = || ApiError(StatusCode::NOT_FOUND, "organization_unavailable", None);
@@ -704,12 +732,13 @@ pub async fn deactivate_member(
 ) -> Result<(), sqlx::Error> {
     let state = state.clone();
     tokio::spawn(async move {
-        let mut tx = state.pool.begin().await?;
-        sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
-            .bind(organization).fetch_optional(&mut *tx).await?;
-        let revision: Option<(Uuid, i64)> = sqlx::query_as("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING id, membership_revision")
-            .bind(organization).bind(account).fetch_optional(&mut *tx).await?;
-        tx.commit().await?;
+        let revision = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
+            sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE")
+                .bind(organization).fetch_optional(&mut *tx).await?;
+            let revision: Option<(Uuid, i64)> = sqlx::query_as("UPDATE users SET deactivated_at = clock_timestamp() WHERE organization_id = $1 AND account_id = $2 AND deactivated_at IS NULL RETURNING id, membership_revision")
+                .bind(organization).bind(account).fetch_optional(&mut *tx).await?;
+            Ok::<_, sqlx::Error>(revision)
+        }).await?;
         if let Some((member, revision)) = revision {
             state.session_changes.membership_revoked(organization,account,revision);
             state.session_changes.recheck_subscriptions(&state.pool, SubscriptionScope::Member(organization, member)).await;
@@ -879,9 +908,21 @@ mod tests {
     // The real app uses the process-global PASSWORD_WORKERS. These saturation tests
     // need an isolated semaphore so holding every permit cannot stall parallel tests.
     // This router uses the same handlers and extractors as crate::app, passing only
-    // that semaphore explicitly, and matches its JSON body limit. Other routes and
+    // those password workers explicitly, and matches its JSON body limit. Other routes and
     // the static fallback do not participate in setup or sign-in requests.
-    fn app_with_workers(state: AppState, workers: &'static tokio::sync::Semaphore) -> axum::Router {
+    pub(super) fn app_with_workers(
+        state: AppState,
+        workers: &'static PasswordWorkers,
+    ) -> axum::Router {
+        app_with_workers_and_entropy(state, workers, fill_random)
+    }
+
+    pub(super) fn app_with_workers_and_entropy(
+        state: AppState,
+        workers: &'static PasswordWorkers,
+        entropy: impl Fn(&mut [u8]) -> Result<(), ApiError> + Clone + Send + Sync + 'static,
+    ) -> axum::Router {
+        let web_entropy = entropy.clone();
         axum::Router::new()
             .route(
                 "/api/v1/setup",
@@ -891,13 +932,24 @@ mod tests {
             )
             .route(
                 "/api/v1/session",
-                axum::routing::post(
-                    move |State(state), peer, headers, ApiJson(input)| async move {
-                        sign_in_with_workers(state, peer, headers, input, workers)
+                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
+                    let entropy = web_entropy.clone();
+                    async move {
+                        web_sign_in_with_entropy(state, peer, headers, input, workers, entropy)
+                            .await
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/native/session",
+                axum::routing::post(move |State(state), peer, headers, ApiJson(input)| {
+                    let entropy = entropy.clone();
+                    async move {
+                        sign_in_with_entropy(state, peer, headers, input, workers, entropy)
                             .await
                             .map(IntoResponse::into_response)
-                    },
-                ),
+                    }
+                }),
             )
             .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
             .with_state(state)
@@ -1001,9 +1053,14 @@ mod tests {
                     let mut attempt = throttle.begin(ip).unwrap();
                     attempt.account("owner@example.com".into()).unwrap();
                     assert!(
-                        check_password(password.into(), stored.clone(), attempt, &PASSWORD_WORKERS)
-                            .await
-                            .unwrap()
+                        check_password(
+                            password.into(),
+                            stored.clone(),
+                            attempt,
+                            PASSWORD_WORKERS.acquire().await.unwrap(),
+                        )
+                        .await
+                        .unwrap()
                     );
                 }
             }
@@ -1015,7 +1072,7 @@ mod tests {
                         "incorrect password".into(),
                         stored.clone(),
                         attempt,
-                        &PASSWORD_WORKERS
+                        PASSWORD_WORKERS.acquire().await.unwrap(),
                     )
                     .await
                     .unwrap()
@@ -1032,8 +1089,13 @@ mod tests {
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
         let peer: std::net::SocketAddr = "192.0.2.1:1234".parse().unwrap();
-        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-        let _workers = WORKERS.acquire_many(4).await.unwrap();
+        static WORKERS: PasswordWorkers = PasswordWorkers::new();
+        let _workers = WORKERS.running.acquire_many(4).await.unwrap();
+        let _queue = WORKERS
+            .waiting
+            .acquire_many(WORKERS.waiting.available_permits() as u32)
+            .await
+            .unwrap();
         for by_ip in [false, true] {
             let throttle = SignInThrottle::default();
             for _ in 0..if by_ip { 20 } else { 5 } {
@@ -1146,8 +1208,8 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-        let _workers = WORKERS.acquire_many(4).await.unwrap();
+        static WORKERS: PasswordWorkers = PasswordWorkers::new();
+        let _workers = WORKERS.running.acquire_many(4).await.unwrap();
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE organizations IN EXCLUSIVE MODE")
             .execute(&mut *tx)

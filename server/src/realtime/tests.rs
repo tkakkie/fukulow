@@ -270,7 +270,17 @@ async fn event(client: &mut Client) -> Value {
     loop {
         match frame(client).await {
             tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
-            frame => return serde_json::from_str(frame.to_text().unwrap()).unwrap(),
+            tungstenite::Message::Text(text) => {
+                return serde_json::from_str(&text).unwrap_or_else(|error| {
+                    panic!("expected JSON event, got Text({text:?}): {error}")
+                });
+            }
+            tungstenite::Message::Close(Some(close)) => panic!(
+                "expected JSON event, got Close(code={}, reason={:?})",
+                u16::from(close.code),
+                close.reason.as_str()
+            ),
+            frame => panic!("expected JSON event, got {frame:?}"),
         }
     }
 }
@@ -294,10 +304,11 @@ async fn silent(client: &mut Client) {
     );
 }
 async fn closed(client: &mut Client, code: u16) {
-    let tungstenite::Message::Close(Some(close)) = frame(client).await else {
-        panic!("expected close");
+    let frame = frame(client).await;
+    let tungstenite::Message::Close(Some(close)) = &frame else {
+        panic!("expected Close(code={code}), got {frame:?}");
     };
-    assert_eq!(u16::from(close.code), code);
+    assert_eq!(u16::from(close.code), code, "got {frame:?}");
 }
 fn rejected(result: Result<Client, tungstenite::Error>, status: u16) {
     let Err(tungstenite::Error::Http(response)) = result else {
@@ -1047,3 +1058,5 @@ mod roles;
 mod replies;
 
 pub(super) mod access_loss;
+
+mod round_trips;

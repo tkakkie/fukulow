@@ -300,11 +300,14 @@ async fn invite_acceptance_allows_demoted_issuer_with_authority_for_invited_role
 async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_controls(
     pool: sqlx::PgPool,
 ) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let pool = pools.admin;
+    crate::database::tests::context::context_policies(&pool).await;
     let org = org(&pool).await;
     let foreign = org_fn(&pool).await;
     let (_, target, _, _) = account(&pool, org, Role::Member).await;
     let (_, foreign_member, _, foreign_token) = account(&pool, foreign, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pools.app.clone()));
     // A second Owner keeps the role-change positive control independent of last-Owner protection.
     account(&pool, org, Role::Owner).await;
     for role in crate::auth::ALL_ROLES {
@@ -450,6 +453,7 @@ async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_contr
         .status(),
         StatusCode::OK
     );
+    pools.app.close().await;
 }
 async fn org_fn(pool: &sqlx::PgPool) -> Uuid {
     org(pool).await
@@ -459,11 +463,14 @@ async fn org_fn(pool: &sqlx::PgPool) -> Uuid {
 async fn invite_existing_account_requires_signed_in_matching_account_and_is_single_use(
     pool: sqlx::PgPool,
 ) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let pool = pools.admin;
+    crate::database::tests::context::context_policies(&pool).await;
     let org = org(&pool).await;
     let other = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, _, email, token) = account(&pool, other, Role::Member).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pools.app.clone()));
     let i = invite(&app, org, &owner, &email, Role::Admin).await;
     let hash: Vec<u8> =
         sqlx::query_scalar("SELECT token_hash FROM invites WHERE organization_id=$1 AND id=$2")
@@ -496,6 +503,7 @@ async fn invite_existing_account_requires_signed_in_matching_account_and_is_sing
         req(&app, "POST", &path, Some(&token), input).await.status(),
         StatusCode::NOT_FOUND
     );
+    pools.app.close().await;
 }
 
 #[sqlx::test]
@@ -564,9 +572,12 @@ async fn invite_unknown_expired_used_foreign_and_wrong_email_deny_without_consum
 async fn new_account_acceptance_is_atomic_and_concurrent_consumption_has_one_winner(
     pool: sqlx::PgPool,
 ) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let pool = pools.admin;
+    crate::database::tests::context::context_policies(&pool).await;
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pools.app.clone()));
     let email = "new@example.invalid";
     let i = invite(&app, org, &owner, email, Role::Member).await;
     let path = format!("/api/v1/orgs/{org}/invites/accept");
@@ -599,6 +610,7 @@ async fn new_account_acceptance_is_atomic_and_concurrent_consumption_has_one_win
     assert!(stored.starts_with("$argon2"));
     let memberships:i64=sqlx::query_scalar("SELECT count(*) FROM users u JOIN accounts a ON a.id=u.account_id WHERE organization_id=$1 AND email=$2").bind(org).bind(email).fetch_one(&pool).await.unwrap();
     assert_eq!(memberships, 1);
+    pools.app.close().await;
 }
 
 #[sqlx::test]

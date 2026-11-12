@@ -67,3 +67,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #138: opt-in Topic composition bootstraps sync with the real Message at W from the initial timeline; later projection pages stay outside sync. Reason: preserve the existing unfiltered cursor/gap protocol and avoid component conflicts during the UI follow-up.
 - #140 keeps one opt-in chain per Channel, merged by Message id and stable reply_root_id. Page continuation uses only the last page seq; live appends cannot skip unpaged siblings or enter sync cursor/gap evidence.
 - #140 composes over sync (or Topic sync) and sends confirmed-parent Replies through its existing pending/retry path. Preserve reply_to with the id/body so retries cannot change intent; projection reads settle C5 with session/read fencing before teardown.
+
+## Entries in other parts
+
+- [auth](auth.md): `#314 single-statement hot reads use`
