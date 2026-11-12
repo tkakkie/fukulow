@@ -4,6 +4,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 | Rule | Test |
 |---|---|
+| SQLx test app pools use a non-superuser, NOBYPASSRLS, non-owning role; migration writes and DDL require the separate admin pool | `server/tests/test_pools.rs::app_pool_is_restricted_and_admin_remains_separate` |
 | Read-only Ok/Err reuses a clean backend; cancellation or BEGIN/ROLLBACK failure discards it; subsequent writes are read-write | `server/src/database/tests/read_only.rs::successful_read_only_reuses_clean_connection`, `server/src/database/tests/read_only.rs::read_only_body_error_reuses_clean_connection`, `server/src/database/tests/read_only.rs::cancelled_read_only_begin_discards_connection_before_next_write`, `server/src/database/tests/read_only.rs::cancelled_read_only_body_discards_connection_before_next_write`, `server/src/database/tests/read_only.rs::failed_rollback_keeps_body_error_and_discards_connection` |
 | App startup reads history only; missing/extra/different versions, checksum mismatch or failed state prevents listening | `server/src/database/tests.rs::application_requires_migration_history_without_creating_it`, `server/src/database/tests.rs::application_rejects_migration_version_checksum_failed_missing_and_extra_rows` |
 | Roles command fails before connecting without a nonempty password; unknown subcommands fail | `server/tests/config.rs::roles_command_requires_password_before_connecting_and_rejects_unknown_commands` |
