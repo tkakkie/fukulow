@@ -1,5 +1,29 @@
 use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConnection};
 
+pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+pub(crate) async fn ready(pool: &PgPool) -> bool {
+    let Ok(Ok(mut connection)) = tokio::time::timeout(READY_ACQUIRE_TIMEOUT, pool.acquire()).await
+    else {
+        return false;
+    };
+    match tokio::time::timeout(
+        READY_QUERY_TIMEOUT,
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&mut *connection),
+    )
+    .await
+    {
+        Ok(Ok(1)) => true,
+        Ok(_) => false,
+        Err(_) => {
+            // Do not retain a pool permit for asynchronous cleanup of a stuck socket.
+            drop(connection.detach());
+            false
+        }
+    }
+}
+
 pub async fn read_only<T, E>(
     pool: &PgPool,
     body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,

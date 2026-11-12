@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 27 operations document shutdown, including Member/Invite, Unread and Reply chain operations.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 185;
+// All 28 operations document shutdown, including readiness.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 187;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -105,7 +105,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 27);
+        assert_eq!(operations, 28);
     }
 }
 
@@ -143,7 +143,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 27);
+    assert_eq!(requests.len(), 28);
     requests.extend(
         [
             "/",

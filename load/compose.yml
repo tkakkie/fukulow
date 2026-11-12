@@ -1,6 +1,12 @@
 # Disposable measurement environment; never shares production/E2E images, ports or volumes.
 services:
   app:
+    healthcheck:
+      test: ["CMD", "fukulow-server", "probe"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     image: ${LOAD_APP_IMAGE:-${LOAD_PROJECT:?Set LOAD_PROJECT}-app}
     build:

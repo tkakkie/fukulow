@@ -3,6 +3,46 @@ use crate::auth::session::tests::{Phase, fixture};
 
 mod exit;
 
+#[sqlx::test]
+async fn readiness_rejects_abnormal_worker_until_process_replacement(pool: PgPool) {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+
+    async fn status(router: &axum::Router, expected: StatusCode) {
+        let response = router
+            .clone()
+            .oneshot(Request::get("/api/v1/ready").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        if expected == StatusCode::OK {
+            assert_eq!(body, "ok");
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"error": "not_ready"})
+            );
+        }
+    }
+    let changes = SessionChanges::with_recheck_timing(Duration::from_millis(20), CHECK_TIMEOUT)
+        .with_on_fatal(Arc::new(|| {}));
+    let mut state = crate::AppState::for_test(pool.clone());
+    state.session_changes = changes.clone();
+    let router = crate::app(state);
+    status(&router, axum::http::StatusCode::OK).await;
+    changes.start_rechecks(&pool);
+    status(&router, axum::http::StatusCode::OK).await;
+    changes.panic_worker().await;
+    status(&router, axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
+    // The latch never resets in-process: #163 recovers by starting a fresh process.
+    let replacement = crate::app(crate::AppState::for_test(pool));
+    status(&replacement, axum::http::StatusCode::OK).await;
+}
 async fn active_checks(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \

@@ -31,6 +31,11 @@ Related: [Setup token](accounts.md#setup).
 - The binary remains PID 1 with Docker's default SIGTERM stop signal and the existing 75-second stop grace period; #195 handles shutdown. No init wrapper is needed because the server starts no child processes.
 
 ## HTTP availability
+- `/api/v1/health` remains liveness: plain-text `ok`, no DB/worker check. `GET /api/v1/ready` returns plain-text `ok` (200) when DB `SELECT 1` succeeds and the fallback supervisor has not latched unavailability; not-yet-started is normal.
+- Readiness failure returns 503 `ErrorBody` (`error: "not_ready"`), `Retry-After: 1`, no internal details. Both endpoints use `Cache-Control: no-store`. Worker failure recovers through #163 process replacement; DB recovery can restore readiness in-process.
+- Readiness admits one check at a time; concurrent checks return 503. Acquire and query each time out after 200 ms; query timeout discards the socket/slot. It shares the FIFO app pool, holds at most one slot, and takes no #156/#158 send/watermark permits.
+- Compose app/load checks run `fukulow-server probe` every 10 s (1 s internal deadline, 2 s Compose timeout, 3 failures, 10 s startup allowance). The runtime binary probes `/ready` on the configured app address/port, mapping wildcard IPs to loopback; no ports are added.
+- Both proxies pass `/ready` through just like `/health`; proxy `depends_on: app` remains `service_started`. Unhealthy alone does not restart Compose; #163 abnormal-exit recovery and `restart: unless-stopped` are unchanged.
 - During graceful shutdown, new HTTP API requests return 503 with JSON `ErrorBody` (`error: "shutting_down"`), a jittered `Retry-After` of 1–5 seconds and `Cache-Control: no-store`. This instance is stopping; the outer middleware rejects requests before authentication, extraction or operation admission, including health checks and WebSocket handshakes.
 - Clients retry after `Retry-After`, preserving the same `client_message_id` for sends to retain idempotency (C6). Send-admission 503 (`send admission unavailable`) instead rejects one operation because its queue is full or its 30-second admission wait expired; persistence has not started. Projection-admission 503 (`projection admission unavailable`) is also an operation capacity rejection. Both admission responses use the same retry range and no-store policy.
 

@@ -1,11 +1,20 @@
 use fukulow_server::AppState;
 use sqlx::postgres::PgPoolOptions;
 
+mod probe;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command: Vec<String> = std::env::args().skip(1).collect();
     match command.as_slice() {
         [] => {}
+        [command] if command == "probe" => {
+            let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+            probe::run(&addr)
+                .await
+                .map_err(|_| "Readiness probe failed")?;
+            return Ok(());
+        }
         [command] if command == "migrate" => {
             let pool = migration_pool().await?;
             fukulow_server::database::migrate_and_grant(&pool).await?;
@@ -19,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pool = migration_pool().await?;
             return fukulow_server::database::roles(&pool, &password).await;
         }
-        _ => return Err("Usage: fukulow-server [migrate [roles]]".into()),
+        _ => return Err("Usage: fukulow-server [probe | migrate [roles]]".into()),
     }
     let setup_token = match std::env::var("FUKULOW_SETUP_TOKEN") {
         Ok(token) if token.trim().is_empty() || token.trim() == "setup-token-local-test-only" => {

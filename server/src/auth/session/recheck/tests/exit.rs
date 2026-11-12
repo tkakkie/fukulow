@@ -52,6 +52,7 @@ async fn worker_panic_requests_fatal_exit_once_after_grace() {
     changes.start_rechecks(&pool);
     changes.panic_worker().await;
     assert!(changes.sessions.lock().unwrap().unavailable);
+    assert!(!changes.fallback_available());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let mut refused = SessionWatch {
         registration: changes.register((Uuid::new_v4(), vec![])),
@@ -172,11 +173,13 @@ async fn not_started_or_running_worker_never_requests_fatal_exit() {
     tokio::time::advance(RECHECK_INTERVAL + EXIT_GRACE).await;
     assert!(!changes.worker.is_completed());
     assert!(!changes.sessions.lock().unwrap().unavailable);
+    assert!(changes.fallback_available());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     changes.start_rechecks(&pool);
     tokio::task::yield_now().await;
     tokio::time::advance(RECHECK_INTERVAL + EXIT_GRACE).await;
     assert!(changes.worker.is_completed());
     assert!(!changes.sessions.lock().unwrap().unavailable);
+    assert!(changes.fallback_available());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

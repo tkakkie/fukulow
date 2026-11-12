@@ -90,8 +90,14 @@ pub fn app(state: AppState) -> Router {
             state.message_delivery.channel_access.clone(),
         ));
     let cookie_secure = state.cookie_secure;
+    let readiness = Readiness {
+        pool: state.pool.clone(),
+        sessions: state.session_changes.clone(),
+        permit: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+    };
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/ready", get(ready).with_state(readiness))
         .route("/api/v1/setup", get(auth::setup_status).post(auth::setup))
         .route(
             "/api/v1/session",
@@ -317,6 +323,36 @@ async fn health() -> Result<&'static str, auth::ApiError> {
     Ok("ok")
 }
 
+#[derive(Clone)]
+struct Readiness {
+    pool: sqlx::PgPool,
+    sessions: auth::SessionChanges,
+    permit: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+#[utoipa::path(get, path = "/api/v1/ready", responses(
+    (status = 200, description = "Database and session fallback worker are available; returns plain-text ok", body = String, content_type = "text/plain"),
+    (status = 503, description = "Readiness unavailable: error not_ready; database check failed or timed out, fallback worker stopped, or another readiness check is in flight", body = auth::ErrorBody)
+))]
+async fn ready(State(readiness): State<Readiness>) -> Response {
+    // One short FIFO pool acquisition at a time, independent of send/watermark budgets.
+    if let Ok(_permit) = readiness.permit.try_acquire()
+        && readiness.sessions.fallback_available()
+        && database::ready(&readiness.pool).await
+        && readiness.sessions.fallback_available()
+    {
+        return "ok".into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        axum::Json(auth::ErrorBody {
+            error: "not_ready".into(),
+        }),
+    )
+        .into_response()
+}
+
 async fn static_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     // Undefined API endpoints are never the SPA.
@@ -361,6 +397,7 @@ fn is_hashed_asset(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod readiness;
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
