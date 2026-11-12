@@ -4,6 +4,10 @@
 -- forces generic plans. Without it, the auto.* sections run timeline and Unread
 -- counts six times in this session and explain the next (default plan_cache_mode,
 -- as a pooled SQLx connection sees it after five executions).
+-- `-v org_context=1` runs every measured statement inside a transaction that
+-- first sets the Organization transaction-locally, as the #314 helper does; the
+-- `### ctx` plans time that Organization setting separately from the measured SQL. Use it
+-- before and after RLS (step 5); without it, RLS hides every tenant row.
 \set ON_ERROR_STOP on
 \pset pager off
 \if :{?generic}
@@ -16,10 +20,27 @@ SELECT array_agg(md5('user-a-' || g)::uuid)::text AS cands, array_agg(0::bigint)
        array_agg('00000000-0000-4000-8000-00000000000a'::uuid)::text AS orgs,
        array_agg(md5('chan-a-1')::uuid)::text AS chans
 FROM generate_series(1, 1024) g \gset
+\set E 'EXPLAIN (ANALYZE, BUFFERS)'
+PREPARE org_ctx(text) AS SELECT set_config('fukulow.organization_id', $1, true);
+\if :{?org_context}
+\set B 'BEGIN;'
+\set C 'COMMIT;'
+\set CTX '\\echo ''### ctx'' \\\\ ' :E ' EXECUTE org_ctx(''' :org ''');'
+\set CTXQ 'EXECUTE org_ctx(''' :org ''');'
+\else
+\set B ''
+\set C ''
+\set CTX ''
+\set CTXQ ''
+\endif
+\o /dev/null
+:B
+:CTXQ
+\o
 SELECT array_agg(id ORDER BY id)::text AS visible_ids FROM channels
 WHERE organization_id = :'org' AND (visibility = 'public' OR id IN (
   SELECT channel_id FROM channel_members WHERE organization_id = :'org' AND member_id = :'member')) \gset
-\set E 'EXPLAIN (ANALYZE, BUFFERS)'
+:C
 \set ROW 'id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, to_char(created_at AT TIME ZONE ''UTC'', ''YYYY-MM-DD"T"HH24:MI:SS.US"Z"'') AS created_at'
 \set ACTIVE 'SELECT id, membership_revision, role FROM users WHERE organization_id = $1 AND deactivated_at IS NULL'
 \set VISIBLE '(c.visibility = ''public'' AND u.role IN (''owner'',''admin'',''member'')) OR (u.role IN (''owner'',''admin'',''member'',''guest'') AND EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision))'
@@ -27,20 +48,30 @@ WHERE organization_id = :'org' AND (visibility = 'public' OR id IN (
 
 \echo '### auth'
 PREPARE auth(bytea, uuid) AS SELECT s.account_id, u.id, u.name, u.role, o.name, u.membership_revision FROM account_sessions s LEFT JOIN users u ON u.account_id = s.account_id AND u.organization_id = $2 AND u.deactivated_at IS NULL LEFT JOIN organizations o ON o.organization_id = u.organization_id WHERE s.token_hash = $1 AND s.expires_at > now();
+:B
+:CTX
 :E EXECUTE auth(sha256('hot-plans-session'), :'org');
+:C
 
 \echo '### vis'
 PREPARE vis(uuid, uuid, bigint, uuid) AS :VIS;
+:B
+:CTX
 :E EXECUTE vis(:'org', :'member', 0, :'chan');
+:C
 
 \echo '### watermark.shared_lock (own transaction)'
 PREPARE shared_lock(uuid, uuid) AS WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true), set_config('transaction_timeout', '8s', true)) SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) FROM timeout;
 BEGIN ISOLATION LEVEL READ COMMITTED;
+:CTX
 :E EXECUTE shared_lock(:'org', :'chan');
 COMMIT;
 \echo '### watermark'
 PREPARE watermark(uuid, uuid) AS SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2;
+:B
+:CTX
 :E EXECUTE watermark(:'org', :'chan');
+:C
 
 \echo '## send (one Topic Message, rolled back)'
 PREPARE member_lock(uuid, uuid, bigint) AS SELECT role FROM (:ACTIVE AND id = $2 AND membership_revision = $3 FOR SHARE) u;
@@ -53,6 +84,7 @@ PREPARE topic_id(uuid, uuid, text) AS SELECT id FROM topics WHERE organization_i
 PREPARE insert_message(uuid, uuid, uuid, bigint, uuid, uuid, text, uuid, uuid, uuid) AS INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING RETURNING :ROW;
 PREPARE topic_record(uuid, uuid, bigint) AS UPDATE topics SET last_seq = $3, message_count = message_count + 1 WHERE organization_id = $1 AND id = $2 AND last_seq <> $3;
 BEGIN;
+:CTX
 \echo '### send.member_lock'
 :E EXECUTE member_lock(:'org', :'member', 0);
 \echo '### send.channel_public'
@@ -78,9 +110,15 @@ ROLLBACK;
 
 \echo '### history.latest'
 PREPARE history(uuid, uuid, bigint, bigint) AS SELECT :ROW FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq <= $3 ORDER BY seq DESC LIMIT $4;
+:B
+:CTX
 :E EXECUTE history(:'org', :'chan', 9223372036854775807, 51);
+:C
 \echo '### history.before_old'
+:B
+:CTX
 :E EXECUTE history(:'org', :'chan', 5000, 51);
+:C
 
 \echo '### timeline.latest'
 PREPARE timeline(uuid, uuid, bigint, uuid, bigint, bigint, bigint, boolean, uuid) AS
@@ -116,9 +154,15 @@ FROM access CROSS JOIN w LEFT JOIN page p ON true
 LEFT JOIN messages m ON m.organization_id = $1 AND m.channel_id = $4 AND m.seq = p.last_seq
 LEFT JOIN topics t ON t.organization_id = $1 AND t.channel_id = $4 AND t.id = p.topic_id
 ORDER BY p.last_seq DESC;
+:B
+:CTX
 :E EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+:C
 \echo '### timeline.topic'
+:B
+:CTX
 :E EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 2, true, :'topic');
+:C
 
 \echo '### replay'
 PREPARE replay(uuid, uuid, bigint, uuid, bigint, bigint, bigint) AS
@@ -129,11 +173,17 @@ SELECT access.visible,m.* FROM access LEFT JOIN LATERAL (
     FROM messages WHERE organization_id=$1 AND channel_id=$4 AND seq>$5 AND seq<=$6 AND access.visible
     ORDER BY seq LIMIT $7
 ) m ON true ORDER BY m.seq;
+:B
+:CTX
 :E EXECUTE replay(:'org', :'member', 0, :'chan', 99900, 100000, 50);
+:C
 
 \echo '### fanout.member_access_1024'
 PREPARE member_access(uuid, uuid, uuid[], bigint[]) AS SELECT v.id,v.membership_revision,v.visible FROM (SELECT u.id, u.membership_revision, EXISTS (SELECT 1 FROM channels c WHERE c.organization_id = $1 AND c.id = $2 AND (:VISIBLE)) AS visible FROM (:ACTIVE AND id = ANY($3)) u) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision;
+:B
+:CTX
 :E EXECUTE member_access(:'org', :'chan', :'cands', :'revs');
+:C
 
 \echo '### fanout.access_rows_1024'
 PREPARE access_rows(uuid[], uuid[], bigint[], uuid[]) AS SELECT COALESCE((c.visibility='public' AND u.role IN ('owner','admin','member')) OR (u.role IN ('owner','admin','member','guest') AND cm.grant_id IS NOT NULL), false),
@@ -143,11 +193,17 @@ PREPARE access_rows(uuid[], uuid[], bigint[], uuid[]) AS SELECT COALESCE((c.visi
         LEFT JOIN channels c ON c.organization_id=r.organization_id AND c.id=r.channel_id AND u.id IS NOT NULL
         LEFT JOIN channel_members cm ON cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision
         ORDER BY r.n;
+:B
+:CTX
 :E EXECUTE access_rows(:'orgs', :'cands', :'revs', :'chans');
+:C
 
 \echo '### unread.visible_list'
 PREPARE visible_list(uuid, uuid, bigint) AS SELECT c.id, c.name, c.visibility, u.role FROM (:ACTIVE) u LEFT JOIN channels c ON c.organization_id = $1 AND (:VISIBLE) WHERE u.id = $2 AND u.membership_revision = $3 ORDER BY lower(c.name COLLATE "C"), c.id;
+:B
+:CTX
 :E EXECUTE visible_list(:'org', :'member', 0);
+:C
 
 \echo '### unread.list_counts'
 PREPARE list_counts(uuid, uuid, bigint, uuid[]) AS
@@ -178,7 +234,10 @@ CROSS JOIN LATERAL (
     WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
         AND t.last_seq > COALESCE(tr.read_seq, p.initial_seq)
 ) topic;
+:B
+:CTX
 :E EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+:C
 
 \echo '## mark-read (rolled back)'
 PREPARE position_lock(uuid, uuid, uuid, bigint) AS SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE;
@@ -186,6 +245,7 @@ PREPARE mark_channel(uuid, uuid, uuid, bigint) AS UPDATE channel_read_positions 
 PREPARE topic_exists(uuid, uuid, uuid) AS SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id=$1 AND channel_id=$2 AND id=$3);
 PREPARE mark_topic(uuid, uuid, uuid, uuid, bigint) AS INSERT INTO topic_read_positions (organization_id,channel_id,member_id,topic_id,read_seq) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization_id,channel_id,member_id,topic_id) DO UPDATE SET read_seq=GREATEST(topic_read_positions.read_seq,EXCLUDED.read_seq) RETURNING read_seq;
 BEGIN;
+:CTX
 SET LOCAL lock_timeout = '5s';
 \echo '### read.position_lock'
 :E EXECUTE position_lock(:'org', :'chan', :'member', 0);
@@ -200,6 +260,8 @@ ROLLBACK;
 \if :{?generic}
 \else
 \o /dev/null
+:B
+:CTXQ
 EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
 EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
 EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
@@ -217,4 +279,5 @@ EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
 :E EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
 \echo '### auto.list_counts'
 :E EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+:C
 \endif

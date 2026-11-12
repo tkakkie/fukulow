@@ -579,3 +579,23 @@ Limits: one deterministic process run per mode; heap includes controller metadat
 
 - Default `plan_cache_mode` (what SQLx's cached statements get) used the generic plan after the repeated executions: timeline 141.150 ms (range 140.588–141.706) with 644,699 shared-buffer hits (custom: 5,566) via Incremental Sort + GroupAggregate over all 70,000 Topic Messages; Unread counts 3.868 ms (3,814 hits, same as custom). Step 5 compares custom, generic and `auto.*`. Tracked in #326.
 - Limits: single machine, one dataset shape, warm cache, single-session EXPLAIN without concurrency; EXPLAIN timing overhead included; small-load run only (20 sockets), not capacity. Not a guarantee. Raw outputs stay outside Git in `/private/tmp/fukulow-314-baseline` (plans in `v2/`; load artifacts hold server logs and a source patch: do not attach publicly).
+
+### Transaction-local Organization setting cost (#314, 2026-11-13)
+
+- Purpose: the cost of running each hot query inside a transaction that first sets `fukulow.organization_id` locally (the #314 helper), still without RLS. Same machine, PostgreSQL 18.6 and `hot-plans` dataset as above; source main 1069a9f.
+- Plans reproduce: `psql -X [-v generic=1] -v org_context=1 -f load/hot-plans/plans.sql` as `fukulow_app`, six passes per mode, medians of passes 2–6, compared with passes without `org_context` taken in the same session. Execution Time of every measured statement stays within run-to-run noise (custom → custom+context: VIS 0.017 → 0.022, history latest 0.034 → 0.032, replay 0.050 → 0.056, timeline latest 33.900 → 34.086, fan-out `member_access` 0.952 → 0.961, Unread counts 19.478 → 19.660 ms; generic plans likewise). The `set_config` statement itself: median 0.002–0.003 ms, max 0.007 ms.
+- Latency reproduce: `HOTPLANS_CONTAINER=<container> PGPASSWORD=<app test password> LATENCY_SECONDS=30 node load/hot-latency.ts` (pgbench inside the container, prepared statements, per-transaction logs), three runs; medians of the three.
+
+| Script | Clients | Context | Transactions/s | p50 / p95 / p99 ms (p95 range) |
+|---|---:|---|---:|---|
+| History latest page | 1 | none | 11,560 | 0.086 / 0.092 / 0.100 (0.088–0.094) |
+| History latest page | 1 | BEGIN, set, query, COMMIT | 5,934 | 0.167 / 0.180 / 0.189 (0.177–0.180) |
+| History latest page | 8 | none | 73,987 | 0.075 / 0.192 / 0.233 (0.184–0.195) |
+| History latest page | 8 | BEGIN, set, query, COMMIT | 52,262 | 0.096 / 0.309 / 0.380 (0.305–0.320) |
+| Replay 50 after cursor | 1 | none | 13,704 | 0.070 / 0.080 / 0.086 (0.080–0.081) |
+| Replay 50 after cursor | 1 | BEGIN, set, query, COMMIT | 6,394 | 0.155 / 0.167 / 0.180 (0.165–0.169) |
+| Replay 50 after cursor | 8 | none | 80,462 | 0.070 / 0.173 / 0.216 (0.166–0.174) |
+| Replay 50 after cursor | 8 | BEGIN, set, query, COMMIT | 55,191 | 0.091 / 0.295 / 0.374 (0.281–0.295) |
+
+- The measured SQL itself is unchanged (pgbench per-statement averages: history 0.087 vs 0.088 ms, replay 0.072 vs 0.076 ms with one client); the added cost is the three extra round trips (BEGIN, `set_config`, COMMIT ≈ 0.08 ms per transaction on loopback). This is why #314 step 3b sets the context inside the same statement for single-statement hot reads.
+- Limits: loopback inside the container (no network latency; a real network multiplies the round-trip cost), one dataset, warm cache, no RLS yet, pgbench rather than the server. Not a guarantee. Raw outputs stay outside Git.
