@@ -98,6 +98,14 @@ test('checks each SET independently within the 200-character window', () => {
   assert.deepEqual(violations("SET LOCAL fukulow.account_id = 'x';\nSET fukulow.organization_id = 'x';"), [2])
 })
 
+test('ignores fukulow-prefixed identifiers that are not the setting namespace', () => {
+  for (const source of [
+    '"Set-Cookie" = String, description = "__Host-fukulow_session; Secure"',
+    'must be set to a nonempty value".into());\n let origins = std::env::var("FUKULOW_WS_ALLOWED_ORIGINS");',
+  ]) assert.deepEqual(violations(source), [], source)
+  assert.deepEqual(violations('concat!("SET ", "fukulow", ".organization_id")'), [1])
+})
+
 test('documents accepted false positives: comments, inert strings and quoted punctuation', () => {
   for (const source of [
     '-- SET fukulow',

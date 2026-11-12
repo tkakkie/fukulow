@@ -1,5 +1,6 @@
 // Conservative raw-text guard for tracked Rust/SQL: require literal true as
-// set_config's third argument, reject non-LOCAL SET within 200 chars of fukulow,
+// set_config's third argument, reject non-LOCAL SET within 200 chars of a bare
+// fukulow word (fukulow_session or FUKULOW_WS are other identifiers),
 // and reject Unicode escape prefixes. No parsing, decoding or comment stripping:
 // quotes are ordinary characters; false positives in comments/strings are accepted.
 // Diagnostics contain only file:line, never matched text or bound data.
@@ -35,7 +36,7 @@ export function violations(source: string): number[] {
   }
   for (const match of source.matchAll(/\bSET\b/gi)) {
     const after = source.slice(match.index + match[0].length)
-    if (!/^\s+LOCAL\b/i.test(after) && /^[\s\S]{0,200}fukulow/i.test(after)) offsets.push(match.index)
+    if (!/^\s+LOCAL\b/i.test(after) && /^[\s\S]{0,200}fukulow(?![\w])/i.test(after)) offsets.push(match.index)
   }
   for (const match of source.matchAll(/U&['"]/gi)) offsets.push(match.index)
   return [...new Set(offsets.map(offset => source.slice(0, offset).split('\n').length))].sort((a, b) => a - b)
