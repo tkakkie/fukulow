@@ -38,7 +38,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 
 ## Boundaries
 - One crate; modules `realtime` -> `messages` -> `channels` -> `auth`, no reverse edges. Split crates only when build time, deps or parallel work hurt.
-- Approved (#295): an explicit DAG of top-level modules replaces this order once the checker enforces it (allowed, denied and cycle fixtures). Until then the order above holds; moves come in small behaviour-preserving PRs.
+- Target DAG (#319): the four domain modules stay this chain; leaves `database` (used by channels, messages; by auth only once #314 needs it) and `shutdown` (used by messages, realtime) depend on nothing. CI checks the chain (#318), then the leaves (M1, #320). Kept on purpose: `docs/decisions/process.md` #319.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.
 - (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure protocol: `step(state, input) -> {state, effects}`, no clock, randomness, I/O, Svelte; vitest-testable. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
