@@ -560,21 +560,22 @@ Limits: one deterministic process run per mode; heap includes controller metadat
 | 3 | 600 (600) | 12,000 / 0 / 0 | 9 / 13 / 17 / 47 | 7 / 11 / 14 | 9.008 | 6.91 / 12.96 |
 
 - All 1,244 checks passed in each run; 13.035 statements per send including BEGIN/COMMIT and nested. Highest total SQL time per run: Message INSERT, sequence upsert, session AUTH, fan-out `member_access`.
-- Plans reproduce: fresh PostgreSQL 18.6, `sqlx migrate run`, `deploy/db-roles.sql` + `deploy/db-grants.sql`, then `psql -f load/hot-plans/seed.sql` as owner and `psql -X [-v generic=1] -f load/hot-plans/plans.sql` as `fukulow_app` six times per mode; medians of passes 2–6. Dataset: Org A 10,000 Members (every 50th a guest), 40 public + 10 private Channels, measured Channel 100,000 Messages (70% in 2,000 Topics), 2,000 Messages elsewhere; Org B 1,000 Members, 10 Channels × 5,000; 406,800 Channel read positions, each Channel 100 unread. Writes rolled back.
+- Plans reproduce: fresh PostgreSQL 18.6, `sqlx migrate run`, `deploy/db-roles.sql` + `deploy/db-grants.sql`, then `psql -f load/hot-plans/seed.sql` as owner and `psql -X [-v generic=1] -f load/hot-plans/plans.sql` as `fukulow_app` six times per mode; medians of passes 2–6. Without `generic`, the `auto.*` sections run timeline and Unread counts six more times in the same session, then explain under default `plan_cache_mode`. Dataset: Org A 10,000 Members (every 50th a guest), 40 public + 10 private Channels, measured Channel 100,000 Messages (70% in 2,000 Topics), 2,000 Messages elsewhere; Org B 1,000 Members, 10 Channels × 5,000; 406,800 Channel read positions at the last 100 Messages; the measured Member also has all 2,000 Topic positions at that cut-off (hot-Channel Unread 100). Writes rolled back.
 
 | Query (Execution Time, ms) | Custom plan | Forced generic |
 |---|---:|---:|
-| AUTH session lookup | 0.022 | 0.025 |
-| Visibility check (VIS) / watermark | 0.015 / 0.007 | 0.018 / 0.009 |
-| Send: Member FOR SHARE / Channel public / idempotency lookup / reply parent | 0.018 / 0.005 / 0.023 / 0.041 | 0.021 / 0.006 / 0.011 / 0.039 |
-| Send: sequence upsert / Topic join / Topic id / Message INSERT / Topic record | 0.042 / 0.039 / 0.004 / 0.186 / 0.033 | 0.047 / 0.040 / 0.009 / 0.210 / 0.033 |
-| History latest page / old page (51 rows) | 0.036 / 0.038 | 0.036 / 0.037 |
-| Timeline latest page (51 of 2,000 Topics) | 35.599 | 226.659 |
-| Timeline single Topic | 0.142 | 7.980 |
-| Replay 50 after cursor | 0.050 | 0.069 |
-| Fan-out `member_access`, 1,024 candidates / `access_rows`, 1,024 subscriptions | 0.972 / 2.500 | 1.081 / 2.615 |
-| Unread: visible Channel list / counts for 50 Channels | 0.664 / 33.304 | 0.683 / 16.543 |
-| Mark-read: position FOR UPDATE / Channel update / Topic exists / Topic upsert | 0.017 / 0.045 / 0.014 / 0.084 | 0.020 / 0.042 / 0.014 / 0.078 |
+| AUTH session lookup | 0.024 | 0.025 |
+| Visibility check (VIS) / watermark shared lock / watermark | 0.020 / 0.012 / 0.008 | 0.022 / 0.018 / 0.008 |
+| Send: Member FOR SHARE / Channel public / idempotency lookup / reply parent | 0.021 / 0.005 / 0.012 / 0.041 | 0.024 / 0.006 / 0.022 / 0.039 |
+| Send: Channel advisory lock / sequence upsert / Topic join / Topic id | 0.006 / 0.049 / 0.042 / 0.007 | 0.008 / 0.053 / 0.039 / 0.009 |
+| Send: Message INSERT / Topic record | 0.197 / 0.035 | 0.196 / 0.035 |
+| History latest page / old page (51 rows) | 0.033 / 0.036 | 0.037 / 0.036 |
+| Timeline latest page (51 of 2,000 Topics) | 37.659 | 144.048 |
+| Timeline single Topic | 0.137 | 7.921 |
+| Replay 50 after cursor | 0.053 | 0.060 |
+| Fan-out `member_access`, 1,024 candidates / `access_rows`, 1,024 subscriptions | 0.978 / 2.442 | 1.077 / 2.568 |
+| Unread: visible Channel list / counts for 50 Channels | 0.624 / 20.623 | 0.704 / 3.973 |
+| Mark-read: position FOR UPDATE / Channel update / Topic exists / Topic upsert | 0.014 / 0.043 / 0.013 / 0.029 | 0.011 / 0.035 / 0.013 / 0.028 |
 
-- Default `plan_cache_mode` (what SQLx's cached statements get) switched the timeline to the generic plan after five executions: 223.280 ms, 504,699 shared-buffer hits (custom: 5,542) via Incremental Sort + GroupAggregate over all 70,000 Topic Messages; Unread counts took 16.133 ms. Step 5 compares both modes.
-- Limits: single machine, one dataset shape, warm cache, single-session EXPLAIN without concurrency; EXPLAIN timing overhead included; small-load run only (20 sockets), not capacity. Not a guarantee. Raw outputs stay outside Git in `/private/tmp/fukulow-314-baseline` (load artifacts hold server logs and a source patch: do not attach publicly).
+- Default `plan_cache_mode` (what SQLx's cached statements get) used the generic plan after the repeated executions: timeline 141.150 ms (range 140.588–141.706) with 644,699 shared-buffer hits (custom: 5,566) via Incremental Sort + GroupAggregate over all 70,000 Topic Messages; Unread counts 3.868 ms (3,814 hits, same as custom). Step 5 compares custom, generic and `auto.*`. Tracked in #326.
+- Limits: single machine, one dataset shape, warm cache, single-session EXPLAIN without concurrency; EXPLAIN timing overhead included; small-load run only (20 sockets), not capacity. Not a guarantee. Raw outputs stay outside Git in `/private/tmp/fukulow-314-baseline` (plans in `v2/`; load artifacts hold server logs and a source patch: do not attach publicly).

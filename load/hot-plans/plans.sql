@@ -1,7 +1,9 @@
 -- #314 EXPLAIN (ANALYZE, BUFFERS) of the hot queries, copied from the server SQL
 -- at the measured commit. Run as fukulow_app on the seed.sql dataset; writes are
 -- rolled back. Run twice and keep the second (warm) output. `-v generic=1`
--- forces generic plans (what prepared statements may use after five executions).
+-- forces generic plans. Without it, the auto.* sections run timeline and Unread
+-- counts six times in this session and explain the next (default plan_cache_mode,
+-- as a pooled SQLx connection sees it after five executions).
 \set ON_ERROR_STOP on
 \pset pager off
 \if :{?generic}
@@ -31,6 +33,11 @@ PREPARE auth(bytea, uuid) AS SELECT s.account_id, u.id, u.name, u.role, o.name, 
 PREPARE vis(uuid, uuid, bigint, uuid) AS :VIS;
 :E EXECUTE vis(:'org', :'member', 0, :'chan');
 
+\echo '### watermark.shared_lock (own transaction)'
+PREPARE shared_lock(uuid, uuid) AS WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true), set_config('transaction_timeout', '8s', true)) SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) FROM timeout;
+BEGIN ISOLATION LEVEL READ COMMITTED;
+:E EXECUTE shared_lock(:'org', :'chan');
+COMMIT;
 \echo '### watermark'
 PREPARE watermark(uuid, uuid) AS SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2;
 :E EXECUTE watermark(:'org', :'chan');
@@ -54,6 +61,9 @@ BEGIN;
 :E EXECUTE existing(:'org', :'member', gen_random_uuid());
 \echo '### send.reply_parent'
 :E EXECUTE reply_parent(:'org', :'chan', :'parent');
+\echo '### send.channel_lock'
+PREPARE channel_lock(uuid, uuid) AS WITH timeout AS MATERIALIZED (SELECT set_config('lock_timeout', '10s', true), set_config('transaction_timeout', '8s', true)) SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || '/' || $2::uuid::text, 135)) FROM timeout;
+:E EXECUTE channel_lock(:'org', :'chan');
 \echo '### send.next_seq'
 :E EXECUTE next_seq(:'org', :'chan');
 \echo '### send.topic_join'
@@ -186,3 +196,25 @@ SET LOCAL lock_timeout = '5s';
 \echo '### read.mark_topic'
 :E EXECUTE mark_topic(:'org', :'chan', :'member', :'topic', 100000);
 ROLLBACK;
+
+\if :{?generic}
+\else
+\o /dev/null
+EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+\o
+\echo '### auto.timeline'
+:E EXECUTE timeline(:'org', :'member', 0, :'chan', 100000, NULL, 51, false, NULL);
+\echo '### auto.list_counts'
+:E EXECUTE list_counts(:'org', :'member', 0, :'visible_ids');
+\endif

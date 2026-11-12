@@ -54,11 +54,14 @@ WHERE t.organization_id = a.organization_id AND t.id = a.topic_id;
 INSERT INTO channel_message_sequences (organization_id, channel_id, seq)
 SELECT organization_id, channel_id, max(seq) FROM messages GROUP BY 1, 2;
 
--- Every Member has read everything but the last 100 Messages of each Channel;
--- the measured Member has read 20 Topics up to their last Message.
+-- Every Member has read everything but the last 100 Messages of each Channel.
+-- Only the measured Member gets Topic positions (all 2,000, same cut-off), so
+-- its hot-Channel Unread is also the last 100 Messages; other Members fall back
+-- to initial_seq for Topics, which the measured queries never read.
 UPDATE channel_read_positions p SET read_seq = greatest(p.initial_seq, s.seq - 100)
 FROM channel_message_sequences s WHERE s.organization_id = p.organization_id AND s.channel_id = p.channel_id;
 INSERT INTO topic_read_positions (organization_id, channel_id, member_id, topic_id, read_seq)
-SELECT t.organization_id, t.channel_id, md5('user-a-2')::uuid, t.id, t.last_seq
-FROM topics t WHERE t.channel_id = md5('chan-a-1')::uuid ORDER BY t.id LIMIT 20;
+SELECT t.organization_id, t.channel_id, md5('user-a-2')::uuid, t.id, least(t.last_seq, s.seq - 100)
+FROM topics t JOIN channel_message_sequences s ON s.organization_id = t.organization_id AND s.channel_id = t.channel_id
+WHERE t.channel_id = md5('chan-a-1')::uuid;
 ANALYZE;
