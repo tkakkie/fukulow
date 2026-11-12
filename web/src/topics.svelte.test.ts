@@ -80,6 +80,62 @@ it('reuses merged adapter and Topic snapshots until notify, including reads whil
   await c.sync.close()
 })
 
+it('notifies only the changed Channel and keeps unaffected Channel snapshots reference-equal; multi-Channel changes notify each affected Channel', async () => {
+  const c = topicClient()
+  await c.boot()
+  await c.sync.watch('B')
+  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'B', caught_up_seq: 10 })
+  await settle()
+
+  const adapterA = topicsAdapter(c.topics, 'A')
+  const adapterB = topicsAdapter(c.topics, 'B')
+  const snapA0 = adapterA.state
+  const snapB0 = adapterB.state
+  const viewA = await mount(() => adapterA.state)
+  const viewB = await mount(() => adapterB.state)
+  const listenerA = vi.fn()
+  const listenerB = vi.fn()
+  const unsubA = c.topics.subscribe(listenerA, 'A')
+  const unsubB = c.topics.subscribe(listenerB, 'B')
+
+  expect(viewA.values).toHaveLength(1)
+  expect(viewB.values).toHaveLength(1)
+
+  // Single-Channel change on A (stream event, loadTopic, loadSummary) notifies only A and leaves B === snapB0.
+  c.event(11, 'T')
+  await settle()
+  expect(listenerA).toHaveBeenCalledTimes(1)
+  expect(listenerB).not.toHaveBeenCalled()
+  expect(viewA.values).toHaveLength(2)
+  expect(viewB.values).toHaveLength(1)
+  expect(adapterA.state).not.toBe(snapA0)
+  expect(adapterB.state).toBe(snapB0)
+  expect(c.topics.get('B')).toBe(snapB0)
+
+  await adapterA.loadTopic('T')
+  await settle()
+  expect(listenerB).not.toHaveBeenCalled()
+  expect(viewB.values).toHaveLength(1)
+  expect(adapterB.state).toBe(snapB0)
+
+  // Multi-Channel change (organization unavailable across watched Channels A and B) notifies both A and B.
+  const countABefore = listenerA.mock.calls.length
+  await c.sync.unavailable()
+  await settle()
+  expect(listenerA.mock.calls.length).toBeGreaterThan(countABefore)
+  expect(listenerB).toHaveBeenCalledTimes(1)
+  expect(viewB.values).toHaveLength(2)
+  expect(adapterB.state).not.toBe(snapB0)
+  expect(adapterA.state.unavailable).toBe(true)
+  expect(adapterB.state.unavailable).toBe(true)
+
+  unsubA()
+  unsubB()
+  await viewA.unmount()
+  await viewB.unmount()
+  await c.sync.close()
+})
+
 const { running: topicScenarios, proposed: proposedTopicScenarios } = partitionScenarios(
   topicProjectionFixtures.scenarios as unknown as ClientScenario[],
 )

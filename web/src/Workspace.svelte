@@ -90,13 +90,8 @@
   const currentUnread = $derived(selected ? session.unread?.(selected.id) ?? null : null)
   const selectedChannelUnread = $derived(s.selectedId ? session.unread?.(s.selectedId) ?? null : null)
   const selectedChannelUnreadState = $derived(selectedChannelUnread ? selectedChannelUnread.state : null)
-  const channelUnreadCounts = $derived.by(() => {
-    const counts: Record<string, number | null> = {}
-    for (const c of s.channels) {
-      counts[c.id] = session.unread?.(c.id).state.unreadCount ?? null
-    }
-    return counts
-  })
+  const channelUnreadCount = (id: string): number | null =>
+    session.unread?.(id).state.unreadCount ?? null
   const activeReplyMessageId = $derived(route?.panel?.startsWith('reply:') ? route.panel.slice(6) : null)
   let lastOpenedAnchor = $state<Message | null>(null)
   const inMemoryReplyAnchor = $derived.by(() => {
@@ -611,7 +606,7 @@
         activeTopicId={route?.channelId === s.selectedId ? (route?.topicId ?? null) : null}
         topics={currentTopicsState && selected?.id === s.selectedId ? currentTopicsState.topics : []}
         allTopicsKnown={selected?.id === s.selectedId ? allTopicsKnown : false}
-        {channelUnreadCounts}
+        {channelUnreadCount}
         topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
         onselect={handleSelectChannel}
         onselecttopic={handleSelectTopic}

@@ -317,4 +317,90 @@ describe('sync adapter and the unavailable state (C9)', () => {
     await settle()
     session.close()
   })
+
+  it('typing in Channel, Topic, or Reply composers notifies only the composer subscription without changing timeline reference; sending still works', async () => {
+    const net = fakeNetwork()
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    const { session, sync } = start(net)
+    await loadChannels(net)
+    net.subscribed('A', 100)
+    await settle()
+
+    const a = sync.channel('A')
+    const initialTimeline = a.timeline
+    const timelineView = await mount(() => a.timeline)
+    const composerView = await mount(() => a.composer)
+    const topicComposerView = await mount(() => a.topic('T').composer)
+    const replyComposerView = await mount(() => a.reply('m-100', 'T').composer)
+    const timelineListener = vi.fn()
+    const unsubTimeline = session.sync.getTimeline('A').subscribe(timelineListener)
+
+    expect(timelineView.values).toHaveLength(1)
+    expect(composerView.values).toHaveLength(1)
+    expect(topicComposerView.values).toHaveLength(1)
+    expect(replyComposerView.values).toHaveLength(1)
+
+    // Typing draft and topicDraft in Channel composer updates composerView only; timelineView does not re-run and reference is ===.
+    a.setDraft('キー入力1')
+    await settle()
+    expect(composerView.last).toEqual({ draft: 'キー入力1', topicDraft: '', composerError: null })
+    expect(composerView.values).toHaveLength(2)
+    expect(timelineListener).not.toHaveBeenCalled()
+    expect(timelineView.values).toHaveLength(1)
+    expect(a.timeline).toBe(initialTimeline)
+    expect(topicComposerView.values).toHaveLength(1)
+    expect(replyComposerView.values).toHaveLength(1)
+
+    a.setTopicDraft('新トピック')
+    await settle()
+    expect(composerView.last).toEqual({ draft: 'キー入力1', topicDraft: '新トピック', composerError: null })
+    expect(composerView.values).toHaveLength(3)
+    expect(timelineListener).not.toHaveBeenCalled()
+    expect(timelineView.values).toHaveLength(1)
+    expect(a.timeline).toBe(initialTimeline)
+
+    // Typing in Topic composer or Reply composer notifies only its own subscription.
+    a.topic('T').setDraft('トピック返信')
+    await settle()
+    expect(topicComposerView.last).toEqual({ draft: 'トピック返信', composerError: null })
+    expect(topicComposerView.values).toHaveLength(2)
+    expect(composerView.values).toHaveLength(3)
+    expect(replyComposerView.values).toHaveLength(1)
+    expect(timelineListener).not.toHaveBeenCalled()
+    expect(timelineView.values).toHaveLength(1)
+    expect(a.timeline).toBe(initialTimeline)
+
+    a.reply('m-100', 'T').setDraft('スレッド返信')
+    await settle()
+    expect(replyComposerView.last).toEqual({ draft: 'スレッド返信', composerError: null })
+    expect(replyComposerView.values).toHaveLength(2)
+    expect(composerView.values).toHaveLength(3)
+    expect(topicComposerView.values).toHaveLength(2)
+    expect(timelineListener).not.toHaveBeenCalled()
+    expect(timelineView.values).toHaveLength(1)
+    expect(a.timeline).toBe(initialTimeline)
+
+    // Sending from Channel composer clears draft, notifies timeline for pending + ack, and completes normally.
+    const submitPromise = a.submit()
+    await settle()
+    expect(composerView.last).toEqual({ draft: '', topicDraft: '', composerError: null })
+    expect(timelineView.last.pending).toMatchObject([{ body: 'キー入力1', topicName: '新トピック', status: 'sending' }])
+    expect(net.sends[0]?.body).toEqual({
+      client_message_id: 'me-c1',
+      body: 'キー入力1',
+      topic_name: '新トピック',
+    })
+    net.sends[0].resolve(ok({ ...sentBy('me', 101, 'me-c1', 'キー入力1'), topic_id: 'T' }))
+    expect(await submitPromise).toBe(true)
+    await settle()
+    expect(timelineView.last.pending).toEqual([])
+    expect(timelineView.last.messages.map(m => m.seq)).toEqual([100, 101])
+
+    unsubTimeline()
+    await timelineView.unmount()
+    await composerView.unmount()
+    await topicComposerView.unmount()
+    await replyComposerView.unmount()
+    session.close()
+  })
 })

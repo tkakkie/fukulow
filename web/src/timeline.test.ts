@@ -434,3 +434,61 @@ it('no-op extra patches and dispatches leaving olderError false notify no Channe
   expect(d.get()).toBe(dEmpty)
   await sync.close()
 })
+
+it('typing in composer notifies composer subscribers without changing timeline state reference or notifying timeline subscribers', async () => {
+  const sendMessage = vi.fn().mockImplementation(async (channel: string, body: { client_message_id: string; body: string }) => ({
+    ok: true,
+    data: { ...record(2, channel), sender: 'me', client_message_id: body.client_message_id, body: body.body },
+  }))
+  const sync = createSync({
+    selfId: 'me',
+    newId: () => 'c1',
+    connect: handlers => {
+      handlers.onReady()
+      return { send() {}, close() {} }
+    },
+    api: {
+      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [record(1, 'A')], has_more: false } }),
+      sendMessage,
+    },
+  })
+  await sync.start()
+  await sync.watch('A')
+
+  const a = sync.getTimeline('A')
+  const before = a.get()
+  const timelineListener = vi.fn()
+  const composerListener = vi.fn()
+  const topicComposerListener = vi.fn()
+  const replyComposerListener = vi.fn()
+  a.subscribe(timelineListener)
+  a.composer.subscribe(composerListener)
+  a.topic('T').subscribe(topicComposerListener)
+  a.reply('r1', 'T').subscribe(replyComposerListener)
+
+  a.setDraft('hello')
+  a.setTopicDraft('Topic Name')
+  expect(timelineListener).not.toHaveBeenCalled()
+  expect(composerListener).toHaveBeenCalledTimes(2)
+  expect(topicComposerListener).not.toHaveBeenCalled()
+  expect(replyComposerListener).not.toHaveBeenCalled()
+  expect(a.get()).toBe(before)
+  expect(a.composer.get()).toEqual({ draft: 'hello', topicDraft: 'Topic Name', composerError: null })
+
+  a.topic('T').setDraft('topic draft')
+  expect(timelineListener).not.toHaveBeenCalled()
+  expect(composerListener).toHaveBeenCalledTimes(2)
+  expect(topicComposerListener).toHaveBeenCalledTimes(1)
+  expect(a.get()).toBe(before)
+
+  a.reply('r1', 'T').setDraft('reply draft')
+  expect(timelineListener).not.toHaveBeenCalled()
+  expect(replyComposerListener).toHaveBeenCalledTimes(1)
+  expect(a.get()).toBe(before)
+
+  expect(await a.submit()).toBe(true)
+  expect(a.composer.get()).toEqual({ draft: '', topicDraft: '', composerError: null })
+  expect(timelineListener).toHaveBeenCalled()
+  expect(a.get().messages.map(m => m.seq)).toEqual([1, 2])
+  await sync.close()
+})

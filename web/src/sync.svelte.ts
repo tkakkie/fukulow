@@ -7,11 +7,13 @@ import {
   TOPIC_NAME_MAX,
   topicNameError,
   type createSync,
+  type ChannelComposerState,
   type TimelineState,
   type TopicComposerState,
 } from './sync'
 
 export { foldTopicName, MESSAGE_BODY_MAX, messageBodyError, TOPIC_NAME_MAX, topicNameError }
+export type { ChannelComposerState, TimelineState, TopicComposerState }
 
 type Sync = ReturnType<typeof createSync>
 
@@ -24,13 +26,15 @@ type Sync = ReturnType<typeof createSync>
 function channelAdapter(sync: Sync, channel: string) {
   const timeline = sync.getTimeline(channel)
   const subscribe = createSubscriber(update => timeline.subscribe(update))
+  const subscribeComposer = createSubscriber(update => timeline.composer.subscribe(update))
   const topics = new Map<string, ReturnType<typeof topicAdapter>>()
   const replies = new Map<string, ReturnType<typeof replyAdapter>>()
   function topicAdapter(topicId: string) {
     const tc = timeline.topic(topicId)
+    const subscribeTopicComposer = createSubscriber(update => tc.subscribe(update))
     return {
       get composer(): TopicComposerState {
-        subscribe()
+        subscribeTopicComposer()
         return tc.get()
       },
       setDraft: (draft: string) => tc.setDraft(draft),
@@ -40,9 +44,10 @@ function channelAdapter(sync: Sync, channel: string) {
   }
   function replyAdapter(replyRootId: string, topicId: string | null = null) {
     const rc = timeline.reply(replyRootId, topicId)
+    const subscribeReplyComposer = createSubscriber(update => rc.subscribe(update))
     return {
       get composer(): TopicComposerState {
-        subscribe()
+        subscribeReplyComposer()
         return rc.get()
       },
       setDraft: (draft: string) => rc.setDraft(draft),
@@ -57,6 +62,10 @@ function channelAdapter(sync: Sync, channel: string) {
     get timeline(): TimelineState {
       subscribe()
       return timeline.get()
+    },
+    get composer(): ChannelComposerState {
+      subscribeComposer()
+      return timeline.composer.get()
     },
     /** The server confirmed this Channel's subscription (live indicator). */
     get live(): boolean {

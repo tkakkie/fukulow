@@ -35,12 +35,25 @@ type Deadline = { channel?: string; cancel(): void }
 export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
+  const channelListeners = new Map<string, Set<() => void>>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   const deadlines = new Map<ReturnType<typeof setTimeout>, Deadline>()
   let previous = sync.get(), closed = false, session = 0, epoch = 0, issue = 0
   let list: symbol | undefined, queuedList = false, listTimer: ReturnType<typeof setTimeout> | undefined, listAttempt = 0
   let visit: Visit | undefined, visible = false
-  const notify = () => { snapshots.clear(); listeners.forEach(l => l()) }
+  const notify = (changed?: string | Iterable<string>) => {
+    if (changed === undefined) {
+      snapshots.clear()
+      for (const ls of channelListeners.values()) ls.forEach(l => l())
+      listeners.forEach(l => l())
+      return
+    }
+    const ids = typeof changed === 'string' ? new Set([changed]) : new Set(changed)
+    if (ids.size === 0) return
+    for (const id of ids) snapshots.delete(id)
+    for (const id of ids) channelListeners.get(id)?.forEach(l => l())
+    listeners.forEach(l => l())
+  }
   const getChannel = (id: string) => {
     let c = channels.get(id)
     if (!c) channels.set(id, c = channelState())
@@ -66,8 +79,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   function prune(c: Channel) {
     for (const [seq, m] of c.records) if (!needed(c, m)) c.records.delete(seq)
   }
-  function collectRecord(c: Channel, m: Message) {
-    if (needed(c, m)) c.records.set(m.seq, m)
+  function collectRecord(c: Channel, m: Message): boolean {
+    if (!needed(c, m) || c.records.get(m.seq) === m) return false
+    c.records.set(m.seq, m)
+    return true
   }
   const active = () => !closed && sync.get().running && sync.get().organization === 'available'
   const watched = (id: string) => active() && sync.get().channels[id]?.watched === true && sync.get().channels[id]?.state !== 'unavailable' && !getChannel(id).stopped
@@ -138,12 +153,16 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (!active() || generation !== epoch || list !== token) return
     list = undefined
     if (r.ok) {
+      const changed = new Set<string>()
       for (const row of r.data.channels) {
         if (retryTokens && !discovering && !tokens.has(row.id)) continue
         const existing = channels.get(row.id)
         if (existing && tokens.get(row.id) !== existing.token) continue
         const c = getChannel(row.id)
         if (c.stopped || sync.get().channels[row.id]?.state === 'unavailable') continue
+        const prevError = c.error
+        const prevMainBase = c.main.baseline, prevMainPos = c.main.position, prevMainErr = c.main.error
+        const prevAgg = c.aggregate, prevHeld = c.heldPositions.size
         c.error = false
         acceptScope(c.main, mainBaseline(row))
         if (number > c.accepted && number >= c.requiredAfter && (!c.aggregate || row.as_of_seq >= c.aggregate.as_of_seq)) {
@@ -151,6 +170,21 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
           c.requiredAfter = 0; c.heldPositions.clear()
         }
         prune(c)
+        const aggChanged = prevAgg?.as_of_seq !== c.aggregate?.as_of_seq ||
+          prevAgg?.read_seq !== c.aggregate?.read_seq ||
+          prevAgg?.unread_count !== c.aggregate?.unread_count ||
+          prevAgg?.main_unread_count !== c.aggregate?.main_unread_count
+        if (
+          !existing ||
+          prevError !== c.error ||
+          prevMainBase !== c.main.baseline ||
+          prevMainPos !== c.main.position ||
+          prevMainErr !== c.main.error ||
+          aggChanged ||
+          prevHeld !== c.heldPositions.size
+        ) {
+          changed.add(row.id)
+        }
       }
       const unresolved = new Map([...channels].filter(([id, c]) => tokens.get(id) === c.token && !c.stopped &&
         listNeedsRecovery(c)))
@@ -158,14 +192,15 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const affected = new Map([...unresolved].map(([id, c]) => [id, c.token]))
         listTimer = setTimeout(() => { listTimer = undefined; void refresh(affected) }, retryDelay(listAttempt++, r))
       } else listAttempt = 0
-      resolveBoundary(); notify()
+      if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+      notify(changed)
     } else if (!api.isOrganizationUnavailable(r)) {
       const affected = new Map([...tokens].filter(([id, token]) => {
         const c = channels.get(id)
         return c && !c.stopped && c.token === token
       }))
       affected.forEach((_, id) => { getChannel(id).error = true })
-      notify()
+      notify(affected.keys())
       if (retryable(r) && (discovering || affected.size > 0)) listTimer = setTimeout(() => { listTimer = undefined; void refresh(affected) }, retryDelay(listAttempt++, r))
     }
     if (queuedList) { queuedList = false; void refresh() }
@@ -199,14 +234,15 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     return ranges
   }
-  function resolveBoundary() {
-    if (!visit || visit.boundary !== null) return
+  function resolveBoundary(): boolean {
+    if (!visit || visit.boundary !== null) return false
     const c = getChannel(visit.scope.channel), s = getScope(c, visit.scope.topicId)
     const unread = count(visit.scope.channel, c, visit.scope.topicId)
-    if (unread === null) return
+    if (unread === null) return false
     visit.boundary = s.position; visit.unreadAtEntry = unread
     prune(c)
     enqueue(visit)
+    return true
   }
   const isVisit = (v: Visit) => visit === v && visible && watched(v.scope.channel)
   function enqueue(v: Visit) {
@@ -242,7 +278,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       }
       if (s.queued && s.queued.read_seq <= s.position) s.queued = undefined
       if (v.scope.topicId !== null) void refresh()
-      notify()
+      notify(v.scope.channel)
       if (s.queued) void submit(v, c, s)
     } else if (retryable(r)) {
       s.timer = setTimeout(() => { s.timer = undefined; void submit(v, c, s) }, retryDelay(s.attempt++, r))
@@ -251,7 +287,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (!api.isOrganizationUnavailable(r) && r.kind === 'http' && r.status === 404 && r.error !== 'topic_not_found') {
         fence(v.scope.channel, c); c.stopped = true
       }
-      notify()
+      notify(v.scope.channel)
     }
   }
   async function refreshTopic(id: string, topic: string) {
@@ -288,29 +324,33 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       c.summaryAttempts.set(topic, attempt + 1)
       c.summaryTimers.set(topic, setTimeout(() => { c.summaryTimers.delete(topic); void refreshTopic(id, topic) }, retryDelay(attempt, r)))
     }
-    resolveBoundary(); prune(c); notify()
+    const changed = new Set([id])
+    if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+    prune(c); notify(changed)
     if (rerun) void refreshTopic(id, topic)
   }
-  function collect(id: string, c: Channel) {
-    if (!watched(id)) return
+  function collect(id: string, c: Channel): boolean {
+    if (!watched(id)) return false
     const p = options.topics?.get(id)
-    let changed = false
+    let baselineChanged = false
+    let recordAdded = false
     const observed: string[] = []
     // Merge first: filtering against the previous readSeq could discard rows the winner needs.
     for (const line of p && !p.unavailable ? p.topics : []) {
       if (line.baseline && !c.ignoredBaselines.has(line.baseline) && !c.observedBaselines.has(line.baseline)) {
         c.observedBaselines.add(line.baseline)
+        const hadTopic = c.topics.has(line.topicId)
         const s = getScope(c, line.topicId)
-        const previous = s.baseline
+        const previous = s.baseline, prevPos = s.position, prevErr = s.error, prevStop = s.stopped
         acceptScope(s, topicBaseline(line.baseline.asOfSeq, line.baseline.summary))
-        changed ||= s.baseline !== previous
+        baselineChanged ||= !hadTopic || s.baseline !== previous || s.position !== prevPos || s.error !== prevErr || s.stopped !== prevStop
         observed.push(line.topicId)
       }
     }
-    for (const m of sync.get().channels[id]?.messages ?? []) collectRecord(c, m)
+    for (const m of sync.get().channels[id]?.messages ?? []) if (collectRecord(c, m)) recordAdded = true
     if (p && !p.unavailable) {
-      for (const line of p.lines) if (line.kind === 'message') collectRecord(c, line.message)
-      for (const topic of c.topics.keys()) for (const m of p.topic(topic).messages) collectRecord(c, m)
+      for (const line of p.lines) if (line.kind === 'message' && collectRecord(c, line.message)) recordAdded = true
+      for (const topic of c.topics.keys()) for (const m of p.topic(topic).messages) if (collectRecord(c, m)) recordAdded = true
     }
     for (const topic of observed) {
       const s = getScope(c, topic)
@@ -324,22 +364,41 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         c.summaryReads.delete(topic); c.queuedSummaries.delete(topic)
       }
     }
-    if (changed) prune(c)
+    if (baselineChanged) prune(c)
+    return baselineChanged || recordAdded
   }
-  function reconcile() {
+  function reconcile(syncChanged?: ReadonlySet<string>) {
     if (closed) return
     const next = sync.get(), before = previous
     previous = next
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
     let rebootstrap = false
-    for (const id of new Set([...channels.keys(), ...Object.keys(next.channels)])) {
-      let c = getChannel(id)
+    const changed = new Set<string>()
+    const selfChanged = before.selfId !== next.selfId
+    if (selfChanged) {
+      for (const id of [...channels.keys(), ...snapshots.keys(), ...channelListeners.keys()]) changed.add(id)
+    }
+    const candidates = !selfChanged && before.running === next.running && syncChanged
+      ? syncChanged
+      : new Set([...channels.keys(), ...Object.keys(next.channels)])
+    for (const id of candidates) {
+      const existed = channels.has(id)
       const old = before.channels[id], now = next.channels[id]
+      if (!selfChanged && old === now && existed) continue
+      let c = getChannel(id)
+      let channelChanged = !existed
       if (now?.state === 'unavailable') {
-        if (!c.stopped) { fence(id, c); c.stopped = true; c.records.clear(); c.aggregate = undefined; c.main = scopeState(); c.topics.clear() }
+        if (!c.stopped) {
+          fence(id, c); c.stopped = true; c.records.clear(); c.aggregate = undefined; c.main = scopeState(); c.topics.clear()
+          channelChanged = true
+        }
+        if (channelChanged) changed.add(id)
         continue
       }
-      if (old?.watched && !now?.watched) { fence(id, c); c.records.clear(); c.heldPositions.clear() }
+      if (old?.watched && !now?.watched) {
+        fence(id, c); c.records.clear(); c.heldPositions.clear()
+        channelChanged = true
+      }
       const resetHistory = old?.cursor != null && now?.cursor === null
       const selected = now?.watched && (!old?.watched || old.state === 'unavailable')
       if (resetHistory || selected) {
@@ -348,14 +407,19 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         fence(id, c); channels.set(id, c = channelState()); rebootstrap = true
         for (const b of oldBaselines) { c.ignoredBaselines.add(b); getScope(c, b.summary.id) }
         if (oldVisit) visit = { id: Symbol(), scope: oldVisit.scope, boundary: null, unreadAtEntry: null, presented: new Set() }
+        channelChanged = true
       }
       // Bootstrap omits history <= B from replay. A REST snapshot older than B cannot cover that prefix.
       if (now?.watched && old?.cursor == null && now.cursor !== null) {
         c.requiredBase = now.cursor; rebootstrap = true
+        channelChanged = true
       }
-      collect(id, c)
+      if (collect(id, c)) channelChanged = true
+      if (visit?.scope.channel === id && old?.messages !== now?.messages) channelChanged = true
+      if (channelChanged) changed.add(id)
     }
-    resolveBoundary(); notify()
+    if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+    notify(changed)
     if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); cancelDeadlines() }
     if ((!before.running && next.running) || (!before.connected && next.connected) || rebootstrap) {
       if (channels.size === 0 || [...channels.keys()].some(watched)) void refresh()
@@ -363,10 +427,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
   }
   const unsubscribe = sync.subscribe(reconcile)
-  const unsubscribeTopics = options.topics?.subscribe(() => {
+  const unsubscribeTopics = options.topics?.subscribe(topicChannels => {
     if (!active()) return
-    for (const [id, c] of channels) collect(id, c)
-    resolveBoundary(); notify()
+    const changed = new Set<string>()
+    const targets = topicChannels && topicChannels.size > 0 ? topicChannels : channels.keys()
+    for (const id of targets) {
+      const c = channels.get(id)
+      if (!c) continue
+      if (collect(id, c) || visit?.scope.channel === id) changed.add(id)
+    }
+    if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+    notify(changed)
   })
   function snapshot(id: string) {
     const c = channels.get(id)
@@ -397,7 +468,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   function leave(id?: symbol) {
     if (!visit || (id !== undefined && visit.id !== id)) return
     const channel = visit.scope.channel, c = getChannel(channel)
-    fence(channel, c); prune(c); notify()
+    fence(channel, c); prune(c); notify(channel)
     if (!c.stopped) {
       // fence() drops in-flight and scheduled list retries for this Channel; restart any recovery they owned.
       if (c.error || c.requiredAfter > 0 || !c.main.baseline || listNeedsRecovery(c)) void refresh()
@@ -405,9 +476,22 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         !c.summaryReads.has(topic) && !c.summaryTimers.has(topic)) void refreshTopic(channel, topic)
     }
   }
+  function subscribe(listener: () => void, channel?: string): () => void {
+    if (channel !== undefined) {
+      let set = channelListeners.get(channel)
+      if (!set) channelListeners.set(channel, set = new Set())
+      set.add(listener)
+      return () => {
+        set?.delete(listener)
+        if (set?.size === 0) channelListeners.delete(channel)
+      }
+    }
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
   if (active()) { reconcile(); void refresh() }
   return {
-    subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l) } },
+    subscribe,
     get(id: string) { let s = snapshots.get(id); if (!s) snapshots.set(id, s = snapshot(id)); return s },
     refresh: () => refresh(),
     async enter(scope: UnreadScope) {
@@ -419,7 +503,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       s.stopped = false; s.error = wasStopped
       visit = { id: Symbol(), scope: { ...scope }, boundary: null, unreadAtEntry: null, presented: new Set() }
       const id = visit.id
-      collect(scope.channel, c); resolveBoundary(); notify()
+      collect(scope.channel, c); resolveBoundary(); notify(scope.channel)
       if (!s.baseline || s.baseline.asOfSeq < c.requiredBase || wasStopped) {
         if (scope.topicId === null) void refresh()
         else void refreshTopic(scope.channel, scope.topicId)
@@ -436,8 +520,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
           if (visit.boundary === null) visit.presented.clear()
         }
         // Returning to a visible document needs a fresh row presentation intent.
+        notify(visit.scope.channel)
       }
-      notify()
     },
     presented(id: symbol, seqs: number[]) {
       if (!visit || visit.id !== id || !isVisit(visit)) return
@@ -446,7 +530,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       enqueue(visit)
     },
     replaceSession() { session++; reset() },
-    close() { closed = true; unsubscribe(); unsubscribeTopics?.(); reset(); listeners.clear() },
+    close() { closed = true; unsubscribe(); unsubscribeTopics?.(); reset(); listeners.clear(); channelListeners.clear() },
   }
 }
 export type Unread = ReturnType<typeof createUnread>

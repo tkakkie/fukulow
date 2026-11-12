@@ -3,7 +3,7 @@ import type { Topics } from './topics'
 
 /** Reactive reads and user intents only; the session owns the controller lifetime. */
 export function topicsAdapter(topics: Topics, channel: string) {
-  const subscribe = createSubscriber(update => topics.subscribe(update))
+  const subscribe = createSubscriber(update => topics.subscribe(update, channel))
   return {
     get state() { subscribe(); return topics.get(channel) },
     loadMain: () => topics.loadMain(channel),

@@ -36,7 +36,9 @@ type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
 // Compose only via createTopicSync, or call replaceSession/close on topics before sync with a test.
 export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
   const windows = new Map<string, Window>()
-  const listeners = new Set<() => void>()
+  const listeners = new Set<(channels: ReadonlySet<string>) => void>()
+  const channelListeners = new Map<string, Set<() => void>>()
+  const pendingChannels = new Set<string>()
   const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   let closed = false
@@ -69,35 +71,67 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     deadlines.clear()
   }
   let previous = sync.get()
-  const notify = () => { snapshots.clear(); listeners.forEach(l => l()) }
-  const reconcileSync = () => {
+  const notify = (channel?: string | Iterable<string>) => {
+    if (channel === undefined) {
+      const all = new Set([...windows.keys(), ...snapshots.keys(), ...channelListeners.keys()])
+      snapshots.clear()
+      pendingChannels.clear()
+      for (const ls of channelListeners.values()) ls.forEach(l => l())
+      listeners.forEach(l => l(all))
+      return
+    }
+    const ids = typeof channel === 'string' ? [channel] : channel
+    for (const id of ids) {
+      snapshots.delete(id)
+      pendingChannels.add(id)
+    }
+    if (batching || pendingChannels.size === 0) return
+    const changed = new Set(pendingChannels)
+    pendingChannels.clear()
+    for (const id of changed) channelListeners.get(id)?.forEach(l => l())
+    listeners.forEach(l => l(changed))
+  }
+  const reconcileSync = (syncChanged?: ReadonlySet<string>) => {
     const next = sync.get()
     if (next === previous) return false
-    for (const [id, w] of windows) {
-      const before = previous.channels[id], after = next.channels[id]
-      if (
-        !after ||
-        (before?.watched && !after.watched) ||
-        (!before?.watched && after.watched && w.unavailable) ||
-        (before?.cursor != null && after.cursor === null)
-      ) {
-        clearWindowTimers(w)
-        windows.delete(id)
-      } else if ((before?.state === 'unavailable' || w.unavailable) && after.state !== 'unavailable') {
-        clearWindowTimers(w)
-        w.unavailable = false
-        w.generation = nextGeneration++
-      } else if (!next.running || next.organization === 'unavailable' || after.state === 'unavailable') {
-        freezeWindow(w)
+    const globalChange = previous.running !== next.running || previous.organization !== next.organization
+    const candidates = globalChange
+      ? new Set([...windows.keys(), ...snapshots.keys(), ...channelListeners.keys()])
+      : syncChanged ?? new Set(
+          [...windows.keys(), ...snapshots.keys(), ...channelListeners.keys(), ...Object.keys(previous.channels), ...Object.keys(next.channels)].filter(
+            id => previous.channels[id] !== next.channels[id],
+          ),
+        )
+    for (const id of candidates) {
+      const w = windows.get(id)
+      if (w) {
+        const before = previous.channels[id], after = next.channels[id]
+        if (
+          !after ||
+          (before?.watched && !after.watched) ||
+          (!before?.watched && after.watched && w.unavailable) ||
+          (before?.cursor != null && after.cursor === null)
+        ) {
+          clearWindowTimers(w)
+          windows.delete(id)
+        } else if ((before?.state === 'unavailable' || w.unavailable) && after.state !== 'unavailable') {
+          clearWindowTimers(w)
+          w.unavailable = false
+          w.generation = nextGeneration++
+        } else if (!next.running || next.organization === 'unavailable' || after.state === 'unavailable') {
+          freezeWindow(w)
+        }
       }
+      snapshots.delete(id)
+      pendingChannels.add(id)
     }
     if (!next.running) cancelReads()
     previous = next
-    snapshots.clear()
     return true
   }
-  const withSync = (fn: () => void) => {
-    snapshots.clear()
+  const withSync = (channel: string, fn: () => void) => {
+    snapshots.delete(channel)
+    pendingChannels.add(channel)
     batching = true
     try { fn() } finally { batching = false }
   }
@@ -106,9 +140,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     if (!w) windows.set(channel, w = window(nextGeneration++))
     return w
   }
-  const unsubscribe = sync.subscribe(() => {
-    reconcileSync()
-    if (!batching) notify()
+  const unsubscribe = sync.subscribe(changedChannels => {
+    reconcileSync(changedChannels)
+    if (!batching) notify([])
   })
   const current = (channel: string, w: Window) => {
     if (!closed) reconcileSync()
@@ -142,9 +176,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         // C9: refuse sends and resubscription until explicit user selection.
         w.unavailable = true
         freezeWindow(w)
-        withSync(() => { void sync.channelUnavailable(channel) })
+        withSync(channel, () => { void sync.channelUnavailable(channel) })
         windows.set(channel, w)
-        notify()
+        notify(channel)
       }
       return { result, isCurrent }
     } finally {
@@ -178,16 +212,16 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     }
     const w = getWindow(channel), p = w.main
     if (!current(channel, w) || p.loading || !p.hasMore) return { ok: false, kind: 'network' }
-    p.loading = true; p.error = false; notify()
+    p.loading = true; p.error = false; notify(channel)
     const query: ListTimelineQuery = p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }
     const { result, isCurrent } = await read(channel, w, 'main', () => options.api.listTimeline(channel, query), bootstrap)
     if (isCurrent() && w.main === p) {
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         applyMain(w, result.data)
-        withSync(() => { void sync.settleHistory(channel, result.data.items.map(i => i.kind === 'message' ? i.message : i.topic.latest_message)) })
+        withSync(channel, () => { void sync.settleHistory(channel, result.data.items.map(i => i.kind === 'message' ? i.message : i.topic.latest_message)) })
       }
-      notify()
+      notify(channel)
     }
     return isCurrent() ? result : { ok: false, kind: 'network' }
   }
@@ -241,15 +275,15 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       const existing = w.topics.get(topicId)
       if (existing) existing.notFound = false
       mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
-      withSync(() => { void sync.settleHistory(channel, [result.data.topic.latest_message]) })
-      notify()
+      withSync(channel, () => { void sync.settleHistory(channel, [result.data.topic.latest_message]) })
+      notify(channel)
     } else if (result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found') {
       clearSummaryRetry(w, topicId)
       let t = w.topics.get(topicId)
       if (!t) w.topics.set(topicId, t = topicWindow())
       if (!t.notFound) {
         t.notFound = true
-        notify()
+        notify(channel)
       }
     }
     return result
@@ -260,7 +294,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const hadTerminal = w.summaryRetries.get(topicId)?.terminal !== undefined
     clearSummaryRetry(w, topicId)
     const pending = fetchSummary(channel, topicId)
-    if (hadTerminal) notify()
+    if (hadTerminal) notify(channel)
     const result = await pending
     if (
       result &&
@@ -274,7 +308,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         attempt: MAX_SUMMARY_RETRIES,
         terminal: isRetryableSummaryFailure(result) ? 'retryable' : 'non_retryable',
       })
-      notify()
+      notify(channel)
     }
     return result
   }
@@ -307,12 +341,12 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const attempt = latestRetry?.attempt ?? 0
     if (result.ok || !isRetryableSummaryFailure(result)) {
       w.summaryRetries.set(topicId, { attempt, terminal: 'non_retryable' })
-      notify()
+      notify(channel)
       return
     }
     if (attempt >= MAX_SUMMARY_RETRIES) {
       w.summaryRetries.set(topicId, { attempt, terminal: 'retryable' })
-      notify()
+      notify(channel)
       return
     }
     const timer = setTimeout(() => {
@@ -336,11 +370,25 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const hadTerminal = w.summaryRetries.get(topicId)?.terminal !== undefined
     clearSummaryRetry(w, topicId)
     const pending = ensureSummary(channel, topicId)
-    if (hadTerminal) notify()
+    if (hadTerminal) notify(channel)
     await pending
   }
+  function subscribe(listener: (channels: ReadonlySet<string>) => void, channel?: string): () => void {
+    if (channel !== undefined) {
+      const wrapped = () => listener(new Set([channel]))
+      let set = channelListeners.get(channel)
+      if (!set) channelListeners.set(channel, set = new Set())
+      set.add(wrapped)
+      return () => {
+        set?.delete(wrapped)
+        if (set?.size === 0) channelListeners.delete(channel)
+      }
+    }
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
   return {
-    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    subscribe,
     get(channel: string) {
       if (!closed) reconcileSync()
       let value = snapshots.get(channel)
@@ -370,7 +418,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     async loadList(channel: string) {
       const w = getWindow(channel), p = w.list
       if (!current(channel, w) || p.loading || !p.hasMore) return
-      p.loading = true; p.error = false; notify()
+      p.loading = true; p.error = false; notify(channel)
       const { result, isCurrent } = await read(channel, w, 'list', () => options.api.listTopics(channel,
         p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }))
       if (!isCurrent()) return
@@ -378,9 +426,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (result.ok) {
         mergeBaselines(w, result.data)
         p.asOfSeq = result.data.as_of_seq; p.before = result.data.topics[0]?.last_seq; p.hasMore = result.data.has_more
-        withSync(() => { void sync.settleHistory(channel, result.data.topics.map(t => t.latest_message)) })
+        withSync(channel, () => { void sync.settleHistory(channel, result.data.topics.map(t => t.latest_message)) })
       }
-      notify()
+      notify(channel)
     },
     loadSummary,
     ensureSummary,
@@ -390,7 +438,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       let t = w.topics.get(topicId)
       if (!t) w.topics.set(topicId, t = topicWindow())
       if (!current(channel, w) || t.loading || !t.hasMore) return
-      t.loading = true; t.error = false; t.notFound = false; notify()
+      t.loading = true; t.error = false; t.notFound = false; notify(channel)
       const { result, isCurrent } = await read(channel, w, `topic:${topicId}`, () => options.api.listTopicMessages(channel, topicId,
         t.before === undefined ? {} : { before_seq: t.before }))
       if (!isCurrent()) return
@@ -403,14 +451,14 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         t.through = Math.max(t.through ?? 0, result.data.messages.at(-1)?.seq ?? 0)
         for (const m of result.data.messages) t.messages.set(m.seq, m)
         t.before = result.data.messages[0]?.seq; t.hasMore = result.data.has_more
-        withSync(() => { void sync.settleHistory(channel, result.data.messages) })
+        withSync(channel, () => { void sync.settleHistory(channel, result.data.messages) })
       }
-      notify()
+      notify(channel)
     },
     replaceSession() { sessionToken++; cancelReads(); windows.clear(); notify() },
     close() {
       closed = true; unsubscribe(); cancelReads(); windows.clear()
-      notify(); listeners.clear()
+      notify(); listeners.clear(); channelListeners.clear()
     },
   }
 }

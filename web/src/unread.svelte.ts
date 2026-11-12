@@ -3,7 +3,7 @@ import type { Unread } from './unread'
 
 /** Reactive reads and viewport/view/visibility intents; the Account Session owns lifetime. */
 export function unreadAdapter(unread: Unread, channel: string) {
-  const subscribe = createSubscriber(update => unread.subscribe(update))
+  const subscribe = createSubscriber(update => unread.subscribe(update, channel))
   return {
     get state() { subscribe(); return unread.get(channel) },
     enter: (topicId: string | null = null) => unread.enter({ channel, topicId }),
