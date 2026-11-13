@@ -985,6 +985,34 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it('windows a thousand pending sends without dropping them and Composer Up mounts the latest confirmed Message', async () => {
+    const net = fakeNetwork()
+    const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.socket.onReady()
+    net.pages.general = ok({ messages: [record(1, 'general')], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('general')] }))
+    await settle(); net.subscribed('general', 1); await settle()
+    const ch = syncAdapter(session.sync).channel('general')
+    const sends = Array.from({ length: 1000 }, (_, n) => ch.send(`未確認 ${n}`))
+    await settle()
+    const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+    const instance = mount(Timeline, { target: host as unknown as Element,
+      props: { channel: ch, channelId: 'general', selfId: 'me' } })
+    await settle()
+    const scroll = host.querySelector('.timeline-scroll')!
+    scroll.clientHeight = 600; scroll.scrollHeight = 116116; scroll.scrollTop = 115516
+    scroll.dispatchEvent(new MiniDomEvent('scroll'))
+    await settle()
+    expect(queryAll(host, '[data-status]').length).toBeLessThan(25)
+    expect(host.textContent).toContain('未確認 999')
+    expect(ch.timeline.pending).toHaveLength(1000)
+    const up = new MiniDomEvent('keydown', { bubbles: true, cancelable: true }); up.key = 'ArrowUp'
+    host.querySelector('textarea')!.dispatchEvent(up)
+    await settle()
+    expect(testDoc.activeElement?.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe('id1')
+    await unmount(instance); session.close(); await Promise.all(sends)
+  })
+
   it('renders no 再送する or 編集して送り直す when target is unavailable and keeps 破棄 working', async () => {
     // 1. Direct MessageRow check across both retryable and refused failed states under targetUnavailable
     const host = testDoc.createElement('div')

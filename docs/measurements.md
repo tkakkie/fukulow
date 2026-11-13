@@ -895,3 +895,45 @@ Sign-in flood with the image default: 30,000 sent, 85.8% of correct sign-ins suc
 Result: no write regression; after was equal or better at every step, which is within this host's run-to-run noise (the before `many` run dropped more iterations). The sign-in run matches the #196 C "fixed + mmap threshold" row, now from the image default rather than a run-time variable.
 
 Limits: one run per variant on a shared host; glibc (Debian bookworm) only, so a base image or libc change needs a new measurement; 60 s steps do not show long-run fragmentation.
+
+## Bounded web message windows (#308, 2026-11-14 JST)
+
+Source: main 68b888c plus the #308 working tree. macOS 27.0.1 / arm64, Apple M5, 10 CPUs, 32 GiB; Node 26.13.0, Vitest 5.1.0, Playwright 1.65.0 / Chromium 158.0.8127.18. Browser run: Rust 1.99.0 debug server, PostgreSQL 18.6 from the compose-pinned image on Docker Desktop 29.9.3, disposable migrated database, loopback HTTP/WebSocket, 1440×900 viewport. Runs were sequential, with no other task tests or builds running.
+
+Named body budgets: main projections 400, one active Topic history 300, one Reply panel 200; sync 400 per watched Channel, 50 per inactive Channel in at most five LRU slots, and 600 shared across sync caches. Main/Topic budgets are shared across Channels. The 600 sync budget reserves the other 900 slots for simultaneous projection histories; it may release an older inactive slot before all five slots are full. Total history budget: 1,500 slots. Pending sends and active navigation anchors are separate; Unread keeps other-sender identity/sequence metadata, not display bodies. Topic sequence ranges and gap evidence also survive body eviction.
+
+Reproduce with the pinned Node version, from the repository root:
+
+```bash
+MEASURE_WINDOW=1 npm --prefix web test -- src/message-window-memory.test.ts --disableConsoleIntercept
+npm --prefix web run build
+cargo build -p fukulow-server --bins
+DATABASE_URL=<disposable-app-role-url> npm --prefix web run e2e -- message-window.spec.ts
+```
+
+Provision a fresh disposable PostgreSQL database with the role/migration steps in `.github/workflows/e2e.yml` before the browser command. The local runs used `npx --yes --package=node@26.13.0 -c '<command>'` to select the repository pin without changing dependencies. Both probes print one JSON measurement record and assert their bounds.
+
+Controller probe (`web/src/message-window-memory.test.ts`): 2,000 initial synthetic records; ten cycles of 1,000 timed main-Channel arrivals, ten older main pages, eight Topic pages and six Reply pages (50 records/page), then Topic release, Reply dismissal and a Channel round trip. Each of the ten distinct other Channels receives another 100 untimed events before unwatch. Thus 10,000 timed arrivals, 1,000 additional events, 20 Channel changes and ten Topic/Reply visits. Transport fixtures exercise the production sync/projection controllers; they are not a server-data or browser benchmark. Timing includes dispatch plus reading main/Reply snapshots.
+
+| Controller result | Value |
+| --- | --- |
+| Peak retained sync / main / Topic / Reply records | 600 / 400 / 300 / 200 |
+| Peak combined retained history slots | 1,500 |
+| Arrival p50 / p95 / maximum | 0.0508 / 0.1360 / 1.4417 ms |
+| Main / Topic / Reply reads, including initial loads | 131 / 80 / 60 |
+
+Browser probe (`web/e2e/message-window.spec.ts`): real endpoints seed 450 main Messages, 450 Topic Messages and a 300-Message Reply chain. After paging main beyond its cap, 2,000 arrivals use response-paced batches of eight HTTP sends; every tenth body repeats its text ten times to vary row heights. One Composer send follows, then 450 further arrivals while unpinned. The run makes six Channel round trips, repeatedly opens Topic and Reply views, pages both past their caps, refetches in both directions, and exercises Composer Up, Home/End and Arrow navigation beyond mounted rows. A 300-record Topic window and 200-record Reply window are open together. The anchor moves less than 3px during the unpinned arrival block.
+
+| Browser result | Value |
+| --- | --- |
+| Mounted main / Topic / Reply rows at samples | 13 / 18 / 12 |
+| Descendant DOM elements in main / Topic / Reply at samples | 139 / 188 / 129 |
+| All application DOM elements with Topic and Reply open | 386 |
+| 2,000 timed arrivals, HTTP submission through final DOM update | 11,603 ms |
+| Mutation to next animation frame p50 / p95 (2,643 samples) | 5.1 / 14.8 ms |
+| Renderer script / layout / style recalculation during timed arrivals | 2,497 / 372 / 148 ms |
+| Projection/navigation reads across the complete browser workload | 43 |
+
+The browser uses CDP cumulative CPU metrics for script/layout/style deltas; mutation-to-frame samples cover the first main view's active lifetime, including its arrival, keyboard and anchor checks. They measure frame readiness, not GPU paint time. Arrival wall time includes HTTP, PostgreSQL, WebSocket delivery and the Playwright driver. This is not a server throughput claim. Element counts include controls and spacers; row counts count mounted confirmed rows. Separate Vitest coverage windows 1,000 pending sends without dropping them, and Playwright covers first-Unread entry through 450 Messages beyond the main cap.
+
+These results keep the approved 400/300/200 caps and 560px overscan: record and DOM counts remain bounded through the workload, with p95 mutation-to-frame time below one 60Hz frame on this machine. No API extension was needed. Limits: one run per probe, headless desktop browser and debug server; no production capacity or low-end-device claim, no heap-size bound, and no claim that sequence/ID evidence or user-authored pending sends have fixed cardinality. Cache-slot counts can include the same canonical Message in more than one store; caller-held snapshots and transient HTTP response allocations are not heap measurements. Older Reply history still requires restarting from the chain start with existing endpoints.

@@ -11,6 +11,29 @@ vi.mock('./unread-counts', async importOriginal => {
 })
 afterEach(() => { mode.prune = true; vi.useRealTimers() })
 
+it('retains only Message identity and sequence metadata without holding display bodies', async () => {
+  const c = retentionClient(), source = msg(1)
+  await c.boot([source])
+  expect(c.records.size).toBeGreaterThan(0)
+  const retained = c.records.get(1)!
+  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'id', 'sender', 'seq', 'topic_id'])
+  expect(source.body).toBeDefined()
+  expect(retained).not.toBe(source)
+  c.close()
+})
+
+it('skips own Message bookkeeping and still advances across own rows to a presented other-sender Message', async () => {
+  const c = retentionClient(), own = { ...msg(1), sender: 'me' }
+  await c.boot([own])
+  const visit = await c.enter()
+  expect(c.records.size).toBe(0)
+  c.feed([own, msg(2)])
+  await c.present(visit, [2])
+  expect(c.unread.get('A').main.position).toBe(2)
+  expect(c.records.has(1)).toBe(false)
+  c.close()
+})
+
 it.each([
   { name: 'baseline subtraction and future reads', baseline: { asOfSeq: 8, readSeq: 3, count: 4 }, aggregate: Infinity, visit: Infinity, first: 4 },
   { name: 'aggregate held suffix', baseline: { asOfSeq: 8, readSeq: 8, count: 0 }, aggregate: 3, visit: Infinity, first: 4 },

@@ -242,8 +242,7 @@
     const targetRootId = anchor.reply_root_id ?? anchor.id
     const alreadyOpen = Boolean(
       currentRepliesState?.anchor &&
-        currentRepliesState.rootId === targetRootId &&
-        currentRepliesState.messages.some((m) => m.id === anchor.id),
+        currentRepliesState.rootId === targetRootId,
     )
     if (!alreadyOpen) {
       void currentReplies.open(anchor)

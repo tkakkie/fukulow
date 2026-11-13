@@ -176,7 +176,7 @@ it('reply_chain_not_found fails only the chain and leaves the Channel ready for 
   await c.sync.close()
 })
 
-it('unchanged Channel message arrays skip membership scans and preserve unaffected chain snapshots', async () => {
+it('new records skip rescanning retained Channel Messages and preserve unaffected chain snapshots', async () => {
   const c = replyClient(); await c.boot(); await c.sync.watch('B')
   const unrelated = { ...recordOther(2), get reply_root_id() { return null } }
   const membership = vi.spyOn(unrelated, 'reply_root_id', 'get')
@@ -193,7 +193,7 @@ it('unchanged Channel message arrays skip membership scans and preserve unaffect
   expect(c.replies.get('A')).toBe(snapshot)
   expect(listener).not.toHaveBeenCalled()
   c.event(recordOther(3))
-  expect(membership).toHaveBeenCalled()
+  expect(membership).not.toHaveBeenCalled()
   expect(c.replies.get('A')).toBe(snapshot)
   expect(listener).not.toHaveBeenCalled()
   c.event(reply(4))

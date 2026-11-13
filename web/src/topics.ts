@@ -4,6 +4,8 @@ import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, 
 import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import { selectMainTimeline, selectTopicMessages, type TopicBaseline, type TopicSummaryError } from './topic-selectors'
+import { countSequencesAfter, rememberTopicMessages, trimMessages, type TopicEvidence } from './message-window'
+import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
 
 type Sync = ReturnType<typeof createSync>
 export type TopicsApi = {
@@ -19,15 +21,17 @@ export const topicsApi = (organizationId: string): TopicsApi => ({
   listTopicMessages: (c, t, q) => api.listTopicMessages(organizationId, c, t, q),
 })
 const MAX_SUMMARY_RETRIES = 4
-type Paging = { asOfSeq?: number; before?: number; hasMore: boolean; loading: boolean; error: boolean }
-type TopicWindow = { messages: Map<number, Message>; before?: number; through?: number; initialized: boolean; hasMore: boolean; loading: boolean; error: boolean; notFound: boolean }
+type Paging = { asOfSeq?: number; before?: number; through?: number; hasMore: boolean; hasNewer: boolean; following: boolean; newerCount: number; loading: boolean; error: boolean }
+type TopicWindow = { messages: Map<number, Message>; before?: number; through?: number; initialized: boolean; hasMore: boolean; hasNewer: boolean; following: boolean; newerCount: number; loading: boolean; error: boolean; notFound: boolean }
 type SummaryRetry = { attempt: number; timer?: ReturnType<typeof setTimeout>; terminal?: TopicSummaryError }
 const isRetryableSummaryFailure = <T>(r: Exclude<Result<T>, { ok: true }>) =>
   r.kind === 'network' || (r.kind === 'http' && r.status >= 500)
-const paging = (): Paging => ({ hasMore: true, loading: false, error: false })
-const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, loading: false, error: false, notFound: false })
+const paging = (): Paging => ({ hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false })
+const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false, notFound: false })
 const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
-  mainTopics: new Set<string>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
+  mainTopics: new Set<string>(), mainPositions: new Map<string, number>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
+  evidence: new Map() as TopicEvidence,
+  summaryThrough: new Map<string, number>(),
   summaries: new Set<string>(), summaryRetries: new Map<string, SummaryRetry>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
 type Window = ReturnType<typeof window>
 type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
@@ -91,7 +95,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     for (const id of changed) channelListeners.get(id)?.forEach(l => l())
     listeners.forEach(l => l(changed))
   }
-  const reconcileSync = (syncChanged?: ReadonlySet<string>) => {
+  const reconcileSync = (syncChanged?: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => {
     const next = sync.get()
     if (next === previous) return false
     const globalChange = previous.running !== next.running || previous.organization !== next.organization
@@ -113,6 +117,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           (before?.cursor != null && after.cursor === null)
         ) {
           clearWindowTimers(w)
+          w.messages.clear(); w.baselines.clear(); w.reads.clear()
+          for (const t of w.topics.values()) t.messages.clear()
+          w.topics.clear()
           windows.delete(id)
         } else if ((before?.state === 'unavailable' || w.unavailable) && after.state !== 'unavailable') {
           clearWindowTimers(w)
@@ -120,6 +127,26 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           w.generation = nextGeneration++
         } else if (!next.running || next.organization === 'unavailable' || after.state === 'unavailable') {
           freezeWindow(w)
+        } else if (before?.messages !== after.messages || records?.has(id)) {
+          const incoming = records?.get(id) ?? after.messages
+          rememberTopicMessages(w.evidence, incoming)
+          if (!w.main.following && w.messages.size + w.baselines.size >= MAIN_MESSAGE_LIMIT) w.main.hasNewer = true
+          for (const m of incoming) {
+            const arrived = m.seq > (before?.cursor ?? Infinity) && !before?.messages.some(old => old.seq === m.seq)
+            if (arrived && w.main.hasNewer) w.main.newerCount++
+            if (m.seq > (w.main.asOfSeq ?? 0) && (!w.main.hasNewer || (m.topic_id && w.baselines.has(m.topic_id)))) w.messages.set(m.seq, m)
+            for (const [topicId, t] of w.topics) if (m.topic_id === topicId) {
+              if (!t.following && t.messages.size >= TOPIC_MESSAGE_LIMIT) t.hasNewer = true
+              if (arrived && t.hasNewer) t.newerCount++
+              if (!t.hasNewer) t.messages.set(m.seq, m)
+            }
+          }
+          trimMain(w, w.main.hasNewer ? 'older' : 'newer')
+          for (const t of w.topics.values()) {
+            if (trimMessages(t.messages, TOPIC_MESSAGE_LIMIT)) {
+              t.before = Math.min(...t.messages.keys()); t.hasMore = true
+            }
+          }
         }
       }
       snapshots.delete(id)
@@ -137,11 +164,14 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   const getWindow = (channel: string) => {
     let w = windows.get(channel)
-    if (!w) windows.set(channel, w = window(nextGeneration++))
+    if (!w) {
+      windows.set(channel, w = window(nextGeneration++))
+      rememberTopicMessages(w.evidence, sync.get().channels[channel]?.messages ?? [])
+    }
     return w
   }
-  const unsubscribe = sync.subscribe(changedChannels => {
-    reconcileSync(changedChannels)
+  const unsubscribe = sync.subscribe((changedChannels, records) => {
+    reconcileSync(changedChannels, records)
     if (!batching) notify([])
   })
   const current = (channel: string, w: Window) => {
@@ -150,6 +180,13 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     return !closed && s.running &&
       s.organization === 'available' && windows.get(channel) === w && !w.unavailable &&
       s.channels[channel]?.watched === true && s.channels[channel]?.state !== 'unavailable'
+  }
+  const needsSummary = (w: Window, topicId: string) => {
+    const baseline = w.baselines.get(topicId)
+    if (!baseline) return true
+    const known = w.evidence.get(topicId)?.at(-1)?.end ?? 0
+    return known > baseline.summary.latest_message.seq && w.messages.get(known)?.topic_id !== topicId &&
+      known > (w.summaryThrough.get(topicId) ?? 0)
   }
 
   async function read<T>(channel: string, w: Window, slot: ReadSlot, run: () => Promise<Result<T>>, bootstrap = false) {
@@ -192,23 +229,70 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (!old || response.as_of_seq > old.asOfSeq) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
     }
   }
+  function trimMain(w: Window, edge: 'older' | 'newer') {
+    const lines = selectMainTimeline([], w.messages.values(), w.baselines.values(), w.evidence)
+    const liveTopics = new Set([...w.messages.values()].flatMap(m => m.topic_id ? [m.topic_id] : []))
+    const kept = [...lines]
+    const cost = (line: typeof lines[number]) => line.kind === 'message' ? 1 :
+      Number(w.baselines.has(line.topicId)) + Number(liveTopics.has(line.topicId))
+    let size = kept.reduce((sum, l) => sum + cost(l), 0)
+    const trimmed = size > MAIN_MESSAGE_LIMIT
+    while (size > MAIN_MESSAGE_LIMIT) size -= cost(edge === 'older' ? kept.pop()! : kept.shift()!)
+    const ids = new Set(kept.filter(l => l.kind === 'topic').map(l => l.topicId))
+    const seqs = new Set(kept.filter(l => l.kind === 'message').map(l => l.message.seq))
+    for (const [seq, m] of w.messages) if (m.topic_id ? !ids.has(m.topic_id) : !seqs.has(seq)) w.messages.delete(seq)
+    for (const id of w.baselines.keys()) if (!ids.has(id)) {
+      w.baselines.delete(id); w.mainTopics.delete(id); w.mainPositions.delete(id); w.summaryThrough.delete(id)
+      if (!w.topics.has(id)) { w.reads.delete(`summary:${id}`); w.summaries.delete(id); clearSummaryRetry(w, id) }
+    }
+    // Only the latest body of each Topic is needed; its count evidence has a separate lifetime.
+    const latest = new Map<string, number>()
+    for (const m of w.messages.values()) if (m.topic_id) latest.set(m.topic_id, Math.max(latest.get(m.topic_id) ?? 0, m.seq))
+    for (const [seq, m] of w.messages) if (m.topic_id && seq !== latest.get(m.topic_id)) w.messages.delete(seq)
+    if (trimmed) {
+      w.main.before = Math.min((w.main.asOfSeq ?? Infinity) + 1, ...kept.map(l => l.kind === 'message' ? l.message.seq : w.mainPositions.get(l.topicId) ?? l.position))
+      if (edge === 'older') {
+        w.main.hasNewer = true
+        w.main.through = Math.min(w.main.through ?? Infinity, Math.max(...kept.map(l => l.kind === 'message' ? l.message.seq : w.mainPositions.get(l.topicId) ?? l.position)))
+      }
+      else w.main.hasMore = true
+    }
+    let total = [...windows.values()].reduce((n, value) => n + value.messages.size + value.baselines.size, 0)
+    for (const [id, other] of windows) {
+      if (total <= MAIN_MESSAGE_LIMIT) break
+      if (other === w) continue
+      total -= other.messages.size + other.baselines.size
+      other.messages.clear(); other.baselines.clear(); other.mainTopics.clear(); other.mainPositions.clear()
+      other.main = paging(); other.list = paging()
+      other.summaryThrough.clear(); other.summaries.clear()
+      for (const slot of other.reads.keys()) if (!slot.startsWith('topic:')) other.reads.delete(slot)
+      clearWindowTimers(other)
+      snapshots.delete(id); pendingChannels.add(id)
+    }
+  }
   function applyMain(w: Window, page: TimelinePage) {
+    const older = w.main.asOfSeq !== undefined
     for (const item of page.items) {
       if (item.kind === 'message') w.messages.set(item.message.seq, item.message)
       else {
         w.mainTopics.add(item.topic.id)
+        w.mainPositions.set(item.topic.id, item.topic.last_seq)
         mergeBaselines(w, { as_of_seq: page.as_of_seq, topics: [item.topic] })
       }
     }
     w.main.asOfSeq = page.as_of_seq
+    w.main.through ??= page.as_of_seq
     w.main.before = page.items[0] && (page.items[0].kind === 'message' ? page.items[0].message.seq : page.items[0].topic.last_seq)
     w.main.hasMore = page.has_more
+    trimMain(w, older ? 'older' : 'newer')
   }
 
-  async function loadMainPage(channel: string, bootstrap = false): Promise<Result<TimelinePage>> {
+  async function loadMainPage(channel: string, bootstrap = false, latest = false): Promise<Result<TimelinePage>> {
     if (bootstrap) {
       const w = getWindow(channel)
       w.main = paging(); w.messages.clear(); w.mainTopics.clear()
+      for (const m of sync.get().channels[channel]?.messages ?? []) w.messages.set(m.seq, m)
+      trimMain(w, 'newer')
     }
     const w = getWindow(channel), p = w.main
     if (!current(channel, w) || p.loading || !p.hasMore) return { ok: false, kind: 'network' }
@@ -218,36 +302,73 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     if (isCurrent() && w.main === p) {
       p.loading = false; p.error = !result.ok
       if (result.ok) {
+        if (latest) {
+          w.messages.clear(); w.mainTopics.clear(); w.baselines.clear(); w.mainPositions.clear(); w.list = paging()
+          w.summaryThrough.clear()
+        }
         applyMain(w, result.data)
+        if (query.as_of_seq === undefined) {
+          const messages = sync.get().channels[channel]?.messages ?? []
+          rememberTopicMessages(w.evidence, messages)
+          const cursor = sync.get().channels[channel]?.cursor ?? 0
+          const suffix = messages.filter(m => m.seq > result.data.as_of_seq)
+          const missing = cursor > result.data.as_of_seq && (suffix[0]?.seq ?? Infinity) > result.data.as_of_seq + 1
+          if (missing) w.main.hasNewer = true
+          else for (const m of suffix) w.messages.set(m.seq, m)
+          trimMain(w, 'newer')
+        }
         withSync(channel, () => { void sync.settleHistory(channel, result.data.items.map(i => i.kind === 'message' ? i.message : i.topic.latest_message)) })
       }
       notify(channel)
     }
     return isCurrent() ? result : { ok: false, kind: 'network' }
   }
+  async function reanchorMain(channel: string, w: Window) {
+    if (!current(channel, w)) return false
+    const p = w.main
+    p.loading = true; p.error = false; p.hasNewer = true; notify(channel)
+    const { result, isCurrent } = await read(channel, w, 'main', () => options.api.listTimeline(channel, {}))
+    if (!isCurrent() || w.main !== p) return false
+    p.loading = false; p.error = !result.ok
+    if (result.ok) {
+      p.through = Math.min(result.data.as_of_seq, Math.max(p.through ?? p.asOfSeq ?? 0, sync.get().channels[channel]?.cursor ?? 0))
+      p.asOfSeq = result.data.as_of_seq
+      for (const id of w.mainTopics) {
+        const ranges = w.evidence.get(id) ?? []
+        const range = [...ranges].reverse().find(r => r.start <= p.asOfSeq!)
+        if (range) w.mainPositions.set(id, Math.max(w.mainPositions.get(id) ?? 0, Math.min(range.end, p.asOfSeq)))
+      }
+      const lines = snapshot(channel).lines
+      p.before = Math.min(...lines.map(l => l.kind === 'message' ? l.message.seq : w.mainPositions.get(l.topicId) ?? l.position))
+      p.hasMore = true
+      withSync(channel, () => { void sync.settleHistory(channel, result.data.items.map(i => i.kind === 'message' ? i.message : i.topic.latest_message)) })
+    }
+    notify(channel)
+    return result.ok
+  }
   function snapshot(channel: string) {
     const w = closed ? window(0) : getWindow(channel)
     const syncState = closed ? undefined : sync.get()
     const c = syncState?.channels[channel]
-    const messages = c?.messages ?? []
+    const messages = w.main.asOfSeq === undefined ? (c?.messages ?? []) : []
     const summaryErrorFor = (topicId: string): TopicSummaryError | null =>
-      w.baselines.has(topicId) || w.topics.get(topicId)?.notFound
+      (w.baselines.has(topicId) && !needsSummary(w, topicId)) || w.topics.get(topicId)?.notFound
         ? null
         : (w.summaryRetries.get(topicId)?.terminal ?? null)
-    const merged = selectMainTimeline(messages, w.messages.values(), w.baselines.values())
+    const merged = selectMainTimeline(messages, w.messages.values(), w.baselines.values(), w.evidence)
     for (const item of merged) {
-      if (item.kind === 'topic' && item.baseline === null) item.summaryError = summaryErrorFor(item.topicId)
+      if (item.kind === 'topic') item.summaryError = summaryErrorFor(item.topicId)
     }
     // List/summary baselines supply counts, while main pages and sync records supply main membership.
-    const visibleTopics = new Set([...w.mainTopics, ...messages.flatMap(m => m.topic_id ? [m.topic_id] : [])])
+    const visibleTopics = new Set([...w.mainTopics, ...[...w.messages.values(), ...messages].flatMap(m => m.topic_id ? [m.topic_id] : [])])
     const lines = merged.filter(l => l.kind === 'message' || visibleTopics.has(l.topicId))
     const topicSnapshots = new Map<string, ReturnType<typeof topic>>()
     function topic(topicId: string) {
       const t = w.topics.get(topicId)
-      return { messages: selectTopicMessages(topicId, messages, t?.messages.values() ?? []),
+      return { messages: selectTopicMessages(topicId, t ? [] : (c?.messages ?? []), t?.messages.values() ?? []).slice(-TOPIC_MESSAGE_LIMIT),
         before: t?.before, through: t?.through,
         initialized: t?.initialized ?? false,
-        loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, error: t?.error ?? false,
+        loading: t?.loading ?? false, hasMore: t?.hasMore ?? true, hasNewer: t?.hasNewer ?? false, newerCount: t?.newerCount ?? 0, error: t?.error ?? false,
         notFound: t?.notFound ?? false, summaryError: summaryErrorFor(topicId) }
     }
     return { generation: w.generation, lines, topics: merged.filter(l => l.kind === 'topic'),
@@ -268,13 +389,16 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       pendingRetry.timer = undefined
     }
     w.summaries.add(topicId)
+    const through = w.evidence.get(topicId)?.at(-1)?.end ?? 0
     const { result, isCurrent } = await read(channel, w, `summary:${topicId}`, () => options.api.getTopicSummary(channel, topicId))
     if (!isCurrent()) return
     w.summaries.delete(topicId)
     if (result.ok) {
+      w.summaryThrough.set(topicId, through)
       const existing = w.topics.get(topicId)
       if (existing) existing.notFound = false
       mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
+      trimMain(w, 'newer')
       withSync(channel, () => { void sync.settleHistory(channel, [result.data.topic.latest_message]) })
       notify(channel)
     } else if (result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found') {
@@ -300,7 +424,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       result &&
       !result.ok &&
       current(channel, w) &&
-      !w.baselines.has(topicId) &&
+      needsSummary(w, topicId) &&
       !w.topics.get(topicId)?.notFound &&
       !w.summaries.has(topicId)
     ) {
@@ -317,7 +441,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const existingRetry = w.summaryRetries.get(topicId)
     if (
       !current(channel, w) ||
-      w.baselines.has(topicId) ||
+      !needsSummary(w, topicId) ||
       w.topics.get(topicId)?.notFound ||
       w.summaries.has(topicId) ||
       existingRetry?.timer !== undefined ||
@@ -330,7 +454,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const latestRetry = w.summaryRetries.get(topicId)
     if (
       !current(channel, w) ||
-      w.baselines.has(topicId) ||
+      !needsSummary(w, topicId) ||
       w.topics.get(topicId)?.notFound ||
       w.summaries.has(topicId) ||
       latestRetry?.timer !== undefined ||
@@ -400,7 +524,38 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         await sync.getTimeline(channel).loadLatest()
         return sync.get().channels[channel]?.cursor !== null
       }
+      const w = getWindow(channel), p = w.main
+      const first = snapshot(channel).lines[0]
+      if (p.asOfSeq !== undefined && first && !p.loading &&
+        (first.kind === 'message' ? first.message.seq : first.position) > p.asOfSeq &&
+        !(await reanchorMain(channel, w))) return false
       return (await loadMainPage(channel)).ok
+    },
+    async loadMainLatest(channel: string) {
+      const w = getWindow(channel)
+      if (!current(channel, w)) return
+      const previous = w.main, next = paging()
+      w.reads.delete('main'); w.main = next
+      const result = await loadMainPage(channel, false, true)
+      if (!result.ok && current(channel, w) && w.main === next) {
+        w.main = { ...previous, loading: false, error: true }; notify(channel)
+      }
+      return result
+    },
+    releaseTopic(channel: string, topicId: string) {
+      const w = windows.get(channel)
+      if (!w) return
+      w.topics.get(topicId)?.messages.clear()
+      w.reads.delete(`topic:${topicId}`); w.topics.delete(topicId); notify(channel)
+    },
+    async loadTopicLatest(channel: string, topicId: string) {
+      const w = getWindow(channel)
+      if (!current(channel, w)) return
+      return this.loadTopic(channel, topicId, true)
+    },
+    setMainPinned(channel: string, pinned: boolean) { const w = windows.get(channel); if (w) w.main.following = pinned },
+    setTopicPinned(channel: string, topicId: string, pinned: boolean) {
+      const t = windows.get(channel)?.topics.get(topicId); if (t) t.following = pinned
     },
     async bootstrap(channel: string): Promise<Result<MessagePage>> {
       const request = sync.get().channels[channel]?.latest
@@ -425,6 +580,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         mergeBaselines(w, result.data)
+        trimMain(w, 'older')
         p.asOfSeq = result.data.as_of_seq; p.before = result.data.topics[0]?.last_seq; p.hasMore = result.data.has_more
         withSync(channel, () => { void sync.settleHistory(channel, result.data.topics.map(t => t.latest_message)) })
       }
@@ -433,24 +589,47 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     loadSummary,
     ensureSummary,
     retrySummary,
-    async loadTopic(channel: string, topicId: string) {
+    async loadTopic(channel: string, topicId: string, latest = false) {
       const w = getWindow(channel)
+      if (!current(channel, w)) return
+      for (const [id, other] of windows) if (other !== w && other.topics.size) {
+        for (const [topic, value] of other.topics) { value.messages.clear(); other.reads.delete(`topic:${topic}`) }
+        other.topics.clear(); notify(id)
+      }
       let t = w.topics.get(topicId)
-      if (!t) w.topics.set(topicId, t = topicWindow())
-      if (!current(channel, w) || t.loading || !t.hasMore) return
+      if (!t) {
+        for (const [id, old] of w.topics) { old.messages.clear(); w.reads.delete(`topic:${id}`); w.topics.delete(id) }
+        w.topics.set(topicId, t = topicWindow())
+        for (const m of sync.get().channels[channel]?.messages ?? []) if (m.topic_id === topicId) t.messages.set(m.seq, m)
+        trimMessages(t.messages, TOPIC_MESSAGE_LIMIT)
+      }
+      if (!current(channel, w) || (!latest && (t.loading || !t.hasMore))) return
+      const older = t.initialized && !latest
       t.loading = true; t.error = false; t.notFound = false; notify(channel)
       const { result, isCurrent } = await read(channel, w, `topic:${topicId}`, () => options.api.listTopicMessages(channel, topicId,
-        t.before === undefined ? {} : { before_seq: t.before }))
-      if (!isCurrent()) return
+        latest || t.before === undefined ? {} : { before_seq: t.before }))
+      if (!isCurrent() || w.topics.get(topicId) !== t) return
       t.loading = false
       const missing = !result.ok && result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found'
       t.notFound = missing
       t.error = !result.ok && !missing
       if (result.ok) {
+        if (latest) t.messages.clear()
+        if (!older) { t.hasNewer = false; t.following = true; t.newerCount = 0; t.through = undefined }
         t.initialized = true
         t.through = Math.max(t.through ?? 0, result.data.messages.at(-1)?.seq ?? 0)
         for (const m of result.data.messages) t.messages.set(m.seq, m)
+        if (!older) {
+          const suffix = (sync.get().channels[channel]?.messages ?? []).filter(m => m.topic_id === topicId && m.seq > (t!.through ?? 0))
+          if (countSequencesAfter(w.evidence.get(topicId) ?? [], t.through ?? 0) > suffix.length) t.hasNewer = true
+          else for (const m of suffix) t.messages.set(m.seq, m)
+        }
         t.before = result.data.messages[0]?.seq; t.hasMore = result.data.has_more
+        if (trimMessages(t.messages, TOPIC_MESSAGE_LIMIT, older ? 'older' : 'newer')) {
+          if (older) t.hasNewer = true
+          else { t.hasMore = true; t.before = Math.min(...t.messages.keys()) }
+        }
+        if (t.hasNewer) t.through = Math.max(0, ...t.messages.keys())
         withSync(channel, () => { void sync.settleHistory(channel, result.data.messages) })
       }
       notify(channel)

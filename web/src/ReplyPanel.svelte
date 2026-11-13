@@ -4,6 +4,7 @@
   import type { Message } from './api'
   import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
   import Composer from './Composer.svelte'
+  import VirtualRows from './ui/VirtualRows.svelte'
   import {
     confirmReplaceDraftWithFailedSend,
     decideEditAndResend,
@@ -193,11 +194,30 @@
           : 'ready',
   )
 
+  let rowWindow = $state<{ reveal(id: string, focus?: boolean, align?: 'start' | 'end'): Promise<void> } | null>(null)
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
   const focusableMessageIds = $derived(visibleMessages.map((m) => m.id))
-  const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds, activeRowId))
+  let mountedIds = $state<string[]>([])
+  const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds.filter(id => mountedIds.includes(id)), activeRowId))
+
+  async function focusMessage(id: string | undefined) {
+    if (!id) return
+    activeRowId = id
+    await rowWindow?.reveal(id, true)
+  }
+  function handleRowKeydown(e: KeyboardEvent) {
+    const id = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-message-id]')?.getAttribute('data-message-id')
+    const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
+    if (next === null) return
+    e.preventDefault()
+    void focusMessage(focusableMessageIds[next])
+  }
+  async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
+    const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
+  }
 
   function captureCurrentAnchor() {
     if (!scrollEl) return
@@ -206,13 +226,15 @@
 
   function handleScroll() {
     handleTimelineContainerScroll(scrollEl, scrollController)
+    replies.setPinned(scrollController.get().pinned)
   }
 
   function applyScrollAction(action: ScrollAction, anchor: ScrollAnchor | null) {
     applyTimelineScrollAction(scrollEl, scrollController, action, anchor)
   }
 
-  function jumpToBottom() {
+  async function jumpToBottom() {
+    if (rState.hasNewer) { await replies.loadLatest(); await tick() }
     const action = scrollController.jumpToBottom()
     applyScrollAction(action, null)
   }
@@ -247,6 +269,12 @@
     } else {
       onretrytarget?.()
     }
+  }
+
+  async function loadOlder() {
+    await replies.loadOlder()
+    await tick()
+    if (rState.rootId) await rowWindow?.reveal(rState.rootId)
   }
 
   function handleRestoreRequest(clientMessageId: string) {
@@ -289,6 +317,7 @@
     if (!canSendReply) return false
     const ok = await rc.submit(anchorMessageId)
     if (!ok) return false
+    if (rState.hasNewer) await replies.loadLatest()
     const action = scrollController.onUserSubmit()
     applyScrollAction(action, null)
     void tick().then(() => {
@@ -297,28 +326,6 @@
     return true
   }
 
-  function focusLatestMessageRow() {
-    if (!scrollEl) return
-    const rows = scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]')
-    if (rows.length > 0) {
-      const lastId = focusableMessageIds.at(-1)
-      if (lastId) activeRowId = lastId
-      focusTarget(rows[rows.length - 1])
-    }
-  }
-
-  function handleMessageRowKeydown(e: KeyboardEvent) {
-    if (!scrollEl) return
-    const rows = Array.from(scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]'))
-    const idx = rows.indexOf(e.currentTarget as HTMLElement)
-    const nextIdx = stepMessageRowIndex(idx, rows.length, e)
-    if (nextIdx !== null) {
-      e.preventDefault()
-      const nextId = focusableMessageIds[nextIdx]
-      if (nextId) activeRowId = nextId
-      focusTarget(rows[nextIdx])
-    }
-  }
 </script>
 
 <div class="reply-panel">
@@ -368,14 +375,28 @@
         <EmptyState title="この返信のつながりは利用できません。" />
       {/if}
 
+      {#if rState.hasOlder && !targetUnavailable}
+        <Button variant="secondary" onclick={loadOlder}>以前の返信を読み込む</Button>
+      {/if}
       {#if visibleMessages.length > 0 || pending.length > 0}
-        <ul class="reply-panel__list" aria-label="返信のつながりのメッセージ一覧">
-          {#each visibleMessages as m, idx (m.id)}
-            <li
-              class="reply-panel__item"
-              class:reply-panel__item--root={idx === 0 && m.id === effectiveRootId}
-              data-message-id={m.id}
-            >
+        <VirtualRows
+        class="reply-panel__list"
+        bind:this={rowWindow}
+        items={visibleMessages}
+        rowId={(m) => m.id}
+        pendingItems={pending}
+        pendingId={(p) => p.clientMessageId}
+        pendingStatus={(p) => p.status}
+        pendingClass="reply-panel__item"
+        itemClass={(m) => m.id === effectiveRootId ? 'reply-panel__item reply-panel__item--root' : 'reply-panel__item'}
+        container={scrollEl}
+        label="返信のつながりのメッセージ一覧"
+        followBottom={scrollView.pinned}
+        onmounted={(ids) => { mountedIds = ids }}
+        onfocuslost={() => focusTarget(composerRef)}
+      >
+        {#snippet children(m)}
+
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
@@ -389,24 +410,22 @@
                 onrowfocus={() => {
                   activeRowId = m.id
                 }}
-                onrowkeydown={handleMessageRowKeydown}
+                onrowkeydown={handleRowKeydown}
               />
-            </li>
-          {/each}
-          {#each pending as p (p.clientMessageId)}
-            <li class="reply-panel__item" data-status={p.status}>
-              <MessageRow
-                body={p.body}
-                pendingStatus={p.status}
-                retryable={p.retryable}
-                {targetUnavailable}
-                onretry={() => void rc.retry(p.clientMessageId)}
-                onrestore={() => handleRestoreRequest(p.clientMessageId)}
-                ondiscard={() => handleDiscard(p.clientMessageId)}
-              />
-            </li>
-          {/each}
-        </ul>
+
+          {/snippet}
+        {#snippet pendingRow(p)}
+          <MessageRow
+            body={p.body}
+            pendingStatus={p.status}
+            retryable={p.retryable}
+            {targetUnavailable}
+            onretry={() => void rc.retry(p.clientMessageId)}
+            onrestore={() => handleRestoreRequest(p.clientMessageId)}
+            ondiscard={() => handleDiscard(p.clientMessageId)}
+          />
+        {/snippet}
+        </VirtualRows>
       {/if}
 
       {#if isLoading && visibleMessages.length > 0}
@@ -423,10 +442,10 @@
     {/if}
   </div>
 
-  {#if !scrollView.pinned && scrollView.belowCount > 0}
+  {#if !scrollView.pinned && (scrollView.belowCount > 0 || rState.newerCount > 0)}
     <div class="reply-panel__new-below">
       <Button variant="primary" onclick={jumpToBottom}>
-        新着 {scrollView.belowCount}件 ↓
+        新着 {Math.max(scrollView.belowCount, rState.newerCount)}件 ↓
       </Button>
     </div>
   {/if}
@@ -441,7 +460,7 @@
       submitDisabled={!canSendReply}
       oninput={(b) => rc.setDraft(b)}
       onsubmit={handleSubmit}
-      onarrowupempty={focusLatestMessageRow}
+      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1))}
     />
   </div>
 
@@ -476,6 +495,7 @@
   .reply-panel__scroll {
     grid-row: 2;
     overflow-y: auto;
+    overflow-anchor: none;
     padding: var(--space-12);
     display: flex;
     flex-direction: column;
@@ -484,23 +504,11 @@
     min-width: 0;
   }
 
-  .reply-panel__list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: var(--space-4);
-    min-width: 0;
-  }
-
-  .reply-panel__item {
-    min-width: 0;
-  }
-
-  .reply-panel__item--root {
+  :global(.reply-panel__item--root) {
     padding-bottom: var(--space-8);
     border-bottom: 1px solid var(--border);
   }
+
 
   .reply-panel__more {
     display: flex;

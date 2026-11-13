@@ -1,6 +1,8 @@
 import * as api from './api'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
+import { REPLY_MESSAGE_LIMIT } from './protocol'
+import { countSequencesAfter, rememberSequence, trimMessages } from './message-window'
 
 type Sync = ReturnType<typeof createSync>
 export type RepliesApi = {
@@ -10,7 +12,10 @@ export const repliesApi = (organizationId: string): RepliesApi => ({
   listReplyChain: (channel, anchor, query) => api.listReplyChain(organizationId, channel, anchor, query),
 })
 const chain = (anchor: Message) => ({ anchor, rootId: anchor.reply_root_id ?? anchor.id,
-  messages: new Map<string, Message>([[anchor.id, anchor]]), after: 0, hasMore: true,
+  messages: new Map<string, Message>([[anchor.id, anchor]]), after: 0, hasMore: true, hasOlder: false,
+  following: true, hasNewer: false, newerCount: 0,
+  restart: false,
+  liveSequences: [] as Parameters<typeof rememberSequence>[0],
   loading: false, error: false, read: Symbol() })
 type Chain = ReturnType<typeof chain>
 
@@ -20,6 +25,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   const listeners = new Set<() => void>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>()
+  const inFlight = new WeakMap<Chain, Promise<void>>()
   let closed = false
   let sessionToken = 0
   let previous = sync.get()
@@ -35,14 +41,23 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   const belongs = (w: Chain, m: Message) => m.id === w.rootId || m.reply_root_id === w.rootId
   const pending = (w: Chain, c: ReturnType<Sync['get']>['channels'][string] | undefined) =>
     (c?.pending ?? []).filter(p => p.reply_to && (p.reply_to === w.rootId || w.messages.has(p.reply_to)))
-  const mergeStream = (channel: string, w: Chain) => {
+  const mergeStream = (channel: string, w: Chain, incoming = sync.get().channels[channel]?.messages ?? []) => {
     let changed = false
-    for (const m of sync.get().channels[channel]?.messages ?? []) if (belongs(w, m) && w.messages.get(m.id) !== m) {
+    for (const m of incoming) if (belongs(w, m) && (!w.hasOlder || m.seq > w.after) && w.messages.get(m.id) !== m) {
+      const isNew = countSequencesAfter(w.liveSequences, m.seq - 1) === countSequencesAfter(w.liveSequences, m.seq)
+      rememberSequence(w.liveSequences, m.seq)
+      if (!w.following && w.messages.size >= REPLY_MESSAGE_LIMIT && !w.messages.has(m.id)) {
+        if (isNew) { w.hasNewer = w.hasMore = true; w.newerCount++; changed = true }
+        continue
+      }
       w.messages.set(m.id, m); changed = true
+    }
+    if (trimMessages(w.messages, REPLY_MESSAGE_LIMIT, w.hasMore ? 'older' : 'newer')) {
+      if (!w.hasMore) w.hasOlder = true
     }
     return changed
   }
-  const unsubscribe = sync.subscribe(() => {
+  const unsubscribe = sync.subscribe((_changed, records) => {
     const next = sync.get()
     const changed = new Set<string>()
     for (const id of new Set([...chains.keys(), ...snapshots.keys()])) {
@@ -50,10 +65,10 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       const w = chains.get(id)
       if (w) {
         if (!next.running || next.organization === 'unavailable' || !after?.watched || after.state === 'unavailable' ||
-          (before?.cursor != null && after.cursor === null)) { chains.delete(id); changed.add(id) }
+          (before?.cursor != null && after.cursor === null)) { release(w); chains.delete(id); changed.add(id) }
         else {
           const oldPending = pending(w, before)
-          if (before?.messages !== after.messages && mergeStream(id, w)) changed.add(id)
+          if ((before?.messages !== after.messages || records?.has(id)) && mergeStream(id, w, records?.get(id))) changed.add(id)
           if (before?.pending !== after.pending || changed.has(id)) {
             const newPending = pending(w, after)
             if (oldPending.length !== newPending.length || oldPending.some((p, i) => p !== newPending[i])) changed.add(id)
@@ -69,15 +84,17 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   const current = (channel: string, w: Chain) => !closed && sync.get().running &&
     sync.get().organization === 'available' && chains.get(channel) === w &&
     sync.get().channels[channel]?.watched === true && sync.get().channels[channel]?.state !== 'unavailable'
+  const release = (w: Chain) => { w.messages.clear(); w.anchor = { ...w.anchor, body: '' } }
 
-  async function loadMore(channel: string) {
+  async function readMore(channel: string) {
     const w = chains.get(channel)
-    if (!w || !current(channel, w) || w.loading || !w.hasMore) return
+    if (!w || !current(channel, w) || w.loading || (!w.hasMore && !w.restart)) return
+    const requestedAfter = w.restart ? 0 : w.after
     const token = Symbol(), session = sessionToken
     w.read = token; w.loading = true; w.error = false; notify()
     const isCurrent = () => current(channel, w) && w.read === token
     let timer: ReturnType<typeof setTimeout> | undefined
-    const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, w.anchor.id, { after_seq: w.after }))
+    const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, w.anchor.id, { after_seq: requestedAfter }))
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
     // C6 late 401 and C10 remain authoritative for this Account Session, even after timeout or unwatch.
     void operation.then(r => {
@@ -98,12 +115,17 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         w.error = true
       } else {
         const messages = result.data.messages.filter(m => m.channel_id === channel && belongs(w, m))
+        if (w.restart) {
+          w.messages.clear(); w.after = 0; w.hasOlder = w.hasNewer = false; w.newerCount = 0
+          w.liveSequences = []; w.following = true; w.restart = false
+        }
         for (const m of messages) w.messages.set(m.id, m)
         // Only the returned page advances continuation: a live append may be far beyond an unpaged sibling.
-        const after = messages.at(-1)?.seq ?? w.after
+        const after = messages.at(-1)?.seq ?? requestedAfter
         // An empty or non-advancing filtered page cannot safely continue, even if has_more is set.
-        w.hasMore = result.data.has_more && after > w.after
+        w.hasMore = result.data.has_more && after > requestedAfter
         w.after = Math.max(w.after, after)
+        if (trimMessages(w.messages, REPLY_MESSAGE_LIMIT)) w.hasOlder = true
         void sync.settleHistory(channel, messages)
         mergeStream(channel, w)
       }
@@ -122,6 +144,17 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) }
     }
   }
+  function loadMore(channel: string): Promise<void> {
+    const w = chains.get(channel)
+    if (!w) return Promise.resolve()
+    const active = inFlight.get(w)
+    if (active) return active
+    const promise = readMore(channel)
+    inFlight.set(w, promise)
+    const releaseRead = () => { if (inFlight.get(w) === promise) inFlight.delete(w) }
+    void promise.then(releaseRead, releaseRead)
+    return promise
+  }
   function snapshot(channel: string) {
     const w = closed ? undefined : chains.get(channel)
     const c = closed ? undefined : sync.get().channels[channel]
@@ -129,6 +162,8 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       messages: w ? [...w.messages.values()].sort((a, b) => a.seq - b.seq) : [],
       pending: w ? pending(w, c) : [],
       loading: w?.loading ?? false, error: w?.error ?? false, hasMore: w?.hasMore ?? false,
+      hasOlder: w?.hasOlder ?? false,
+      hasNewer: w?.hasNewer ?? false, newerCount: w?.newerCount ?? 0,
       unavailable: c?.state === 'unavailable' || sync.get().organization === 'unavailable' }
   }
   return {
@@ -142,15 +177,35 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       if (anchor.channel_id !== channel || closed || !sync.get().running || sync.get().organization !== 'available' ||
         !sync.get().channels[channel]?.watched || sync.get().channels[channel]?.state === 'unavailable') return
       const w = chain(anchor)
+      for (const old of chains.values()) release(old)
+      chains.clear(); snapshots.clear()
       chains.set(channel, w); mergeStream(channel, w); notify()
       await loadMore(channel)
     },
     loadMore,
-    dismiss(channel: string) { chains.delete(channel); notify() },
+    setPinned(channel: string, pinned: boolean) { const w = chains.get(channel); if (w) w.following = pinned },
+    async loadLatest(channel: string) {
+      const w = chains.get(channel)
+      if (!w || !current(channel, w)) return
+      w.following = true
+      while (current(channel, w) && w.hasMore) {
+        await loadMore(channel)
+        if (w.error) break
+      }
+      if (current(channel, w) && !w.error) { w.hasNewer = false; w.newerCount = 0; notify() }
+    },
+    async loadOlder(channel: string) {
+      const w = chains.get(channel)
+      if (!w || !current(channel, w)) return
+      w.restart = true; w.read = Symbol(); w.loading = false; w.following = false
+      inFlight.delete(w)
+      await loadMore(channel)
+    },
+    dismiss(channel: string) { const w = chains.get(channel); if (w) release(w); chains.delete(channel); notify() },
     async send(channel: string, body: string, parentId?: string) {
       const w = chains.get(channel)
       const parent = parentId ?? w?.anchor.id
-      if (!w || !current(channel, w) || !parent || !w.messages.has(parent)) return false
+      if (!w || !current(channel, w) || !parent || (!w.messages.has(parent) && parent !== w.anchor.id && parent !== w.rootId)) return false
       return sync.getTimeline(channel).send(body, { reply_to: parent })
     },
     retry(channel: string, clientMessageId: string) {
@@ -159,8 +214,8 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       const p = sync.get().channels[channel]?.pending.find(p => p.clientMessageId === clientMessageId)
       if (p?.reply_to && (p.reply_to === w.rootId || w.messages.has(p.reply_to))) return sync.getTimeline(channel).retry(clientMessageId)
     },
-    replaceSession() { sessionToken++; chains.clear(); cancelReads(); notify() },
-    close() { closed = true; unsubscribe(); chains.clear(); cancelReads(); notify(); listeners.clear() },
+    replaceSession() { sessionToken++; chains.forEach(release); chains.clear(); cancelReads(); notify() },
+    close() { closed = true; unsubscribe(); chains.forEach(release); chains.clear(); cancelReads(); notify(); listeners.clear() },
   }
 }
 export type Replies = ReturnType<typeof createReplies>

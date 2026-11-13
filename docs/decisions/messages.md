@@ -71,3 +71,5 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 ## Entries in other parts
 
 - [auth](auth.md): `#314 single-statement hot reads use`
+
+- [web](web.md): `#308 separates display bodies`, `#308 uses 400 main/300 Topic/200 Reply`, `#308 refetches older main pages`

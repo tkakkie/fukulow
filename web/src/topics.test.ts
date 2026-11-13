@@ -502,7 +502,7 @@ it.each(readKinds)('timed-out %s read cannot overwrite its completed retry', asy
   await c.sync.close()
 })
 
-it('independent read kinds and Topic targets do not supersede each other', async () => {
+it('independent read kinds survive while reselection releases the inactive Topic and fences its read', async () => {
   const c = topicClient()
   await c.boot()
   const first = readKinds.map(kind => deferRead(c, kind))
@@ -514,7 +514,8 @@ it('independent read kinds and Topic targets do not supersede each other', async
   expect(c.topics.get('A').main).toMatchObject({ asOfSeq: 20, before: 2, hasMore: false, loading: false })
   expect(c.topics.get('A').list).toMatchObject({ asOfSeq: 20, before: 2, hasMore: true, loading: false })
   expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 99 })
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2, 10])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([10])
+  expect(c.topics.get('A').topic('T').initialized).toBe(false)
   await c.sync.close()
 })
 
@@ -949,8 +950,8 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
     main: { asOfSeq: 10, before: 8, hasMore: true, loading: false, error: false },
     list: { asOfSeq: 10, before: 3, hasMore: false, loading: false, error: false },
   })
-  expect(beforeLoss.topic('T')).toMatchObject({ initialized: true, before: 2, hasMore: false, loading: false, error: false })
-  expect(beforeLoss.topic('T').messages.map(m => m.seq)).toEqual([2, 5, 10])
+  expect(beforeLoss.topic('T')).toMatchObject({ initialized: false, loading: false, error: false })
+  expect(beforeLoss.topic('T').messages.map(m => m.seq)).toEqual([10])
   expect(beforeLoss.topic('U')).toMatchObject({ initialized: true, before: 7, hasMore: true })
   expect(beforeLoss.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
     ['V', 3, 1],
@@ -1007,7 +1008,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
 
   expect(session.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 13 })
   const afterReplay = session.topics.get('A')
-  expect(afterReplay.topic('T').messages.map(m => m.seq)).toEqual([2, 5, 10, 11])
+  expect(afterReplay.topic('T').messages.map(m => m.seq)).toEqual([10, 11])
   expect(afterReplay.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
     ['U', 7, 2],
     ['T', 11, 4],
@@ -1025,7 +1026,6 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   ])
 
   // 6. Outgoing paging requests respect retained hasMore, asOfSeq and before cursors
-  await session.topics.loadTopic('A', 'T')
   await session.topics.loadList('A')
   expect(topicsApi.listTopicMessages).not.toHaveBeenCalled()
   expect(topicsApi.listTopics).not.toHaveBeenCalled()

@@ -7,6 +7,13 @@ Related: [Members, Roles and Invites; access loss](accounts.md#members-roles-and
 Behaviour contract for Message delivery. OpenAPI covers only types (REST shapes, `ClientMessage`/`ServerEvent`, close codes); Rust, the web client and a future Kotlin client satisfy this contract independently and need not share an algorithm. Design and review: #91.
 Scope of every key and guarantee: one Organization and one Account Session. The idempotency key is `(organization_id, sender, client_message_id)`. Delivery guarantees assume the supported single-process deployment (`docs/decisions/process.md`).
 
+### Web display retention (#308)
+Display bodies have separate lifetimes from cursor, gap, Topic-count and Unread evidence. Named limits are 400 main projection records, 300 active Topic Messages and 200 Reply Messages. Inactive Topic history is released. Sync retains at most 400 Messages per watched Channel and 50 per inactive Channel in five LRU slots, with a shared 600-record sync budget. Main and Topic budgets are shared across Channels; together with the single panel, display stores retain at most 1,500 records. Pending sends and sequence/ID bookkeeping are separate and never discarded to meet a body limit.
+
+Older main pages continue exclusively at retained W-relative positions with fixed W. If live trimming leaves the entire window beyond W, a fresh first page establishes a new W before continuing below the retained anchor; its records do not replace that anchor. Latest navigation replaces the window with a fresh first page. Topic history uses before_seq or a fresh latest page. Reply continuation uses only returned page seqs, never live appends; older Reply history restarts at the chain start. Explicit latest navigation drains forward pages. These projection reads never advance the sync cursor. Eviction fences superseded reads, preserving C6/C8-C10.
+
+Each timeline mounts viewport rows plus overscan, measuring attached rows only. Paging preserves the visible anchor; an unpinned full window holds its bodies while arrivals remain available through latest navigation. Keyboard navigation uses retained Message IDs, mounting a destination before focus. A removed focus target falls back to the Composer. First-Unread entry can page beyond the body cap; a visit's marker is restored whenever its retained row is mounted again.
+
 ### Server guarantees (implemented and tested)
 Tests are in `server/src/messages/tests.rs` (M), `server/src/realtime/tests.rs` (R) and `web/src/protocol.test.ts` (W).
 - For all sends, including non-Replies, Account Session authentication precedes input validation (400/413/415), which precedes organization_unavailable (404) and Channel authorization. Topic, timeline and history GET projection routes keep organization_unavailable (404) before query validation (400); the Reply chain GET validates first.
@@ -71,4 +78,3 @@ Fixtures assert only what a client shows or emits to the outside; they do not na
 - **Topic projection vocabulary** (P1-P5, implemented in controller-layer fixtures): a Message's Topic label, Topic-filtered and main-timeline pages (`as_of_seq` = W), the main-timeline lines a client shows (one per Message without Topic, one per Topic with its merged position and count) and a Topic view's Messages.
 
 Capabilities (per-operation `{allowed, reason?}` on resources) are not part of this contract; they are added only when the UI must show whether an operation is possible in advance (see `docs/decisions/web.md`).
-

@@ -113,6 +113,8 @@ States look the same everywhere (board A2-2):
 - Applied in `main.ts` before mounting, never by an inline script (CSP, #197).
 
 ## 8. Timeline scroll
+- Main, Topic and Reply timelines mount viewport rows with 560px overscan. Attached rows use ResizeObserver; one persistent IntersectionObserver attaches/detaches rows for presentation. Spacer heights use measured geometry via `--row-space`; native scroll anchoring is disabled because the shared controller preserves the anchor.
+- Arrow/Home/End navigate retained Message IDs and mount their destination before focus; Tab enters one mounted confirmed row. Evicted focus falls back to the Composer. A visit's Unread marker returns when its row is mounted again.
 - Pinned = scrolled to within 64px of the bottom. When pinned, new Messages keep the view at the bottom; when not pinned, the position does not move and `新着 n件 ↓` appears.
 - Your own send scrolls to the bottom: it is your action, not an automatic follow.
 - Older pages, gap fills and reordering above the viewport keep the first visible Message at the same offset (measured anchor, not only `overflow-anchor`); focus does not move.

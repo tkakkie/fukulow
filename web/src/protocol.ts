@@ -3,6 +3,13 @@ import type { components, ServerEvent } from './api-schema.d.ts'
 type Message = components['schemas']['Message']
 type MessagePage = components['schemas']['MessagePage']
 type SendTarget = Pick<components['schemas']['SendMessageRequest'], 'reply_to' | 'topic_name'>
+export const MAIN_MESSAGE_LIMIT = 400
+export const TOPIC_MESSAGE_LIMIT = 300
+export const REPLY_MESSAGE_LIMIT = 200
+export const INACTIVE_CHANNEL_MESSAGE_LIMIT = 50
+export const INACTIVE_CHANNEL_LIMIT = 5
+export const TOTAL_MESSAGE_LIMIT = 1500
+export const SYNC_MESSAGE_LIMIT = TOTAL_MESSAGE_LIMIT - MAIN_MESSAGE_LIMIT - TOPIC_MESSAGE_LIMIT - REPLY_MESSAGE_LIMIT
 export type Failure = number | 'network' | 'timeout'
 export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff'
 export type Pending = SendTarget & { clientMessageId: string; body: string; state: 'sending' | 'unknown' | 'failed'; request: number }
@@ -13,6 +20,10 @@ export type ChannelState = {
   messages: Message[]
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
   advancing: number[]
+  heldThrough?: number
+  lastUsed?: number
+  retainedCount?: number
+  streamBase?: number
   pending: Pending[]
   hasOlder: boolean
   historyError: boolean
@@ -81,10 +92,11 @@ const sameFields = <T extends object>(a: T, b: T) => {
 }
 
 /** All policy lives here. Tokens are deterministic local generations, never wire ids. */
-export function step(previous: State, input: Input): { state: State; effects: Effect[]; changedChannels: ReadonlySet<string> } {
+export function step(previous: State, input: Input): { state: State; effects: Effect[]; changedChannels: ReadonlySet<string>; records: ReadonlyMap<string, Message[]> } {
   let state: State = { ...previous, requests: { ...previous.requests }, timers: { ...previous.timers } }
   const touched = new Set<string>()
   const effects: Effect[] = []
+  const observedRecords = new Map<string, Message[]>()
   const token = () => state.next++
   const channel = (id: string) => {
     if (!touched.has(id)) {
@@ -100,6 +112,29 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   }
   const finish = () => {
     for (const id of touched) {
+      const c = state.channels[id]
+      if (c && c.messages !== previous.channels[id]?.messages) c.retainedCount = c.messages.length
+    }
+    const inactive = Object.entries(state.channels).filter(([, c]) => !c.watched)
+      .sort((a, b) => (b[1].lastUsed ?? 0) - (a[1].lastUsed ?? 0))
+    for (const [index, [id, c]] of inactive.entries()) {
+      const limit = index < INACTIVE_CHANNEL_LIMIT ? INACTIVE_CHANNEL_MESSAGE_LIMIT : 0
+      if ((c.retainedCount ?? 0) > limit) {
+        const trimmed = channel(id)
+        trimmed.messages = limit ? c.messages.slice(-limit) : []; trimmed.retainedCount = trimmed.messages.length; trimmed.hasOlder = true
+      }
+    }
+    let remaining = SYNC_MESSAGE_LIMIT
+    const priority = Object.entries(state.channels).sort((a, b) => Number(b[1].watched) - Number(a[1].watched) ||
+      (b[1].lastUsed ?? 0) - (a[1].lastUsed ?? 0))
+    for (const [id, c] of priority) {
+      if ((c.retainedCount ?? 0) > remaining) {
+        const trimmed = channel(id)
+        trimmed.messages = remaining ? c.messages.slice(-remaining) : []; trimmed.retainedCount = trimmed.messages.length; trimmed.hasOlder = true
+      }
+      remaining -= state.channels[id].retainedCount ?? 0
+    }
+    for (const id of touched) {
       const before = previous.channels[id]
       const after = state.channels[id]
       if (before === after || (before && after && sameFields(before, after))) {
@@ -110,7 +145,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     if (touched.size === 0) state.channels = previous.channels
     if (sameFields(previous.requests, state.requests)) state.requests = previous.requests
     if (sameFields(previous.timers, state.timers)) state.timers = previous.timers
-    return { state: sameFields(previous, state) ? previous : state, effects, changedChannels: touched }
+    return { state: sameFields(previous, state) ? previous : state, effects, changedChannels: touched, records: observedRecords }
   }
   const cancel = (id: number | undefined) => {
     if (id === undefined || !state.timers[id]) return
@@ -163,7 +198,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     effects.push({ type: 'fetch_history', id: n, channel: id, page, seq })
   }
   const gap = (c: ChannelState) => c.cursor !== null &&
-    ((c.messages.at(-1)?.seq ?? 0) > c.cursor + 1 || (c.subscription?.confirmed && c.subscription.watermark > c.cursor))
+    ((c.heldThrough ?? 0) > c.cursor + 1 || (c.subscription?.confirmed && c.subscription.watermark > c.cursor))
   const reconcile = (id: string, immediate = false) => {
     const c = channel(id)
     if (!c.watched || c.state === 'unavailable' || c.cursor === null) return
@@ -187,6 +222,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream') => {
     const c = channel(id)
     const valid = records.filter(m => m.channel_id === id)
+    if (valid.length) observedRecords.set(id, valid)
     // Sort/deduplicate only the incoming page. Find changes in the existing sorted window without
     // rebuilding an index or sorting it; allocate one replacement array only when a record changes.
     const incoming = valid.length < 2 ? valid : [...new Map(valid.map(m => [m.seq, m])).values()].sort((a, b) => a.seq - b.seq)
@@ -209,6 +245,12 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     if (merged) {
       for (; offset < c.messages.length; offset++) merged.push(c.messages[offset])
       c.messages = merged
+    }
+    if (valid.length) c.heldThrough = Math.max(c.heldThrough ?? 0, ...valid.map(m => m.seq))
+    if (c.messages.length > MAIN_MESSAGE_LIMIT) {
+      c.messages = source === 'window' && valid.at(-1)!.seq < c.messages.at(-1)!.seq
+        ? c.messages.slice(0, MAIN_MESSAGE_LIMIT) : c.messages.slice(-MAIN_MESSAGE_LIMIT)
+      c.hasOlder = true
     }
     settle(id, valid)
     if (source !== 'window') {
@@ -248,9 +290,9 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     else clearChannels()
     state = { ...initialState(input.selfId), next: state.next, running: true }
     connect()
-    return { state, effects, changedChannels: touched }
+    return { state, effects, changedChannels: touched, records: observedRecords }
   }
-  if (input.type === 'stop') { stop(false); return { state, effects, changedChannels: touched } }
+  if (input.type === 'stop') { stop(false); return { state, effects, changedChannels: touched, records: observedRecords } }
   if (input.type === 'organization_unavailable' || (input.type === 'socket_closed' &&
     input.connection === state.connection && input.code === 4003)) {
     if (!state.running) return finish()
@@ -298,10 +340,14 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     case 'watch': {
       const c = channel(input.channel)
       if (c.watched && c.state !== 'unavailable') break
+      c.lastUsed = token()
       c.watched = true; c.historyError = false
       if (c.state === 'unavailable') { c.state = 'loading'; c.subscription = undefined }
       if (c.cursor === null) history(input.channel, 'latest')
-      else { subscribe(input.channel); reconcile(input.channel) }
+      else {
+        if (!c.messages.length) history(input.channel, 'latest')
+        subscribe(input.channel); reconcile(input.channel)
+      }
       break
     }
     case 'channel_unavailable':
@@ -311,6 +357,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const c = channel(input.channel)
       if (c.subscription && state.connected) effects.push({ type: 'unsubscribe', channel: input.channel })
       c.watched = false; c.subscription = undefined
+      c.lastUsed = token()
       invalidate(input.channel)
       break
     }
@@ -393,7 +440,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       }
       const before = c.cursor
       const bootstrap = c.cursor === null && r.page === 'latest'
-      if (bootstrap) c.cursor = input.page.messages.at(-1)?.seq ?? 0
+      if (bootstrap) { c.cursor = input.page.messages.at(-1)?.seq ?? 0; c.streamBase = c.cursor }
       merge(r.channel, input.page.messages, r.page === 'after' ? 'stream' : 'window')
       // Latest/before has_more is older; after has_more must never overwrite it.
       if (r.page !== 'after') {

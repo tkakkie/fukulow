@@ -106,7 +106,7 @@ export function createSync(options: SyncOptions) {
   let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
-  const listeners = new Set<(changedChannels: ReadonlySet<string>) => void>()
+  const listeners = new Set<(changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const composerListeners = new Map<string, Set<() => void>>()
   const topicComposerListeners = new Map<string, Set<() => void>>()
@@ -316,7 +316,7 @@ export function createSync(options: SyncOptions) {
         }
       }
     }
-    if (state !== previous) listeners.forEach(l => l(result.changedChannels))
+    if (state !== previous) listeners.forEach(l => l(result.changedChannels, result.records))
     for (const channel of result.changedChannels) {
       channelListeners.get(channel)?.forEach(l => l())
     }
@@ -771,7 +771,7 @@ export function createSync(options: SyncOptions) {
 
   return {
     get: () => state,
-    subscribe(listener: (changedChannels: ReadonlySet<string>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    subscribe(listener: (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),
     replaceSession: (selfId: string) => dispatch({ type: 'session_replaced', selfId }),
     watch: (channel: string) => dispatch({ type: 'watch', channel }),
