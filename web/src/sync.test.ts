@@ -260,7 +260,7 @@ it('request timeout becomes unknown and same-key retry settles; late completion 
   expect(vi.getTimerCount()).toBe(0)
 })
 
-it.each([400, 403, 404, 409, 413, 415, 402, 408, 422, 429, 499, 500])(
+it.each([400, 403, 404, 409, 413, 415, 402, 408, 422, 499, 500])(
   'only C6 definite refusals prevent delegate resend after HTTP %s', async status => {
     const client = controllerClient()
     await ready(client)

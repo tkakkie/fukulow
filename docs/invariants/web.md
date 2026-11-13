@@ -22,11 +22,14 @@ Web UI shell: sign-in/session UI, navigation, tokens, timeline, a11y, setup. Wri
 | A Member panel created during C9 recovers on explicit Channel re-selection | `web/src/session.test.ts::a Member panel created during C9 recovers on explicit Channel re-selection` |
 | Explicit re-selection retries the current C9 Channel; another Organization's sync remains ready | `web/src/session.test.ts::explicitly selecting the current C9 Channel reattempts it while another Organization stays ready` |
 | Topic UI adapter passes all shared projections, renders one summary line at latest activity, suppresses summary-move alerts, and preserves scroll anchors | `web/src/topics.svelte.test.ts::runs all contract/realtime/client/topic-projections.json scenarios through topicsAdapter`, `web/src/timeline.svelte.test.ts::renders Topic summary lines at latest activity, creates Topics from Composer, expands sidebar/panel Topic lists, and operates Topic view with isolated drafts and return focus`, `web/src/announcements.test.ts::suppresses Topic summary moves in Channel view while announcing live arrivals in an open Topic view`, `web/src/timeline-scroll.test.ts::preserves visual scroll anchor when a Topic summary line moves from above the viewport to the tail while unpinned` |
+| Throttled pending sends show readable Japanese status with tokens, no extra live role or manual retry/edit; discard cancels and restores Composer focus | `web/src/timeline.svelte.test.ts::shows accessible Japanese throttled status, automatic retry and discard without manual resend or edit`, `web/src/sync.svelte.test.ts::exposes throttled sends reactively through retry, repeated 429, canonical ACK and discard` |
 
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [messages](messages.md): `treats admission 503 as retryable and preserves the send key`, `an admission refusal cannot restore a draft after the Account Session store was cleared`
+- [messages](messages.md): `retains the 429 delay even when ErrorBody is malformed`
+- [sync](sync.md): `429 waits without resending early, re-arms with a new delay and preserves the entire request`, `throttled sends cancel waits on canonical settlement, discard, access loss and lifecycle changes`
 - [topics](topics.md): `retains Topic window, baselines and paging cursors across C9 loss and same-Channel recovery with replay`
 - [unread](unread.md): `positions at the first Unread Message after loading needed older pages, then preserves anchor on further older loads`

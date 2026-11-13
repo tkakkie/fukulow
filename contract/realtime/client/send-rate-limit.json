@@ -1,0 +1,45 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "throttled-send-rearms-and-settles-canonically",
+      "title": "429 waits before resending the same key, repeated throttling re-arms, and ACK settles canonically",
+      "covers": ["C5", "C6"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"base"}]}},
+        {"input":{"type":"history_result","respond_to":"base","messages":[{"seq":100}],"has_more":false}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"original"},"effects":{"required":[{"type":"send","client_message_id":"c1","as":"send1"}]}},
+        {"input":{"type":"send_failed","respond_to":"send1","status":429,"retry_after_ms":2000},"effects":{"required":[{"type":"wait","purpose":"send_retry","channel":"A","as":"wait1"}],"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"throttled"}]}}}},
+        {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"forbidden":[{"type":"send"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"wait1"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"send2"}]}},
+        {"input":{"type":"send_failed","respond_to":"send2","status":429,"retry_after_ms":4000},"effects":{"required":[{"type":"wait","purpose":"send_retry","channel":"A","as":"wait2"}],"forbidden":[{"type":"send"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"wait1"},"effects":{"forbidden":[{"type":"send"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"wait2"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"send3"}]}},
+        {"input":{"type":"ack","respond_to":"send3","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"original"}},"observe":{"channels":{"A":{"pending":[],"cursor":100,"records":[{"seq":101,"body":"original"}]}}}}
+      ]
+    },
+    {
+      "id": "throttled-send-settlement-and-discard-fence-waits",
+      "title": "Echo settlement and discard both prevent a saved throttled wait from sending",
+      "covers": ["C5", "C6"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"base"}]}},
+        {"input":{"type":"history_result","respond_to":"base","messages":[{"seq":100}],"has_more":false}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c1"},"effects":{"required":[{"type":"send","client_message_id":"c1","as":"send1"}]}},
+        {"input":{"type":"send_failed","respond_to":"send1","status":429},"effects":{"required":[{"type":"wait","purpose":"send_retry","as":"wait1"}]}},
+        {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"me","client_message_id":"c1"}},"observe":{"channels":{"A":{"pending":[]}}}},
+        {"input":{"type":"timer_elapsed","respond_to":"wait1"},"effects":{"forbidden":[{"type":"send"}]}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"c2"},"effects":{"required":[{"type":"send","client_message_id":"c2","as":"send2"}]}},
+        {"input":{"type":"send_failed","respond_to":"send2","status":429},"effects":{"required":[{"type":"wait","purpose":"send_retry","as":"wait2"}]}},
+        {"input":{"type":"user_discard","client_message_id":"c2"},"observe":{"channels":{"A":{"pending":[]}}}},
+        {"input":{"type":"timer_elapsed","respond_to":"wait2"},"effects":{"forbidden":[{"type":"send"}]}}
+      ]
+    }
+  ]
+}

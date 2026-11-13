@@ -105,6 +105,15 @@ test('the disposable load stack also separates owner migrations from app credent
   assert.match(result.stderr, /LOAD_APP_PASSWORD/)
 })
 
+test('the send limit keeps the production default unless the environment overrides it', () => {
+  const unset = JSON.parse(execFileSync('docker', args('caddy'), { cwd, env, encoding: 'utf8' })).services.app
+  assert.equal(String(unset.environment.FUKULOW_SEND_BURST), '10')
+  assert.equal(String(unset.environment.FUKULOW_SEND_REFILL_PER_SECOND), '1')
+  const raised = JSON.parse(execFileSync('docker', args('caddy'), { cwd, env: { ...env, FUKULOW_SEND_BURST: '10000', FUKULOW_SEND_REFILL_PER_SECOND: '1000' }, encoding: 'utf8' })).services.app
+  assert.equal(String(raised.environment.FUKULOW_SEND_BURST), '10000')
+  assert.equal(String(raised.environment.FUKULOW_SEND_REFILL_PER_SECOND), '1000')
+})
+
 test('both profiles isolate the database and trust only the fixed proxy IP, including custom prefixes', () => {
   for (const profile of ['caddy', 'nginx']) {
     for (const prefix of ['172.30.94', '172.29.193']) {

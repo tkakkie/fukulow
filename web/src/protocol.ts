@@ -4,8 +4,8 @@ type Message = components['schemas']['Message']
 type MessagePage = components['schemas']['MessagePage']
 type SendTarget = Pick<components['schemas']['SendMessageRequest'], 'reply_to' | 'topic_name'>
 export type Failure = number | 'network' | 'timeout'
-export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff'
-export type Pending = SendTarget & { clientMessageId: string; body: string; state: 'sending' | 'unknown' | 'failed'; request: number }
+export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff' | 'send_retry'
+export type Pending = SendTarget & { clientMessageId: string; body: string; state: 'sending' | 'throttled' | 'unknown' | 'failed'; request: number; retryWait?: number }
 export type ChannelState = {
   state: 'loading' | 'ready' | 'unavailable'
   watched: boolean
@@ -28,7 +28,7 @@ export type ChannelState = {
 type Request =
   | { type: 'history'; channel: string; page: 'latest' | 'before' | 'after'; seq?: number; stale?: true }
   | { type: 'send'; channel: string; clientMessageId: string; stale?: true }
-type Timer = { purpose: Purpose; channel?: string }
+type Timer = { purpose: Purpose; channel?: string; clientMessageId?: string }
 export type State = {
   selfId: string
   organization: 'available' | 'unavailable'
@@ -50,7 +50,8 @@ export type Effect =
   | { type: 'unsubscribe'; channel: string }
   | { type: 'fetch_history'; id: number; channel: string; page: 'latest' | 'after' | 'before'; seq?: number }
   | (SendTarget & { type: 'send'; id: number; channel: string; client_message_id: string; body: string })
-  | { type: 'wait'; id: number; purpose: Purpose; channel?: string; attempt: number }
+  | { type: 'wait'; id: number; purpose: Exclude<Purpose, 'send_retry'>; channel?: string; attempt: number }
+  | { type: 'wait'; id: number; purpose: 'send_retry'; channel: string; delayMs: number }
   | { type: 'cancel_timer'; id: number }
   | { type: 'sign_in' }
 export type Input =
@@ -65,7 +66,7 @@ export type Input =
   | { type: 'history_result'; request: number; page: MessagePage }
   | { type: 'history_failed'; request: number; status: Failure }
   | { type: 'settle_history'; channel: string; messages: Message[] }
-  | { type: 'send_failed'; request: number; status: Failure }
+  | { type: 'send_failed'; request: number; status: Failure; retryAfterMs?: number }
   | { type: 'ack'; request: number; message: Message }
   | { type: 'timer_elapsed'; id: number }
 
@@ -117,7 +118,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     delete state.timers[id]
     effects.push({ type: 'cancel_timer', id })
   }
-  const wait = (purpose: Purpose, id?: string, attempt = 0) => {
+  const wait = (purpose: Exclude<Purpose, 'send_retry'>, id?: string, attempt = 0) => {
     const n = token()
     state.timers[n] = { purpose, channel: id }
     effects.push({ type: 'wait', id: n, purpose, channel: id, attempt })
@@ -182,7 +183,10 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   const settle = (id: string, records: Message[]) => {
     const c = channel(id)
     const settled = new Set(records.filter(m => m.channel_id === id && m.sender === state.selfId).map(m => m.client_message_id))
-    if (c.pending.some(p => settled.has(p.clientMessageId))) c.pending = c.pending.filter(p => !settled.has(p.clientMessageId))
+    if (c.pending.some(p => settled.has(p.clientMessageId))) {
+      for (const p of c.pending) if (settled.has(p.clientMessageId)) cancel(p.retryWait)
+      c.pending = c.pending.filter(p => !settled.has(p.clientMessageId))
+    }
   }
   const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream') => {
     const c = channel(id)
@@ -222,9 +226,10 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     }
   }
   const attempt = (id: string, p: Pending) => {
+    cancel(p.retryWait)
     const n = token()
     const c = channel(id)
-    const sending: Pending = { ...p, state: 'sending', request: n }
+    const sending: Pending = { ...p, state: 'sending', request: n, retryWait: undefined }
     c.pending = c.pending.includes(p) ? c.pending.map(entry => entry === p ? sending : entry) : [...c.pending, sending]
     state.requests[n] = { type: 'send', channel: id, clientMessageId: p.clientMessageId }
     effects.push({ type: 'send', id: n, channel: id, client_message_id: p.clientMessageId, body: p.body,
@@ -237,7 +242,10 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     if (c.subscription && state.connected) effects.push({ type: 'unsubscribe', channel: id })
     c.subscription = undefined
     c.state = 'unavailable'
-    c.pending = c.pending.map(p => ({ ...p, state: 'failed' }))
+    c.pending = c.pending.map(p => {
+      cancel(p.retryWait)
+      return { ...p, state: 'failed', retryWait: undefined }
+    })
     for (const [key, request] of Object.entries(state.requests)) {
       if (request.channel === id && request.type === 'send') state.requests[Number(key)] = { ...request, stale: true }
     }
@@ -262,15 +270,17 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     for (const id of Object.keys(state.channels)) {
       const c = channel(id)
       c.state = 'unavailable'; c.subscription = undefined
-      c.pending = c.pending.map(p => ({ ...p, state: 'failed' }))
+      c.pending = c.pending.map(p => ({ ...p, state: 'failed', retryWait: undefined }))
     }
     effects.push({ type: 'close' })
     return finish()
   }
   if (input.type === 'user_discard' && (state.running || state.organization === 'unavailable')) {
     const c = state.channels[input.channel]
-    if (c?.pending.some(p => p.clientMessageId === input.clientMessageId && p.state !== 'sending'))
+    if (c?.pending.some(p => p.clientMessageId === input.clientMessageId && p.state !== 'sending')) {
+      for (const p of c.pending) if (p.clientMessageId === input.clientMessageId) cancel(p.retryWait)
       channel(input.channel).pending = c.pending.filter(p => p.clientMessageId !== input.clientMessageId || p.state === 'sending')
+    }
     return finish()
   }
   if (!state.running) return finish()
@@ -360,9 +370,12 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
           effects.push({ type: 'unsubscribe', channel: id })
           invalidate(id, true)
           // Pre-clamp HTTP results may refer to the discarded history generation. Only those
-          // sending attempts become unknown; definite refusals and same-key retries keep their state.
+          // sending/throttled attempts become unknown; definite refusals and unknown outcomes keep their state.
           // Sends started during the new bootstrap remain valid until completion/timeout or another clamp.
-          const pending = c.pending.map(p => p.state === 'sending' ? { ...p, state: 'unknown' as const } : p)
+          const pending = c.pending.map(p => {
+            cancel(p.retryWait)
+            return p.state === 'sending' || p.state === 'throttled' ? { ...p, state: 'unknown' as const, retryWait: undefined } : p
+          })
           state.channels[id] = { ...emptyChannel(), watched: true, pending }
           history(id, 'latest')
         } else {
@@ -421,6 +434,16 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         if (input.status === 401) { stop(true); break }
         const p = c.pending.find(p => p.clientMessageId === r.clientMessageId && p.request === input.request)
         if (p) {
+          if (input.status === 429) {
+            cancel(p.retryWait)
+            const n = token()
+            const delay = input.retryAfterMs ?? 1000
+            const delayMs = Number.isSafeInteger(delay) && delay >= 1000 ? delay : 1000
+            state.timers[n] = { purpose: 'send_retry', channel: r.channel, clientMessageId: p.clientMessageId }
+            c.pending = c.pending.map(entry => entry === p ? { ...p, state: 'throttled', retryWait: n } : entry)
+            effects.push({ type: 'wait', id: n, purpose: 'send_retry', channel: r.channel, delayMs })
+            break
+          }
           const outcome = typeof input.status === 'number' && [400, 403, 404, 409, 413, 415].includes(input.status) ? 'failed' : 'unknown'
           if (p.state !== outcome) c.pending = c.pending.map(entry => entry === p ? { ...p, state: outcome } : entry)
         }
@@ -434,6 +457,10 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (t.purpose === 'reconnect_backoff') {
         if (state.reconnectWait !== input.id) break
         state.reconnectWait = undefined; connect()
+      } else if (t.purpose === 'send_retry' && t.channel) {
+        const c = channel(t.channel)
+        const p = c.pending.find(p => p.clientMessageId === t.clientMessageId && p.retryWait === input.id)
+        if (p?.state === 'throttled' && c.state !== 'unavailable') attempt(t.channel, p)
       } else if (t.channel) {
         const c = channel(t.channel)
         if (c.wait !== input.id) break
