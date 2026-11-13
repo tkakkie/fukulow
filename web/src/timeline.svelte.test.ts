@@ -1018,6 +1018,44 @@ describe('Channel creation visibility', () => {
     })
   }
 
+  for (const result of [null, '同じ名前のチャンネルがすでにあります。']) {
+    it(`disables visibility choices while creation is pending and enables them after ${result === null ? 'success' : 'refusal'}`, async () => {
+      let resolveCreate!: (result: string | null) => void
+      const pending = new Promise<string | null>((resolve) => { resolveCreate = resolve })
+      const oncreate = vi.fn(() => pending)
+      const host = testDoc.createElement('div')
+      testDoc.body.appendChild(host)
+      const instance = mount(CreateChannelForm, { target: host as unknown as Element, props: { oncreate } })
+      await settle()
+      const fieldset = host.querySelector('fieldset')!
+      const publicRadio = host.querySelector('input[value="public"]')!
+      const privateRadio = host.querySelector('input[value="private"]')!
+      expect(publicRadio.closest('fieldset')).toBe(fieldset)
+      expect(privateRadio.closest('fieldset')).toBe(fieldset)
+      // Mini DOM only models own disabled attributes; native radios also inherit from their fieldset.
+      const isDisabled = (radio: MiniElement) => radio.disabled || Boolean(radio.closest('fieldset')?.disabled)
+      expect(fieldset.disabled).toBe(false)
+      expect(isDisabled(publicRadio)).toBe(false)
+      expect(isDisabled(privateRadio)).toBe(false)
+      const name = host.querySelector('input[name="channel_name"]')!
+      name.value = '新しいチャンネル'
+      name.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      await settle()
+      buttonsByText(host, 'チャンネルを作成')[0]!.click()
+      await settle()
+      expect(oncreate).toHaveBeenCalledExactlyOnceWith('新しいチャンネル', 'public')
+      expect(fieldset.disabled).toBe(true)
+      expect(isDisabled(publicRadio)).toBe(true)
+      expect(isDisabled(privateRadio)).toBe(true)
+      resolveCreate(result)
+      await settle()
+      expect(fieldset.disabled).toBe(false)
+      expect(isDisabled(publicRadio)).toBe(false)
+      expect(isDisabled(privateRadio)).toBe(false)
+      await unmount(instance)
+    })
+  }
+
   it('preserves the private selection and name after a refusal', async () => {
     const oncreate = vi.fn(async () => '同じ名前のチャンネルがすでにあります。')
     const host = testDoc.createElement('div')
