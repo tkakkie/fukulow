@@ -167,13 +167,13 @@ export function createAuth(deps: AuthDeps = defaults) {
       await show({ screen: 'app', identity: result.data.identity })
       return true
     },
-    async signOut(): Promise<boolean> {
+    async signOut({ reportError = true } = {}): Promise<boolean> {
       const account = accountGeneration, selection = selectionGeneration
       busy = true; error = ''
       const ok = await deps.signOut()
       busy = false
       if (!ok) {
-        if (account === accountGeneration && selection === selectionGeneration) {
+        if (reportError && account === accountGeneration && selection === selectionGeneration) {
           error = errorMessage({ ok: false, kind: 'network' }, 'signin')
         }
         return false

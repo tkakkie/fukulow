@@ -24,6 +24,7 @@ async function call<T>(
   path: string,
   init: RequestInit,
   parse: boolean,
+  successStatus?: number,
 ): Promise<Result<T>> {
   try {
     // Cookie auth only: the HttpOnly session cookie is sent by the browser; no token is stored.
@@ -41,6 +42,7 @@ async function call<T>(
       return { ok: false, kind: 'http', status: res.status, ...(error === undefined ? {} : { error }),
         ...(res.status === 429 ? { retryAfterMs: Number.isSafeInteger(delay) && delay >= 1000 ? delay : 1000 } : {}) }
     }
+    if (successStatus !== undefined && res.status !== successStatus) return { ok: false, kind: 'network' }
     return { ok: true, data: (parse ? await res.json() : undefined) as T }
   } catch {
     return { ok: false, kind: 'network' }
@@ -64,7 +66,7 @@ export const postSession = (body: SignInRequest, f: typeof fetch = fetch) =>
   call<components['schemas']['SessionResponse']>(f, '/api/v1/session', json(body), true)
 
 export const deleteSession = (f: typeof fetch = fetch) =>
-  call<undefined>(f, '/api/v1/session', { method: 'DELETE' }, false)
+  call<undefined>(f, '/api/v1/session', { method: 'DELETE' }, false, 204)
 
 export const getMe = (f: typeof fetch = fetch) => call<AccountIdentity>(f, '/api/v1/me', { cache: 'no-store' }, true)
 

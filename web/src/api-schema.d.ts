@@ -3497,9 +3497,10 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential; current and legacy cookies cleared without revocation */
             401: {
                 headers: {
+                    "Set-Cookie"?: string;
                     [name: string]: unknown;
                 };
                 content: {

@@ -84,17 +84,31 @@ export function takeInvite(url = new URL(location.href), replace: (path: string)
   } catch { return null }
 }
 export function createInviteAcceptance(invite: ReturnType<typeof takeInvite>, api = acceptInvite) {
-  let state = { available: invite !== null, busy: false, error: '', accepted: false }
+  let state = { available: invite !== null, busy: false, error: '', accepted: false, sessionRejected: false }
   const listeners = new Set<() => void>()
   const set = (patch: Partial<typeof state>) => { state = { ...state, ...patch }; listeners.forEach(l => l()) }
+  async function signOutAndContinue(signOut: () => Promise<boolean>) {
+    if (!invite || !state.sessionRejected || state.busy) return
+    set({ busy: true })
+    const ok = await signOut()
+    set(ok
+      ? { busy: false, sessionRejected: false, error: '' }
+      : { busy: false, error: 'ログアウトできませんでした。通信状況を確認して、もう一度お試しください。' })
+  }
   return {
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
+    signOutAndContinue,
     async accept(input: Omit<AcceptInviteRequest, 'token'>, onEnded: () => void = () => {}): Promise<Identity | null> {
       if (!invite || state.busy) return null
-      set({ busy: true, error: '' })
+      set({ busy: true, error: '', sessionRejected: false })
       const r = await api(invite.organizationId, { ...input, token: invite.token })
-      if (!r.ok) { if (r.kind === 'http' && r.status === 401) onEnded(); set({ busy: false, error: memberError(r) }); return null }
+      if (!r.ok) {
+        const sessionRejected = r.kind === 'http' && r.status === 401
+        if (sessionRejected) onEnded()
+        set({ busy: false, error: memberError(r), sessionRejected })
+        return null
+      }
       invite = null
       set({ busy: false, accepted: true, available: false })
       return r.data
