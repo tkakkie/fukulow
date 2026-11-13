@@ -8,7 +8,7 @@ use std::sync::{
 use tower::ServiceExt;
 
 pub(super) async fn fixture(pool: sqlx::PgPool) -> AppState {
-    let state = AppState::for_test(pool);
+    let state = AppState::for_test(pool).await;
     setup_with_workers(
         state.clone(),
         SetupRequest {

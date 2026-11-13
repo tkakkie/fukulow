@@ -218,7 +218,7 @@ async fn unread_rejects_foreign_topics_invalid_inputs_and_stale_member_revision(
                 .unwrap();
         }
         for (scope, auth) in captured.into_iter().enumerate() {
-            let state = State(AppState::for_test(pool.clone()));
+            let state = State(AppState::for_test(pool.clone()).await);
             let response = match scope {
                 0 => mark_channel_read(
                     state,

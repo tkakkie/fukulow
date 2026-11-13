@@ -964,9 +964,11 @@ async fn check_tenant_denials(pool: PgPool) {
         .unwrap()
         .parse::<Uuid>()
         .unwrap();
+    // Fixture SQL as the app role runs in each Organization's context (#314).
+    let mut foreign_scoped = scoped(&pool, foreign).await;
     sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Foreign')")
         .bind(foreign)
-        .execute(&pool)
+        .execute(&mut *foreign_scoped)
         .await
         .unwrap();
     sqlx::query(
@@ -976,21 +978,26 @@ async fn check_tenant_denials(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Foreign member','owner')").bind(foreign).bind(shared_id).bind(account).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Foreign member','owner')").bind(foreign).bind(shared_id).bind(account).execute(&mut *foreign_scoped).await.unwrap();
+    foreign_scoped.commit().await.unwrap();
     let session = body(sign_in(&app, "", PASSWORD).await).await;
     let auth = format!("Bearer {}", session["token"].as_str().unwrap());
-    let guard = additional_owner(&pool, first_id).await;
+    let mut first_scoped = scoped(&pool, first_id).await;
+    let guard = additional_owner(&mut first_scoped, first_id).await;
+    first_scoped.commit().await.unwrap();
     let mut refusal = None;
     for organization in [foreign, Uuid::new_v4(), first_id] {
         if organization == first_id {
+            let mut first_scoped = scoped(&pool, first_id).await;
             sqlx::query(
                 "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id<>$2",
             )
             .bind(first_id)
             .bind(guard)
-            .execute(&pool)
+            .execute(&mut *first_scoped)
             .await
             .unwrap();
+            first_scoped.commit().await.unwrap();
         }
         for suffix in ["me", "channels", "ws"] {
             let response = request(
@@ -1491,6 +1498,18 @@ async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool:
     check_member_identity(pool).await;
 }
 
+/// A transaction with a transaction-local Organization context, so RLS admits
+/// direct test SQL for that Organization as the app role (#314); a no-op for the owner.
+async fn scoped(pool: &PgPool, organization: Uuid) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('fukulow.organization_id', $1::uuid::text, true)")
+        .bind(organization)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction
+}
+
 async fn check_member_identity(pool: PgPool) -> Value {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -1499,12 +1518,13 @@ async fn check_member_identity(pool: PgPool) -> Value {
         .unwrap()
         .parse()
         .unwrap();
+    // Direct SQL as the app role needs an Organization context under RLS (#314).
     let account: Uuid = sqlx::query_scalar("SELECT account_id FROM users WHERE organization_id=$1")
         .bind(organization)
-        .fetch_one(&pool)
+        .fetch_one(&mut *scoped(&pool, organization).await)
         .await
         .unwrap();
-    let error=sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Duplicate','guest')").bind(organization).bind(Uuid::new_v4()).bind(account).execute(&pool).await.unwrap_err();
+    let error=sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Duplicate','guest')").bind(organization).bind(Uuid::new_v4()).bind(account).execute(&mut *scoped(&pool, organization).await).await.unwrap_err();
     assert_eq!(
         error.as_database_error().unwrap().code().as_deref(),
         Some("23505")
@@ -1512,29 +1532,35 @@ async fn check_member_identity(pool: PgPool) -> Value {
     assert!(
         sqlx::query("DELETE FROM users WHERE organization_id=$1")
             .bind(organization)
-            .execute(&pool)
+            .execute(&mut *scoped(&pool, organization).await)
             .await
             .is_err()
     );
-    let guard = additional_owner(&pool, organization).await;
+    let mut transaction = scoped(&pool, organization).await;
+    let guard = additional_owner(&mut transaction, organization).await;
+    transaction.commit().await.unwrap();
+    let mut transaction = scoped(&pool, organization).await;
     sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
         .bind(guard)
-        .execute(&pool)
+        .execute(&mut *transaction)
         .await
         .unwrap();
+    transaction.commit().await.unwrap();
+    let mut transaction = scoped(&pool, organization).await;
     sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
         .bind(guard)
-        .execute(&pool)
+        .execute(&mut *transaction)
         .await
         .unwrap();
+    transaction.commit().await.unwrap();
     let (member, revision): (Uuid, i64) = sqlx::query_as(
         "SELECT id,membership_revision FROM users WHERE organization_id=$1 AND id<>$2",
     )
     .bind(organization)
     .bind(guard)
-    .fetch_one(&pool)
+    .fetch_one(&mut *scoped(&pool, organization).await)
     .await
     .unwrap();
     assert_eq!(member.to_string(), identity["member"]["id"]);
@@ -1565,9 +1591,14 @@ async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &st
     }
     // check_member_identity adds a guard Owner (#221 last-Owner rule): look up the setup Member.
     let member: Uuid = identity["member"]["id"].as_str().unwrap().parse().unwrap();
+    let organization: Uuid = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     let preserved: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM users WHERE id = $1)")
         .bind(member)
-        .fetch_one(&pool)
+        .fetch_one(&mut *scoped(&pool, organization).await)
         .await
         .unwrap();
     assert!(preserved);
@@ -1667,6 +1698,14 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
     for migration in migrations.iter().filter(|m| m.version < 202611110197) {
         sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
     }
+    // Current setup code calls the #314 bootstrap check; the old schema lacks it.
+    sqlx::raw_sql(
+        "CREATE FUNCTION fukulow_setup_required() RETURNS boolean LANGUAGE sql STABLE \
+         AS $$ SELECT NOT EXISTS (SELECT 1 FROM public.organizations) $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = router_with_cookie_security(&pool, false);
     setup(&app).await;
     let input = json!({"email":"owner@example.com", "password":PASSWORD});
@@ -2041,15 +2080,15 @@ async fn app_role_denies_ddl_and_both_memberships_and_preserves_member_and_tenan
     database_roles::check_app_role(pool).await;
 }
 
-async fn additional_owner(pool: &PgPool, organization: Uuid) -> Uuid {
+async fn additional_owner(connection: &mut sqlx::PgConnection, organization: Uuid) -> Uuid {
     let account = Uuid::new_v4();
     let member = Uuid::new_v4();
     sqlx::query("INSERT INTO accounts (id,email,password_hash) VALUES ($1,$2,'unused')")
         .bind(account)
         .bind(format!("{account}@test.invalid"))
-        .execute(pool)
+        .execute(&mut *connection)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Other Owner','owner')").bind(organization).bind(member).bind(account).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Other Owner','owner')").bind(organization).bind(member).bind(account).execute(&mut *connection).await.unwrap();
     member
 }

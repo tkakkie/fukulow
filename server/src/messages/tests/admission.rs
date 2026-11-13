@@ -15,7 +15,7 @@ fn assert_unavailable(response: &Response) {
 #[sqlx::test]
 async fn send_queue_cap_returns_503_and_same_key_retry_is_idempotent(pool: PgPool) {
     let (_, organization, _, channel, token) = fixture(&pool).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state);
     let mut queued = Vec::new();
@@ -74,7 +74,7 @@ async fn saturated_send_queue_preserves_organization_and_private_channel_denials
         .unwrap();
     let channel_id = Uuid::new_v4();
     channel(&pool, organization_a, channel_id, creator, true).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state);
     let admission = delivery.admission(&pool);

@@ -13,7 +13,7 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
     pool: PgPool,
 ) {
     let (_, org, sender, channel, token) = fixture(&pool).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let mut queue = delivery.queue(org, (sender, 0), 256);
     queue.subscribe(channel);
@@ -218,7 +218,7 @@ async fn topic_projection_reauthorizes_after_waiting_for_barrier(pool: PgPool) {
             for id in [owner, viewer] {
                 sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)").bind(org).bind(channel).bind(id).execute(&pool).await.unwrap();
             }
-            let state = AppState::for_test(pool.clone());
+            let state = AppState::for_test(pool.clone()).await;
             let app = crate::app(state);
             let message = sent(
                 &app,
@@ -379,7 +379,7 @@ async fn topic_migration_preserves_existing_messages_as_null(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let app = router(&pool);
+    let app = router(&pool).await;
     let history = list(&app, &token, channel, "").await;
     assert_eq!(history["messages"][0]["id"], id.to_string());
     assert!(history["messages"][0]["topic_id"].is_null());

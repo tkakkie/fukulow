@@ -18,8 +18,8 @@ mod names;
 mod role_changes;
 mod visibility;
 
-fn router(pool: &PgPool) -> Router {
-    crate::app(AppState::for_test(pool.clone()))
+async fn router(pool: &PgPool) -> Router {
+    crate::app(AppState::for_test(pool.clone()).await)
 }
 
 async fn body(response: Response) -> Value {
@@ -119,7 +119,7 @@ async fn channels_require_authentication_without_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = router(&pool);
+    let app = router(&pool).await;
     for method in ["GET", "POST"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
             let mut request = Request::builder()
@@ -145,7 +145,7 @@ async fn channels_require_authentication_without_database_access() {
 
 #[sqlx::test]
 async fn channel_list_database_failure_returns_generic_500(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     assert_eq!(list(&app, &token).await, json!({"channels": []}));
@@ -205,7 +205,7 @@ async fn channel_json_rejections_use_error_body() {
 async fn private_channel_is_listed_only_for_its_creator(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    let app = router(&pools.app);
+    let app = router(&pools.app).await;
     let organization_id = organization(&pool).await;
     let creator_id = Uuid::new_v4();
     let creator = member(&pool, organization_id, creator_id, "member").await;
@@ -242,7 +242,7 @@ async fn private_channel_is_listed_only_for_its_creator(pool: PgPool) {
 
 #[sqlx::test]
 async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let first = organization(&pool).await;
     let second = organization(&pool).await;
     let shared_member_id = Uuid::new_v4();
@@ -333,7 +333,7 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
 
 #[sqlx::test]
 async fn foreign_membership_does_not_grant_private_channel_visibility(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let first = organization(&pool).await;
     let second = organization(&pool).await;
     let shared_member_id = Uuid::new_v4();
@@ -374,7 +374,7 @@ async fn foreign_membership_does_not_grant_private_channel_visibility(pool: PgPo
 
 #[sqlx::test]
 async fn channel_body_limit_and_content_type_rejections_do_not_write(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     for (content_type, name, status, error) in [
@@ -413,7 +413,7 @@ async fn channel_body_limit_and_content_type_rejections_do_not_write(pool: PgPoo
 
 #[sqlx::test]
 async fn channel_memberships_reject_cross_organization_references(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let first = organization(&pool).await;
     let second = organization(&pool).await;
     let member_a = Uuid::new_v4();
@@ -444,7 +444,7 @@ async fn channel_memberships_reject_cross_organization_references(pool: PgPool) 
 
 #[sqlx::test]
 async fn private_channel_creation_rolls_back_if_membership_insert_fails(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     // Simulate a membership constraint failure after the channel INSERT succeeds.
@@ -517,7 +517,7 @@ async fn extract_auth(state: AppState, token: &str) -> Auth {
 async fn reactivation_keeps_member_identity_without_restoring_private_channel_permissions(
     pool: PgPool,
 ) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization = organization(&pool).await;
     let id = Uuid::new_v4();
     let token = member(&pool, organization, id, "member").await;
@@ -666,7 +666,7 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
     let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
     assert_eq!(event["type"], "subscribed");
     assert_eq!(event["channel_id"], private_id.to_string());
-    let app = router(&pool);
+    let app = router(&pool).await;
     assert_eq!(
         request(
             &app,

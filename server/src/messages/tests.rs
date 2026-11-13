@@ -14,8 +14,8 @@ use tower::ServiceExt;
 mod admission;
 pub(super) mod unread;
 
-fn router(pool: &PgPool) -> Router {
-    crate::app(AppState::for_test(pool.clone()))
+async fn router(pool: &PgPool) -> Router {
+    crate::app(AppState::for_test(pool.clone()).await)
 }
 
 async fn body(response: Response) -> Value {
@@ -97,7 +97,13 @@ async fn fixture(pool: &PgPool) -> (Router, Uuid, Uuid, Uuid, String) {
     let token = member(pool, organization_id, sender).await;
     let channel_id = Uuid::new_v4();
     channel(pool, organization_id, channel_id, sender, false).await;
-    (router(pool), organization_id, sender, channel_id, token)
+    (
+        router(pool).await,
+        organization_id,
+        sender,
+        channel_id,
+        token,
+    )
 }
 
 fn input(client_message_id: Uuid, text: &str) -> Value {
@@ -150,7 +156,7 @@ async fn messages_require_authentication_without_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = router(&pool);
+    let app = router(&pool).await;
     for method in ["GET", "POST"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
             let mut request = Request::builder().method(method).uri(
@@ -518,7 +524,7 @@ async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
 async fn committed_send_retry_returns_canonical_message_without_sequence_allocation(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, _, sender, channel_id, token) = fixture(&pools.admin).await;
-    let app = router(&pools.app);
+    let app = router(&pools.app).await;
     let key = Uuid::new_v4();
     // The first response is not used to choose the retry key, simulating a lost response.
     let first_response = send(&app, &token, channel_id, input(key, "hello\n世界")).await;
@@ -904,3 +910,4 @@ mod replies;
 pub(super) mod removal;
 
 mod context;
+mod rls_statements;

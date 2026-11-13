@@ -222,7 +222,7 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
             .bind(organization).bind(channel).bind(reader).execute(&pool).await.unwrap();
         let old: Uuid = sqlx::query_scalar("SELECT grant_id FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
             .bind(organization).bind(channel).bind(reader).fetch_one(&pool).await.unwrap();
-        let mut state = state(&pool);
+        let mut state = state(&pool).await;
         state.session_changes = SessionChanges::with_recheck_timing(
             Duration::from_millis(50),
             Duration::from_millis(200),

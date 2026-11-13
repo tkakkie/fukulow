@@ -155,7 +155,12 @@ async fn delivery_contract_rejects_incorrect_expectations(pool: PgPool) {
                 None
             })
             .unwrap_or_else(|| panic!("no fixture exercises {wrong:?}"));
-        let result = tokio::spawn(Runner::run(pool.clone(), scenario))
+        // A local task keeps panic isolation without requiring the test-pool
+        // provisioning future (sqlx transaction borrows) to be provably Send.
+        let result = tokio::task::LocalSet::new()
+            .run_until(async {
+                tokio::task::spawn_local(Runner::run(pool.clone(), scenario)).await
+            })
             .await
             .unwrap();
         assert_eq!(

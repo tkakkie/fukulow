@@ -12,7 +12,7 @@ async fn assert_conflict(response: Response) {
 
 #[sqlx::test]
 async fn channel_names_are_unique_across_case_and_visibility(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let creator = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     let other = member(&pool, organization_id, Uuid::new_v4(), "member").await;
@@ -68,7 +68,7 @@ async fn channel_names_are_unique_across_case_and_visibility(pool: PgPool) {
 
 #[sqlx::test]
 async fn channel_name_uniqueness_is_scoped_to_organization(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     for visibility in ["public", "private"] {
         let organization_id = organization(&pool).await;
         let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
@@ -82,7 +82,7 @@ async fn channel_name_uniqueness_is_scoped_to_organization(pool: PgPool) {
 
 #[sqlx::test]
 async fn channel_name_comparison_and_order_use_ascii_case_folding(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     for (index, name) in ["zebra", "Banana", "apple", "ZULU", "Apricot", "ä", "Ä"]
@@ -118,7 +118,7 @@ async fn channel_name_comparison_and_order_use_ascii_case_folding(pool: PgPool) 
 
 #[sqlx::test]
 async fn concurrent_duplicate_channel_creates_leave_one_channel(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     // All contenders create private Channels so the surviving membership is

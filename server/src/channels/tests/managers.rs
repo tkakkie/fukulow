@@ -49,7 +49,7 @@ impl Fixture {
         let org = organization(&pools.admin).await;
         let creator = Uuid::new_v4();
         let token = member(&pools.admin, org, creator, "member").await;
-        let state = AppState::for_test(pools.app.clone());
+        let state = AppState::for_test(pools.app.clone()).await;
         let observed = Arc::new(Observed::default());
         state
             .session_changes

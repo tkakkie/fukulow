@@ -231,3 +231,106 @@ async fn schema_guard_rejects_missing_and_nullable_organization_id(pool: PgPool)
     .unwrap();
     check_organization_ids(&pool).await.unwrap();
 }
+
+/// #314: every table except the global exemptions is tenant-isolated by RLS,
+/// with exactly the reviewed policies (no broad or extra permissive policy).
+async fn check_row_level_security(pool: &PgPool) -> Result<(), String> {
+    let violations: Vec<(String, String, String)> = sqlx::query_as(
+        "WITH guarded AS (
+             SELECT c.oid, n.nspname::text AS schema, c.relname::text AS name, c.relrowsecurity
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.relkind IN ('r', 'p')
+               AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+               AND NOT (n.nspname = 'public' AND c.relname IN (
+                   '_sqlx_migrations', -- SQLx bookkeeping; the app role may only SELECT it.
+                   'accounts', -- Global authentication identities.
+                   'account_sessions' -- Global credentials for one Account.
+               ))
+         ), policies AS (
+             SELECT schemaname::text AS schema, tablename::text AS name, policyname::text AS policy,
+                    cmd, permissive, roles, qual, with_check
+             FROM pg_policies
+         )
+         SELECT schema, name, 'row level security disabled' FROM guarded WHERE NOT relrowsecurity
+         UNION ALL
+         SELECT g.schema, g.name, 'missing org_isolation' FROM guarded g
+         WHERE NOT EXISTS (
+             SELECT 1 FROM policies p
+             WHERE p.schema = g.schema AND p.name = g.name AND p.policy = 'org_isolation'
+               AND p.cmd = 'ALL' AND p.permissive = 'PERMISSIVE' AND p.roles = '{public}'
+               AND p.qual = '(organization_id = fukulow_current_org())'
+               AND p.with_check = '(organization_id = fukulow_current_org())')
+         UNION ALL
+         SELECT p.schema, p.name, 'unexpected policy ' || p.policy FROM policies p
+         WHERE p.policy <> 'org_isolation'
+           AND NOT (p.schema = 'public' AND p.policy = 'account_read' AND p.cmd = 'SELECT'
+                    AND p.with_check IS NULL AND p.roles = '{public}' AND p.permissive = 'PERMISSIVE'
+                    AND (p.name, regexp_replace(p.qual, '\\s+', ' ', 'g')) IN (
+                        ('users', '(account_id = fukulow_current_account())'),
+                        ('organizations', '(EXISTS ( SELECT 1 FROM users u WHERE ((u.organization_id = organizations.organization_id) AND (u.account_id = fukulow_current_account()))))')))
+         ORDER BY 1, 2, 3",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("inspect row level security: {e}"))?;
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("row level security violations: {violations:?}"))
+    }
+}
+
+#[sqlx::test(migrations = false)]
+async fn migrated_tables_have_tenant_row_level_security(pool: PgPool) {
+    migrate(&pool).await.unwrap();
+    check_row_level_security(&pool).await.unwrap();
+}
+
+#[sqlx::test(migrations = false)]
+async fn schema_guard_rejects_tables_without_reviewed_row_level_security(pool: PgPool) {
+    migrate(&pool).await.unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE no_rls (organization_id uuid NOT NULL);
+         CREATE TABLE no_policy (organization_id uuid NOT NULL);
+         ALTER TABLE no_policy ENABLE ROW LEVEL SECURITY;
+         CREATE TABLE read_only_policy (organization_id uuid NOT NULL);
+         ALTER TABLE read_only_policy ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY org_isolation ON read_only_policy FOR SELECT
+             USING (organization_id = fukulow_current_org());
+         CREATE POLICY broad ON channels FOR SELECT USING (true);
+         CREATE POLICY account_read ON messages FOR SELECT USING (true);
+         DROP POLICY account_read ON users;
+         CREATE POLICY account_read ON users FOR SELECT USING (account_id IS NOT NULL);
+         CREATE SCHEMA other;
+         CREATE TABLE other.accounts (organization_id uuid NOT NULL);
+         ALTER TABLE invites DISABLE ROW LEVEL SECURITY;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        check_row_level_security(&pool).await.unwrap_err(),
+        "row level security violations: [\
+         (\"other\", \"accounts\", \"missing org_isolation\"), \
+         (\"other\", \"accounts\", \"row level security disabled\"), \
+         (\"public\", \"channels\", \"unexpected policy broad\"), \
+         (\"public\", \"invites\", \"row level security disabled\"), \
+         (\"public\", \"messages\", \"unexpected policy account_read\"), \
+         (\"public\", \"no_policy\", \"missing org_isolation\"), \
+         (\"public\", \"no_rls\", \"missing org_isolation\"), \
+         (\"public\", \"no_rls\", \"row level security disabled\"), \
+         (\"public\", \"read_only_policy\", \"missing org_isolation\"), \
+         (\"public\", \"users\", \"unexpected policy account_read\")]"
+    );
+    sqlx::raw_sql(
+        "DROP SCHEMA other CASCADE; DROP TABLE no_rls, no_policy, read_only_policy;
+         DROP POLICY broad ON channels; DROP POLICY account_read ON messages;
+         DROP POLICY account_read ON users;
+         CREATE POLICY account_read ON users FOR SELECT USING (account_id = fukulow_current_account());
+         ALTER TABLE invites ENABLE ROW LEVEL SECURITY;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    check_row_level_security(&pool).await.unwrap();
+}

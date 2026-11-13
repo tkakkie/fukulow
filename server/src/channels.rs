@@ -413,6 +413,8 @@ mod access;
 pub mod members;
 pub use access::AccessChanges;
 pub(crate) use access::AccessWatch;
+#[cfg(test)]
+pub(crate) use access::access_row_for_test;
 
 pub(crate) async fn member_access(
     pool: &sqlx::PgPool,

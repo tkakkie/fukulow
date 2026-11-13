@@ -156,7 +156,7 @@ pub(super) async fn fixture(pool: &PgPool) -> (AppState, Auth) {
         .execute(pool)
         .await
         .unwrap();
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let identity = super::super::Identity {
         organization: super::super::Organization {
             organization_id: organization,

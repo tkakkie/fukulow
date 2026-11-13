@@ -3,7 +3,7 @@ use super::*;
 #[sqlx::test]
 async fn channel_list_denies_deactivation_after_auth_and_stale_reactivation(pool: PgPool) {
     for reactivate in [false, true] {
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state.clone());
         let organization = organization(&pool).await;
         let id = Uuid::new_v4();
@@ -41,7 +41,7 @@ async fn channel_list_denies_deactivation_after_auth_and_stale_reactivation(pool
 async fn channel_creation_denies_deactivation_after_auth_without_inserting(pool: PgPool) {
     for reactivate in [false, true] {
         for visibility in [ChannelVisibility::Public, ChannelVisibility::Private] {
-            let state = AppState::for_test(pool.clone());
+            let state = AppState::for_test(pool.clone()).await;
             let organization = organization(&pool).await;
             let id = Uuid::new_v4();
             let token = member(&pool, organization, id, "member").await;
@@ -100,8 +100,8 @@ async fn channel_creation_rechecks_guest_role_after_auth_with_positive_control(p
     let org = organization(&pool).await;
     let id = Uuid::new_v4();
     let token = member(&pool, org, id, "member").await;
-    let state = AppState::for_test(pool.clone());
-    create(&router(&pool), &token, "Allowed", "public").await;
+    let state = AppState::for_test(pool.clone()).await;
+    create(&router(&pool).await, &token, "Allowed", "public").await;
     let auth = extract_auth(state.clone(), &token).await;
     sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
         .bind(org)

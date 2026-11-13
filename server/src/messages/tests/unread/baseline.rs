@@ -27,7 +27,7 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     let (_, org, _, channel, owner) = fixture(&pool).await;
     let viewer_id = Uuid::new_v4();
     let viewer = member(&pool, org, viewer_id).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let mut queue = delivery.queue(org, (viewer_id, 0), 256);
     queue.subscribe(channel);
@@ -151,7 +151,7 @@ async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(
         permit = tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire()) => permit.unwrap().unwrap().forget(),
     }
     let message = post(&app, &owner, channel, None).await;
-    let fresh_app = router(&pool);
+    let fresh_app = router(&pool).await;
     let newer = channels(&fresh_app, &viewer).await;
     mark(&app, &viewer, channel, None, 2).await;
     let read = channels(&fresh_app, &viewer).await;

@@ -176,9 +176,19 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
       '--exit-on-error', '--single-transaction', '--no-owner', '--no-acl'], { cwd, env, stdio: [input, 'ignore', 'inherit'] })
     } finally { closeSync(input) }
     dc('run', '--rm', '-e', `DATABASE_URL=postgres://fukulow:${env.POSTGRES_PASSWORD}@db:5432/fukulow_restore`, 'migrate', 'roles')
-    assert.equal(dc('exec', '-T', '-e', `PGPASSWORD=${env.POSTGRES_APP_PASSWORD}`, 'db', 'psql', '-X', '-h', '127.0.0.1',
-      '-U', 'fukulow_app', '-d', 'fukulow_restore', '-Atc', 'SELECT count(*) FROM messages'), '1')
-    console.log('PASS existing volume: idempotent roles, identical Organizations/Accounts/Members/Messages/Sessions, old Session, sign-in, history, restart, startup mismatch denial/revert, DDL denials, #198 backup/drill/restored grants')
+    const restoredApp = (query: string) => dc('exec', '-T', '-e', `PGPASSWORD=${env.POSTGRES_APP_PASSWORD}`, 'db', 'psql', '-X',
+      '-h', '127.0.0.1', '-U', 'fukulow_app', '-d', 'fukulow_restore', '-v', 'ON_ERROR_STOP=1', '-Atc', query)
+    // #314 RLS: no context fails closed; the restored Organization is readable only with its context.
+    assert.equal(restoredApp('SELECT count(*) FROM messages'), '0')
+    assert.equal(restoredApp("WITH context AS MATERIALIZED (SELECT set_config('fukulow.organization_id', " +
+      `'${organization}', true) AS id) SELECT count(*) FROM context CROSS JOIN LATERAL ` +
+      '(SELECT 1 FROM messages WHERE context.id IS NOT NULL OFFSET 0) m'), '1')
+    // --no-acl resets function ACLs; the grants step must leave the definer function to fukulow_app only.
+    assert.equal(dc('exec', '-T', 'db', 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow_restore', '-Atc',
+      "SELECT string_agg(coalesce(nullif(acl.grantee, 0)::regrole::text, 'PUBLIC'), ',' ORDER BY 1) FROM pg_proc p, " +
+      "aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl WHERE p.proname = 'fukulow_setup_required' " +
+      "AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner"), 'fukulow_app')
+    console.log('PASS existing volume: idempotent roles, identical Organizations/Accounts/Members/Messages/Sessions, old Session, sign-in, history, restart, startup mismatch denial/revert, DDL denials, #198 backup/drill/restored grants, restored RLS and definer ACL')
   } finally {
     if (!configOnly) {
       spawnSync('docker', [...current, 'down', '-v', '--remove-orphans'], { cwd, env, stdio: 'inherit' })

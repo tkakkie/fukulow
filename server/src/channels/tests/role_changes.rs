@@ -69,7 +69,7 @@ impl auth::SubscriptionRecheck for ObservedAccess {
 
 #[sqlx::test]
 async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgPool) {
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
     let observed = Arc::new(ObservedAccess::default());
     state
@@ -135,7 +135,7 @@ async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgP
 #[sqlx::test]
 async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(pool: PgPool) {
     for multiple in [false, true] {
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state.clone());
         let observed = Arc::new(ObservedAccess::default());
         state
@@ -209,7 +209,7 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
 
 #[sqlx::test]
 async fn role_demotion_counts_only_usable_scoped_managers_with_allowed_controls(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let org = organization(&pool).await;
     let owner = Uuid::new_v4();
     let ot = member(&pool, org, owner, "owner").await;
@@ -312,7 +312,7 @@ async fn wait_for_lock(pool: &PgPool, pattern: &str, count: i64) {
 #[sqlx::test]
 async fn private_creation_racing_creator_demotion_preserves_its_manager(pool: PgPool) {
     for role in ["member", "guest"] {
-        let app = router(&pool);
+        let app = router(&pool).await;
         let org = organization(&pool).await;
         let ot = member(&pool, org, Uuid::new_v4(), "owner").await;
         let creator = Uuid::new_v4();
@@ -369,7 +369,7 @@ async fn private_creation_racing_creator_demotion_preserves_its_manager(pool: Pg
 async fn role_demotion_races_with_demotion_removal_and_leave_preserve_a_manager(pool: PgPool) {
     for operation in ["demote", "remove", "leave"] {
         for role_first in [false, true] {
-            let app = router(&pool);
+            let app = router(&pool).await;
             let org = organization(&pool).await;
             let ot = member(&pool, org, Uuid::new_v4(), "owner").await;
             let a = Uuid::new_v4();
@@ -443,7 +443,7 @@ async fn role_demotion_races_with_demotion_removal_and_leave_preserve_a_manager(
 
 #[sqlx::test]
 async fn role_demotion_locks_organization_then_channels_in_order_before_members(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let org = organization(&pool).await;
     let target = Uuid::new_v4();
     let tt = member(&pool, org, target, "owner").await;

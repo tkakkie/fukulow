@@ -15,6 +15,15 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM fukulow_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO fukulow_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM fukulow_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO fukulow_app;
+-- pg_restore --no-acl resets function ACLs to the PUBLIC default; the
+-- SECURITY DEFINER bootstrap check must stay executable only by fukulow_app.
+DO $$
+BEGIN
+    IF to_regprocedure('public.fukulow_setup_required()') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION public.fukulow_setup_required() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION public.fukulow_setup_required() TO fukulow_app;
+    END IF;
+END $$;
 -- SQLx creates its bookkeeping table after initdb; reapply after migrations.
 DO $$
 BEGIN

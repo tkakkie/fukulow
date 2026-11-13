@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 pub(crate) mod context;
 pub(crate) mod interrupted;
 mod read_only;
+mod rls;
 mod statement;
 
 async fn startup_pool(pool: &PgPool) -> PgPool {

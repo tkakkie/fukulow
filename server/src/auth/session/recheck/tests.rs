@@ -31,7 +31,7 @@ async fn readiness_rejects_abnormal_worker_until_process_replacement(pool: PgPoo
     }
     let changes = SessionChanges::with_recheck_timing(Duration::from_millis(20), CHECK_TIMEOUT)
         .with_on_fatal(Arc::new(|| {}));
-    let mut state = crate::AppState::for_test(pool.clone());
+    let mut state = crate::AppState::for_test(pool.clone()).await;
     state.session_changes = changes.clone();
     let router = crate::app(state);
     status(&router, axum::http::StatusCode::OK).await;
@@ -40,7 +40,7 @@ async fn readiness_rejects_abnormal_worker_until_process_replacement(pool: PgPoo
     changes.panic_worker().await;
     status(&router, axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
     // The latch never resets in-process: #163 recovers by starting a fresh process.
-    let replacement = crate::app(crate::AppState::for_test(pool));
+    let replacement = crate::app(crate::AppState::for_test(pool).await);
     status(&replacement, axum::http::StatusCode::OK).await;
 }
 async fn active_checks(pool: &PgPool) -> i64 {
@@ -452,48 +452,65 @@ async fn large_session_pass_fails_closed_by_production_deadline(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "manual many-distinct-sessions measurement; run alone with --ignored --nocapture"]
 async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
-    // Distinct Accounts/Members spread over ten Organizations; provisioning is untimed.
-    sqlx::raw_sql("INSERT INTO organizations (organization_id, name) SELECT lpad(to_hex(1000000+n),32,'0')::uuid, 'Measured Organization' FROM generate_series(0,9) n;
-        INSERT INTO accounts (id,email,password_hash) SELECT lpad(to_hex(n),32,'0')::uuid, n::text || '@measurement.example', 'unused' FROM generate_series(1,100000) n;
-        INSERT INTO users (organization_id,id,account_id,name,role) SELECT lpad(to_hex(1000000+n%10),32,'0')::uuid, lpad(to_hex(n),32,'0')::uuid, lpad(to_hex(n),32,'0')::uuid, 'Measured Member', 'member' FROM generate_series(1,100000) n;
-        INSERT INTO account_sessions (token_hash,account_id) SELECT decode(lpad(to_hex(n),64,'0'),'hex'), lpad(to_hex(n),32,'0')::uuid FROM generate_series(1,100000) n;
-        ANALYZE organizations; ANALYZE accounts; ANALYZE users; ANALYZE account_sessions;")
+    // Runs as the RLS-restricted app role (#314): one transaction per Organization.
+    let app = crate::test_app_pool(pool.clone()).await;
+    // Member rows cannot be truncated: each layout gets disjoint ids, so the
+    // 1,000-Organization pass also carries the first pass's 100,000 rows.
+    for (layout, organizations) in [10_u32, 1_000].into_iter().enumerate() {
+        let (org_base, id_base) = (1_000_000 + 10_000 * layout as u32, 200_000 * layout as u32);
+        // Distinct Accounts/Members spread over the Organizations; provisioning is untimed.
+        sqlx::raw_sql(&format!("INSERT INTO organizations (organization_id, name) SELECT lpad(to_hex({org_base}+n),32,'0')::uuid, 'Measured Organization' FROM generate_series(0,{last}) n;
+        INSERT INTO accounts (id,email,password_hash) SELECT lpad(to_hex({id_base}+n),32,'0')::uuid, ({id_base}+n)::text || '@measurement.example', 'unused' FROM generate_series(1,100000) n;
+        INSERT INTO users (organization_id,id,account_id,name,role) SELECT lpad(to_hex({org_base}+n%{organizations}),32,'0')::uuid, lpad(to_hex({id_base}+n),32,'0')::uuid, lpad(to_hex({id_base}+n),32,'0')::uuid, 'Measured Member', 'member' FROM generate_series(1,100000) n;
+        INSERT INTO account_sessions (token_hash,account_id) SELECT decode(lpad(to_hex({id_base}+n),64,'0'),'hex'), lpad(to_hex({id_base}+n),32,'0')::uuid FROM generate_series(1,100000) n;
+        ANALYZE organizations; ANALYZE accounts; ANALYZE users; ANALYZE account_sessions;", last = organizations - 1))
         .execute(&pool).await.unwrap();
-    for count in [1_000_u32, 10_000, 100_000] {
-        let keys: Vec<_> = (1..=count)
-            .map(|i| {
-                let mut hash = vec![0; 32];
-                hash[28..].copy_from_slice(&i.to_be_bytes());
-                (Uuid::from_u128(1_000_000 + u128::from(i % 10)), hash)
-            })
-            .collect();
-        let changes = SessionChanges::default();
-        let registrations: Vec<_> = keys
-            .iter()
-            .enumerate()
-            .map(|(i, key)| changes.register_member(key.clone(), Uuid::from_u128(i as u128 + 1), 0))
-            .collect();
-        let started = Instant::now();
-        pass(
-            &changes.sessions,
-            &pool,
-            started + CHECK_TIMEOUT,
-            &changes.gate,
-        )
-        .await;
-        for registration in &registrations {
-            let status = *registration.changed.borrow();
-            assert!(!status.failed);
-            assert!(!status.revoked);
-            assert!(!status.membership_revoked);
+        for count in [1_000_u32, 10_000, 100_000] {
+            let keys: Vec<_> = (1..=count)
+                .map(|i| {
+                    let mut hash = vec![0; 32];
+                    hash[28..].copy_from_slice(&(id_base + i).to_be_bytes());
+                    (
+                        Uuid::from_u128(u128::from(org_base + i % organizations)),
+                        hash,
+                    )
+                })
+                .collect();
+            let changes = SessionChanges::default();
+            let registrations: Vec<_> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, key)| {
+                    changes.register_member(
+                        key.clone(),
+                        Uuid::from_u128(u128::from(id_base) + i as u128 + 1),
+                        0,
+                    )
+                })
+                .collect();
+            let started = Instant::now();
+            pass(
+                &changes.sessions,
+                &app,
+                started + CHECK_TIMEOUT,
+                &changes.gate,
+            )
+            .await;
+            for registration in &registrations {
+                let status = *registration.changed.borrow();
+                assert!(!status.failed);
+                assert!(!status.revoked);
+                assert!(!status.membership_revoked);
+            }
+            assert!(started.elapsed() < CHECK_TIMEOUT);
+            eprintln!(
+                "DISTINCT_SESSION_PASS organizations={organizations} accounts={count} members={count} sessions={count} chunks={} elapsed_ms={:.3} deadline_ms=5000",
+                keys.len().div_ceil(BATCH_SIZE),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
         }
-        assert!(started.elapsed() < CHECK_TIMEOUT);
-        eprintln!(
-            "DISTINCT_SESSION_PASS organizations=10 accounts={count} members={count} sessions={count} chunks={} elapsed_ms={:.3} deadline_ms=5000",
-            keys.len().div_ceil(BATCH_SIZE),
-            started.elapsed().as_secs_f64() * 1000.0
-        );
     }
+    app.close().await;
 }
 
 #[sqlx::test]
@@ -668,7 +685,7 @@ async fn rechecks_scope_each_organization_and_preserve_revocation_causes(pool: P
             .unwrap()
             .is_empty()
     );
-    let mut state = AppState::for_test(pools.app.clone());
+    let mut state = AppState::for_test(pools.app.clone()).await;
     state.session_changes = SessionChanges::default().with_on_fatal(Arc::new(|| {}));
     let mut first_watch = first.watch_session(&state).await.unwrap().unwrap();
     let second_watch = second.watch_session(&state).await.unwrap().unwrap();

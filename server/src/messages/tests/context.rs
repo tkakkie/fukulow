@@ -6,7 +6,7 @@ async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool)
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, org, _, channel, token) = fixture(&pools.admin).await;
     crate::database::tests::context::context_policies(&pools.admin).await;
-    let app = router(&pools.app);
+    let app = router(&pools.app).await;
     let key = Uuid::new_v4();
     let intent = json!({"client_message_id":key,"body":"Topic root","topic_name":"Context"});
     let mut held = pools.admin.begin().await.unwrap();
@@ -16,7 +16,7 @@ async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool)
     let mut sends = tokio::task::JoinSet::new();
     for _ in 0..2 {
         // Independent process-local admission permits the cross-process race.
-        let app = router(&pools.app);
+        let app = router(&pools.app).await;
         let token = token.clone();
         let intent = intent.clone();
         sends.spawn(async move { sent(&app, &token, channel, intent).await });
@@ -100,9 +100,11 @@ async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
     sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Shared Account','member')")
         .bind(other_org).bind(Uuid::new_v4()).bind(account).execute(&pools.admin).await.unwrap();
     crate::database::tests::context::context_policies(&pools.admin).await;
-    let app = router(&pools.app).layer(axum::Extension(axum::extract::ConnectInfo(
-        "127.0.0.1:3140".parse::<std::net::SocketAddr>().unwrap(),
-    )));
+    let app = router(&pools.app)
+        .await
+        .layer(axum::Extension(axum::extract::ConnectInfo(
+            "127.0.0.1:3140".parse::<std::net::SocketAddr>().unwrap(),
+        )));
     // Negative controls: the restricted role cannot read or write without context.
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
         .fetch_one(&pools.app)

@@ -71,7 +71,14 @@ pub struct AppState {
 
 #[cfg(test)]
 impl AppState {
-    pub(crate) fn for_test(pool: sqlx::PgPool) -> Self {
+    /// Application queries run as the restricted, RLS-subject test role (#314);
+    /// keep fixtures, DDL and fault injection on the administrative pool passed in.
+    pub(crate) async fn for_test(pool: sqlx::PgPool) -> Self {
+        Self::with_test_pool(test_app_pool(pool).await)
+    }
+
+    /// Test state over `pool` as given (e.g. a pool that never connects).
+    pub(crate) fn with_test_pool(pool: sqlx::PgPool) -> Self {
         Self {
             pool,
             cookie_secure: true,
@@ -83,6 +90,24 @@ impl AppState {
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
         }
+    }
+}
+
+/// The restricted application pool for `admin`, or `admin` itself when it is
+/// already non-superuser (e.g. `TestPools::app`).
+#[cfg(test)]
+pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
+    // A pool that cannot connect (tests asserting no database access) is
+    // returned as is: it can reach no rows, restricted or not.
+    let superuser: Option<bool> =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&admin)
+            .await
+            .ok();
+    if superuser == Some(true) {
+        test_support::TestPools::new(admin).await.app
+    } else {
+        admin
     }
 }
 
@@ -522,7 +547,7 @@ mod tests {
         for secure in [false, true] {
             let router = app(AppState {
                 cookie_secure: secure,
-                ..AppState::for_test(pool.clone())
+                ..AppState::with_test_pool(pool.clone())
             });
             for (method, path, content_type, input, status) in [
                 ("GET", "/", "application/json", "", 200),
