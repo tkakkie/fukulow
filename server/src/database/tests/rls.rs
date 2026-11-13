@@ -45,9 +45,8 @@ async fn tenant(admin: &PgPool) -> Tenant {
         "INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $3, $2, 'Member', 'owner')",
         "INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $4, 'general', 'public')",
         "INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $4, $3)",
-        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 0) ON CONFLICT DO NOTHING",
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 1)",
         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) VALUES ($1, $4, $5, 'topic', 1, 1, 1)",
-        "UPDATE channel_message_sequences SET seq = 1 WHERE organization_id = $1 AND channel_id = $4",
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id) VALUES ($1, gen_random_uuid(), $4, 1, $3, gen_random_uuid(), 'hello', $5)",
         "INSERT INTO channel_read_positions (organization_id, channel_id, member_id, membership_revision, initial_seq, read_seq) SELECT $1, $4, $3, membership_revision, 0, 0 FROM users WHERE organization_id = $1 AND id = $3 ON CONFLICT DO NOTHING",
         "INSERT INTO topic_read_positions (organization_id, channel_id, member_id, topic_id, read_seq) VALUES ($1, $4, $3, $5, 0) ON CONFLICT DO NOTHING",
@@ -93,10 +92,25 @@ fn sqlstate(error: &sqlx::Error) -> Option<String> {
 }
 
 /// Copy one visible row of `table` with `organization_id` replaced.
-fn copy_sql(table: &str) -> String {
+/// Copies one visible row of `table` with `organization_id` = $1, listing only
+/// insertable (non-generated) columns.
+async fn copy_sql(admin: &PgPool, table: &str) -> String {
+    let columns = insertable(admin, table).await;
     format!(
-        "INSERT INTO {table} SELECT (jsonb_populate_record(NULL::{table}, to_jsonb(t) || jsonb_build_object('organization_id', $1::uuid))).* FROM {table} t LIMIT 1"
+        "INSERT INTO {table} ({columns}) SELECT {columns} FROM jsonb_populate_record(NULL::{table}, \
+         (SELECT to_jsonb(t) || jsonb_build_object('organization_id', $1::uuid) FROM {table} t LIMIT 1))"
     )
+}
+
+async fn insertable(admin: &PgPool, table: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) FROM pg_attribute
+         WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''",
+    )
+    .bind(table)
+    .fetch_one(admin)
+    .await
+    .unwrap()
 }
 
 #[sqlx::test]
@@ -113,10 +127,11 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
     .await
     .unwrap();
     for table in TABLES {
+        let copy = copy_sql(&pools.admin, table).await;
         // Each case runs in its own transaction: an error aborts it.
         let insert =
             database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
-                sqlx::query(&copy_sql(table))
+                sqlx::query(&copy)
                     .bind(b.organization)
                     .execute(&mut *tx)
                     .await
@@ -194,8 +209,9 @@ async fn rls_without_context_reads_nothing_and_writes_nothing(pool: PgPool) {
         .fetch_one(&pools.admin)
         .await
         .unwrap();
+        let columns = insertable(&pools.admin, table).await;
         let error = sqlx::query(&format!(
-            "INSERT INTO {table} SELECT (jsonb_populate_record(NULL::{table}, $1)).*"
+            "INSERT INTO {table} ({columns}) SELECT {columns} FROM jsonb_populate_record(NULL::{table}, $1)"
         ))
         .bind(row)
         .execute(&pools.app)
@@ -240,8 +256,9 @@ async fn rls_account_context_reads_only_own_members_and_writes_nothing(pool: PgP
     .await
     .unwrap();
     for table in ["users", "organizations"] {
+        let copy = copy_sql(&pools.admin, table).await;
         let error = database::account(&pools.app, a.account, async |tx: &mut PgConnection| {
-            sqlx::query(&copy_sql(table))
+            sqlx::query(&copy)
                 .bind(b.organization)
                 .execute(&mut *tx)
                 .await

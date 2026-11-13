@@ -94,24 +94,21 @@ impl AppState {
 }
 
 /// The restricted application pool for `admin`, or `admin` itself when it is
-/// already non-superuser (e.g. `TestPools::app`). Boxed so callers inside
-/// `tokio::spawn` see a concrete `Send` future.
+/// already non-superuser (e.g. `TestPools::app`).
 #[cfg(test)]
-pub(crate) fn test_app_pool(
-    admin: sqlx::PgPool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = sqlx::PgPool> + Send>> {
-    Box::pin(async move {
-        let superuser: bool =
-            sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
-                .fetch_one(&admin)
-                .await
-                .unwrap();
-        if superuser {
-            test_support::TestPools::new(admin).await.app
-        } else {
-            admin
-        }
-    })
+pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
+    // A pool that cannot connect (tests asserting no database access) is
+    // returned as is: it can reach no rows, restricted or not.
+    let superuser: Option<bool> =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&admin)
+            .await
+            .ok();
+    if superuser == Some(true) {
+        test_support::TestPools::new(admin).await.app
+    } else {
+        admin
+    }
 }
 
 pub fn app(state: AppState) -> Router {

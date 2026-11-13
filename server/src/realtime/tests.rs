@@ -113,21 +113,18 @@ impl Server {
             .map(|(client, _)| client)
     }
 }
-fn state(pool: &PgPool) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppState> + Send>> {
-    let pool = pool.clone();
-    Box::pin(async move {
-        AppState {
-            pool: crate::test_app_pool(pool).await,
-            cookie_secure: false,
-            setup_token: "setup-token-test-only".into(),
-            sign_in_throttle: Default::default(),
-            message_delivery: Default::default(),
-            session_changes: Default::default(),
-            session_cleanup: Default::default(),
-            shutdown: Default::default(),
-            ws_allowed_origins: Default::default(),
-        }
-    })
+async fn state(pool: &PgPool) -> AppState {
+    AppState {
+        pool: crate::test_app_pool(pool.clone()).await,
+        cookie_secure: false,
+        setup_token: "setup-token-test-only".into(),
+        sign_in_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        session_cleanup: Default::default(),
+        shutdown: Default::default(),
+        ws_allowed_origins: Default::default(),
+    }
 }
 struct Fixture {
     app: Router,

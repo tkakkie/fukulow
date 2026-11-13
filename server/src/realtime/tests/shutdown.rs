@@ -207,7 +207,7 @@ async fn signal_child() {
     let start = tokio::time::Instant::now();
     closed(&mut idle, 1001).await;
     closed(&mut subscribed, 1001).await;
-    assert!(!pool.is_closed());
+    assert!(!f.state.pool.is_closed());
     if !expired {
         assert!(!serving.is_finished());
     }
@@ -228,7 +228,7 @@ async fn signal_child() {
         tokio::time::advance(deadline).await;
         assert!(!serving.await.unwrap().unwrap());
         assert!(start.elapsed() >= deadline);
-        assert!(!pool.is_closed());
+        assert!(!f.state.pool.is_closed());
         tokio::time::resume();
     } else {
         persistence.release.add_permits(1);
@@ -246,10 +246,10 @@ async fn signal_child() {
             !serving.is_finished(),
             "HTTP drained but notification is still held"
         );
-        assert!(!pool.is_closed());
+        assert!(!f.state.pool.is_closed());
         notification.release.add_permits(1);
         assert!(serving.await.unwrap().unwrap());
-        assert!(pool.is_closed());
+        assert!(f.state.pool.is_closed());
         assert!(start.elapsed() < deadline);
         tokio::time::sleep(Duration::from_millis(2100)).await;
         assert_eq!(fatal.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -382,7 +382,7 @@ async fn send_load_child(pool: PgPool, sends: usize) {
     let (completed, finished) = serving.await.unwrap();
     assert!(completed.unwrap());
     let elapsed = finished.duration_since(started);
-    assert!(pool.is_closed());
+    assert!(f.state.pool.is_closed());
     assert_eq!(committed.len(), sends);
     println!(
         "MEASURE shutdown_send_load sends={sends} channels={} in_flight=8 queued={} drain_ms={:.3} completed={} pool_closed=true deadline_s=60",
