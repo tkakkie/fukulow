@@ -227,9 +227,10 @@ async fn a_duplicate_subscribe_is_a_charged_no_op_whatever_its_after_seq(pool: P
     assert_eq!(event(&mut socket).await["message"], first);
     assert_eq!(event(&mut socket).await["message"], second);
     ready(&mut socket, f.channel, 2).await;
-    // No authorization query, watermark or replay, and no reply.
-    subscribe(&mut socket, f.channel, 0).await;
+    // No authorization query, watermark or replay, and no reply, even for an
+    // after_seq that a new subscription would refuse.
     subscribe(&mut socket, f.channel, 1).await;
+    subscribe(&mut socket, f.channel, -1).await;
     silent(&mut socket).await;
     let live = post(&f, f.channel).await;
     assert_eq!(event(&mut socket).await["message"], live);

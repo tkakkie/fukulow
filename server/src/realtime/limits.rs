@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 const MILLIS_PER_TOKEN: u64 = 1000;
 const NANOS_PER_MILLI: u128 = 1_000_000;
-/// Account entries kept for budgets that outlive their connections; only idle
-/// entries with a full budget are reclaimed.
+/// Account entries kept for budgets that outlive their connections. At the bound,
+/// idle full entries are reclaimed, then the idle entry closest to full is evicted
+/// (that Account's next connection starts with a full budget).
 pub(crate) const MAX_ACCOUNTS: usize = 100_000;
 
 /// A token bucket: `burst` frames at once, refilled at `per_second`.
@@ -166,8 +167,20 @@ impl SocketGate {
             inner
                 .accounts
                 .retain(|_, a| a.connections > 0 || !a.frames.is_full(budget, now));
+            // Still full: evict the idle entry closest to a full budget, so many
+            // depleted Accounts cannot block new ones. Entries with open sockets are
+            // at most the global cap, so one is always idle when the bound exceeds it.
             if inner.accounts.len() >= max_accounts {
-                return None;
+                let (_, idle) = inner
+                    .accounts
+                    .iter_mut()
+                    .filter(|(_, a)| a.connections == 0)
+                    .map(|(id, a)| {
+                        a.frames.refill(budget, now);
+                        (a.frames.level, *id)
+                    })
+                    .max()?;
+                inner.accounts.remove(&idle);
             }
         }
         inner.open += 1;
@@ -357,19 +370,30 @@ mod tests {
     }
 
     #[test]
-    fn the_account_table_bound_keeps_active_and_depleted_entries() {
+    fn the_account_table_bound_evicts_only_idle_entries_and_never_blocks_new_accounts() {
         let gate = gate(4, 10, 10, 10);
-        let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (a, b, c, d) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
         let _a = gate.admit_within(a, 2).unwrap();
         let mut b1 = gate.admit_within(b, 2).unwrap();
         assert!((0..5).all(|_| b1.charge()));
         drop(b1);
-        // B is idle but depleted (5 s to refill): its budget is kept, so C is refused.
-        assert!(gate.admit_within(c, 2).is_none());
+        // B is idle but depleted (5 s to refill): kept until the table is full.
         assert_eq!(gate.open(), (1, 2));
-        // Accounts already in the table are still admitted at the bound.
-        let _a2 = gate.admit_within(a, 2).unwrap();
-        let _b2 = gate.admit_within(b, 2).unwrap();
+        // Accounts already in the table are admitted at the bound without eviction.
+        let a2 = gate.admit_within(a, 2).unwrap();
+        // A new Account at the bound evicts the idle entry, never an active one.
+        let _c = gate.admit_within(c, 2).unwrap();
         assert_eq!(gate.open(), (3, 2));
+        let mut b2 = gate.admit_within(b, 3).unwrap();
+        assert!(b2.charge(), "an evicted Account starts with a full budget");
+        // Every entry active: a new Account is refused.
+        assert!(gate.admit_within(d, 3).is_none());
+        drop(a2);
+        assert_eq!(gate.open(), (3, 3));
     }
 }

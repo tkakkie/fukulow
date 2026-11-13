@@ -271,13 +271,14 @@ impl Connection<'_> {
                 channel_id,
                 after_seq,
             } => {
-                if after_seq < 0 {
-                    return Self::error(socket, Some(channel_id), "invalid_input").await;
-                }
-                // Already subscribed here: no authorization query, watermark or replay.
-                // The client holds this subscription's cursor; older history is REST.
+                // Already subscribed here: no authorization query, watermark, replay or
+                // reply, whatever after_seq (even an invalid one). The client holds this
+                // subscription's cursor; older history is REST.
                 if self.cursors.contains_key(&channel_id) {
                     return Ok(());
+                }
+                if after_seq < 0 {
+                    return Self::error(socket, Some(channel_id), "invalid_input").await;
                 }
                 if self.cursors.len() >= MAX_SUBSCRIPTIONS {
                     return Self::error(socket, Some(channel_id), "subscription_limit").await;
