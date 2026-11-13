@@ -115,6 +115,16 @@ pub struct Delivery {
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
+impl Delivery {
+    /// Delivery with an operator-configured send limit (`docs/decisions/messages.md`).
+    pub fn with_send_limit(limit: super::SendLimit) -> Self {
+        Self {
+            send_limiter: super::limiter::SendLimiter::new(limit),
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for Delivery {
     fn default() -> Self {
         Self {

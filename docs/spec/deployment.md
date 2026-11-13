@@ -30,6 +30,11 @@ Related: [Setup token](accounts.md#setup).
 - An HTTP TLS terminator also becomes nginx's immediate client. To preserve per-client sign-in budgets, configure nginx real-IP handling to trust only that terminator's fixed IP and a client-IP header it overwrites; verify distinct client budgets. Never trust arbitrary forwarded headers. This deployment-specific configuration is outside the stock HTTP-only profile.
 - The binary remains PID 1 with Docker's default SIGTERM stop signal and the existing 75-second stop grace period; #195 handles shutdown. No init wrapper is needed because the server starts no child processes.
 
+## Send limit (#306)
+- `FUKULOW_SEND_BURST` (tokens, default 10) and `FUKULOW_SEND_REFILL_PER_SECOND` (tokens per second, default 1) size the per-(Organization, Member) send bucket (S6 in `docs/spec/realtime.md`). Each must be an integer from 1 to 1,000,000; unset uses the default; empty, zero or invalid values fail startup.
+- Compose passes `${FUKULOW_SEND_BURST:-10}` and `${FUKULOW_SEND_REFILL_PER_SECOND:-1}`, so production keeps 10 and 1/s unless `.env` sets them. Do not raise them in production; CI raises them only for the light k6 run and browser tests, which send from one Member.
+- The settings change only bucket size and refill: authorization order, idempotency, the waiter/key/bucket caps and 503 fail-closed behaviour stay the same. Restart the app to apply a change; buckets are in-process and start full.
+
 ## HTTP availability
 - `/api/v1/health` remains liveness: plain-text `ok`, no DB/worker check. Internal `GET /api/v1/ready` returns plain-text `ok` (200) when DB `SELECT 1` succeeds, bounded connection cleanup completes and the fallback supervisor has not observed an abnormal exit; not-yet-started is normal. Worker availability is a supervisor latch, not a progress watchdog: a hung worker or an exit the supervisor has not yet observed can still appear available.
 - Readiness failure returns 503 `ErrorBody` (`error: "not_ready"`), `Retry-After: 1`, no internal details. Both endpoints use `Cache-Control: no-store`. Worker failure recovers through #163 process replacement; DB recovery can restore readiness in-process.

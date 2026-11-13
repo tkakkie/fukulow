@@ -199,6 +199,47 @@ async fn concurrent_identical_requests_consume_one_token_and_share_one_message(p
 }
 
 #[sqlx::test]
+async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_retry(pool: PgPool) {
+    let l = limited(&pool).await;
+    for _ in 2..BURST {
+        sent(&l.app, &l.token, l.channel, input(Uuid::new_v4(), "fill")).await;
+    }
+    let key = Uuid::new_v4();
+    let gate = commit::pause_commit(key);
+    let pending = commit::ambiguous_commit(key);
+    let leader = {
+        let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
+        tokio::spawn(async move { send(&app, &token, channel, input(key, "maybe")).await })
+    };
+    gate.entered.acquire().await.unwrap().forget();
+    let waiter = {
+        let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
+        tokio::spawn(async move { send(&app, &token, channel, input(key, "maybe")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiter.is_finished());
+    gate.release.add_permits(1);
+    // Both settle with the leader's unknown outcome; the waiter neither pays nor executes.
+    // Re-executing would block on the held row until the 8 s transaction timeout.
+    let waiter = tokio::time::timeout(Duration::from_secs(3), waiter)
+        .await
+        .expect("waiter settles with the leader")
+        .unwrap();
+    for response in [leader.await.unwrap(), waiter] {
+        assert_error(response, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+    pending.await.unwrap().rollback().await.unwrap();
+    // The client's own retry still gets the free retry; one token is left.
+    assert_eq!(
+        sent(&l.app, &l.token, l.channel, input(key, "maybe")).await["body"],
+        "maybe"
+    );
+    sent(&l.app, &l.token, l.channel, input(Uuid::new_v4(), "last")).await;
+    l.throttled(&l.token, l.channel, input(Uuid::new_v4(), "over"))
+        .await;
+}
+
+#[sqlx::test]
 async fn unknown_commit_retry_is_free_and_a_confirmed_failure_retry_is_charged(pool: PgPool) {
     let l = limited(&pool).await;
     let key = Uuid::new_v4();

@@ -22,6 +22,7 @@ mod commit;
 mod delivery;
 mod failure;
 mod limiter;
+pub use limiter::SendLimit;
 pub(crate) mod replies;
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub(crate) mod topics;
@@ -227,12 +228,34 @@ pub async fn send_message(
     let sender = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization_id, sender, channel_id).await?;
     let limiter = &state.message_delivery.send_limiter;
-    // One execution per key at a time; identical requests wait without charge or slot.
+    let key = (organization_id, sender.0, input.client_message_id);
+    // One execution per key at a time; identical requests wait without charge or slot
+    // and settle with that execution (S6).
     let mut lead = loop {
-        match limiter.begin((organization_id, sender.0, input.client_message_id))? {
-            limiter::Begin::Leader(lead) => break lead,
-            limiter::Begin::Wait(mut settled) => {
-                let _ = settled.changed().await;
+        let mut settled = match limiter.begin(key) {
+            Ok(limiter::Begin::Leader(lead)) => break lead,
+            Ok(limiter::Begin::Wait(settled)) => settled,
+            Err(limiter::Refusal::Saturated) => {
+                // A committed retry still answers canonically at the tracking cap (S5).
+                return match committed(&state.pool, organization_id, sender, channel_id, &input)
+                    .await?
+                {
+                    Some(message) => Ok(created(message)),
+                    None => Err(MessageError::LimiterSaturated),
+                };
+            }
+            Err(refusal) => return Err(refusal.into()),
+        };
+        let _ = settled.changed().await;
+        let outcome = settled.borrow().clone();
+        if let limiter::Settled::Executed(failure) = outcome {
+            if let Some(message) =
+                committed(&state.pool, organization_id, sender, channel_id, &input).await?
+            {
+                return Ok(created(message));
+            }
+            if let Some(failure) = failure {
+                return Err(failure.replay());
             }
         }
     };
@@ -263,7 +286,9 @@ pub async fn send_message(
         )
         .await;
         // Only a database failure other than a definite rollback may have committed.
-        lead.settle(matches!(&result, Err(MessageError::Database(error)) if !commit::definitely_rolled_back(error)));
+        let failure = result.as_ref().err();
+        let unknown = matches!(failure, Some(MessageError::Database(error)) if !commit::definitely_rolled_back(error));
+        lead.settle(unknown, failure.map(MessageError::replay));
         result
     })
     .await
@@ -362,6 +387,30 @@ pub enum MessageError {
     /// A send-limiter tracking cap was reached.
     LimiterSaturated,
     Database(sqlx::Error),
+}
+
+impl MessageError {
+    /// The same response for an identical request that waited on this one. Database
+    /// details are not shared; the response is the same 500.
+    fn replay(&self) -> Self {
+        match self {
+            Self::InvalidInput => Self::InvalidInput,
+            Self::NotFound => Self::NotFound,
+            Self::TopicNotFound => Self::TopicNotFound,
+            Self::ReplyTopicNotAllowed => Self::ReplyTopicNotAllowed,
+            Self::ReplyParentNotFound => Self::ReplyParentNotFound,
+            Self::ReplyChainNotFound => Self::ReplyChainNotFound,
+            Self::OrganizationUnavailable => Self::OrganizationUnavailable,
+            Self::Conflict => Self::Conflict,
+            Self::AdmissionRejected => Self::AdmissionRejected,
+            Self::ProjectionAdmissionRejected => Self::ProjectionAdmissionRejected,
+            Self::Throttled(seconds) => Self::Throttled(*seconds),
+            Self::LimiterSaturated => Self::LimiterSaturated,
+            Self::Database(_) => Self::Database(sqlx::Error::Protocol(
+                "identical in-flight send failed".into(),
+            )),
+        }
+    }
 }
 
 impl From<limiter::Refusal> for MessageError {

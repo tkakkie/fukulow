@@ -20,6 +20,10 @@ jobs:
           --health-retries 15
     env:
       DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
+      # CI-only: browser tests post quickly from one Member; the default limit is
+      # covered by the server tests.
+      FUKULOW_SEND_BURST: '10000'
+      FUKULOW_SEND_REFILL_PER_SECOND: '1000'
       # A Playwright bump must update the tag and digest together.
       PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.0-noble@sha256:6e3fb709361521eb27161606e6da6d2674e5e89fa16516cb37d6fdd91372273d
     steps:
@@ -51,7 +55,7 @@ jobs:
           fi
           docker run --pull never --rm --init --network host --ipc host \
             --user "$(id -u):$(id -g)" \
-            --env CI --env DATABASE_URL \
+            --env CI --env DATABASE_URL --env FUKULOW_SEND_BURST --env FUKULOW_SEND_REFILL_PER_SECOND \
             --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             --volume "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
             --workdir "$GITHUB_WORKSPACE/web" \
