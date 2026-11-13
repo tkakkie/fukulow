@@ -136,6 +136,14 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(auth::native_sign_in),
         )
         .route("/api/v1/me", get(auth::me))
+        .route(
+            "/api/v1/me/password",
+            axum::routing::put(auth::security::change_password),
+        )
+        .route(
+            "/api/v1/me/sessions/revoke-others",
+            axum::routing::post(auth::security::revoke_others),
+        )
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
         .route(
             "/api/v1/orgs/{org}/members",

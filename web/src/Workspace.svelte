@@ -49,6 +49,7 @@
     skipTargetId = $bindable<SkipLinkTargetId>('main-content'),
     resolveSenderName,
     onselectorganization,
+    onsettings,
     onsignout,
     onannounce,
   }: {
@@ -64,6 +65,7 @@
     skipTargetId?: SkipLinkTargetId
     resolveSenderName?: (senderId: string) => string
     onselectorganization?: (id: string) => void
+    onsettings?: () => void
     onsignout?: () => void
     onannounce?: (message: string) => void
   } = $props()
@@ -553,6 +555,9 @@
     </div>
 
     <div class="rail__bottom">
+      {#if onsettings}
+        <Button variant="icon" ariaLabel="設定" onclick={onsettings}>⚙</Button>
+      {/if}
       {#if onsignout}
         <Button variant="icon" ariaLabel="ログアウト" disabled={busy} onclick={onsignout}>⇥</Button>
       {/if}

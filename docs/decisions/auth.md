@@ -53,6 +53,13 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - #305 Owner may deactivate another active Member; Admin only non-Owners; no self-deactivation. Authorize before target disclosure, then target-specific denial before last_owner/last_channel_manager. Reason: offboarding without self-lockout or existence leaks.
 - #305 owns the deactivation transaction and post-COMMIT revision signal in one detached task. Reason: HTTP cancellation must not lose notification; 4003 affects all Sessions of only that Membership, with the documented revocation boundary and 35 s fallback.
 
+## Password and other Sessions (#304)
+- #304 PUT /api/v1/me/password takes current_password/new_password; POST /api/v1/me/sessions/revoke-others takes current_password. Both return 204 and keep the current Session, so an Account can secure itself without losing its active client.
+- #304 wrong current password is 403 current_password_incorrect; 401 means only an invalid/expired/revoked Session on these endpoints. Reason: clients end their Session on 401. Invalid new length is 400 invalid_new_password, distinct from 429 too many sign-in attempts.
+- #304 both actions share sign-in IP/email failures and in-flight reservations before Argon2; only wrong passwords count. One admitted worker verifies and hashes the replacement, avoiding a second queue admission while retaining the Account lock.
+- #304 lock order: Account FOR UPDATE -> current Account Session -> other Sessions; web/native sign-in: Account FOR UPDATE -> new Session. Hold through COMMIT, verifying under the Account lock, so an authenticating sign-in cannot escape revocation.
+- #304 recheck current Session/password under locks, then atomically update password and delete other Sessions across Organizations. A detached task owns the transaction and post-COMMIT token signals, so cancellation cannot lose 4001; the observed-loss/in-flight-frame boundary stays.
+
 ## Sessions and revocation
 - #149 channel_access_lost carries only channel_id, keeps the socket open and retires the subscription. The same fallback worker checks captured grant lifetimes under its 35 s bound; failed/overdue passes fail closed. No retained notification state.
 - #149 observed loss fences queued/replay frames and subscribed at first socket poll under the status read guard. Only an already handed-off frame may finish; REST authorization/data snapshots established before COMMIT may finish without later Messages.

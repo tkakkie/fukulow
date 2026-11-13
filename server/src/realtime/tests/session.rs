@@ -1,6 +1,6 @@
 use super::*;
 
-async fn fallback_close(socket: &mut Client, code: u16) {
+pub(super) async fn fallback_close(socket: &mut Client, code: u16) {
     let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
         .await
         .unwrap()
@@ -193,7 +193,7 @@ async fn worker_panic_closes_existing_and_new_sockets_with_internal_error(pool: 
     ready(&mut healthy, f.channel, 0).await;
 }
 
-async fn account_id(pool: &PgPool, organization: Uuid, member: Uuid) -> Uuid {
+pub(super) async fn account_id(pool: &PgPool, organization: Uuid, member: Uuid) -> Uuid {
     sqlx::query_scalar("SELECT account_id FROM users WHERE organization_id=$1 AND id=$2")
         .bind(organization)
         .bind(member)
@@ -202,14 +202,22 @@ async fn account_id(pool: &PgPool, organization: Uuid, member: Uuid) -> Uuid {
         .unwrap()
 }
 
-async fn add_organization_membership(pool: &PgPool, organization: Uuid, account: Uuid) -> Uuid {
+pub(super) async fn add_organization_membership(
+    pool: &PgPool,
+    organization: Uuid,
+    account: Uuid,
+) -> Uuid {
     let member = Uuid::new_v4();
     sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Independent Member','guest')")
         .bind(organization).bind(member).bind(account).execute(pool).await.unwrap();
     member
 }
 
-async fn connect_organization(server: &Server, token: &str, organization: Uuid) -> Client {
+pub(super) async fn connect_organization(
+    server: &Server,
+    token: &str,
+    organization: Uuid,
+) -> Client {
     let mut request = format!("ws://{}/api/v1/orgs/{organization}/ws", server.address)
         .into_client_request()
         .unwrap();
