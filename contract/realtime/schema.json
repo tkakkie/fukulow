@@ -551,7 +551,7 @@
           "additionalProperties": false
         },
         {
-          "$comment": "No earlier delivery remains on the socket. The runner subscribes to barrier.channel at barrier.caught_up_seq then sends a nonce-bearing WebSocket ping and requires exactly its subscribed watermark followed by the matching pong. The pong proves this subscribe was processed, so an old duplicate subscribed cannot impersonate the barrier. Choose an authorized Channel at its current high-water seq, without concurrent posts or held replay. POST responses await publication; subscribe drains the entire connection queue before subscribed, so this barrier covers earlier work across Channels, not a time window. Close paths (4008 overflow, 4001 session end) are covered because connected() polls the close signals before the connection in a biased select; overflow is signalled before the HTTP response, so a pending close wins over the barrier. It must not re-subscribe the Channel whose unsubscribe or loss of access is under test. Only as the last item of an expect.",
+          "$comment": "No earlier delivery remains on the socket. The runner unsubscribes and then subscribes barrier.channel at barrier.caught_up_seq (a duplicate subscribe is a no-op, #196) then sends a nonce-bearing WebSocket ping and requires exactly its subscribed watermark followed by the matching pong. The pong proves this subscribe was processed, so an old duplicate subscribed cannot impersonate the barrier. Choose an authorized Channel at its current high-water seq, without concurrent posts or held replay. POST responses await publication; subscribe drains the entire connection queue before subscribed, so this barrier covers earlier work across Channels, not a time window. Close paths (4008 overflow, 4001 session end) are covered because connected() polls the close signals before the connection in a biased select; overflow is signalled before the HTTP response, so a pending close wins over the barrier. It must not re-subscribe the Channel whose unsubscribe or loss of access is under test. Only as the last item of an expect.",
           "type": "object",
           "required": ["type", "barrier"],
           "properties": {
@@ -624,7 +624,7 @@
       ]
     },
     "EffectPattern": {
-      "$comment": "Matches an emitted effect when every field given here equals the effect's field (extra fields of the effect are ignored). Effect types: connect (open a socket); subscribe(channel, after_seq); unsubscribe(channel); fetch_history(channel, page=latest|after|before, seq for after/before); send(channel, client_message_id) = the HTTP send, a resend is another send with the same id; wait(purpose, channel?) = the client asks to be woken later (exact durations are not part of the contract; the harness decides when to deliver timer_elapsed); membership_check = GET /api/v1/orgs/{org}/me after a WebSocket handshake failure (C10). Planned (P1, P2): fetch_history with topic = a Topic-filtered page; fetch_main_timeline(channel, as_of_seq?, before_position?) = GET /timeline. Controller-only (P8): fetch_unread(channel) refetches a Channel-list Unread baseline. Controller-only fetch_reply_chain(channel, anchor, after_seq) = GET /messages/{anchor}/chain; send.reply_to is a confirmed Message id. as: binds a label to the matched effect so a later input can respond_to it. times: exactly this many emitted effects match in this step (default: at least one when required, none when forbidden).",
+      "$comment": "Matches an emitted effect when every field given here equals the effect's field (extra fields of the effect are ignored). Effect types: connect (open a socket); subscribe(channel, after_seq); unsubscribe(channel); fetch_history(channel, page=latest|after|before, seq for after/before); send(channel, client_message_id) = the HTTP send, a resend is another send with the same id; wait(purpose, channel?) = the client asks to be woken later (send_retry respects C6 Retry-After; the harness delivers timer_elapsed after the wait, and controller tests check durations); membership_check = GET /api/v1/orgs/{org}/me after a WebSocket handshake failure (C10). Planned (P1, P2): fetch_history with topic = a Topic-filtered page; fetch_main_timeline(channel, as_of_seq?, before_position?) = GET /timeline. Controller-only (P8): fetch_unread(channel) refetches a Channel-list Unread baseline. Controller-only fetch_reply_chain(channel, anchor, after_seq) = GET /messages/{anchor}/chain; send.reply_to is a confirmed Message id. as: binds a label to the matched effect so a later input can respond_to it. times: exactly this many emitted effects match in this step (default: at least one when required, none when forbidden).",
       "type": "object",
       "required": ["type"],
       "properties": {
@@ -636,7 +636,7 @@
         "page": { "enum": ["latest", "after", "before"] },
         "seq": { "$ref": "#/$defs/Cursor" },
         "client_message_id": { "$ref": "#/$defs/Label" },
-        "purpose": { "enum": ["reorder_grace", "fill_backoff", "reconnect_backoff"] },
+        "purpose": { "enum": ["reorder_grace", "fill_backoff", "reconnect_backoff", "send_retry"] },
         "topic": { "$ref": "#/$defs/Label" },
         "as_of_seq": { "$ref": "#/$defs/Seq" },
         "before_position": { "$ref": "#/$defs/Seq" },
@@ -765,11 +765,11 @@
           "$comment": "A send ended without a Message.",
           "type": "object",
           "required": ["type", "respond_to", "status"],
-          "properties": { "type": { "const": "send_failed" }, "respond_to": { "$ref": "#/$defs/Label" }, "status": { "$ref": "#/$defs/Status" } },
+          "properties": { "type": { "const": "send_failed" }, "respond_to": { "$ref": "#/$defs/Label" }, "status": { "$ref": "#/$defs/Status" }, "retry_after_ms": { "type": "integer", "minimum": 1000 } },
           "additionalProperties": false
         },
         { "$comment": "The user retries a send.", "type": "object", "required": ["type", "client_message_id"], "properties": { "type": { "const": "user_retry" }, "client_message_id": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
-        { "$comment": "The user discards a failed send.", "type": "object", "required": ["type", "client_message_id"], "properties": { "type": { "const": "user_discard" }, "client_message_id": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
+        { "$comment": "The user discards a failed or throttled send.", "type": "object", "required": ["type", "client_message_id"], "properties": { "type": { "const": "user_discard" }, "client_message_id": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
         { "$comment": "A wait the client asked for ended.", "type": "object", "required": ["type", "respond_to"], "properties": { "type": { "const": "timer_elapsed" }, "respond_to": { "$ref": "#/$defs/Label" } }, "additionalProperties": false },
         {
           "$comment": "The Membership check ended (C10): status 200 = Member; 404 with error organization_unavailable = Membership lost; another status, network or timeout = no conclusion.",
@@ -830,12 +830,12 @@
           "$ref": "#/$defs/SeqList"
         },
         "pending": {
-          "$comment": "Sends not yet settled, as a set (order is not compared). sending = request in flight; unknown = outcome unknown (network error, timeout, lost ack); failed = definite refusal (not retryable). A settled or discarded send is absent. Listing [] asserts there is none.",
+          "$comment": "Sends not yet settled, as a set (order is not compared). sending = request in flight; throttled = 429, waiting to resend the same request after Retry-After; unknown = outcome unknown (network error, timeout, lost ack); failed = definite refusal (not retryable). A settled or discarded send is absent. Listing [] asserts there is none.",
           "type": "array",
           "items": {
             "type": "object",
             "required": ["client_message_id", "state"],
-            "properties": { "client_message_id": { "$ref": "#/$defs/Label" }, "state": { "enum": ["sending", "unknown", "failed"] } },
+            "properties": { "client_message_id": { "$ref": "#/$defs/Label" }, "state": { "enum": ["sending", "throttled", "unknown", "failed"] } },
             "additionalProperties": false
           }
         },

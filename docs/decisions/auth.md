@@ -3,6 +3,7 @@
 Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and the other parts: [index](../decisions.md).
 
 ## Auth, Accounts and tenancy
+- #299 shared raw-text validation rejects NUL in emails, setup names and Channel names before operation DB/Argon2 work; sign-in before throttle. Existing authentication/setup-token gates keep 401 precedence. Reason: PostgreSQL text cannot store NUL; avoid 500 and throttle bypass.
 - #146 splits global Accounts and Account Sessions from Organization Members. Authority is the Account plus the Organization URL on each request. Documented global operations: setup existence, credential/session lookup, active-Organization listing, Session cleanup.
 - Non-Member, unknown Organization and deactivated Member return the same 404 `organization_unavailable` so Membership is not disclosed (#146).
 - #197 web POST /session returns only identity/expiry via HttpOnly cookie; native POST /native/session returns bearer JSON without cookies. Both share verification, issuance, throttle and DELETE /session revocation; only SHA-256 stored, 30-day expiry.

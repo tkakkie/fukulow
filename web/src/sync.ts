@@ -32,7 +32,7 @@ export type PendingMessageState = {
   topicName?: string
   topicId?: string
   replyTo?: string
-  status: 'sending' | 'failed'
+  status: 'sending' | 'throttled' | 'failed'
   retryable: boolean
 }
 export type TopicComposerState = {
@@ -452,16 +452,25 @@ export function createSync(options: SyncOptions) {
         // Close cancels the wait while detached sends still observe definite refusals.
         if (!result.ok && result.kind === 'network' && !result.cancelled) submitted.delete(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
-          : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
+          : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network',
+            retryAfterMs: result.retryAfterMs })
         break
       }
       case 'wait': {
-        const ms = effect.purpose === 'reorder_grace' ? options.graceMs ?? 100
+        const ms = effect.purpose === 'send_retry' ? effect.delayMs
+          : effect.purpose === 'reorder_grace' ? options.graceMs ?? 100
           : effect.purpose === 'reconnect_backoff' ? reconnectDelay(effect.attempt, random) : fillDelay(effect.attempt)
-        timers.set(effect.id, schedule(() => {
-          timers.delete(effect.id)
-          void dispatch({ type: 'timer_elapsed', id: effect.id })
-        }, ms, effect))
+        // Browser timers overflow above signed 32-bit milliseconds; split long waits to avoid an early send.
+        const arm = (remaining: number) => {
+          const chunk = Math.min(remaining, 2_147_483_647)
+          timers.set(effect.id, schedule(() => {
+            if (!state.timers[effect.id]) return
+            if (remaining > chunk) { arm(remaining - chunk); return }
+            timers.delete(effect.id)
+            void dispatch({ type: 'timer_elapsed', id: effect.id })
+          }, chunk, effect))
+        }
+        arm(ms)
         break
       }
       case 'cancel_timer':
@@ -676,7 +685,7 @@ export function createSync(options: SyncOptions) {
             ...(p.topic_name ? { topicName: p.topic_name } : {}),
             ...(pendingTopics.get(p.clientMessageId) ? { topicId: pendingTopics.get(p.clientMessageId) } : {}),
             ...(p.reply_to ? { replyTo: p.reply_to } : {}),
-            status: p.state === 'sending' ? 'sending' : 'failed',
+            status: p.state === 'sending' || p.state === 'throttled' ? p.state : 'failed',
             retryable: p.state !== 'failed',
           })),
           hasOlder: c?.hasOlder ?? false, loadingOlder: c?.older !== undefined,

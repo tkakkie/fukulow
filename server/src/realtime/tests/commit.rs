@@ -213,7 +213,7 @@ async fn definite_commit_failure_does_not_signal_or_consume_sequence(pool: PgPoo
             .unwrap(),
         0
     );
-    subscribe(&mut socket, f.channel, 0).await;
+    resubscribe(&mut socket, f.channel, 0).await;
     ready(&mut socket, f.channel, 0).await;
     silent(&mut socket).await;
     sqlx::query("DROP TRIGGER reject_commit ON messages")
@@ -306,9 +306,9 @@ async fn ambiguous_commit_recovery_preserves_organization_and_private_channel_de
     let mut denied_socket = f.server.connect(&nonmember).await;
     subscribe(&mut denied_socket, f.channel, 0).await;
     denied(&mut denied_socket, f.channel).await;
-    subscribe(&mut other_org, f.channel, 0).await;
+    resubscribe(&mut other_org, f.channel, 0).await;
     ready(&mut other_org, f.channel, 0).await;
-    subscribe(&mut unrelated, other_channel, 0).await;
+    resubscribe(&mut unrelated, other_channel, 0).await;
     ready(&mut unrelated, other_channel, 0).await;
     // A foreign Organization still cannot subscribe to this Organization's other Channel.
     subscribe(&mut other_org, other_channel, 0).await;

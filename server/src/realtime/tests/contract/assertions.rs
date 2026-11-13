@@ -89,7 +89,7 @@ pub(super) async fn silence(
     // shared FIFO queue length and awaits live() for that whole prefix before sending
     // subscribed. This drains *all* Channels, even a wrongly enqueued denial/duplicate.
     // Replay and sends in progress on this connection must also finish before control.
-    // A nonce ping follows the control on the same ordered stream. Its pong proves
+    // A nonce ping follows the controls on the same ordered stream. Its pong proves
     // this subscribe ran; an old duplicate subscribed cannot impersonate the barrier.
     // TCP preserves frame order. Thus any earlier wrong send, even if live() takes
     // >100 ms, precedes this response and fails here. A cross-Channel live Message or
@@ -120,6 +120,15 @@ pub(super) async fn barrier_controls(
     channel: Uuid,
     caught_up_seq: i64,
 ) -> Result<Vec<u8>, Assertion> {
+    // A duplicate subscribe is a no-op (#196): only a fresh subscription drains and answers.
+    control(
+        client,
+        ClientMessage::Unsubscribe {
+            channel_id: channel,
+        },
+    )
+    .await
+    .map_err(|_| Assertion::Silence)?;
     control(
         client,
         ClientMessage::Subscribe {

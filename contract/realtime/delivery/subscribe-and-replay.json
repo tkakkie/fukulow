@@ -76,6 +76,7 @@
         {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":0}]},
         {"do":"post","as":"alice","channel":"general","count":2},
         {"do":"expect","socket":"s1","events":[{"type":"message","channel":"general","seqs":[1,2]},{"type":"silent","barrier":{"channel":"general","caught_up_seq":2}}]},
+        {"do":"unsubscribe","socket":"s1","channel":"general"},
         {"do":"subscribe","socket":"s1","channel":"general","after_seq":4000000000},
         {"do":"expect","socket":"s1","events":[{"type":"subscribed","channel":"general","caught_up_seq":2}]},
         {"do":"post","as":"alice","channel":"general"},

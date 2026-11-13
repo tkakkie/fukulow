@@ -4,6 +4,7 @@ Index and Terms: [docs/spec.md](../spec.md).
 Related: [Membership/access loss, C9](realtime.md#client-rules); [setup token](deployment.md#proxy-and-sign-in-limits).
 
 ## Accounts and Memberships
+- Emails, setup Organization/Member names and Channel names reject NUL with 400 ErrorBody before operation-specific database/password work. Authentication and setup-token gates retain 401 precedence; web/native sign-in validates email before throttle reservation. Passwords and Invite tokens keep their existing rules (#299).
 - An Account owns globally unique lower-case email, password and Account Sessions. A Member owns the display name and Role in one Organization. One Account may have different Members and Roles in several Organizations; there is at most one Member per Account per Organization.
 - Sign in uses email and password only. Web POST /api/v1/session returns only identity and expires_in, setting an HttpOnly Account Session cookie; native POST /api/v1/native/session returns identity, token and expires_in without cookies. Both share verification, issuance, throttling and DELETE /api/v1/session revocation.
 - GET /api/v1/me returns the Account and its active Organizations; GET /api/v1/orgs/{org}/me returns its active Member. Every Channel, Message and WebSocket route is under /api/v1/orgs/{org}; only the authenticated Account and that Organization URL establish authority.

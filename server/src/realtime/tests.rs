@@ -53,6 +53,28 @@ async fn entered(gate: &Gate) {
         .forget();
 }
 
+/// A socket to a server whose `Server` handle another task owns.
+async fn connect_at(address: std::net::SocketAddr, token: &str) -> Client {
+    try_connect_at(address, token).await.unwrap()
+}
+async fn try_connect_at(
+    address: std::net::SocketAddr,
+    token: &str,
+) -> Result<Client, tungstenite::Error> {
+    let mut request = format!("ws://{address}{}", scoped_path("/api/v1/ws", token))
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    Ok(tokio_tungstenite::connect_async(request).await?.0)
+}
+const UNMETERED: Budget = Budget {
+    burst: 1 << 40,
+    per_second: 1,
+};
+
 struct Server {
     address: std::net::SocketAddr,
     task: JoinHandle<()>,
@@ -124,6 +146,15 @@ async fn state(pool: &PgPool) -> AppState {
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        // Caps and budgets are exercised in tests/limits.rs; other tests and the
+        // manual measurements open many sockets and subscriptions for one Account.
+        socket_gate: SocketGate::new(SocketLimits {
+            per_account: 100_000,
+            global: 100_000,
+            connection_frames: UNMETERED,
+            account_frames: UNMETERED,
+            ..SocketLimits::default()
+        }),
     }
 }
 struct Fixture {
@@ -258,6 +289,18 @@ async fn subscribe(client: &mut Client, channel: Uuid, after: i64) {
     )
     .await
     .unwrap();
+}
+/// A fresh subscription on a subscribed Channel: a duplicate subscribe is a no-op (#196).
+async fn resubscribe(client: &mut Client, channel: Uuid, after: i64) {
+    control(
+        client,
+        ClientMessage::Unsubscribe {
+            channel_id: channel,
+        },
+    )
+    .await
+    .unwrap();
+    subscribe(client, channel, after).await;
 }
 async fn frame(client: &mut Client) -> tungstenite::Message {
     tokio::time::timeout(Duration::from_secs(5), client.next())
@@ -779,7 +822,10 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
                         state.pool = exhausted;
                         {
                             let work = state.shutdown.sockets.enter();
-                            ws.on_upgrade(move |socket| connected(socket, state, auth, work))
+                            let permit = state.socket_gate.admit(auth.account_id).unwrap();
+                            ws.on_upgrade(move |socket| {
+                                connected(socket, state, auth, permit, work)
+                            })
                         }
                     }
                 },
@@ -812,7 +858,7 @@ async fn malformed_controls_and_future_cursor_do_not_break_subscription_state(po
         assert_eq!(event(&mut socket).await["message"], canonical);
     }
     silent(&mut socket).await;
-    subscribe(&mut socket, f.channel, i64::MAX).await;
+    resubscribe(&mut socket, f.channel, i64::MAX).await;
     ready(&mut socket, f.channel, 2).await;
     let canonical = post(&f, f.channel).await;
     assert_eq!(event(&mut socket).await["message"], canonical);
@@ -1002,6 +1048,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 mod commit;
 mod contract;
 mod lifecycle;
+mod limits;
 mod notification;
 mod session;
 mod watermark;

@@ -17,7 +17,7 @@ export type SignInRequest = components['schemas']['SignInRequest']
 
 /** Result of an API call. `network` covers fetch failures and 5xx, including admission 503
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
-export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string } | { ok: false; kind: 'network'; retryAfterMs?: number }
+export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; retryAfterMs?: number }
 
 async function call<T>(
   fetchFn: typeof fetch,
@@ -36,7 +36,10 @@ async function call<T>(
     if (!res.ok) {
       let error: string | undefined
       try { error = ((await res.json()) as components['schemas']['ErrorBody']).error } catch { /* Status remains authoritative for malformed errors. */ }
-      return { ok: false, kind: 'http', status: res.status, ...(error === undefined ? {} : { error }) }
+      const header = res.headers.get('Retry-After')
+      const delay = header !== null && /^\d+$/.test(header) ? Number(header) * 1000 : NaN
+      return { ok: false, kind: 'http', status: res.status, ...(error === undefined ? {} : { error }),
+        ...(res.status === 429 ? { retryAfterMs: Number.isSafeInteger(delay) && delay >= 1000 ? delay : 1000 } : {}) }
     }
     return { ok: true, data: (parse ? await res.json() : undefined) as T }
   } catch {

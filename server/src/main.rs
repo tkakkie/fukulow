@@ -55,6 +55,12 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         Ok("true") | Err(std::env::VarError::NotPresent) => true,
         _ => return Err("FUKULOW_COOKIE_SECURE must be true or false".into()),
     };
+    let send_limit = fukulow_server::messages::SendLimit::configured(
+        std::env::var("FUKULOW_SEND_BURST").ok().as_deref(),
+        std::env::var("FUKULOW_SEND_REFILL_PER_SECOND")
+            .ok()
+            .as_deref(),
+    )?;
     let pool = PgPoolOptions::new()
         .max_connections(20)
         .connect(&database_url)
@@ -72,10 +78,11 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             cookie_secure,
             setup_token,
             sign_in_throttle,
-            message_delivery: Default::default(),
+            message_delivery: fukulow_server::messages::Delivery::with_send_limit(send_limit),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
             ws_allowed_origins,
+            socket_gate: Default::default(),
         },
         signal,
         fukulow_server::DRAIN_TIMEOUT,

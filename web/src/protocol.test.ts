@@ -43,6 +43,70 @@ function id(effects: Effect[], type: 'fetch_history' | 'wait' | 'send' | 'connec
   return effect.id
 }
 
+it('429 waits without resending early, re-arms with a new delay and preserves the entire request', () => {
+  for (const target of [{}, { topic_name: 'Release' }, { reply_to: 'parent' }]) {
+    const d = boot()
+    const original = { channel: 'A', clientMessageId: 'c1', body: '  original\nbody  ', ...target }
+    const send = id(d.feed({ type: 'user_send', ...original }), 'send')
+    const waits = d.feed({ type: 'send_failed', request: send, status: 429, retryAfterMs: 2000 })
+    const timer = id(waits, 'wait')
+    expect(waits).toEqual([{ type: 'wait', id: timer, purpose: 'send_retry', channel: 'A', delayMs: 2000 }])
+    expect(d.get().channels.A.pending[0]).toMatchObject({ clientMessageId: 'c1', body: original.body, ...target, state: 'throttled' })
+    expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toEqual([])
+    d.event(101)
+    const retry = d.feed({ type: 'timer_elapsed', id: timer })
+    expect(retry).toEqual([{ type: 'send', id: expect.any(Number), channel: 'A', client_message_id: 'c1', body: original.body, ...target }])
+    const again = d.feed({ type: 'send_failed', request: id(retry, 'send'), status: 429, retryAfterMs: 4000 })
+    expect(again).toEqual([{ type: 'wait', id: expect.any(Number), purpose: 'send_retry', channel: 'A', delayMs: 4000 }])
+    expect(d.feed({ type: 'timer_elapsed', id: timer })).toEqual([])
+    expect(Object.keys(d.get().timers)).toHaveLength(1)
+  }
+})
+
+it.each([undefined, NaN, Infinity, -1000, 0, 1, 1000.5])('429 delay %s falls back to one second', retryAfterMs => {
+  const d = boot()
+  const request = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+  expect(d.feed({ type: 'send_failed', request, status: 429, retryAfterMs }))
+    .toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'send_retry', delayMs: 1000 }))
+})
+
+it('throttled sends cancel waits on canonical settlement, discard, access loss and lifecycle changes', () => {
+  for (const end of ['echo', 'history', 'projection', 'discard', 'access', 'C10', 'stop', 'replacement', 'clamp'] as const) {
+    const d = boot()
+    const request = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+    const timer = id(d.feed({ type: 'send_failed', request, status: 429, retryAfterMs: 3000 }), 'wait')
+    const own = { ...record(99), sender: 'me', client_message_id: 'c1' }
+    let effects: Effect[]
+    if (end === 'echo') effects = d.feed({ type: 'event', connection: d.connection, event: { type: 'message', message: own } })
+    else if (end === 'history') {
+      const history = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
+      effects = d.feed({ type: 'history_result', request: history, page: { messages: [own], has_more: false } })
+    } else if (end === 'projection') effects = d.feed({ type: 'settle_history', channel: 'A', messages: [own] })
+    else if (end === 'discard') effects = d.feed({ type: 'user_discard', channel: 'A', clientMessageId: 'c1' })
+    else if (end === 'access') effects = d.feed({ type: 'channel_unavailable', channel: 'A' })
+    else if (end === 'C10') effects = d.feed({ type: 'organization_unavailable' })
+    else if (end === 'stop') effects = d.feed({ type: 'stop' })
+    else if (end === 'replacement') effects = d.feed({ type: 'session_replaced', selfId: 'other' })
+    else {
+      d.feed({ type: 'unwatch', channel: 'A' }); d.feed({ type: 'watch', channel: 'A' })
+      effects = d.feed({ type: 'event', connection: d.connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
+      expect(d.get().channels.A.pending[0]).toMatchObject({ clientMessageId: 'c1', state: 'unknown', retryWait: undefined })
+    }
+    expect(effects, end).toContainEqual({ type: 'cancel_timer', id: timer })
+    expect(d.get().timers[timer], end).toBeUndefined()
+    expect(d.feed({ type: 'timer_elapsed', id: timer }), end).toEqual([])
+  }
+})
+
+it('settlement before a late 429 never resurrects a send or arms a timer', () => {
+  const d = boot()
+  const request = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'hello' }), 'send')
+  d.feed({ type: 'settle_history', channel: 'A', messages: [{ ...record(99), sender: 'me', client_message_id: 'c1' }] })
+  expect(d.feed({ type: 'send_failed', request, status: 429, retryAfterMs: 2000 })).toEqual([])
+  expect(d.get().channels.A.pending).toEqual([])
+  expect(d.get().timers).toEqual({})
+})
+
 it('channel_unavailable fences history, refuses sends and retries, and recovers only on watch after reconnect', () => {
   const d = boot()
   const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c1', body: 'unknown' }), 'send')
@@ -208,6 +272,17 @@ it('before and nonadjacent latest records extend the window without becoming cur
   expect(d.get().channels.A.cursor).toBe(102)
 })
 
+it('backs off longer on each 4029 rate-limit close until a subscription is confirmed', () => {
+  const d = boot()
+  const first = d.feed({ type: 'socket_closed', connection: d.connection, code: 4029 })
+  expect(first).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff', attempt: 0 }))
+  expect(d.get().session).not.toBe('sign_in_required')
+  const connection = id(d.feed({ type: 'timer_elapsed', id: id(first, 'wait') }), 'connect')
+  d.feed({ type: 'connection_ready', connection })
+  const second = d.feed({ type: 'socket_closed', connection, code: 4029 })
+  expect(second).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff', attempt: 1 }))
+})
+
 it('reconnects with backoff after a 1001 idle-timeout close', () => {
   const d = boot()
   const timer = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1001 }), 'wait')
@@ -215,7 +290,7 @@ it('reconnects with backoff after a 1001 idle-timeout close', () => {
   expect(next).toBeDefined()
 })
 
-it.each([4008, 1001, 1011, 1006])('defers a pending fill backoff after close %s until reconnected and resubscribed', code => {
+it.each([4008, 4029, 1001, 1011, 1006])('defers a pending fill backoff after close %s until reconnected and resubscribed', code => {
   const d = boot()
   const grace = id(d.event(103), 'wait')
   const fill = id(d.feed({ type: 'timer_elapsed', id: grace }), 'fetch_history')

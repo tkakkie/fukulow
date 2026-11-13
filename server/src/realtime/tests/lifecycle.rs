@@ -17,11 +17,13 @@ async fn lifecycle_socket(f: &Fixture) -> (Server, Client, oneshot::Receiver<()>
                     let done = done.clone();
                     async move {
                         let work = state.shutdown.sockets.enter();
+                        let permit = state.socket_gate.admit(auth.account_id).unwrap();
                         ws.on_upgrade(move |socket| async move {
                             connected_with_lifecycle(
                                 socket,
                                 state,
                                 auth,
+                                permit,
                                 Lifecycle {
                                     ping_interval: PING_INTERVAL,
                                     idle_timeout: IDLE_TIMEOUT,
@@ -147,7 +149,7 @@ async fn post_replay_ping(f: &Fixture, socket: &mut Client) {
     let canonical = post(f, f.channel).await;
     assert_eq!(event(socket).await["message"], canonical);
     let gate = pause(f.channel);
-    subscribe(socket, f.channel, 0).await;
+    resubscribe(socket, f.channel, 0).await;
     entered(&gate).await;
     // No client frame is sent while replay prevents the first heartbeat Ping.
     advance(IDLE_TIMEOUT + PING_INTERVAL).await;
@@ -224,7 +226,7 @@ async fn pong_queued_during_replay_clears_outstanding_ping(pool: PgPool) {
         tungstenite::Message::Ping(_)
     ));
     let gate = pause(f.channel);
-    subscribe(&mut socket, f.channel, 0).await;
+    resubscribe(&mut socket, f.channel, 0).await;
     entered(&gate).await;
     socket
         .send(tungstenite::Message::Pong(vec![1].into()))

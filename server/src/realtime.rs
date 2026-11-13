@@ -19,7 +19,9 @@ use crate::{
 };
 
 mod connection;
+mod limits;
 mod origin;
+pub use limits::{Budget, SocketGate, SocketLimits};
 pub use origin::AllowedOrigins;
 
 /// Queue overflow: reconnect and subscribe from the last seq per channel; never drop silently.
@@ -28,6 +30,8 @@ pub const CLOSE_QUEUE_OVERFLOW: u16 = 4008;
 pub const CLOSE_SESSION_ENDED: u16 = 4001;
 /// Membership ended for this Organization only: terminal unavailable, no reconnect.
 pub const CLOSE_ORGANIZATION_UNAVAILABLE: u16 = 4003;
+/// Control-frame budget exhausted: reconnect with backoff, as after 4008.
+pub const CLOSE_RATE_LIMITED: u16 = 4029;
 
 /// Client -> server control messages. Cursors are per channel and exclusive.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -81,6 +85,10 @@ pub enum ServerEvent {
 /// stop protected delivery and go to Sign in. Membership loss closes only this
 /// Organization with 4003: terminal unavailable, never reconnect/resubscribe/retry sends.
 /// A rejected handshake has no close code: check GET /api/v1/orgs/{org}/me.
+/// Every text or binary frame (subscribe, unsubscribe, invalid) is charged to a
+/// per-connection and a per-Account budget before any database access; over
+/// budget closes with 4029: reconnect with backoff. A subscribe for a Channel
+/// already subscribed on this connection is ignored (no reply), whatever its after_seq.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/ws",
     params(("org" = Uuid, Path, description = "Organization id")),
     security(("cookie" = []), ("bearer" = [])),
@@ -89,7 +97,9 @@ pub enum ServerEvent {
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential before WebSocket upgrade", body = ErrorBody),
         (status = 403, description = "Cookie Origin missing or not allowed, checked before authentication and Organization resolution: origin_not_allowed", body = ErrorBody),
         (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
-        (status = 500, description = "Database failure while resolving the session before WebSocket upgrade", body = ErrorBody)))]
+        (status = 500, description = "Database failure while resolving the session before WebSocket upgrade", body = ErrorBody),
+        (status = 503, description = "socket_limit: the Account's or the server's open-socket cap is reached, or the Account's control-frame budget is empty (Retry-After 1 through 5, jittered); retry with the normal reconnect backoff", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Retry delay in seconds, at least 1")))))]
 pub async fn upgrade(
     State(state): State<AppState>,
     _origin: origin::CheckedOrigin,
@@ -109,20 +119,46 @@ pub async fn upgrade(
                 .into_response();
         }
     };
+    // Dropped with the upgrade callback if the handshake never completes.
+    let Some(permit) = state.socket_gate.admit(auth.account_id) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CACHE_CONTROL, "no-store".to_owned()),
+                (
+                    header::RETRY_AFTER,
+                    rand::random_range(1..=5_u64).to_string(),
+                ),
+            ],
+            Json(ErrorBody {
+                error: "socket_limit".into(),
+            }),
+        )
+            .into_response();
+    };
     let socket_work = state.shutdown.sockets.enter();
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
-        .on_upgrade(move |socket| connected(socket, state, auth, socket_work))
+        .read_buffer_size(state.socket_gate.limits().read_buffer)
+        .on_upgrade(move |socket| connected(socket, state, auth, permit, socket_work))
 }
 
-async fn connected(socket: WebSocket, state: AppState, auth: Auth, work: crate::shutdown::Guard) {
-    connected_with_lifecycle(socket, state, auth, connection::Lifecycle::default(), work).await;
+async fn connected(
+    socket: WebSocket,
+    state: AppState,
+    auth: Auth,
+    permit: limits::Permit,
+    work: crate::shutdown::Guard,
+) {
+    let lifecycle = connection::Lifecycle::default();
+    connected_with_lifecycle(socket, state, auth, permit, lifecycle, work).await;
 }
 
 async fn connected_with_lifecycle(
     mut socket: WebSocket,
     state: AppState,
     auth: Auth,
+    permit: limits::Permit,
     lifecycle: connection::Lifecycle,
     _work: crate::shutdown::Guard,
 ) {
@@ -158,6 +194,7 @@ async fn connected_with_lifecycle(
         queue,
         cursors: HashMap::new(),
         access: HashMap::new(),
+        permit,
     };
     let code = tokio::select! {
         biased;

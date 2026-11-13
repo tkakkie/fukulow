@@ -1,0 +1,3 @@
+# RFC 6455 sample Sec-WebSocket-Key in a test of #196 A (commit a1eab39), not a secret;
+# later commits generate the key at run time.
+a1eab394259f3761d9af929beda247709e08f6d1:server/src/realtime/tests/limits.rs:generic-api-key:143

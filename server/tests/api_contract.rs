@@ -25,7 +25,7 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // All 32 operations document shutdown, including Account security actions.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 223;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 224;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -124,6 +124,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
         session_changes: Default::default(),
         session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     };
     let shutdown = state.shutdown.clone();
     let router = app(state);
@@ -518,12 +519,12 @@ fn response_description_check_covers_reusable_and_nested_responses() {
 }
 
 #[test]
-fn channel_name_schemas_limit_length_to_128() {
+fn channel_name_schemas_limit_length_to_1_through_128() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     for schema in ["Channel", "CreateChannelRequest"] {
         let name = &document["components"]["schemas"][schema]["properties"]["name"];
         assert_eq!(name["maxLength"], 128);
-        assert!(name.get("minLength").is_none());
+        assert_eq!(name["minLength"], 1);
     }
 }
 
@@ -693,6 +694,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     });
     for (method, path) in [(
         "GET",
