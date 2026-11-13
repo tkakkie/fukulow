@@ -3,13 +3,21 @@
 // prepared statements (like SQLx) and per-transaction logs, then prints p50/p95/p99.
 // ctx=1 runs each query in a transaction that sets the Organization first; the
 // per-statement averages separate that cost from the measured SQL.
+// LATENCY_RESULT_DIR optionally preserves pgbench reports outside the checkout.
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
 export function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) throw new Error('no samples');
   const rank = Math.ceil((p / 100) * sorted.length);
   return sorted[Math.min(sorted.length, Math.max(rank, 1)) - 1];
+}
+
+export function transactionsPerSecond(report: string): number {
+  const match = /^tps = ([\d.]+) \(without initial connection time\)/m.exec(report);
+  if (!match || !Number.isFinite(Number(match[1]))) throw new Error('missing pgbench tps');
+  return Number(match[1]);
 }
 
 // pgbench --log line: client_id transaction_no time_us script_no time_epoch time_us_frac
@@ -52,10 +60,14 @@ function main() {
         '-D', `ctx=${ctx}`, '-D', 'org=00000000-0000-4000-8000-00000000000a', '-D', `chan=${ids[0]}`, '-D', `member=${ids[1]}`,
         '-f', `/tmp/hot-latency-${script}.sql`, database);
       if (!/number of failed transactions: 0 /.test(report)) throw new Error(`${script}: pgbench reported failures\n${report}`);
+      if (process.env.LATENCY_RESULT_DIR) {
+        mkdirSync(process.env.LATENCY_RESULT_DIR, { recursive: true });
+        writeFileSync(`${process.env.LATENCY_RESULT_DIR}/${script}-${ctx}-${c}.txt`, report);
+      }
       const samples = logLatenciesMs(docker('exec', container, 'sh', '-c', `cat ${prefix}*`)).sort((a, b) => a - b);
       const row = [50, 95, 99].map((p) => percentile(samples, p).toFixed(3)).join(' / ');
       const statements = statementAveragesMs(report).filter((s) => s.ms > 0).map((s) => `${s.ms.toFixed(3)} ${s.command}`).join('; ');
-      console.log(`${script} ctx=${ctx} clients=${c} n=${samples.length} p50/p95/p99 ms ${row} | avg: ${statements}`);
+      console.log(`${script} ctx=${ctx} clients=${c} n=${samples.length} tps=${transactionsPerSecond(report).toFixed(3)} p50/p95/p99 ms ${row} | avg: ${statements}`);
     }
   }
 }
