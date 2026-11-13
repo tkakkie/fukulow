@@ -54,7 +54,7 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 ## Personal section notices (#204, specified)
 
 - #204 sections_changed goes only to the changed Member's current sessions in that Organization, including the caller and sockets with no subscriptions. It carries no section data. Reason: devices converge without disclosing personal grouping.
-- #204 section notices share #307's post-COMMIT publication, coalescing buffer, activity_reset and reconnect refetch. Reason: failure and burst recovery need one bounded path, with no parallel subscription or Message cursor.
+- #204 section notices share #307's post-COMMIT publication, buffer, proven-recipient resets and O5 periodic REST reconciliation of held targets. Reason: recovery must converge without another mutation or disclosing personal activity to other Members.
 - #204 section display intersects authorized layout and Channel-list snapshots under A11/A12 fences; loss hides immediately. Reason: a stale personal-layout response must never restore a Channel hidden by access loss.
 
 ## Admission and timeouts

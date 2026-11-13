@@ -36,7 +36,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 ## Personal sections (#204, specified)
 
 - #204 sections belong to one Member in one Organization, including Guest; Owner/Admin have no override. Reason: personal grouping must neither grant Channel access nor affect another Member's view.
-- #204 access loss hides but retains placement/order; regain restores it. Section/Channel deletion removes placements atomically. Reason: losing a grant must not erase personal grouping choices or leave dangling placements.
+- #204 access loss hides but retains placement/order; regain restores it. Section/Channel deletion removes placements atomically; hidden Channel cleanup changes no exposed generation or notice. Reason: retain grouping without dangling placements or disclosing deletion after loss.
 - #204 composite Organization/Member/section keys enforce placement ownership; unique Organization/Member/Channel enforces cardinality. Reason: application checks alone cannot prevent cross-owner or cross-Organization data.
 - #204 moves, reorders and deletes serialize per Member; complete reorders use last-committing-writer-wins. Keep Organization -> sorted Channels -> Members -> grants lock order. Reason: atomic orders and delete races must not introduce a deadlock.
 
