@@ -23,8 +23,8 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
 - Channel names are unique per Organization across visibility, `lower(name COLLATE "C")` (ASCII folds, non-ASCII as-is); duplicates 409. Existing duplicates fail the migration for the operator to resolve; no auto-rename (#51).
 - Accepted (#51): a 409 on creation lets an Organization Member infer a private Channel name exists (names only, no members or messages).
-- Channel names are at most 128 Unicode scalars (Rust and PostgreSQL CHECK, OpenAPI `maxLength`), 400 before a write transaction. Reason: keeps 4-byte names inside the unique btree entry limit; generated TS cannot enforce it (#63).
-- #63 migration never truncates, renames or deletes names; a violation aborts deployment. Before deploying, stop Channel writes and run `SELECT organization_id, id, name FROM channels WHERE char_length(name) > 128`; resolve, re-run until empty.
+- #299 Channel names are 1..=128 Unicode scalars, NUL-free (400 before a write transaction); Rust, PostgreSQL CHECK and OpenAPI enforce length. Empty-name acceptance is superseded. Reason: usable names and the unique btree entry limit (#63).
+- #299 migration validates existing rows before replacing the CHECK; violations abort, preserving rows. No automatic rename/truncate/delete. Stop Channel writes; run `SELECT organization_id, id, name FROM channels WHERE char_length(name) NOT BETWEEN 1 AND 128`; correct and re-run until empty.
 - #63 accepted lock: the plain CHECK validates rows under ACCESS EXCLUSIVE during ALTER, also blocking reads; acceptable at current scale.
 - Channel names with leading/trailing `str::trim()` whitespace are rejected (400), never trimmed: trimming changes what was typed, invisible differences allow look-alikes (#72). Checked in the API, not a DB CHECK: PostgreSQL whitespace differs from Rust (#77).
 - Per-Channel seq comes from a messages-owned counter row updated in the insert transaction, not a PostgreSQL sequence, so a rollback consumes no number. Cost: it serializes writes to a hot Channel (#17).
@@ -75,8 +75,20 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #140 keeps one opt-in chain per Channel, merged by Message id and stable reply_root_id. Page continuation uses only the last page seq; live appends cannot skip unpaged siblings or enter sync cursor/gap evidence.
 - #140 composes over sync (or Topic sync) and sends confirmed-parent Replies through its existing pending/retry path. Preserve reply_to with the id/body so retries cannot change intent; projection reads settle C5 with session/read fencing before teardown.
 
+## Send limit (#306)
+- Per-(Organization, Member) bucket, burst 10, 1/s, initial 10 (maintainer, 2026-11-13): a person types well below 1/s sustained, bursts cover pastes and retries, and one Member or stolen session can no longer fill a Channel's 256-waiter queue for others.
+- The limiter runs after Channel authorization and before admission, so denials stay 404 and a 429 takes no slot, sequence or event. Committed retries answer before it after an access recheck (S5), so an exhausted bucket never blocks recovery.
+- Charge on passing the limiter, no refund: a refund would let failing sends (missing parent, rollback) loop free. COMMIT-unknown and in-flight duplicates are not charged again, so a client retrying per C6 never pays twice for one outcome.
+- Database failures other than a definite rollback count as COMMIT-unknown: conservative, since an extra free retry within 120 s costs one send at most, while a double charge would throttle honest C6 retries.
+- Bounded state, fail closed (503, Retry-After 1, uncharged): buckets <=100,000 at ~70 B (~7.5 MiB with table growth); a bucket is dropped only when refilled to full, equal to a fresh one, so eviction never resets debt.
+- Pending keys <=10,000 at ~200 B incl. the watch channel (~2 MiB), 16 waiters each; unknown markers live 120 s. In-process only, matching the single-process deployment (`docs/decisions/process.md`).
+- Identical waiters take the executed leader's outcome (canonical, else its failure), never re-execute: that would pay again or spend the free retry. Only a charged unknown COMMIT earns a marker, so retries cannot chain. Another intent on the key inherits neither.
+- A leader that paid but was refused before persistence (admission 503) hands that refusal to identical waiters; releasing them instead let each pay again, breaking one charge per concurrent identical send (#349 review). Another intent still begins again.
+- Burst and refill are operator env settings (maintainer, 2026-11-13) so CI load/e2e can send fast from one Member; defaults stay 10 and 1/s and Compose keeps them. Only the size changes: order, idempotency, caps and 503 fail-closed are fixed. CI numbers are not production-limit measurements.
+
 ## Entries in other parts
 
 - [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
 
 - [auth](auth.md): `#314 single-statement hot reads use`
+- [auth](auth.md): `#299 shared raw-text validation`

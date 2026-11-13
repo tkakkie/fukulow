@@ -7,6 +7,8 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+mod text_input;
+
 async fn org(pool: &sqlx::PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Test')")

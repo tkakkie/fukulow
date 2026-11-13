@@ -60,6 +60,9 @@ async fn http_status(
     serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
 
+/// The unresolved Message plus 81 new sends (96 storm sends, 15 same-key retries).
+const STORM_SEQS: i64 = 82;
+
 #[sqlx::test]
 async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organizations_and_channels(
     pool: PgPool,
@@ -154,12 +157,10 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         let barrier = barrier.clone();
         sending.spawn(async move {
             barrier.wait().await;
-            let send_key = if index % 2 == 0 { key } else { Uuid::new_v4() };
-            let body = if index % 2 == 0 {
-                "unresolved"
-            } else {
-                "new send"
-            };
+            // Identical retries wait on the in-flight key, at most 16 per key (#306).
+            let retry = index % 2 == 0 && index < 30;
+            let send_key = if retry { key } else { Uuid::new_v4() };
+            let body = if retry { "unresolved" } else { "new send" };
             http_json(
                 address,
                 &token,
@@ -245,13 +246,13 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     }
     assert_eq!(
         seqs.into_iter().collect::<Vec<_>>(),
-        (1..=49).collect::<Vec<_>>()
+        (1..=STORM_SEQS).collect::<Vec<_>>()
     );
     for socket in &mut waiting {
         // COMMIT resolution can race the queued sends and the handoff snapshot.
         let mut seq = 0;
         let mut subscribed = false;
-        while seq < 49 || !subscribed {
+        while seq < STORM_SEQS || !subscribed {
             let value = event(socket).await;
             if value["type"] == "subscribed" {
                 assert!(!subscribed);
@@ -268,14 +269,14 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     }
     let mut recovered = f.server.connect(&f.token).await;
     subscribe(&mut recovered, f.channel, 0).await;
-    for seq in 1..=49 {
+    for seq in 1..=STORM_SEQS {
         let value = event(&mut recovered).await;
         assert_eq!(value["message"]["seq"], seq);
         if seq == 1 {
             assert_eq!(value["message"], canonical);
         }
     }
-    ready(&mut recovered, f.channel, 49).await;
+    ready(&mut recovered, f.channel, STORM_SEQS).await;
 }
 
 #[sqlx::test]

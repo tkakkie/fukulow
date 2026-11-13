@@ -14,6 +14,9 @@ API contract and generated types. Writing rules and the other parts: [index](../
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [auth](auth.md): `#299 shared raw-text validation`
+- [messages](messages.md): `#299 Channel names are`, `#299 migration validates`
+
 - [messages](messages.md): `#204 sections belong`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
 - [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section display intersects`
 
