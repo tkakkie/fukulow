@@ -242,7 +242,7 @@ async fn reply_live_replay_member_revision_and_removed_grant_denials_have_positi
             access_loss::access_lost(&mut live, target).await;
         }
         silent(&mut live).await;
-        subscribe(&mut live, target, 0).await;
+        resubscribe(&mut live, target, 0).await;
         if loss == "grant" {
             denied(&mut live, target).await;
         } else {

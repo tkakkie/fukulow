@@ -105,6 +105,7 @@ async fn account_migration_preserves_single_organization_and_requires_new_sign_i
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     });
     let response = app
         .clone()

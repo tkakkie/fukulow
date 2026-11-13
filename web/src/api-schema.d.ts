@@ -414,6 +414,10 @@ export interface paths {
          *     stop protected delivery and go to Sign in. Membership loss closes only this
          *     Organization with 4003: terminal unavailable, never reconnect/resubscribe/retry sends.
          *     A rejected handshake has no close code: check GET /api/v1/orgs/{org}/me.
+         *     Every text or binary frame (subscribe, unsubscribe, invalid) is charged to a
+         *     per-connection and a per-Account budget before any database access; over
+         *     budget closes with 4029: reconnect with backoff. A subscribe for a Channel
+         *     already subscribed on this connection is ignored (no reply), whatever its after_seq.
          */
         get: operations["upgrade"];
         put?: never;
@@ -3321,7 +3325,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description socket_limit: the Account's or the server's open-socket cap is reached, or the Account's control-frame budget is empty (Retry-After 1 through 5, jittered); retry with the normal reconnect backoff; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

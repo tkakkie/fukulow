@@ -67,6 +67,7 @@ pub struct AppState {
     pub session_changes: auth::SessionChanges,
     pub session_cleanup: auth::SessionCleanup,
     pub ws_allowed_origins: realtime::AllowedOrigins,
+    pub socket_gate: realtime::SocketGate,
 }
 
 #[cfg(test)]
@@ -89,6 +90,7 @@ impl AppState {
             session_cleanup: Default::default(),
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
+            socket_gate: Default::default(),
         }
     }
 }
@@ -480,6 +482,7 @@ mod tests {
             session_cleanup: Default::default(),
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
+            socket_gate: Default::default(),
         })
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await

@@ -76,6 +76,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             session_changes: Default::default(),
             session_cleanup: Default::default(),
             ws_allowed_origins,
+            socket_gate: Default::default(),
         },
         signal,
         fukulow_server::DRAIN_TIMEOUT,
