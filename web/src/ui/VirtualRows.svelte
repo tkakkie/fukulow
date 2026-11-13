@@ -28,7 +28,7 @@
   let revealing = false
   const window = createRowWindow(next => { range = next }, () => onvisible(), () => onfocuslost(), () => {
     if (revealing || !untrack(() => followBottom)) return
-    void tick().then(() => { if (!revealing && container) container.scrollTop = container.scrollHeight })
+    void tick().then(() => { if (!revealing && container) container.scrollTop = container.scrollHeight }).catch(console.error)
   })
   $effect(() => {
     const ids = [...items.map(rowId), ...pendingItems.map(item => `pending:${pendingId(item)}`)]

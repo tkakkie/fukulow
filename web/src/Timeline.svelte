@@ -199,7 +199,7 @@
     const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
     if (next === null) return
     e.preventDefault()
-    void focusMessage(focusableMessageIds[next])
+    void focusMessage(focusableMessageIds[next]).catch(console.error)
   }
   async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
     const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
@@ -227,7 +227,7 @@
       void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
         applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
         reportPresented()
-      })
+      }).catch(console.error)
     } else applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
   }
 
@@ -240,14 +240,14 @@
 
   function loadOlderWithAnchor() {
     captureCurrentAnchor()
-    if (topics) void topics.loadMain()
-    else void channel.loadOlder()
+    if (topics) void topics.loadMain().catch(console.error)
+    else void channel.loadOlder().catch(console.error)
   }
 
   function retryInitialLoad() {
     scrollController.resetLoadingTimeout()
-    if (topics && s.status === 'ready') void topics.loadMain()
-    else void channel.loadLatest()
+    if (topics && s.status === 'ready') void topics.loadMain().catch(console.error)
+    else void channel.loadLatest().catch(console.error)
   }
 
   let requestedMainFor = ''
@@ -301,7 +301,7 @@
         enteredTarget = true
         currentVisitId = vid
       }
-    })
+    }).catch(console.error)
     return () => {
       cancelled = true
     }
@@ -331,11 +331,11 @@
       requestedMainFor !== mainKey
     ) {
       requestedMainFor = mainKey
-      void topics.loadMain()
+      void topics.loadMain().catch(console.error)
     }
     for (const topic of tState.topics) {
       if ((topic.baseline === null || topic.latestMessage.seq < topic.position) && topic.summaryError === null) {
-        void topics.ensureSummary(topic.topicId)
+        void topics.ensureSummary(topic.topicId).catch(console.error)
       }
     }
   })
@@ -419,7 +419,7 @@
         }
       }
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
   $effect(() => {
@@ -427,7 +427,7 @@
     if (entry?.boundary === null || needsOlderUnreadPage) return
     void tick().then(() => {
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
 
@@ -477,7 +477,7 @@
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
-    })
+    }).catch(console.error)
     return true
   }
 </script>
@@ -596,7 +596,7 @@
                 unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
                 onclick={() => onopentopic?.(line.topicId)}
                 onretry={!targetUnavailable && line.summaryError === 'retryable' && topics
-                  ? () => void topics.retrySummary(line.topicId)
+                  ? () => void topics.retrySummary(line.topicId).catch(console.error)
                   : undefined}
               />
           {/if}
@@ -611,7 +611,7 @@
             pendingStatus={p.status}
             retryable={p.retryable}
             {targetUnavailable}
-            onretry={() => void channel.retry(p.clientMessageId)}
+            onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
             onrestore={() => handleRestoreRequest(p.clientMessageId)}
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
@@ -624,14 +624,14 @@
       />
     {/if}
     {#if tState?.main.hasNewer && !targetUnavailable && topics}
-      <Button variant="secondary" onclick={jumpToBottom}>最新のメッセージを読み込む</Button>
+      <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
     {/if}
 
   </div>
 
   {#if !scrollView.pinned && (scrollView.belowCount > 0 || (tState?.main.newerCount ?? 0) > 0)}
     <div class="timeline-new-below">
-      <Button variant="primary" onclick={jumpToBottom}>
+      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
         新着 {Math.max(scrollView.belowCount, tState?.main.newerCount ?? 0)}件 ↓
       </Button>
     </div>
@@ -649,7 +649,7 @@
       oninput={(b) => channel.setDraft(b)}
       ontopicinput={(t) => channel.setTopicDraft(t)}
       onsubmit={handleSubmit}
-      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1))}
+      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
   </div>
 

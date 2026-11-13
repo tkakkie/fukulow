@@ -224,7 +224,6 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   function mergeBaselines(w: Window, response: Pick<TopicPage, 'as_of_seq' | 'topics'>) {
     for (const summary of response.topics) {
-      clearSummaryRetry(w, summary.id)
       const old = w.baselines.get(summary.id)
       if (!old || response.as_of_seq > old.asOfSeq) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
     }
@@ -269,7 +268,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       else w.main.hasMore = true
     }
     boundTopicEvidence(w.evidence)
-    for (const id of w.baselines.keys()) if (w.baselines.get(id)!.asOfSeq < w.evidence.floor) void ensureSummaryForWindow(w, id)
+    for (const [id, baseline] of w.baselines) {
+      if (!needsSummary(w, id)) clearSummaryRetry(w, id)
+      else if (baseline.asOfSeq < w.evidence.floor && !w.summaries.has(id)) void ensureSummaryForWindow(w, id)
+    }
     let total = [...windows.values()].reduce((n, value) => n + value.messages.size + value.baselines.size, 0)
     for (const [id, other] of windows) {
       if (total <= MAIN_MESSAGE_LIMIT) break
@@ -405,7 +407,6 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const through = w.evidence.sequences.get(topicId)?.at(-1)?.end ?? 0
     const { result, isCurrent } = await read(channel, w, `summary:${topicId}`, () => options.api.getTopicSummary(channel, topicId))
     if (!isCurrent()) return
-    w.summaries.delete(topicId)
     if (result.ok) {
       w.summaryThrough.set(topicId, through)
       const existing = w.topics.get(topicId)
@@ -413,15 +414,11 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       mergeBaselines(w, { as_of_seq: result.data.as_of_seq, topics: [result.data.topic] })
       trimMain(w, 'newer')
       withSync(channel, () => { void sync.settleHistory(channel, [result.data.topic.latest_message]) })
-      notify(channel)
     } else if (result.kind === 'http' && result.status === 404 && result.error === 'topic_not_found') {
       clearSummaryRetry(w, topicId)
       let t = w.topics.get(topicId)
       if (!t) w.topics.set(topicId, t = topicWindow())
-      if (!t.notFound) {
-        t.notFound = true
-        notify(channel)
-      }
+      t.notFound = true
     }
     return result
   }
@@ -433,20 +430,20 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const pending = fetchSummary(channel, topicId)
     if (hadTerminal) notify(channel)
     const result = await pending
+    if (!result) return
+    w.summaries.delete(topicId)
     if (
-      result &&
       !result.ok &&
       current(channel, w) &&
       needsSummary(w, topicId) &&
-      !w.topics.get(topicId)?.notFound &&
-      !w.summaries.has(topicId)
+      !w.topics.get(topicId)?.notFound
     ) {
       w.summaryRetries.set(topicId, {
         attempt: MAX_SUMMARY_RETRIES,
         terminal: isRetryableSummaryFailure(result) ? 'retryable' : 'non_retryable',
       })
-      notify(channel)
     }
+    notify(channel)
     return result
   }
   async function ensureSummary(channel: string, topicId: string) {
@@ -464,34 +461,40 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     }
     const result = await fetchSummary(channel, topicId)
     if (!result) return
-    const latestRetry = w.summaryRetries.get(topicId)
-    if (
-      !current(channel, w) ||
-      !needsSummary(w, topicId) ||
-      w.topics.get(topicId)?.notFound ||
-      w.summaries.has(topicId) ||
-      latestRetry?.timer !== undefined ||
-      latestRetry?.terminal !== undefined
-    ) {
-      return
+    try {
+      const latestRetry = w.summaryRetries.get(topicId)
+      if (
+        !current(channel, w) ||
+        !needsSummary(w, topicId) ||
+        w.topics.get(topicId)?.notFound ||
+        latestRetry?.timer !== undefined ||
+        latestRetry?.terminal !== undefined
+      ) {
+        return
+      }
+      const attempt = latestRetry?.attempt ?? 0
+      const baseline = w.baselines.get(topicId)
+      if (result.ok && !baseline && !w.topics.has(topicId)) return
+      // An evicted baseline cannot be restored by repeatedly fetching the same old Topic.
+      if ((result.ok && (!baseline || baseline.asOfSeq >= w.evidence.floor)) || (!result.ok && !isRetryableSummaryFailure(result))) {
+        w.summaryRetries.set(topicId, { attempt, terminal: 'non_retryable' })
+        return
+      }
+      if (attempt >= MAX_SUMMARY_RETRIES) {
+        w.summaryRetries.set(topicId, { attempt, terminal: 'retryable' })
+        return
+      }
+      const timer = setTimeout(() => {
+        const entry = w.summaryRetries.get(topicId)
+        if (entry) entry.timer = undefined
+        void ensureSummary(channel, topicId)
+      }, backoffCap(attempt))
+      w.summaryRetries.set(topicId, { attempt: attempt + 1, timer })
+    } finally {
+      // Publish only after retry/terminal state is ready for component effects to re-enter.
+      w.summaries.delete(topicId)
+      if (current(channel, w)) notify(channel)
     }
-    const attempt = latestRetry?.attempt ?? 0
-    if ((result.ok && w.baselines.get(topicId)!.asOfSeq >= w.evidence.floor) || (!result.ok && !isRetryableSummaryFailure(result))) {
-      w.summaryRetries.set(topicId, { attempt, terminal: 'non_retryable' })
-      notify(channel)
-      return
-    }
-    if (attempt >= MAX_SUMMARY_RETRIES) {
-      w.summaryRetries.set(topicId, { attempt, terminal: 'retryable' })
-      notify(channel)
-      return
-    }
-    const timer = setTimeout(() => {
-      const entry = w.summaryRetries.get(topicId)
-      if (entry) entry.timer = undefined
-      void ensureSummary(channel, topicId)
-    }, backoffCap(attempt))
-    w.summaryRetries.set(topicId, { attempt: attempt + 1, timer })
   }
   async function retrySummary(channel: string, topicId: string) {
     const w = getWindow(channel)
@@ -559,6 +562,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       const w = windows.get(channel)
       if (!w) return
       w.topics.get(topicId)?.messages.clear()
+      if (!w.baselines.has(topicId)) clearSummaryRetry(w, topicId)
       w.reads.delete(`topic:${topicId}`); w.topics.delete(topicId); notify(channel)
     },
     async loadTopicLatest(channel: string, topicId: string) {

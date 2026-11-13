@@ -199,7 +199,7 @@
     const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
     if (next === null) return
     e.preventDefault()
-    void focusMessage(focusableMessageIds[next])
+    void focusMessage(focusableMessageIds[next]).catch(console.error)
   }
   async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
     const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
@@ -227,7 +227,7 @@
       void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
         applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
         reportPresented()
-      })
+      }).catch(console.error)
     } else applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
   }
 
@@ -240,15 +240,15 @@
 
   function loadOlderWithAnchor() {
     captureCurrentAnchor()
-    void topics.loadTopic(topicId)
+    void topics.loadTopic(topicId).catch(console.error)
   }
 
   function retryInitial() {
     scrollController.resetLoadingTimeout()
     if (topicStatus === 'error') onretrytopicmeta?.()
     requestedHistoryFor = ''
-    void topics.retrySummary(topicId)
-    void topics.loadTopic(topicId)
+    void topics.retrySummary(topicId).catch(console.error)
+    void topics.loadTopic(topicId).catch(console.error)
   }
 
   $effect(() => () => scrollController.destroy())
@@ -304,7 +304,7 @@
         enteredTarget = true
         currentVisitId = vid
       }
-    })
+    }).catch(console.error)
     return () => {
       cancelled = true
     }
@@ -330,11 +330,11 @@
     if (targetUnavailable || s.status === 'loading') return
     const hasBaseline = tState.topics.some((t) => t.topicId === tId && t.baseline !== null)
     if (!hasBaseline && view.summaryError === null) {
-      void topics.ensureSummary(tId)
+      void topics.ensureSummary(tId).catch(console.error)
     }
     if (!view.initialized && view.hasMore && !view.loading && !view.error && requestedHistoryFor !== key) {
       requestedHistoryFor = key
-      void topics.loadTopic(tId)
+      void topics.loadTopic(tId).catch(console.error)
     }
   })
 
@@ -420,7 +420,7 @@
         }
       }
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
   $effect(() => {
@@ -428,7 +428,7 @@
     if (entry?.boundary === null || needsOlderUnreadPage) return
     void tick().then(() => {
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
 
@@ -474,7 +474,7 @@
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
-    })
+    }).catch(console.error)
     return true
   }
 </script>
@@ -601,7 +601,7 @@
             pendingStatus={p.status}
             retryable={p.retryable}
             {targetUnavailable}
-            onretry={() => void channel.retry(p.clientMessageId)}
+            onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
             onrestore={() => handleRestoreRequest(p.clientMessageId)}
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
@@ -615,14 +615,14 @@
       {/if}
     {/if}
       {#if view.hasNewer && !targetUnavailable}
-      <Button variant="secondary" onclick={jumpToBottom}>最新のメッセージを読み込む</Button>
+      <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
     {/if}
 
   </div>
 
   {#if !scrollView.pinned && (scrollView.belowCount > 0 || (view.newerCount ?? 0) > 0)}
     <div class="topic-view__new-below">
-      <Button variant="primary" onclick={jumpToBottom}>
+      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
         新着 {Math.max(scrollView.belowCount, view.newerCount ?? 0)}件 ↓
       </Button>
     </div>
@@ -638,7 +638,7 @@
       submitDisabled={!topicName}
       oninput={(b) => tc.setDraft(b)}
       onsubmit={handleSubmit}
-      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1))}
+      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
   </div>
 

@@ -17,6 +17,8 @@ import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter } from './unread.svelte'
 import MessageRow from './ui/MessageRow.svelte'
 import Workspace from './Workspace.svelte'
+import { windowClient } from './message-window-test-helpers'
+import { msg, summary } from './topic-test-helpers'
 
 type ListenerEntry = {
   fn: (event: MiniDomEvent) => void
@@ -987,6 +989,78 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it('TopicView handles an active summary evicted by 400 newer main Messages without rejection or a render loop', async () => {
+    vi.useFakeTimers()
+    const c = windowClient(), report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await c.boot()
+      for (let page = 0; page < 7; page++) await c.topics.loadMain('A')
+      c.options.listTopicMessages = async () => ok({ messages: [msg(1, 'T')], has_more: false })
+      const getSummary = vi.fn(async () => ok({ as_of_seq: 1000, topic: summary('T', 1, 1) }))
+      c.options.getTopicSummary = getSummary
+      const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+      const instance = mount(TopicView, { target: host as unknown as Element, props: {
+        channel: syncAdapter(c.sync).channel('A'), topics: topicsAdapter(c.topics, 'A'),
+        channelId: 'A', topicId: 'T', topicName: 'Topic T',
+      } })
+      try {
+        await settle(); await settle()
+        await vi.advanceTimersByTimeAsync(60_000); await settle()
+        expect(getSummary).toHaveBeenCalledTimes(1)
+        expect(report).not.toHaveBeenCalled()
+        expect(c.topics.get('A').lines).toHaveLength(400)
+        expect(c.topics.get('A').topic('T').messages).toEqual([msg(1, 'T')])
+        expect(host.querySelector('[data-message-id="id1"]')).not.toBeNull()
+        expect(c.sync.get().channels.A.cursor).toBe(1000)
+      } finally { await unmount(instance) }
+    } finally { await c.close(); report.mockRestore() }
+  })
+
+  it.each(['Timeline', 'TopicView', 'ReplyPanel'] as const)('%s reports detached task rejections without leaving them unhandled', async view => {
+    const c = windowClient(), report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const failure = new Error(`${view} task failed`)
+    try {
+      await c.boot()
+      const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+      const channel = syncAdapter(c.sync).channel('A')
+      if (view === 'Timeline') {
+        const topics = topicsAdapter(c.topics, 'A')
+        topics.loadMain = vi.fn().mockRejectedValue(failure)
+        const instance = mount(Timeline, { target: host as unknown as Element,
+          props: { channel, topics, channelId: 'A' } })
+        try {
+          await settle()
+          buttonsByText(host, '以前のメッセージを読み込む')[0].click()
+          await settle()
+          expect(report).toHaveBeenCalledExactlyOnceWith(failure)
+        } finally { await unmount(instance) }
+      } else if (view === 'TopicView') {
+        const topics = topicsAdapter(c.topics, 'A')
+        topics.ensureSummary = vi.fn().mockRejectedValue(failure)
+        const instance = mount(TopicView, { target: host as unknown as Element, props: {
+          channel, topics, channelId: 'A', topicId: 'T', topicName: 'Topic T',
+        } })
+        try {
+          await settle(); await settle()
+          expect(report).toHaveBeenCalledWith(failure)
+        } finally { await unmount(instance) }
+      } else {
+        await c.replies.open('A', c.records[0])
+        const replies = repliesAdapter(c.replies, 'A')
+        replies.loadMore = vi.fn().mockRejectedValue(failure)
+        const instance = mount(ReplyPanel, { target: host as unknown as Element, props: {
+          channel, replies, channelId: 'A', anchorMessageId: 'id1', resolvedAnchor: c.records[0],
+        } })
+        try {
+          await settle()
+          buttonsByText(host, 'さらに返信を読み込む')[0].click()
+          await settle()
+          expect(report).toHaveBeenCalledExactlyOnceWith(failure)
+        } finally { await unmount(instance) }
+      }
+    } finally { await c.close(); report.mockRestore() }
+  })
+
   it('keeps an unknown descendant Reply visible with retry and discard after its parent body is evicted', async () => {
     const c = replyClient(); await c.boot(); c.event(reply(2))
     await c.replies.open('A', reply(2))

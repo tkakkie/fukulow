@@ -212,7 +212,7 @@
     const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
     if (next === null) return
     e.preventDefault()
-    void focusMessage(focusableMessageIds[next])
+    void focusMessage(focusableMessageIds[next]).catch(console.error)
   }
   async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
     const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
@@ -253,19 +253,19 @@
       applyScrollAction(action, anchor)
       void tick().then(() => {
         applyScrollAction(action, anchor)
-      })
+      }).catch(console.error)
     } else {
       captureCurrentAnchor()
       void tick().then(() => {
         captureCurrentAnchor()
-      })
+      }).catch(console.error)
     }
   })
 
   function handleRetryLoad() {
     scrollController.resetLoadingTimeout()
     if (isCurrentAnchor) {
-      void replies.loadMore()
+      void replies.loadMore().catch(console.error)
     } else {
       onretrytarget?.()
     }
@@ -322,7 +322,7 @@
     applyScrollAction(action, null)
     void tick().then(() => {
       applyScrollAction(action, null)
-    })
+    }).catch(console.error)
     return true
   }
 
@@ -376,7 +376,7 @@
       {/if}
 
       {#if rState.hasOlder && !targetUnavailable}
-        <Button variant="secondary" onclick={loadOlder}>以前の返信を読み込む</Button>
+        <Button variant="secondary" onclick={() => void loadOlder().catch(console.error)}>以前の返信を読み込む</Button>
       {/if}
       {#if visibleMessages.length > 0 || pending.length > 0}
         <VirtualRows
@@ -420,7 +420,7 @@
             pendingStatus={p.status}
             retryable={p.retryable}
             {targetUnavailable}
-            onretry={() => void rc.retry(p.clientMessageId)}
+            onretry={() => void rc.retry(p.clientMessageId).catch(console.error)}
             onrestore={() => handleRestoreRequest(p.clientMessageId)}
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
@@ -434,7 +434,7 @@
 
       {#if !targetUnavailable && isCurrentAnchor && rState.hasMore && !rState.error && !(rState.loading && visibleMessages.length <= 1)}
         <div class="reply-panel__more">
-          <Button variant="secondary" disabled={rState.loading} onclick={() => void replies.loadMore()}>
+          <Button variant="secondary" disabled={rState.loading} onclick={() => void replies.loadMore().catch(console.error)}>
             さらに返信を読み込む
           </Button>
         </div>
@@ -444,7 +444,7 @@
 
   {#if !scrollView.pinned && (scrollView.belowCount > 0 || rState.newerCount > 0)}
     <div class="reply-panel__new-below">
-      <Button variant="primary" onclick={jumpToBottom}>
+      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
         新着 {Math.max(scrollView.belowCount, rState.newerCount)}件 ↓
       </Button>
     </div>
@@ -460,7 +460,7 @@
       submitDisabled={!canSendReply}
       oninput={(b) => rc.setDraft(b)}
       onsubmit={handleSubmit}
-      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1))}
+      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
   </div>
 

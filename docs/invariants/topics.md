@@ -4,6 +4,8 @@ Topics, server and web, incl. their real-time delivery tests. Writing rules and 
 
 | Rule | Test |
 |---|---|
+| Stale summary successes retain bounded exponential retries until a retained baseline restores count authority | `web/src/topics.test.ts::bounds repeated stale successful summaries after arrivals checkpoint their evidence` |
+| Evicting an active Topic summary resolves safely without repeated reads or changing main history or the sync cursor | `web/src/topics.test.ts::handles a successful active-Topic summary evicted by 400 newer main Messages`, `web/src/timeline.svelte.test.ts::TopicView handles an active summary evicted by 400 newer main Messages without rejection or a render loop` |
 | Topic-list-only baselines never establish main-page coverage or skip unfetched main Messages | `web/src/message-window-review.test.ts::Topic-list history cannot establish the main continuation or skip unfetched Messages` |
 | Topic names reject empty/NUL/surrounding whitespace, count 1..60 scalars, fold only ASCII per Channel and keep the first display name | `server/src/messages/tests/topics/sends.rs::topic_names_validate_scalars_whitespace_and_channel_scoped_ascii_identity` |
 | Concurrent first Topic posts converge; duplicates/lost ACKs consume one seq/count/publication per Message; changed Topic intent is 409 | `server/src/messages/tests/topics/sends.rs::topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once`, `server/src/messages/tests/topics/sends.rs::topic_retry_identity_rejects_added_removed_changed_and_cross_channel_intent`, `server/src/messages/tests/topics/sends.rs::topic_first_creation_duplicates_lost_ack_and_cross_channel_race_leave_no_empty_topic` |
