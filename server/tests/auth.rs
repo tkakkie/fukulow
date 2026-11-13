@@ -964,9 +964,14 @@ async fn check_tenant_denials(pool: PgPool) {
         .unwrap()
         .parse::<Uuid>()
         .unwrap();
+    // Fixture SQL as the app role runs in each Organization's context (#314).
+    let (foreign_scoped, first_scoped) = (
+        organization_scoped(&pool, foreign).await,
+        organization_scoped(&pool, first_id).await,
+    );
     sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Foreign')")
         .bind(foreign)
-        .execute(&pool)
+        .execute(&foreign_scoped)
         .await
         .unwrap();
     sqlx::query(
@@ -976,10 +981,10 @@ async fn check_tenant_denials(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Foreign member','owner')").bind(foreign).bind(shared_id).bind(account).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Foreign member','owner')").bind(foreign).bind(shared_id).bind(account).execute(&foreign_scoped).await.unwrap();
     let session = body(sign_in(&app, "", PASSWORD).await).await;
     let auth = format!("Bearer {}", session["token"].as_str().unwrap());
-    let guard = additional_owner(&pool, first_id).await;
+    let guard = additional_owner(&first_scoped, first_id).await;
     let mut refusal = None;
     for organization in [foreign, Uuid::new_v4(), first_id] {
         if organization == first_id {
@@ -988,7 +993,7 @@ async fn check_tenant_denials(pool: PgPool) {
             )
             .bind(first_id)
             .bind(guard)
-            .execute(&pool)
+            .execute(&first_scoped)
             .await
             .unwrap();
         }
@@ -1023,6 +1028,8 @@ async fn check_tenant_denials(pool: PgPool) {
         .status(),
         StatusCode::OK
     );
+    foreign_scoped.close().await;
+    first_scoped.close().await;
 }
 
 #[sqlx::test]
@@ -1491,6 +1498,27 @@ async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool:
     check_member_identity(pool).await;
 }
 
+/// One connection with a session-level Organization context, so RLS admits
+/// direct test SQL for that Organization; a no-op for the owner.
+async fn organization_scoped(pool: &PgPool, organization: Uuid) -> PgPool {
+    let organization = organization.to_string();
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let organization = organization.clone();
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('fukulow.organization_id', $1, false)")
+                    .bind(organization)
+                    .execute(connection)
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap()
+}
+
 async fn check_member_identity(pool: PgPool) -> Value {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -1499,12 +1527,14 @@ async fn check_member_identity(pool: PgPool) -> Value {
         .unwrap()
         .parse()
         .unwrap();
+    // Direct SQL as the app role needs an Organization context under RLS (#314).
+    let scoped = organization_scoped(&pool, organization).await;
     let account: Uuid = sqlx::query_scalar("SELECT account_id FROM users WHERE organization_id=$1")
         .bind(organization)
-        .fetch_one(&pool)
+        .fetch_one(&scoped)
         .await
         .unwrap();
-    let error=sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Duplicate','guest')").bind(organization).bind(Uuid::new_v4()).bind(account).execute(&pool).await.unwrap_err();
+    let error=sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Duplicate','guest')").bind(organization).bind(Uuid::new_v4()).bind(account).execute(&scoped).await.unwrap_err();
     assert_eq!(
         error.as_database_error().unwrap().code().as_deref(),
         Some("23505")
@@ -1512,21 +1542,21 @@ async fn check_member_identity(pool: PgPool) -> Value {
     assert!(
         sqlx::query("DELETE FROM users WHERE organization_id=$1")
             .bind(organization)
-            .execute(&pool)
+            .execute(&scoped)
             .await
             .is_err()
     );
-    let guard = additional_owner(&pool, organization).await;
+    let guard = additional_owner(&scoped, organization).await;
     sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
         .bind(guard)
-        .execute(&pool)
+        .execute(&scoped)
         .await
         .unwrap();
     sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
         .bind(guard)
-        .execute(&pool)
+        .execute(&scoped)
         .await
         .unwrap();
     let (member, revision): (Uuid, i64) = sqlx::query_as(
@@ -1534,11 +1564,12 @@ async fn check_member_identity(pool: PgPool) -> Value {
     )
     .bind(organization)
     .bind(guard)
-    .fetch_one(&pool)
+    .fetch_one(&scoped)
     .await
     .unwrap();
     assert_eq!(member.to_string(), identity["member"]["id"]);
     assert_eq!(revision, 1);
+    scoped.close().await;
     identity
 }
 
@@ -1565,11 +1596,18 @@ async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &st
     }
     // check_member_identity adds a guard Owner (#221 last-Owner rule): look up the setup Member.
     let member: Uuid = identity["member"]["id"].as_str().unwrap().parse().unwrap();
+    let organization: Uuid = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let scoped = organization_scoped(&pool, organization).await;
     let preserved: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM users WHERE id = $1)")
         .bind(member)
-        .fetch_one(&pool)
+        .fetch_one(&scoped)
         .await
         .unwrap();
+    scoped.close().await;
     assert!(preserved);
 }
 
@@ -1667,6 +1705,14 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
     for migration in migrations.iter().filter(|m| m.version < 202611110197) {
         sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
     }
+    // Current setup code calls the #314 bootstrap check; the old schema lacks it.
+    sqlx::raw_sql(
+        "CREATE FUNCTION fukulow_setup_required() RETURNS boolean LANGUAGE sql STABLE \
+         AS $$ SELECT NOT EXISTS (SELECT 1 FROM public.organizations) $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = router_with_cookie_security(&pool, false);
     setup(&app).await;
     let input = json!({"email":"owner@example.com", "password":PASSWORD});
