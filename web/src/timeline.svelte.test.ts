@@ -1791,7 +1791,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     )!
     expect(restoredMainComposer.value).toBe('チャンネルに残す下書き')
 
-    // Names absent from the directory resolve in every view and refresh both cached states on list fetch.
+    // Main-timeline names absent from the directory refresh both cached states on list fetch.
     deactivated = true
     await memberController.load()
     await settle()
@@ -1819,6 +1819,106 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     navigation.destroy()
     await unmount(instance)
     sessionModel.close()
+    memberController.close()
+  })
+
+  it('resolves isolated older Topic and Reply-chain page authors with accessible names and deactivation refresh in both views', async () => {
+    const net = fakeNetwork()
+    const root = { ...record(1, 'c1'), sender: 'known', body: '過去の返信ルート' }
+    const reply = { ...record(2, 'c1'), sender: 'reply-only', body: '返信ページだけの本文', reply_to: root.id, reply_root_id: root.id }
+    const older = { ...record(3, 'c1'), sender: 'topic-only', body: '古いトピックだけの本文', topic_id: 't-1' }
+    const latest = { ...record(9, 'c1'), sender: 'known', body: '最新トピック本文', topic_id: 't-1' }
+    const recent = { ...record(10, 'c1'), sender: 'known', body: '最新チャンネル本文' }
+    const summary = { id: 't-1', name: '相談', first_seq: 3, last_seq: 9, message_count: 2, latest_message: latest, read_seq: 9, unread_count: 0 }
+    net.timelines.c1 = ok({ as_of_seq: 10, has_more: true, items: [
+      { kind: 'topic', topic: summary }, { kind: 'message', message: recent },
+    ] })
+    net.topicSummaries['c1:t-1'] = ok({ as_of_seq: 10, topic: summary })
+    net.replyChains[`c1:${root.id}`] = ok({ root_id: root.id, messages: [root], has_more: true })
+    net.replyChains[`c1:${root.id}:1`] = ok({ root_id: root.id, messages: [reply], has_more: false })
+    const base = net.options('me')
+    const topicReads = vi.fn(async (_channel: string, _topic: string, query?: { before_seq?: number }) =>
+      query?.before_seq ? ok({ messages: [older], has_more: false }) : ok({ messages: [latest], has_more: true }))
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...base,
+      topicsApi: { ...base.topicsApi!, listTopicMessages: topicReads },
+    })
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets), close: rawSession.close,
+    }
+    let deactivated = false
+    const lookup = vi.fn(async (_org: string, { ids }: { ids: string[] }) => ok({ identities: ids.map(id => ({
+      id, name: id === 'topic-only' ? 'トピック著者' : '返信著者', deactivated,
+    })) }))
+    const memberController = createMembers('org-1', vi.fn(), vi.fn(), {
+      listMembers: async () => ok({ members: [{ id: 'known', name: '既知の著者', role: 'member' }] }),
+      lookupAuthors: lookup, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    await memberController.load()
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    let href = '/o/org-1/c/c1/t/t-1'
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: { state: null,
+        pushState(_s: unknown, _t: string, url: string) { href = url },
+        replaceState(_s: unknown, _t: string, url: string) { href = url },
+      }, innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, session: sessionModel, selectedOrganizationId: 'org-1', members: membersAdapter(memberController),
+      organization: { member: { id: 'me', name: '自分', role: 'owner' }, organization: {
+        organization_id: 'org-1', name: 'Acme', capabilities: {
+          can_create_channels: { allowed: true }, can_invite: { allowed: true },
+          can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
+        },
+      } },
+    } })
+    await settle()
+    net.subscribed('c1', 10)
+    await settle()
+    expect(lookup).not.toHaveBeenCalled()
+    buttonsByText(host, '以前のメッセージを読み込む')[0].click()
+    await settle()
+    expect(topicReads).toHaveBeenLastCalledWith('c1', 't-1', { before_seq: 9 })
+    navigation.navigate({ type: 'reply', messageId: root.id })
+    await settle()
+    await settle()
+    expect(host.querySelector('#panel-content')?.textContent).not.toContain(reply.body)
+    buttonsByText(host, 'さらに返信を読み込む')[0].click()
+    await settle()
+    expect(net.replyHistory.at(-1)?.query?.after_seq).toBe(1)
+    expect(lookup.mock.calls.flatMap(call => call[1].ids)).toEqual(['topic-only', 'reply-only'])
+    expect(rawSession.sync.getTimeline('c1').get().messages.map(m => m.sender)).not.toContain('topic-only')
+    expect(rawSession.sync.getTimeline('c1').get().messages.map(m => m.sender)).not.toContain('reply-only')
+    expect(memberController.get().members.map(m => m.id)).toEqual(['known'])
+
+    const expectAccessibleSender = (scope: string, id: string, text: string) => {
+      const label = host.querySelector(`${scope} [data-message-id="${id}"] .ui-message-row__sender`)!
+      expect(label.textContent).toBe(text)
+      expect(label.closest('[aria-hidden="true"], [hidden], [inert]')).toBeNull()
+      expect(label.getAttribute('aria-label')).toBeNull()
+    }
+    expectAccessibleSender('#main-content', older.id, 'トピック著者')
+    expectAccessibleSender('#panel-content', reply.id, '返信著者')
+    deactivated = true
+    await memberController.load()
+    await settle()
+    expectAccessibleSender('#main-content', older.id, 'トピック著者（無効）')
+    expectAccessibleSender('#panel-content', reply.id, '返信著者（無効）')
+    expect(lookup.mock.calls.flatMap(call => call[1].ids).sort()).toEqual(['reply-only', 'reply-only', 'topic-only', 'topic-only'])
+    deactivated = false
+    await memberController.load()
+    await settle()
+    expectAccessibleSender('#main-content', older.id, 'トピック著者')
+    expectAccessibleSender('#panel-content', reply.id, '返信著者')
+    navigation.destroy()
+    await unmount(instance)
+    rawSession.close()
     memberController.close()
   })
 

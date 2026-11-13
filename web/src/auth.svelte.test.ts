@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAuth, type AuthDeps, type SessionModel } from './auth.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
-import { createInviteAcceptance } from './members'
-import { inviteAcceptanceAdapter } from './members.svelte'
+import { createInviteAcceptance, createMembers } from './members'
+import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
+import type { lookupAuthors } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
@@ -201,6 +202,65 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     expect(s.auth.session!.sync.channel('A').timeline.status).toBe('unavailable')
     expect(net.history).toHaveLength(history)
     expect(s.closes[0]).not.toHaveBeenCalled()
+  })
+
+  it('author lookup Membership loss preserves the Workspace history draft and pending send until explicit Organization re-selection', async () => {
+    vi.useFakeTimers()
+    const finishes: ((result: Awaited<ReturnType<typeof lookupAuthors>>) => void)[] = []
+    const lookup = vi.fn(() => new Promise<Awaited<ReturnType<typeof lookupAuthors>>>(resolve => { finishes.push(resolve) }))
+    const listMembers = vi.fn(async () => ok({ members: [{ id: 'known', name: 'Known', role: 'member' as const }] }))
+    const s = stack({
+      openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable, {
+        listMembers, lookupAuthors: lookup,
+        changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+      })),
+    })
+    await signInAs(s, 'm1')
+    const net = await openChannelA(s)
+    const session = s.auth.session!, members = s.auth.members!
+    const ch = session.sync.channel('A')
+    void ch.send('pending text')
+    await settle()
+    ch.setDraft('draft text')
+    members.authors.watch(['known', 'unknown'])
+    await settle()
+    members.authors.watch(['known', 'unknown', 'late'])
+    await settle()
+    const displayed = await mount(() => ({
+      session: s.auth.session, organization: s.auth.organization, status: s.auth.organizationStatus,
+      timeline: s.auth.session?.sync.channel('A').timeline,
+      draft: s.auth.session?.sync.channel('A').composer.draft,
+    }))
+    finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+    await settle()
+    expect(displayed.last).toMatchObject({
+      session, organization: member('m1'), status: 'unavailable', draft: 'draft text',
+      timeline: { messages: [record(100)], pending: [{ body: 'pending text', status: 'failed', retryable: false }] },
+    })
+    expect(s.closes[0]).not.toHaveBeenCalled()
+    expect(net.socket.closed).toBe(true)
+    const historyCount = net.history.length
+    members.authors.watch(['another']); members.authors.retry(); await members.load()
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settle()
+    expect(lookup).toHaveBeenCalledTimes(2)
+    expect(listMembers).toHaveBeenCalledTimes(1)
+    expect(net.history).toHaveLength(historyCount)
+    expect(net.sends).toHaveLength(1)
+    expect(net.sockets).toHaveLength(1)
+    expect(members.authors.identities.get('known')?.name).toBe('Known')
+
+    await s.auth.selectOrganization('o')
+    expect(s.auth.session).not.toBe(session)
+    expect(s.auth.organizationStatus).toBe('ready')
+    s.auth.members!.authors.watch(['unknown'])
+    await settle()
+    expect(lookup).toHaveBeenCalledTimes(3)
+    // A same-Account late 401 remains authoritative even after explicit re-selection.
+    finishes[1]({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(s.auth.view.screen).toBe('signin')
+    await displayed.unmount()
   })
 })
 

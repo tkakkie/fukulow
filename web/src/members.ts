@@ -37,6 +37,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     authors,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
+    unavailable() { closed = true; loadSequence++; authors.unavailable() },
     close() { closed = true; authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
     async load() {
       if (closed) return

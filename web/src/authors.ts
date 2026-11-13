@@ -16,14 +16,15 @@ export function createAuthors(
   let attempted = new Set<string>()
   let generation = 0
   let closed = false
+  let unavailable = false
   let queued = false
   const listeners = new Set<() => void>()
   const notify = () => listeners.forEach(listener => listener())
 
   function schedule() {
-    if (closed || queued) return
+    if (closed || unavailable || queued) return
     queued = true
-    queueMicrotask(() => { queued = false; if (!closed) void request() })
+    queueMicrotask(() => { queued = false; if (!closed && !unavailable) void request() })
   }
   async function request() {
     const current = generation
@@ -34,9 +35,9 @@ export function createAuthors(
       const result = await lookup(organizationId, { ids: batch })
       // A late 401 still belongs to the Account Session owner.
       if (!result.ok && result.kind === 'http' && result.status === 401) { onEnded(); return }
-      if (closed || current !== generation) return
+      if (closed || unavailable || current !== generation) return
       if (!result.ok) {
-        if (isOrganizationUnavailable(result)) onUnavailable()
+        if (isOrganizationUnavailable(result)) { stop(); onUnavailable() }
         return
       }
       const next = new Map(identities)
@@ -48,12 +49,13 @@ export function createAuthors(
       notify()
     }))
   }
+  function stop() { unavailable = true; generation++ }
   return {
     get: () => identities,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     /** #315 can refetch the Member list via load(); every success calls this hook. */
     replaceMembers(members: Member[]) {
-      if (closed) return
+      if (closed || unavailable) return
       generation++
       identities = new Map(members.map(member => [member.id, { id: member.id, name: member.name, deactivated: false }]))
       attempted = new Set()
@@ -62,7 +64,8 @@ export function createAuthors(
     },
     watch(ids: Iterable<string>) { observed = new Set(ids); schedule() },
     /** Channel selection and reconnect retry unresolved ids, keeping known identities. */
-    retry() { if (!closed) { generation++; attempted = new Set(); schedule() } },
+    retry() { if (!closed && !unavailable) { generation++; attempted = new Set(); schedule() } },
+    unavailable: stop,
     close() { closed = true; generation++; identities = new Map(); observed.clear(); listeners.clear() },
   }
 }

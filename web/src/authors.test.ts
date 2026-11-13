@@ -107,6 +107,27 @@ describe('author identities', () => {
     expect(unavailable).toHaveBeenCalledOnce()
   })
 
+  it('stops lookups and fences in-flight identities on C10 while retaining cached names and late 401 handling', async () => {
+    const finishes: ((result: ReturnType<typeof ok>) => void)[] = []
+    const lookup = vi.fn(() => new Promise<ReturnType<typeof ok>>(resolve => { finishes.push(resolve) }))
+    const ended = vi.fn(), unavailable = vi.fn()
+    const c = createAuthors('org', ended, unavailable, lookup)
+    c.replaceMembers([member('known')])
+    c.watch(Array.from({ length: 201 }, (_, i) => String(i)))
+    await settle()
+    finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+    await settle()
+    expect(unavailable).toHaveBeenCalledOnce()
+    finishes[1](ok([identity('100')]))
+    c.watch(['new']); c.retry(); c.replaceMembers([])
+    await settle()
+    expect(lookup).toHaveBeenCalledTimes(3)
+    expect([...c.get().keys()]).toEqual(['known'])
+    finishes[2]({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(ended).toHaveBeenCalledOnce()
+  })
+
   it('exposes each successful Member list fetch as a freshness hook for #315', async () => {
     const listMembers = vi.fn().mockResolvedValueOnce({ ok: true, data: { members: [member('a')] } })
       .mockResolvedValueOnce({ ok: true, data: { members: [] } })
