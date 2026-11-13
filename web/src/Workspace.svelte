@@ -416,6 +416,7 @@
       replyChainIds,
       selfId: organization?.member.id ?? '',
       resolveSenderName: resolveSender,
+      isSenderPending: (id) => !resolveSenderName && id !== organization?.member.id && (members?.authors.isPending(id) ?? false),
     })
   })
 

@@ -1,7 +1,7 @@
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Member, ReadPosition, Result } from './api'
+import type { lookupAuthors, Member, ReadPosition, Result } from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
@@ -1882,6 +1882,93 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     sessionModel.close()
     memberController.close()
   })
+
+  it.each(['active', 'deactivated', 'omitted', 'failed', 'view changed'] as const)(
+    'handles live sender lookup settlement (%s) without early or duplicate announcements', async outcome => {
+      vi.useFakeTimers()
+      const net = fakeNetwork()
+      net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [
+        { kind: 'message', message: { ...record(1, 'c1'), sender: 'known' } },
+      ] })
+      net.timelines.c2 = ok({ as_of_seq: 0, has_more: false, items: [] })
+      const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...net.options('me') })
+      const sessionModel = {
+        channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
+        topics: (id: string) => topicsAdapter(rawSession.topics, id),
+        navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets), close: rawSession.close,
+      }
+      let finish!: (result: Awaited<ReturnType<typeof lookupAuthors>>) => void
+      const lookup = vi.fn<typeof lookupAuthors>(() => new Promise(resolve => { finish = resolve }))
+      const memberController = createMembers('org-1', vi.fn(), vi.fn(), {
+        listMembers: async () => ok({ members: [{ id: 'known', name: '既知の著者', role: 'member' }] }),
+        lookupAuthors: lookup, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+      })
+      await memberController.load()
+      net.socket.onReady()
+      net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'other')] }))
+      let href = '/o/org-1/c/c1'
+      const navigation = createNavigation({
+        location: { get href() { return href } },
+        history: { state: null,
+          pushState(_s: unknown, _t: string, url: string) { href = url },
+          replaceState(_s: unknown, _t: string, url: string) { href = url },
+        }, innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+      } as unknown as NavigationBrowser)
+      const announcements: string[] = []
+      const host = testDoc.createElement('div')
+      testDoc.body.appendChild(host)
+      const instance = mount(Workspace, { target: host as unknown as Element, props: {
+        navigation, session: sessionModel, selectedOrganizationId: 'org-1', members: membersAdapter(memberController),
+        organization: { member: { id: 'me', name: '自分', role: 'owner' }, organization: {
+          organization_id: 'org-1', name: 'Acme', capabilities: {
+            can_create_channels: { allowed: true }, can_invite: { allowed: true },
+            can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
+          },
+        } },
+        onannounce: text => announcements.push(text),
+      } })
+      await settle()
+      net.subscribed('c1', 1)
+      await settle()
+      announcements.length = 0
+      // Known authors keep the normal 2 s window; own sends remain silent even
+      // when the Member list does not include self.
+      net.event({ type: 'message', message: { ...record(2, 'c1'), sender: 'known', body: '既知の新着' } })
+      net.event({ type: 'message', message: { ...record(3, 'c1'), sender: 'me', body: '自分の送信' } })
+      await settle()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(announcements).toEqual(['既知の著者: 既知の新着'])
+      announcements.length = 0
+      net.event({ type: 'message', message: { ...record(4, 'c1'), sender: 'unknown', body: '新着本文' } })
+      await settle()
+      expect(lookup).toHaveBeenCalledWith('org-1', { ids: ['unknown'] })
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(announcements).toEqual([])
+      if (outcome === 'view changed') {
+        navigation.navigate({ type: 'channel', organizationId: 'org-1', channelId: 'c2' })
+        await settle()
+        expect(announcements).toEqual(['# other'])
+        announcements.length = 0
+      }
+      finish(outcome === 'failed' ? { ok: false, kind: 'network' } : ok({ identities:
+        outcome === 'omitted' ? [] : [{ id: 'unknown', name: '田中', deactivated: outcome === 'deactivated' }],
+      }))
+      await settle()
+      await vi.advanceTimersByTimeAsync(2_000)
+      const name = outcome === 'active' ? '田中' : outcome === 'deactivated' ? '田中（無効）' : 'メンバー'
+      const expected = outcome === 'view changed' ? [] : [name + ': 新着本文']
+      expect(announcements).toEqual(expected)
+      // A further cache notification and timer tick cannot announce the seq again.
+      memberController.authors.watch(['unknown'])
+      await settle()
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(announcements).toEqual(expected)
+      navigation.destroy()
+      await unmount(instance)
+      memberController.close()
+      sessionModel.close()
+    },
+  )
 
   it('resolves isolated older Topic and Reply-chain page authors with accessible names and deactivation refresh in both views', async () => {
     const net = fakeNetwork()
