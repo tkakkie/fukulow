@@ -82,7 +82,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
-- [web](web.md): `#300 Invite session 401 offers`
+- [web](web.md): `#300 Invite session 401 offers`, `#300 Sign-in, sign-out and Invite acceptance share`
 
 - [messages](messages.md): `#231/#305 reject Role demotion or deactivation with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
 - [messages](messages.md): `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`

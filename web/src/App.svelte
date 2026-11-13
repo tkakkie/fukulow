@@ -163,7 +163,8 @@
       model={invitation}
       signedIn={true}
       accept={(input) => auth.acceptInvitation(invitation, input)}
-      signOut={() => auth.signOut({ reportError: false })}
+      busy={auth.busy}
+      signOut={() => auth.signOutAndContinue(invitation)}
     />
 
     {#if session && organization}
@@ -265,7 +266,8 @@
           model={invitation}
           signedIn={false}
           accept={(input) => auth.acceptInvitation(invitation, input)}
-          signOut={() => auth.signOut({ reportError: false })}
+          busy={auth.busy}
+          signOut={() => auth.signOutAndContinue(invitation)}
         />
       {/if}
 

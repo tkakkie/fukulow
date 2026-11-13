@@ -80,6 +80,7 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [web](web.md): `serializes both operation orders, rejects double clicks and competing operations, then permits each action again`
 - [web](web.md): `Invite session 401 ends the app but preserves the Invite through explicit sign-out and matching Account sign-in`
 
 - [channels](channels.md): `session_cannot_access_another_organization`, `notification_rechecks_public_visibility_after_http_response`, `channel_creation_denies_deactivation_after_auth_without_inserting`, `visibility_reads_never_lock_members_and_writes_retain_the_lock`, `guest_visibility_requires_explicit_current_grants_and_role_is_read_afresh`, `channel_creation_rechecks_guest_role_after_auth_with_positive_control`, `management_denial_matrix_and_idempotent_current_revision_grants`, `management_rechecks_demoted_deactivated_stale_and_removed_actors`, `last_owner_precedes_last_channel_manager_without_side_effects`, `role_demotion_counts_only_usable_scoped_managers_with_allowed_controls`, `private_creation_racing_creator_demotion_preserves_its_manager`

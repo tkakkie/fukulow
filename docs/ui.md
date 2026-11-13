@@ -98,6 +98,7 @@ States look the same everywhere (board A2-2):
 | After `破棄` | the Message is removed | focus goes to the Composer |
 | New Messages below | `新着 n件 ↓` button | only when not pinned (§8) |
 | Sign in | board A2-3 | an ended Account Session (4001 or 401, S4 and C6) shows `ログインの有効期限が切れました。` |
+| Auth operation pending | sign-in, Invite acceptance and recovery buttons disabled | one shared guard until the request and state transition finish; no queued submissions |
 | Invite acceptance session 401 | error + `ログアウトして続ける` | explicit click only; waits for sign-out 204/401, then clears the error for manual resubmission; keeps the Invite and sign-in route |
 | Invite sign-out failure | `ログアウトできませんでした。通信状況を確認して、もう一度お試しください。` | keeps Invite and the action; no acceptance request |
 
