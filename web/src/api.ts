@@ -181,3 +181,10 @@ export const markChannelRead = (org: string, channel: string, body: MarkReadRequ
   call<ReadPosition>(f, `${channelPath(org, channel)}/read`, { ...json(body), method: 'PUT' }, true)
 export const markTopicRead = (org: string, channel: string, topic: string, body: MarkReadRequest, f: typeof fetch = fetch) =>
   call<ReadPosition>(f, `${channelPath(org, channel)}/topics/${encodeURIComponent(topic)}/read`, { ...json(body), method: 'PUT' }, true)
+
+export type ChangePasswordRequest = components['schemas']['ChangePasswordRequest']
+export type RevokeOtherSessionsRequest = components['schemas']['RevokeOtherSessionsRequest']
+export const putPassword = (body: ChangePasswordRequest, f: typeof fetch = fetch) =>
+  call<undefined>(f, '/api/v1/me/password', { ...json(body), method: 'PUT' }, false)
+export const revokeOtherSessions = (body: RevokeOtherSessionsRequest, f: typeof fetch = fetch) =>
+  call<undefined>(f, '/api/v1/me/sessions/revoke-others', json(body), false)

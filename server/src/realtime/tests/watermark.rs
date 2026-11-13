@@ -1,17 +1,6 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-async fn connect(address: std::net::SocketAddr, token: &str) -> Client {
-    let mut request = format!("ws://{address}{}", scoped_path("/api/v1/ws", token))
-        .into_client_request()
-        .unwrap();
-    request.headers_mut().insert(
-        header::AUTHORIZATION,
-        format!("Bearer {token}").parse().unwrap(),
-    );
-    tokio_tungstenite::connect_async(request).await.unwrap().0
-}
-
 async fn lock_waiters(pool: &PgPool, holder: i32) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_locks waiter JOIN pg_locks holder \
@@ -146,7 +135,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         let channel = f.channel;
         let barrier = barrier.clone();
         reconnecting.spawn(async move {
-            let mut socket = connect(address, &token).await;
+            let mut socket = connect_at(address, &token).await;
             barrier.wait().await;
             for attempt in 0..3 {
                 // An uncapped database lock wait cannot meet this bound.
@@ -157,7 +146,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
                 .await
                 .expect("watermark saturation must close after bounded admission");
                 if attempt < 2 {
-                    socket = connect(address, &token).await;
+                    socket = connect_at(address, &token).await;
                 }
             }
         });
@@ -188,7 +177,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         // Both another Channel and another Organization can still subscribe.
         for (token, channel) in [(&f.token, other_channel), (&other_token, foreign_channel)] {
             tokio::time::timeout(Duration::from_secs(2), async {
-                let mut socket = connect(address, token).await;
+                let mut socket = connect_at(address, token).await;
                 subscribe(&mut socket, channel, 0).await;
                 ready(&mut socket, channel, 0).await;
             })
@@ -321,7 +310,7 @@ async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: P
         let handshakes = handshakes.clone();
         clients.spawn(async move {
             let permit = handshakes.acquire().await.unwrap();
-            let mut socket = connect(address, &token).await;
+            let mut socket = connect_at(address, &token).await;
             drop(permit);
             barrier.wait().await;
             subscribe(&mut socket, channel, 0).await;
@@ -451,7 +440,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
                     assert_eq!(sent["seq"], seq);
                     let page = http_json(address, &foreign_token, foreign_channel, None).await;
                     assert_eq!(page["messages"][seq as usize - 1], sent);
-                    let mut socket = connect(address, &foreign_token).await;
+                    let mut socket = connect_at(address, &foreign_token).await;
                     subscribe(&mut socket, foreign_channel, seq).await;
                     ready(&mut socket, foreign_channel, seq).await;
                 })
@@ -564,7 +553,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
         )
         .await;
         assert_eq!(next["seq"], 2);
-        let mut recovered = connect(address, &f.token).await;
+        let mut recovered = connect_at(address, &f.token).await;
         subscribe(&mut recovered, channel, 0).await;
         assert_eq!(event(&mut recovered).await["message"], canonical);
         assert_eq!(event(&mut recovered).await["message"], next);
@@ -612,7 +601,7 @@ async fn sixteen_concurrent_sends_leave_reserved_capacity_for_new_subscription(p
     .execute(&pool)
     .await
     .unwrap();
-    let mut socket = connect(f.server.address, &foreign_token).await;
+    let mut socket = connect_at(f.server.address, &foreign_token).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(17));
     let mut sends = tokio::task::JoinSet::new();
     for channel in channels {

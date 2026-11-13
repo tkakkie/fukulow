@@ -60,6 +60,12 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - [#199](https://github.com/tkakkie/fukulow/issues/199): measured, the cap stays 4; cap 2 cut steady-state throughput ~31% and raised recovery 1011 admission rejections ~45%, with no significant 10,000-client recovery-time improvement. The cap-2 change is not merged.
 - #199 known limit: two stuck Channels can hold all 8 watermark slots; another Organization's subscribe then fails with 1011. #213 defers per-Organization watermark fairness unless cross-tenant failure spread becomes a real problem.
 - #212 follows up handshake admission, listen backlog and accept pacing; client jitter is in #195. #199's local recovery was bounded by handshake capacity, not the watermark cap; it does not establish production 10,000-connection capacity.
+- #196 A caps: 32 open sockets per Account (all Organizations and Account Sessions) and 12,000 globally (10,000 target + 20%). Account cap and budget are checked first under one lock, so a refused Account holds no global slot. 503 socket_limit with a random 1-5 s Retry-After, as #161.
+- #196 A budget: every client text/binary frame is charged before DB access to the connection (burst 300, 4/s) and its Account (burst 600, 8/s, kept across reconnects). Bursts fit a 256-Channel bootstrap (two per Account). Over budget closes with new code 4029; clients back off as after 1011.
+- #196 A: an Account with an empty budget is refused at upgrade (503), not after it: measured, reconnecting after 4029 otherwise cost ~660 upgrades/s each with a session check. Refused upgrades still cost one authentication query; handshake admission is #212.
+- #196 A: a duplicate subscribe is a charged no-op whatever its after_seq (maintainer, 2026-11-13): the client already holds that cursor; replay again via unsubscribe+subscribe (charged twice) or REST. It closed the re-subscribe bypass of the 256-subscription and query costs.
+- #196 A: the Account table holds up to 100,000 budgets. At the bound, idle full entries are dropped, then the idle entry closest to full is evicted (its Account restarts full), so depleted Accounts cannot block new ones; active entries are at most the global cap.
+- #196 A read buffer 8 KiB (tungstenite default 128 KiB): measured ~120 KiB less RSS per idle socket (~1.15 GiB at 10,000); 4 KiB saved only ~4 KiB more per socket, so 8 KiB keeps a 16 KiB message to two reads. Idle CPU did not differ.
 
 ## Entries in other parts
 
@@ -74,3 +80,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [messages](messages.md): `#149 grant_id is a durable UUID`, `#149 fast subscription rechecks/failures target Organization+Channel`, `#149 subscriptions follow the current access`, `#149 API mutations lock Organization, Channels`
 
 - [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`
+
+- [auth](auth.md): `#304 recheck current Session/password under locks`, `#304 wrong current password is 403`

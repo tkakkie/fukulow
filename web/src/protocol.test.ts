@@ -272,6 +272,17 @@ it('before and nonadjacent latest records extend the window without becoming cur
   expect(d.get().channels.A.cursor).toBe(102)
 })
 
+it('backs off longer on each 4029 rate-limit close until a subscription is confirmed', () => {
+  const d = boot()
+  const first = d.feed({ type: 'socket_closed', connection: d.connection, code: 4029 })
+  expect(first).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff', attempt: 0 }))
+  expect(d.get().session).not.toBe('sign_in_required')
+  const connection = id(d.feed({ type: 'timer_elapsed', id: id(first, 'wait') }), 'connect')
+  d.feed({ type: 'connection_ready', connection })
+  const second = d.feed({ type: 'socket_closed', connection, code: 4029 })
+  expect(second).toContainEqual(expect.objectContaining({ type: 'wait', purpose: 'reconnect_backoff', attempt: 1 }))
+})
+
 it('reconnects with backoff after a 1001 idle-timeout close', () => {
   const d = boot()
   const timer = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1001 }), 'wait')
@@ -279,7 +290,7 @@ it('reconnects with backoff after a 1001 idle-timeout close', () => {
   expect(next).toBeDefined()
 })
 
-it.each([4008, 1001, 1011, 1006])('defers a pending fill backoff after close %s until reconnected and resubscribed', code => {
+it.each([4008, 4029, 1001, 1011, 1006])('defers a pending fill backoff after close %s until reconnected and resubscribed', code => {
   const d = boot()
   const grace = id(d.event(103), 'wait')
   const fill = id(d.feed({ type: 'timer_elapsed', id: grace }), 'fetch_history')

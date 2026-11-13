@@ -21,7 +21,7 @@ Sign in, organization, channels, topics, reply chains, DM, unread/mention, basic
 Later: attachments, reactions, push notifications, bots/webhooks, multiple organizations UI, OIDC.
 
 ## Parts
-- [Accounts](spec/accounts.md): Accounts and Memberships; Members, Roles and Invites; Channel membership and Channel managers; Setup.
+- [Accounts](spec/accounts.md): Accounts and Memberships; Password and Account Session security; Members, Roles and Invites; Channel membership and Channel managers; Setup.
 - [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability; Operations: backup and restore (#198 C).
 - [Realtime](spec/realtime.md): Real-time sync contract.
 

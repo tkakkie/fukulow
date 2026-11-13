@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 30 operations document shutdown, including Member deactivation.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 206;
+// All 32 operations document shutdown, including Account security actions.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 224;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -105,7 +105,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 30);
+        assert_eq!(operations, 32);
     }
 }
 
@@ -124,6 +124,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
         session_changes: Default::default(),
         session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     };
     let shutdown = state.shutdown.clone();
     let router = app(state);
@@ -143,7 +144,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 30);
+    assert_eq!(requests.len(), 32);
     requests.extend(
         [
             "/",
@@ -693,6 +694,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     });
     for (method, path) in [(
         "GET",
@@ -1188,6 +1190,67 @@ fn member_deactivation_contract_uses_member_id_empty_204_and_ordered_denials() {
                 .as_array()
                 .unwrap()
                 .contains(&json!("can_deactivate_members"))
+        );
+    }
+}
+
+#[test]
+fn account_security_contract_records_paths_errors_and_account_lock_order() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        for (path, method, schema) in [
+            ("/api/v1/me/password", "put", "ChangePasswordRequest"),
+            (
+                "/api/v1/me/sessions/revoke-others",
+                "post",
+                "RevokeOtherSessionsRequest",
+            ),
+        ] {
+            let operation = &document["paths"][path][method];
+            assert_eq!(
+                operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+                format!("#/components/schemas/{schema}")
+            );
+            assert!(
+                operation["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Lock Account FOR UPDATE, then recheck current Session")
+            );
+            let responses = &operation["responses"];
+            assert!(responses["204"]["content"].is_null());
+            assert!(
+                responses["401"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Only missing, invalid, expired or revoked Account Session")
+            );
+            assert!(
+                responses["403"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("current_password_incorrect")
+            );
+            assert!(responses["429"]["headers"]["Retry-After"].is_object());
+            for status in ["400", "401", "403", "413", "415", "429", "500", "503"] {
+                assert_eq!(
+                    responses[status]["content"]["application/json"]["schema"]["$ref"],
+                    "#/components/schemas/ErrorBody"
+                );
+            }
+            assert!(
+                document["components"]["schemas"][schema]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("current_password"))
+            );
+        }
+        assert!(
+            document["paths"]["/api/v1/me/password"]["put"]["responses"]["400"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("invalid_new_password")
         );
     }
 }

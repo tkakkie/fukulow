@@ -67,6 +67,7 @@ pub struct AppState {
     pub session_changes: auth::SessionChanges,
     pub session_cleanup: auth::SessionCleanup,
     pub ws_allowed_origins: realtime::AllowedOrigins,
+    pub socket_gate: realtime::SocketGate,
 }
 
 #[cfg(test)]
@@ -89,6 +90,7 @@ impl AppState {
             session_cleanup: Default::default(),
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
+            socket_gate: Default::default(),
         }
     }
 }
@@ -136,6 +138,14 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(auth::native_sign_in),
         )
         .route("/api/v1/me", get(auth::me))
+        .route(
+            "/api/v1/me/password",
+            axum::routing::put(auth::security::change_password),
+        )
+        .route(
+            "/api/v1/me/sessions/revoke-others",
+            axum::routing::post(auth::security::revoke_others),
+        )
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
         .route(
             "/api/v1/orgs/{org}/members",
@@ -472,6 +482,7 @@ mod tests {
             session_cleanup: Default::default(),
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
+            socket_gate: Default::default(),
         })
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await

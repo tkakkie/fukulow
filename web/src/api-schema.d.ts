@@ -36,6 +36,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** @description Lock Account FOR UPDATE, then recheck current Session, verify password and update/delete Sessions through COMMIT; shared with web/native sign-in. Signal revoked tokens after COMMIT. */
+        put: operations["change_password"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/sessions/revoke-others": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Lock Account FOR UPDATE, then recheck current Session, verify password and delete other Sessions through COMMIT; shared with web/native sign-in. Signal each revoked token after COMMIT, including on HTTP cancellation. */
+        post: operations["revoke_others"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/native/session": {
         parameters: {
             query?: never;
@@ -381,6 +415,10 @@ export interface paths {
          *     stop protected delivery and go to Sign in. Membership loss closes only this
          *     Organization with 4003: terminal unavailable, never reconnect/resubscribe/retry sends.
          *     A rejected handshake has no close code: check GET /api/v1/orgs/{org}/me.
+         *     Every text or binary frame (subscribe, unsubscribe, invalid) is charged to a
+         *     per-connection and a per-Account budget before any database access; over
+         *     budget closes with 4029: reconnect with backoff. A subscribe for a Channel
+         *     already subscribed on this connection is ignored (no reply), whatever its after_seq.
          */
         get: operations["upgrade"];
         put?: never;
@@ -483,6 +521,15 @@ export interface components {
         };
         ChangeChannelManagerRequest: {
             manager: boolean;
+        };
+        ChangePasswordRequest: {
+            /** Format: password */
+            current_password: string;
+            /**
+             * Format: password
+             * @description At least 12 characters, at most 1024 UTF-8 bytes.
+             */
+            new_password: string;
         };
         ChangeRoleRequest: {
             role: components["schemas"]["Role"];
@@ -709,6 +756,10 @@ export interface components {
             /** Format: int32 */
             limit?: number | null;
         };
+        RevokeOtherSessionsRequest: {
+            /** Format: password */
+            current_password: string;
+        };
         /** @enum {string} */
         Role: "owner" | "admin" | "member" | "guest";
         /**
@@ -899,6 +950,7 @@ export type AccountIdentity = components['schemas']['AccountIdentity'];
 export type AddChannelMemberRequest = components['schemas']['AddChannelMemberRequest'];
 export type Capability = components['schemas']['Capability'];
 export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelManagerRequest'];
+export type ChangePasswordRequest = components['schemas']['ChangePasswordRequest'];
 export type ChangeRoleRequest = components['schemas']['ChangeRoleRequest'];
 export type Channel = components['schemas']['Channel'];
 export type ChannelAccessLost = components['schemas']['ChannelAccessLost'];
@@ -928,6 +980,7 @@ export type OrganizationCapabilities = components['schemas']['OrganizationCapabi
 export type ReadPosition = components['schemas']['ReadPosition'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
 export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
+export type RevokeOtherSessionsRequest = components['schemas']['RevokeOtherSessionsRequest'];
 export type Role = components['schemas']['Role'];
 export type SendMessageRequest = components['schemas']['SendMessageRequest'];
 export type ServerEvent = components['schemas']['ServerEvent'];
@@ -1018,6 +1071,206 @@ export interface operations {
                 };
             };
             /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    change_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Password changed with Argon2; every other cookie/bearer Account Session revoked across Organizations; current Session preserved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid_new_password: fewer than 12 characters or more than 1024 UTF-8 bytes; otherwise invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Only missing, invalid, expired or revoked Account Session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description current_password_incorrect; no password or Session changes; current Session remains valid */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and revoke-others */
+            429: {
+                headers: {
+                    /** @description Seconds until retry; at least 1 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or password worker failure; transaction rolled back */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description password admission unavailable; no mutation; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_others: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevokeOtherSessionsRequest"];
+            };
+        };
+        responses: {
+            /** @description Every other cookie/bearer Account Session revoked across Organizations; current Session preserved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid JSON, fields or current password length */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Only missing, invalid, expired or revoked Account Session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description current_password_incorrect; no password or Session changes; current Session remains valid */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and password change */
+            429: {
+                headers: {
+                    /** @description Seconds until retry; at least 1 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or password worker failure; transaction rolled back */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description password admission unavailable; no mutation; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
@@ -3084,7 +3337,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description socket_limit: the Account's or the server's open-socket cap is reached, or the Account's control-frame budget is empty (Retry-After 1 through 5, jittered); retry with the normal reconnect backoff; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

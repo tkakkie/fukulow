@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { logLatenciesMs, percentile, statementAveragesMs } from './hot-latency.ts';
+import { logLatenciesMs, percentile, statementAveragesMs, transactionsPerSecond } from './hot-latency.ts';
+
+test('transaction rate uses pgbench duration excluding connection setup', () => {
+  assert.equal(transactionsPerSecond('tps = 1234.567890 (without initial connection time)\n'), 1234.567890);
+  assert.throws(() => transactionsPerSecond('no rate'));
+});
 
 test('percentile uses the nearest rank', () => {
   const samples = Array.from({ length: 100 }, (_, i) => i + 1);
