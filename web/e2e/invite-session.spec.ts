@@ -143,6 +143,33 @@ function deferred() {
   return { promise, resolve }
 }
 
+test('loading-timeout 再試行 retries a pending restore and ignores its late response', async ({ page }) => {
+  const initial = deferred()
+  let reads = 0
+  await page.clock.install()
+  await page.route('**/api/v1/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v1/me') {
+      const first = ++reads === 1
+      if (first) await initial.promise
+      return route.fulfill({ status: first ? 500 : 401, json: { error: first ? 'internal error' : 'invalid credentials' } })
+    }
+    if (path === '/api/v1/setup') return route.fulfill({ json: { setup_required: false } })
+    return route.fulfill({ status: 404, json: { error: 'not found' } })
+  })
+  await page.goto('/')
+  await expect.poll(() => reads).toBe(1)
+  await page.clock.fastForward(10_000)
+  await page.getByRole('button', { name: '再試行', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'ログイン', exact: true })).toBeEnabled()
+  expect(reads).toBe(2)
+  const completed = page.waitForResponse(response => response.url().endsWith('/api/v1/me') && response.status() === 500)
+  initial.resolve()
+  await completed
+  await expect(page.getByRole('button', { name: 'ログイン', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: '再試行', exact: true })).toHaveCount(0)
+})
+
 async function fillSignIn(page: Page) {
   await page.getByLabel('メールアドレス', { exact: true }).fill(email)
   await page.getByLabel('パスワード', { exact: true }).fill('invite recovery password')

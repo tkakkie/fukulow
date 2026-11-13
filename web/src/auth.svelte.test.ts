@@ -8,6 +8,7 @@ import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
+import type { AuthState } from './auth'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -48,6 +49,76 @@ function stack(over: Partial<AuthDeps> = {}) {
   return { auth: createAuth(deps), deps, nets, ended, closes, stores }
 }
 type Stack = ReturnType<typeof stack>
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+it.each(['sign-in', 'restore', 'setup', 'Invite'] as const)('%s releases cookie mutation busy before a delayed Organization lookup, allowing switching and sign-out', async action => {
+  const lookup = deferred<Awaited<ReturnType<AuthDeps['getOrganization']>>>()
+  const s = stack({
+    restore: vi.fn(async () => ({ screen: 'app' as const, identity: identity('owner') })),
+    setupAndSignIn: vi.fn(async () => ({ state: { screen: 'app' as const, identity: identity('owner') } })),
+  })
+  if (action === 'Invite') await signInAs(s, 'owner')
+  vi.mocked(s.deps.getOrganization).mockReturnValueOnce(lookup.promise)
+  const pending = action === 'sign-in' ? s.auth.submitSignIn('owner@example.com', 'pw')
+    : action === 'restore' ? s.auth.load()
+    : action === 'setup' ? s.auth.submitSetup({ organization_name: 'Org', name: 'Owner', email: 'owner@example.com', password: 'test-only password', setup_token: 'test-only' })
+    : s.auth.acceptInvitation(createInviteAcceptance({ organizationId: 'o', token: 'a'.repeat(64) }, async () => ok(member('owner'))), { email: 'owner@example.com', name: 'Owner' })
+  await settle()
+  expect(s.auth.view.screen).toBe('app')
+  expect(s.auth.organizationStatus).toBe('loading')
+  expect(s.auth.busy).toBe(false)
+
+  await s.auth.selectOrganization('other')
+  expect(s.auth.organizationStatus).toBe('ready')
+  expect(s.auth.session).not.toBeNull()
+  expect(await s.auth.signOut()).toBe(true)
+  expect(s.deps.signOut).toHaveBeenCalledOnce()
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.session).toBeNull()
+
+  lookup.resolve(ok(member('owner')))
+  await pending
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.session).toBeNull()
+  expect(s.auth.busy).toBe(false)
+})
+
+it('loading-timeout retry starts another restore while the first read is pending and fences its late result', async () => {
+  const first = deferred<AuthState>()
+  const retry = deferred<AuthState>()
+  const s = stack({ restore: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(retry.promise) })
+  const pending = s.auth.load()
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(s.auth.view.screen).toBe('loading')
+  expect(s.auth.busy).toBe(false)
+  const retried = s.auth.load()
+  expect(s.deps.restore).toHaveBeenCalledTimes(2)
+  first.resolve({ screen: 'app', identity: identity('stale') })
+  await pending
+  expect(s.auth.view.screen).toBe('loading')
+  expect(s.deps.getOrganization).not.toHaveBeenCalled()
+  retry.resolve({ screen: 'signin' })
+  await retried
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.busy).toBe(false)
+})
+
+it('sign-out during a pending restore fences the read without waiting for it', async () => {
+  const restore = deferred<AuthState>()
+  const s = stack({ restore: vi.fn(() => restore.promise) })
+  const pending = s.auth.load()
+  expect(await s.auth.signOut()).toBe(true)
+  expect(s.deps.signOut).toHaveBeenCalledOnce()
+  restore.resolve({ screen: 'app', identity: identity('stale') })
+  await pending
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.deps.getOrganization).not.toHaveBeenCalled()
+})
 
 it('Organization switch cancels a throttled send and returning never revives its timer', async () => {
   const s = stack()

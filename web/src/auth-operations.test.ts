@@ -178,4 +178,54 @@ describe('shared auth-operation guard', () => {
     await s.ops.signOutAndContinue(s.invitation)
     expect(s.invitation.get()).toMatchObject({ sessionRejected: false, error: '', busy: false })
   })
+
+  it('a superseded Organization read cannot release a newer cookie mutation guard', async () => {
+    const s = fixture()
+    const lookup = deferred<void>()
+    s.account.show.mockImplementationOnce(async () => { await lookup.promise })
+    const signingIn = s.ops.submitSignIn(input.email, input.password)
+    await vi.waitFor(() => expect(s.account.show).toHaveBeenCalledOnce())
+    expect(s.ops.get().busy).toBe(false)
+    const logout = deferred<boolean>()
+    s.deps.signOut.mockReturnValueOnce(logout.promise)
+    const signingOut = s.ops.signOut()
+    expect(s.ops.get().busy).toBe(true)
+    lookup.resolve()
+    await signingIn
+    expect(s.ops.get().busy).toBe(true)
+    expect(await s.ops.submitSignIn(input.email, input.password)).toBe(false)
+    logout.resolve(true)
+    expect(await signingOut).toBe(true)
+    expect(s.ops.get().busy).toBe(false)
+  })
+
+  it.each(['setup', 'sign-out', 'recovery', 'Invite', 'show', 'accepted', 'restore'] as const)('does not leave auth busy after a throwing %s', async action => {
+    const s = fixture()
+    const error = new Error('test-only failure')
+    let pending: Promise<unknown>
+    if (action === 'setup') {
+      s.deps.setupAndSignIn.mockRejectedValueOnce(error)
+      pending = s.ops.submitSetup(setup)
+    } else if (action === 'sign-out' || action === 'recovery') {
+      if (action === 'recovery') await s.ops.acceptInvitation(s.invitation, input)
+      s.deps.signOut.mockRejectedValueOnce(error)
+      pending = action === 'sign-out' ? s.ops.signOut() : s.ops.signOutAndContinue(s.invitation)
+    } else if (action === 'Invite' || action === 'accepted') {
+      if (action === 'Invite') s.api.mockRejectedValueOnce(error)
+      else {
+        s.api.mockResolvedValueOnce({ ok: true, data: member })
+        s.account.accepted.mockRejectedValueOnce(error)
+      }
+      pending = s.ops.acceptInvitation(s.invitation, input)
+    } else if (action === 'show') {
+      s.account.show.mockRejectedValueOnce(error)
+      pending = s.ops.submitSignIn(input.email, input.password)
+    } else {
+      s.deps.restore.mockRejectedValueOnce(error)
+      pending = s.ops.load()
+    }
+    await expect(pending).rejects.toThrow('test-only failure')
+    expect(s.ops.get().busy).toBe(false)
+    expect(await s.ops.signOut()).toBe(true)
+  })
 })
