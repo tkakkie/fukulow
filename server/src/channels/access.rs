@@ -325,6 +325,27 @@ async fn access_rows_in(
         .collect()
 }
 
+/// One single-batch `access_rows` read (one-statement context path) for #314 tests.
+#[cfg(test)]
+pub(crate) async fn access_row_for_test(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    member: (Uuid, i64),
+    channel: Uuid,
+) -> Result<(bool, Option<Uuid>, bool), sqlx::Error> {
+    let entry = Arc::new(Entry {
+        organization,
+        member,
+        channel,
+        grant: Mutex::new(None),
+        status: watch::channel(0).0,
+    });
+    access_rows(pool, &[entry])
+        .await?
+        .pop()
+        .ok_or(sqlx::Error::RowNotFound)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

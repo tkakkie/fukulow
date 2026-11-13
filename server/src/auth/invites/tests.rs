@@ -115,7 +115,7 @@ async fn assert_issuer_denied(
 async fn invite_acceptance_denies_demoted_issuer_for_invited_role(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     for (initial, invited, current) in [
         (Role::Admin, Role::Admin, Role::Member),
         (Role::Owner, Role::Owner, Role::Admin),
@@ -159,7 +159,7 @@ async fn invite_acceptance_denies_deactivated_issuer(pool: sqlx::PgPool) {
     let other = org_fn(&pool).await;
     let (issuer, _, _, admin) = account(&pool, org, Role::Admin).await;
     let (target, _, email, token) = account(&pool, other, Role::Member).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
     let i = invite(&app, org, &admin, &email, Role::Admin).await;
     deactivate_member(&state, org, issuer).await.unwrap();
@@ -179,7 +179,7 @@ async fn invite_acceptance_denies_deactivated_issuer(pool: sqlx::PgPool) {
 async fn invite_acceptance_denies_deactivated_issuer_self_reactivation(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (issuer, member, email, token) = account(&pool, org, Role::Admin).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
     let i = invite(&app, org, &token, &email, Role::Admin).await;
     deactivate_member(&state, org, issuer).await.unwrap();
@@ -199,7 +199,7 @@ async fn invite_acceptance_denies_deactivated_issuer_self_reactivation(pool: sql
 async fn invite_acceptance_allows_currently_authorized_issuer(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     let email = "authorized@example.invalid";
     let i = invite(&app, org, &admin, email, Role::Admin).await;
     let mut input = accept_input(&i, email);
@@ -221,7 +221,7 @@ async fn invite_acceptance_rechecks_issuer_after_waiting_for_organization_lock(p
     let org = org(&pool).await;
     let other = org_fn(&pool).await;
     let (_, foreign_member, email, recipient) = account(&pool, other, Role::Member).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     for deactivate in [false, true] {
         let (_, issuer, _, token) = account(&pool, org, Role::Admin).await;
         let i = invite(&app, org, &token, &email, Role::Admin).await;
@@ -273,7 +273,7 @@ async fn invite_acceptance_allows_demoted_issuer_with_authority_for_invited_role
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, issuer, _, token) = account(&pool, org, Role::Owner).await;
     let (_, _, email, recipient) = account(&pool, other, Role::Member).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     let i = invite(&app, org, &token, &email, Role::Admin).await;
     let r = req(
         &app,
@@ -307,7 +307,7 @@ async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_contr
     let foreign = org_fn(&pool).await;
     let (_, target, _, _) = account(&pool, org, Role::Member).await;
     let (_, foreign_member, _, foreign_token) = account(&pool, foreign, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pools.app.clone()));
+    let app = crate::app(AppState::for_test(pools.app.clone()).await);
     // A second Owner keeps the role-change positive control independent of last-Owner protection.
     account(&pool, org, Role::Owner).await;
     for role in crate::auth::ALL_ROLES {
@@ -470,7 +470,7 @@ async fn invite_existing_account_requires_signed_in_matching_account_and_is_sing
     let other = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, _, email, token) = account(&pool, other, Role::Member).await;
-    let app = crate::app(AppState::for_test(pools.app.clone()));
+    let app = crate::app(AppState::for_test(pools.app.clone()).await);
     let i = invite(&app, org, &owner, &email, Role::Admin).await;
     let hash: Vec<u8> =
         sqlx::query_scalar("SELECT token_hash FROM invites WHERE organization_id=$1 AND id=$2")
@@ -514,7 +514,7 @@ async fn invite_unknown_expired_used_foreign_and_wrong_email_deny_without_consum
     let other = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, _, email, token) = account(&pool, other, Role::Member).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     let i = invite(&app, org, &owner, &email, Role::Guest).await;
     let path = format!("/api/v1/orgs/{org}/invites/accept");
     let wrong = accept_input(&i, "wrong@example.invalid");
@@ -577,7 +577,7 @@ async fn new_account_acceptance_is_atomic_and_concurrent_consumption_has_one_win
     crate::database::tests::context::context_policies(&pool).await;
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pools.app.clone()));
+    let app = crate::app(AppState::for_test(pools.app.clone()).await);
     let email = "new@example.invalid";
     let i = invite(&app, org, &owner, email, Role::Member).await;
     let path = format!("/api/v1/orgs/{org}/invites/accept");
@@ -631,7 +631,7 @@ async fn reinvite_reuses_member_row_without_restoring_channel_grants_or_changing
     .execute(&pool)
     .await
     .unwrap();
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     let path = format!("/api/v1/orgs/{org}/invites/accept");
     let i = invite(&app, org, &owner, &email, Role::Guest).await;
     assert_eq!(
@@ -648,7 +648,7 @@ async fn reinvite_reuses_member_row_without_restoring_channel_grants_or_changing
             .await
             .unwrap();
     assert_eq!(role, Role::Member);
-    deactivate_member(&AppState::for_test(pool.clone()), org, id)
+    deactivate_member(&AppState::for_test(pool.clone()).await, org, id)
         .await
         .unwrap();
     let r = req(&app, "POST", &path, Some(&token), accept_input(&i, &email)).await;
@@ -682,13 +682,13 @@ async fn last_owner_demotion_and_deactivation_are_rejected_with_concurrent_posit
 ) {
     let org = org(&pool).await;
     let (id, member, _, owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     let path = format!("/api/v1/orgs/{org}/members/{member}/role");
     let r = req(&app, "PATCH", &path, Some(&owner), json!({"role":"admin"})).await;
     assert_eq!(r.status(), StatusCode::CONFLICT);
     assert_eq!(body(r).await["error"], "last_owner");
     assert!(
-        deactivate_member(&AppState::for_test(pool.clone()), org, id)
+        deactivate_member(&AppState::for_test(pool.clone()).await, org, id)
             .await
             .is_err()
     );
@@ -717,7 +717,7 @@ async fn every_role_rest_channel_denials_and_grants_have_positive_controls(pool:
     let org = org(&pool).await;
     let foreign = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     let mut channels = Vec::new();
     for visibility in ["public", "private"] {
         let r = req(
@@ -820,7 +820,7 @@ async fn queued_invite_expiry_and_new_account_uniqueness_race_never_attach_by_em
     let other = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, _, _, other_owner) = account(&pool, other, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()));
+    let app = crate::app(AppState::for_test(pool.clone()).await);
     let email = "race@example.invalid";
     let a = invite(&app, org, &owner, email, Role::Member).await;
     let b = invite(&app, other, &other_owner, email, Role::Guest).await;
@@ -895,7 +895,7 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
     let org = org(&pool).await;
     account(&pool, org, Role::Owner).await;
     let (_, target, _, _) = account(&pool, org, Role::Member).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     for loss in ["role", "deactivate", "revision"] {
         let (id, member, _, token) = account(&pool, org, Role::Owner).await;
         // Positive control uses the same captured actor and server handler.
@@ -1069,7 +1069,7 @@ async fn invite_acceptance_uses_configured_web_cookie_and_never_downgrades_inval
     for secure in [true, false] {
         let app = crate::app(AppState {
             cookie_secure: secure,
-            ..AppState::for_test(pool.clone())
+            ..AppState::for_test(pool.clone()).await
         });
         for name in [COOKIE, SECURE_COOKIE, "analytics"] {
             let (_, _, email, token) = account(&pool, other, Role::Member).await;
@@ -1107,7 +1107,7 @@ async fn role_change_unknown_foreign_and_inactive_targets_deny_with_active_posit
     let (account_id, inactive, _, _) = account(&pool, org, Role::Member).await;
     let (_, foreign, _, _) = account(&pool, other, Role::Member).await;
     let (_, active, _, _) = account(&pool, org, Role::Member).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
     deactivate_member(&state, org, account_id).await.unwrap();
     for id in [Uuid::new_v4(), foreign, inactive] {

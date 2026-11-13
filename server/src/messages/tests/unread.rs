@@ -98,7 +98,7 @@ async fn unread_main_timeline_and_topics_are_independent_monotonic_and_exclude_o
     );
     assert_eq!(a["read_seq"], 5);
     assert!(b["read_seq"].as_i64().unwrap() >= 2);
-    let fresh = router(&pool);
+    let fresh = router(&pool).await;
     assert_eq!(
         topics(&fresh, &viewer, channel).await["topics"][0]["read_seq"],
         5

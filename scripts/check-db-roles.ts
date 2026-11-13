@@ -78,6 +78,10 @@ try {
   const appRead = () => run('exec', '-e', `PGPASSWORD=${passwords[1]}`, name, 'psql', '-X', '-h', '127.0.0.1',
     '-U', 'fukulow_app', '-d', 'fukulow', '-Atc', 'SELECT count(*) > 0 FROM _sqlx_migrations')
   assert.equal(appRead(), 't')
+  // #314: the SECURITY DEFINER bootstrap check is executable by fukulow_app only, not PUBLIC.
+  assert.equal(sql("SELECT has_function_privilege('fukulow_app', 'fukulow_setup_required()', 'EXECUTE'), " +
+    "NOT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a " +
+    "WHERE p.proname = 'fukulow_setup_required' AND a.grantee = 0)"), 't|t')
   // The existing role survives both rotation and a rejected ownership update.
   sql('CREATE TABLE role_owned_test (organization_id uuid NOT NULL); ALTER TABLE role_owned_test OWNER TO fukulow_app')
   const rejected = command(['migrate', 'roles'], passwords[3])

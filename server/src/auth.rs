@@ -239,10 +239,10 @@ fn email(value: &str) -> Result<String, ApiError> {
     Ok(value)
 }
 
-// Global bootstrap is a tenant-scope exception: only existence is exposed.
+// Global bootstrap is a tenant-scope exception: RLS hides other Organizations,
+// so a SECURITY DEFINER function exposes only whether any exists (#314).
 async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<bool, sqlx::Error> {
-    // #314 step 4 replaces this global bootstrap read with a SECURITY DEFINER function.
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organizations)")
+    sqlx::query_scalar("SELECT NOT fukulow_setup_required()")
         .fetch_one(executor)
         .await
 }
@@ -990,7 +990,7 @@ mod tests {
                         })
                     }),
                 )
-                .with_state(AppState::for_test(pool.clone()));
+                .with_state(AppState::for_test(pool.clone()).await);
             let request = Request::post("/api/v1/setup")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
@@ -1023,7 +1023,7 @@ mod tests {
         }
         // Entropy failure must leave bootstrap available to a subsequent request.
         let response = setup_with_workers(
-            AppState::for_test(pool),
+            AppState::for_test(pool).await,
             SetupRequest {
                 setup_token: Some("setup-token-test-only".into()),
                 organization_name: "Entropy test".into(),
@@ -1108,7 +1108,7 @@ mod tests {
             let app = app_with_workers(
                 AppState {
                     sign_in_throttle: throttle,
-                    ..AppState::for_test(pool.clone())
+                    ..AppState::for_test(pool.clone()).await
                 },
                 &WORKERS,
             );
@@ -1170,7 +1170,7 @@ mod tests {
             .unwrap();
         let app = crate::app(AppState {
             sign_in_throttle: throttle,
-            ..AppState::for_test(pool)
+            ..AppState::for_test(pool).await
         });
         let request = Request::post("/api/v1/session")
             .extension(ConnectInfo(
@@ -1223,7 +1223,7 @@ mod tests {
             let app = app_with_workers(
                 AppState {
                     setup_token: setup_token.clone(),
-                    ..AppState::for_test(pool.clone())
+                    ..AppState::for_test(pool.clone()).await
                 },
                 &WORKERS,
             );

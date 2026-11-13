@@ -67,7 +67,7 @@ async fn reply_concurrent_duplicates_and_cross_channel_conflict_consume_one_seq_
     pool: PgPool,
 ) {
     let (_, org, sender, channel, token) = fixture(&pool).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state);
     let root = sent(

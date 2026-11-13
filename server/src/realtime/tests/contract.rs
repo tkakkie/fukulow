@@ -48,7 +48,7 @@ impl Runner {
                 return Err(Failure::PublicMembers(channel.id.clone()));
             }
         }
-        let state = state(&pool);
+        let state = state(&pool).await;
         let delivery = state.message_delivery.clone();
         let server = Server::start(crate::app(state)).await;
         let mut runner = Self {

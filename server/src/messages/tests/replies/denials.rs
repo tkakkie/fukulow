@@ -5,7 +5,7 @@ async fn reply_unknown_foreign_channel_and_foreign_organization_parent_and_ancho
     pool: PgPool,
 ) {
     let (_, org, owner, channel, token) = fixture(&pool).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state);
     let own = sent(&app, &token, channel, input(Uuid::new_v4(), "Own")).await;
@@ -67,7 +67,7 @@ async fn reply_rest_denial_matrix_retry_and_chain_have_positive_controls_before_
         };
         let viewer = Uuid::new_v4();
         let token = member(&pool, other, viewer).await;
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let delivery = state.message_delivery.clone();
         let app = crate::app(state);
         let root = sent(
@@ -198,7 +198,7 @@ async fn reply_stale_member_and_queued_access_loss_deny_send_retry_and_chain(poo
         let (_, org, owner, channel, owner_token) = fixture(&pool).await;
         let viewer = Uuid::new_v4();
         let token = member(&pool, org, viewer).await;
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let delivery = state.message_delivery.clone();
         let app = crate::app(state.clone());
         let root = sent(
@@ -438,7 +438,7 @@ async fn reply_send_rejects_invalid_session_without_polling_the_request_body() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = router(&pool);
+    let app = router(&pool).await;
     let request = Request::post(format!(
         "/api/v1/orgs/{}/channels/{}/messages",
         Uuid::new_v4(),

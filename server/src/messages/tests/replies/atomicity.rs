@@ -5,7 +5,7 @@ async fn reply_admission_and_commit_rollback_preserve_seq_topic_count_and_public
     pool: PgPool,
 ) {
     let (_, org, sender, channel, token) = fixture(&pool).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state);
     let root = sent(
@@ -203,7 +203,7 @@ async fn reply_migration_preserves_existing_rows_and_scopes_both_foreign_keys(po
     .execute(&pool)
     .await
     .unwrap();
-    let app = router(&pool);
+    let app = router(&pool).await;
     let root = list(&app, &token, channel, "").await["messages"][0].clone();
     assert_eq!(root["id"], root_id.to_string());
     assert!(root["reply_to"].is_null() && root["reply_root_id"].is_null());
@@ -267,7 +267,7 @@ async fn reply_chain_reauthorizes_member_revision_and_grant_after_barrier_wait(p
         for who in [owner, viewer] {
             sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)").bind(org).bind(channel).bind(who).execute(&pool).await.unwrap();
         }
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state);
         let root = sent(&app, &owner_token, channel, input(Uuid::new_v4(), "Root")).await;
         let child = sent(&app, &token, channel, reply_input(Uuid::new_v4(), &root)).await;

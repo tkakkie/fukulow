@@ -92,7 +92,7 @@ async fn topic_read_admission_rejection_returns_retry_after(pool: PgPool) {
         .await
         .unwrap();
     let (_, org, _, channel, token) = fixture(&pool).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state);
     let message = sent(

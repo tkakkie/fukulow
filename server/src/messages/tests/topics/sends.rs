@@ -107,7 +107,7 @@ async fn topic_names_validate_scalars_whitespace_and_channel_scoped_ascii_identi
 async fn topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once(pool: PgPool) {
     let (_, org, sender, channel, token) = fixture(&pool).await;
     let second = member(&pool, org, Uuid::new_v4()).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let mut queue = delivery.queue(org, (sender, 0), 256);
     queue.subscribe(channel);
@@ -259,7 +259,7 @@ async fn topic_first_creation_duplicates_lost_ack_and_cross_channel_race_leave_n
     pool: PgPool,
 ) {
     let (_, org, sender, channel, token) = fixture(&pool).await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state);
     let other = Uuid::new_v4();

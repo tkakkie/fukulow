@@ -2,7 +2,7 @@ use super::*;
 
 #[sqlx::test]
 async fn channel_name_length_boundaries_count_unicode_scalars(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     for visibility in ["public", "private"] {
         let organization_id = organization(&pool).await;
         let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
@@ -52,7 +52,7 @@ async fn channel_name_length_boundaries_count_unicode_scalars(pool: PgPool) {
 async fn oversized_channel_name_is_rejected_before_opening_transaction(pool: PgPool) {
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let auth = extract_auth(state.clone(), &token).await;
     // Auth may read the session; semantic validation must precede even BEGIN.
     pool.close().await;
@@ -72,7 +72,7 @@ async fn oversized_channel_name_is_rejected_before_opening_transaction(pool: PgP
 
 #[sqlx::test]
 async fn channel_name_length_preserves_empty_names(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     for name in [""] {

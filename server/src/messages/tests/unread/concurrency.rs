@@ -165,7 +165,7 @@ async fn unread_concurrent_member_and_channel_creation_initialize_access_once(po
     }).await.unwrap();
     tx.commit().await.unwrap();
     let viewer = task.await.unwrap();
-    let c = channels(&router(&pool), &viewer).await;
+    let c = channels(&router(&pool).await, &viewer).await;
     assert_eq!(c["channels"].as_array().unwrap().len(), 2);
     let count:i64=sqlx::query_scalar("SELECT count(*) FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=ANY($3)").bind(org).bind(new_channel).bind(vec![owner,viewer_id]).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 2);

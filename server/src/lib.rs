@@ -71,7 +71,11 @@ pub struct AppState {
 
 #[cfg(test)]
 impl AppState {
-    pub(crate) fn for_test(pool: sqlx::PgPool) -> Self {
+    /// Application queries run as the restricted, RLS-subject test role (#314);
+    /// keep fixtures, DDL and fault injection on the administrative pool passed in.
+    /// A pool that already connects as that role is used as is.
+    pub(crate) async fn for_test(pool: sqlx::PgPool) -> Self {
+        let pool = test_support::app_pool(pool).await;
         Self {
             pool,
             cookie_secure: true,

@@ -56,7 +56,7 @@ async fn topic_rest_denial_matrix_has_positive_controls_and_authorization_before
         };
         let viewer = Uuid::new_v4();
         let token = member(&pool, other, viewer).await;
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let delivery = state.message_delivery.clone();
         let app = crate::app(state);
         let key = Uuid::new_v4();
@@ -201,7 +201,7 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
                 .await
                 .unwrap();
         }
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         for (name, auth) in SURFACES.into_iter().zip(captured) {
             let page = || {
                 Ok(Query(ListProjectionQuery {

@@ -258,7 +258,7 @@ async fn signal_child() {
             .connect(&url)
             .await
             .unwrap();
-        f.state = state(&restarted_pool);
+        f.state = state(&restarted_pool).await;
         f.app = crate::app(f.state.clone());
         let restarted = Server::start(f.app.clone()).await;
         assert_eq!(
@@ -396,7 +396,7 @@ async fn send_load_child(pool: PgPool, sends: usize) {
         .connect_with((*pool.connect_options()).clone())
         .await
         .unwrap();
-    let restarted_state = state(&restarted_pool);
+    let restarted_state = state(&restarted_pool).await;
     let restarted = Server::start(crate::app(restarted_state.clone())).await;
     let mut replay = restarted.connect(&f.token).await;
     for channel in channels {

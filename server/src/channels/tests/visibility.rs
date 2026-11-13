@@ -4,7 +4,7 @@ use super::*;
 async fn public_authorization_skips_membership_sql_but_checks_organization_and_channel(
     pool: PgPool,
 ) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let org = organization(&pool).await;
     let creator = Uuid::new_v4();
     let token = member(&pool, org, creator, "member").await;
@@ -61,7 +61,7 @@ async fn public_authorization_skips_membership_sql_but_checks_organization_and_c
 
 #[sqlx::test]
 async fn authorization_reads_current_visibility_and_scopes_private_membership(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let org = organization(&pool).await;
     let other = organization(&pool).await;
     let creator = Uuid::new_v4();
@@ -117,7 +117,7 @@ async fn measure_visibility_reads_and_candidate_plan(pool: PgPool) {
     let org = organization(&pool).await;
     let id = Uuid::new_v4();
     let token = member(&pool, org, id, "member").await;
-    let public = create(&router(&pool), &token, "Public", "public").await;
+    let public = create(&router(&pool).await, &token, "Public", "public").await;
     let channel = Uuid::parse_str(public["id"].as_str().unwrap()).unwrap();
     sqlx::query("WITH added AS (INSERT INTO accounts (id,email,password_hash) SELECT gen_random_uuid(),gen_random_uuid()::text || '@measure.invalid','unused' FROM generate_series(1,9999) RETURNING id) INSERT INTO users (organization_id,id,account_id,name,role) SELECT $1,gen_random_uuid(),id,'Member','member' FROM added")
         .bind(org).execute(&pool).await.unwrap();
@@ -195,7 +195,7 @@ async fn visibility_reads_never_lock_members_and_writes_retain_the_lock(pool: Pg
     let org = organization(&pool).await;
     let id = Uuid::new_v4();
     let token = member(&pool, org, id, "member").await;
-    let public = create(&router(&pool), &token, "Public", "public").await;
+    let public = create(&router(&pool).await, &token, "Public", "public").await;
     let channel = Uuid::parse_str(public["id"].as_str().unwrap()).unwrap();
     let mut updating = pool.begin().await.unwrap();
     sqlx::query("UPDATE users SET name=name WHERE organization_id=$1 AND id=$2")
@@ -311,7 +311,7 @@ async fn visibility_modes_preserve_membership_revision_and_private_grant_denials
     member(&pool, other, foreign, "member").await;
     let nonmember = Uuid::new_v4();
     member(&pool, org, nonmember, "member").await;
-    let app = router(&pool);
+    let app = router(&pool).await;
     let public = Uuid::parse_str(
         create(&app, &token, "Public", "public").await["id"]
             .as_str()
@@ -374,7 +374,7 @@ async fn guest_visibility_requires_explicit_current_grants_and_role_is_read_afre
     let org = organization(&pool).await;
     let id = Uuid::new_v4();
     let token = member(&pool, org, id, "member").await;
-    let app = router(&pool);
+    let app = router(&pool).await;
     let public = Uuid::parse_str(
         create(&app, &token, "Public", "public").await["id"]
             .as_str()

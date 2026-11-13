@@ -57,7 +57,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
     crate::database::tests::context::context_policies(&pool).await;
-    let app = router(&pools.app);
+    let app = router(&pools.app).await;
     let org = organization(&pool).await;
     let foreign = organization(&pool).await;
     let owner = Uuid::new_v4();
@@ -109,7 +109,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
 
 #[sqlx::test]
 async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: PgPool) {
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
     let org = organization(&pool).await;
     let owner = Uuid::new_v4();
@@ -286,7 +286,7 @@ async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: P
 async fn management_rechecks_demoted_deactivated_stale_and_removed_actors(pool: PgPool) {
     for loss in ["demoted", "deactivated", "stale", "removed"] {
         for add in [true, false] {
-            let state = AppState::for_test(pool.clone());
+            let state = AppState::for_test(pool.clone()).await;
             let app = crate::app(state.clone());
             let org = organization(&pool).await;
             let owner = Uuid::new_v4();
@@ -352,7 +352,7 @@ async fn management_rechecks_demoted_deactivated_stale_and_removed_actors(pool: 
 #[sqlx::test]
 async fn private_last_manager_last_grant_and_concurrent_removals_are_serialized(pool: PgPool) {
     for leave in [false, true] {
-        let app = router(&pool);
+        let app = router(&pool).await;
         let org = organization(&pool).await;
         let a = Uuid::new_v4();
         let at = member(&pool, org, a, "admin").await;
@@ -419,7 +419,7 @@ async fn private_last_manager_last_grant_and_concurrent_removals_are_serialized(
 #[sqlx::test]
 async fn deactivated_and_stale_managers_never_count_as_usable(pool: PgPool) {
     for stale in [false, true] {
-        let app = router(&pool);
+        let app = router(&pool).await;
         let org = organization(&pool).await;
         let a = Uuid::new_v4();
         let at = member(&pool, org, a, "admin").await;
@@ -474,7 +474,7 @@ async fn deactivated_and_stale_managers_never_count_as_usable(pool: PgPool) {
 
 #[sqlx::test]
 async fn unmanaged_guest_leave_succeeds_and_last_grant_is_protected(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let org = organization(&pool).await;
     let m = Uuid::new_v4();
     let mt = member(&pool, org, m, "member").await;
@@ -515,7 +515,7 @@ async fn unmanaged_guest_leave_succeeds_and_last_grant_is_protected(pool: PgPool
 
 #[sqlx::test]
 async fn self_leave_hides_inaccessible_existence_and_cleans_stale_grants(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let org = organization(&pool).await;
     let owner = Uuid::new_v4();
     let ot = member(&pool, org, owner, "owner").await;
@@ -561,7 +561,7 @@ async fn self_leave_hides_inaccessible_existence_and_cleans_stale_grants(pool: P
 
 #[sqlx::test]
 async fn mutation_locks_channel_before_actor_member(pool: PgPool) {
-    let app = router(&pool);
+    let app = router(&pool).await;
     let org = organization(&pool).await;
     let owner = Uuid::new_v4();
     let token = member(&pool, org, owner, "owner").await;
@@ -629,7 +629,7 @@ async fn noop_grant_mutations_skip_subscription_rechecks(pool: PgPool) {
             panic!("unexpected failed check");
         }
     }
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let count = Arc::new(Counter::default());
     let app = crate::app(state.clone());
     state
@@ -652,7 +652,7 @@ async fn noop_grant_mutations_skip_subscription_rechecks(pool: PgPool) {
 #[sqlx::test]
 async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
     let access = super::super::access::AccessChanges::default();
-    let state = AppState::for_test(pool.clone());
+    let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
     let org = organization(&pool).await;
     let owner = Uuid::new_v4();

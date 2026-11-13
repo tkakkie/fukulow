@@ -50,7 +50,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
             sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)")
                 .bind(org).bind(channel).bind(keeper).execute(&pool).await.unwrap();
         }
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state.clone());
         let key = Uuid::new_v4();
         let gate = Arc::new(Gate {
@@ -181,7 +181,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
             .await
             .unwrap();
         }
-        let app = router(&pool);
+        let app = router(&pool).await;
         let topic_response = send(
             &app,
             &token,

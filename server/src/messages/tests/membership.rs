@@ -42,7 +42,7 @@ pub(super) async fn captured_auth(pool: &PgPool, token: &str) -> Auth {
                 }
             }),
         )
-        .with_state(AppState::for_test(pool.clone()));
+        .with_state(AppState::for_test(pool.clone()).await);
     assert_eq!(
         request(&app, "GET", "/api/v1/channels", token, Value::Null)
             .await
@@ -72,7 +72,7 @@ async fn deactivation_after_auth_is_organization_unavailable_for_history_and_sen
                 .await
                 .unwrap();
         }
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let response = list_messages(
             State(state.clone()),
             history_auth,
@@ -258,7 +258,7 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
             .bind(organization).bind(first).bind(channel).bind(sender).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
         let auth = captured_auth(&pool, &token).await;
         let next_auth = captured_auth(&pool, &token).await;
-        let state = AppState::for_test(pool.clone());
+        let state = AppState::for_test(pool.clone()).await;
         let gate = Arc::new(HistoryGate {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
