@@ -1,3 +1,5 @@
+import { createAccountSecurity } from './account-security'
+import { accountSecurityAdapter } from './account-security.svelte'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
@@ -22,6 +24,7 @@ export type AuthDeps = {
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void) => ReturnType<typeof membersAdapter>
+  openSecurity?: typeof createAccountSecurity
   openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore): SessionModel
 }
 const defaults: AuthDeps = {
@@ -68,6 +71,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
   let members = $state<ReturnType<typeof membersAdapter> | null>(null)
+  let security = $state<ReturnType<typeof accountSecurityAdapter> | null>(null)
   let changes = $state(0)
   const drafts = createDraftStore()
   let accountGeneration = 0
@@ -112,6 +116,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   }
   async function show(next: AuthState) {
     closeOrganization()
+    security?.close(); security = null
     drafts.clear()
     accountGeneration++
     selectedOrganizationId = ''
@@ -119,6 +124,8 @@ export function createAuth(deps: AuthDeps = defaults) {
     error = ''
     view = next
     if (next.screen === 'app') {
+      const account = accountGeneration
+      security = accountSecurityAdapter((deps.openSecurity ?? createAccountSecurity)(() => ended(account)))
       const requested = typeof window !== 'undefined' ? parseNavigation(window.location.href)?.organizationId : null
       const id = requested ?? next.identity.organizations[0]?.organization_id
       if (id) await selectOrganization(id)
@@ -129,6 +136,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     get view() { return view }, get error() { return error }, get busy() { return busy },
     get organization() { return organization },
     get members() { return members },
+    get security() { return security },
     get selectedOrganizationId() { return selectedOrganizationId },
     get organizationStatus() { return session?.sync.unavailable ? 'unavailable' : organizationStatus },
     get session() { void changes; return session },

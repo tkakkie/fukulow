@@ -23,6 +23,7 @@ mod credential_tests;
 pub mod invites;
 pub mod members;
 mod password;
+pub mod security;
 use password::{PasswordWorkers, check_password, hash_password};
 mod session;
 mod throttle;
@@ -499,11 +500,12 @@ async fn sign_in_with_entropy(
         .map_err(ApiError::throttled)?;
     // Admission covers lookup too, so overload does not turn into a DB flood.
     let permit = workers.acquire().await?;
+    let mut tx = state.pool.begin().await?;
     let stored = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, password_hash FROM accounts WHERE email = $1",
+        "SELECT id, password_hash FROM accounts WHERE email = $1 FOR UPDATE",
     )
     .bind(email)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await?;
     let (user_id, password_hash) = stored.unzip();
     if !check_password(input.password, password_hash, attempt, permit).await? {
@@ -518,8 +520,9 @@ async fn sign_in_with_entropy(
     sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
         .bind(&token_hash)
         .bind(user_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     let identity = account_identity(&state.pool, user_id).await?;
     state.session_cleanup.trigger(&state.pool);
     Ok(NativeSessionResponse {

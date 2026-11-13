@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import {
     createLiveAnnouncementQueue,
     LOADING_TIMEOUT_MS,
@@ -16,6 +17,7 @@
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
   import Workspace from './Workspace.svelte'
+  import AccountSettings from './AccountSettings.svelte'
 
   const invitation = inviteAcceptanceAdapter(inviteFromLocation())
   const navigation = createNavigation()
@@ -29,6 +31,8 @@
 
   const announcementQueue = createLiveAnnouncementQueue()
 
+  let settingsOpen = $state(false)
+  let settingsOpener: HTMLElement | null = null
   let organizationName = $state('')
   let name = $state('')
   let email = $state('')
@@ -45,6 +49,17 @@
 
   function announce(msg: string) {
     pageAnnouncement = announcementQueue.enqueue(msg)
+  }
+
+  function openSettings() {
+    settingsOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    settingsOpen = true
+  }
+
+  async function closeSettings() {
+    settingsOpen = false
+    await tick()
+    focusTarget(settingsOpener)
   }
 
   function handleSkipToContent(e: MouseEvent) {
@@ -98,6 +113,7 @@
   // Announce sign-in notice through the single page role="status" region (docs/ui.md §6)
   $effect(() => {
     const notice = auth.view.screen === 'signin' ? (auth.view.notice ?? '') : ''
+    if (auth.view.screen !== 'app') settingsOpen = false
     if (notice && notice !== lastSigninNotice) {
       lastSigninNotice = notice
       announce(notice)
@@ -137,6 +153,11 @@
   {@const organization = auth.organization}
   {@const otherOrg = identity.organizations.find((o) => o.organization_id !== auth.selectedOrganizationId)}
 
+  {#if settingsOpen && auth.security}
+    {#key auth.security}
+      <AccountSettings model={auth.security} onclose={() => void closeSettings()} onannounce={announce} />
+    {/key}
+  {/if}
   <div class="app-shell">
     <InviteAccept
       model={invitation}
@@ -159,6 +180,7 @@
             authError={auth.error}
             bind:skipTargetId={workspaceSkipTargetId}
             onselectorganization={(id) => void auth.selectOrganization(id)}
+            onsettings={openSettings}
             onsignout={doSignOut}
             onannounce={announce}
           />
@@ -168,6 +190,7 @@
       <div class="app-fallback">
         <nav class="app-fallback__rail" aria-label="メインナビゲーション">
           <div class="app-fallback__logo" aria-hidden="true">🦉</div>
+          <Button variant="icon" ariaLabel="設定" onclick={openSettings}>⚙</Button>
           <Button variant="icon" ariaLabel="ログアウト" disabled={auth.busy} onclick={doSignOut}>⇥</Button>
         </nav>
         <main id="main-content" class="app-fallback__main" tabindex="-1">
