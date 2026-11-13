@@ -192,8 +192,7 @@ async fn mutate_inner(
             .await?;
         // Mutations: Organization -> Channel(s, ascending id) -> Member -> grants
         // -> #142 -> shared #135. Role changes lock all affected private Channels
-        // in ascending id before Members; deactivation starts at Organization and
-        // never acquires Channels after Members (#237 owns its manager protection).
+        // and deactivation lock in ascending id before Members.
         // Private creation takes Organization NO KEY UPDATE before creator Member
         // and new rows, keeping the Role guard's Channel set stable through COMMIT.
         // Sends take Member -> grant -> exclusive #135; their FK KEY SHARE locks
@@ -267,7 +266,7 @@ async fn mutate_inner(
                 .ok_or(ApiError(StatusCode::NOT_FOUND, "channel_grant_not_found", None))?;
             if current != value {
                 if !value {
-                    protect(&mut *tx, org, &[channel], target, false, None, true).await?;
+                    protect(&mut *tx, org, &[channel], target, ManagerChange::RevokeRight).await?;
                 }
                 sqlx::query("UPDATE channel_members SET manager=$4 WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                     .bind(org).bind(channel).bind(target).bind(value).execute(&mut *tx).await?;
@@ -279,7 +278,7 @@ async fn mutate_inner(
         } else {
             // Stale grants contribute nothing to the usable-grant/manager counts.
             if !public && present == Some(revision) {
-                protect(&mut *tx, org, &[channel], target, true, None, false).await?;
+                protect(&mut *tx, org, &[channel], target, ManagerChange::RemoveGrant).await?;
             }
             sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                 .bind(org).bind(channel).bind(target).execute(&mut *tx).await?.rows_affected() > 0
@@ -299,15 +298,33 @@ async fn mutate_inner(
         .into_response())
 }
 
+enum ManagerChange {
+    RemoveGrant,
+    RevokeRight,
+    Role(Role),
+    Deactivate,
+}
+
 async fn protect(
     connection: &mut sqlx::PgConnection,
     org: Uuid,
     channels: &[Uuid],
     target: Uuid,
-    remove_grant: bool,
-    role: Option<Role>,
-    revoke: bool,
+    change: ManagerChange,
 ) -> Result<(), ApiError> {
+    let remove_grant = matches!(
+        change,
+        ManagerChange::RemoveGrant | ManagerChange::Deactivate
+    );
+    let role = if let ManagerChange::Role(role) = change {
+        Some(role)
+    } else {
+        None
+    };
+    let revoke = matches!(
+        change,
+        ManagerChange::RevokeRight | ManagerChange::Role(Role::Guest)
+    );
     let before = manager_sql("u.role", "cm.manager");
     let after = manager_sql(
         "(CASE WHEN u.id=$3 THEN COALESCE($4::text,u.role) ELSE u.role END)",
@@ -327,7 +344,7 @@ async fn protect(
         .fetch_all(connection)
         .await?;
     for (managers, remaining, remaining_managers) in counts {
-        if remove_grant && remaining == 0 {
+        if matches!(change, ManagerChange::RemoveGrant) && remaining == 0 {
             return Err(ApiError(StatusCode::CONFLICT, "last_channel_grant", None));
         }
         if managers > 0 && remaining_managers == 0 {
@@ -348,6 +365,22 @@ fn manager_sql(role: &str, right: &str) -> String {
 pub struct RoleChangeGuard(Vec<Uuid>);
 
 impl auth::members::RoleChangeGuard for RoleChangeGuard {
+    async fn check_deactivation(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        organization: Uuid,
+        target: Uuid,
+    ) -> Result<(), ApiError> {
+        protect(
+            connection,
+            organization,
+            &self.0,
+            target,
+            ManagerChange::Deactivate,
+        )
+        .await
+    }
+
     async fn lock(
         connection: &mut sqlx::PgConnection,
         organization: Uuid,
@@ -373,9 +406,7 @@ impl auth::members::RoleChangeGuard for RoleChangeGuard {
             organization,
             &self.0,
             target,
-            false,
-            Some(role),
-            role == Role::Guest,
+            ManagerChange::Role(role),
         )
         .await?;
         if role == Role::Guest {

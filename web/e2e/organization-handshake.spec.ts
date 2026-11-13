@@ -11,7 +11,7 @@ async function fixture(
   options: { withChannel?: boolean; upgradeDelayMs?: number } = {},
 ) {
   let upgrades = 0, memberChecks = 0
-  const capabilities = { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } }
+  const capabilities = { can_invite: { allowed: true }, can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } }
   const dist = resolve(import.meta.dirname, '../dist')
   const server = createServer(async (req, res) => {
     const path = new URL(req.url!, 'http://localhost').pathname

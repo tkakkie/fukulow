@@ -222,6 +222,15 @@ async fn connect_organization(server: &Server, token: &str, organization: Uuid) 
 
 #[sqlx::test]
 async fn membership_loss_closes_all_account_sessions_only_in_its_organization(pool: PgPool) {
+    endpoint_membership_loss(pool, false).await;
+}
+
+#[sqlx::test]
+async fn deactivation_http_cancellation_still_commits_and_signals_every_session(pool: PgPool) {
+    endpoint_membership_loss(pool, true).await;
+}
+
+async fn endpoint_membership_loss(pool: PgPool, cancel: bool) {
     let f = fixture(&pool).await;
     let account = account_id(&pool, f.organization, f.member).await;
     let foreign = organization(&pool).await;
@@ -239,9 +248,10 @@ async fn membership_loss_closes_all_account_sessions_only_in_its_organization(po
     let second = another_session(&pool, f.organization, f.member).await;
     let mut a1 = f.server.connect(&f.token).await;
     let mut a2 = f.server.connect(&second).await;
+    let mut a3 = f.server.connect(&f.token).await;
     let mut b1 = connect_organization(&f.server, &f.token, foreign).await;
     let mut b2 = connect_organization(&f.server, &second, foreign).await;
-    for socket in [&mut a1, &mut a2] {
+    for socket in [&mut a1, &mut a2, &mut a3] {
         subscribe(socket, f.channel, 0).await;
         ready(socket, f.channel, 0).await;
     }
@@ -249,12 +259,48 @@ async fn membership_loss_closes_all_account_sessions_only_in_its_organization(po
         subscribe(socket, foreign_channel, 0).await;
         ready(socket, foreign_channel, 0).await;
     }
-    crate::auth::deactivate_member(&f.state, f.organization, account)
+    let (owner, ot) = member(&pool, f.organization).await;
+    sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
+        .bind(f.organization)
+        .bind(owner)
+        .execute(&pool)
         .await
         .unwrap();
+    let mut blocker = pool.begin().await.unwrap();
+    crate::auth::members::lock_organization(&mut blocker, f.organization)
+        .await
+        .unwrap();
+    let pending = {
+        let app = f.app.clone();
+        let org = f.organization;
+        let target = f.member;
+        tokio::spawn(async move {
+            request(
+                &app,
+                "POST",
+                &format!("/api/v1/orgs/{org}/members/{target}/deactivate"),
+                &ot,
+                Value::Null,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5),async { loop {
+        let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT organization_id%FOR NO KEY UPDATE')")
+            .fetch_one(&pool).await.unwrap();
+        if waiting {break;} tokio::task::yield_now().await;
+    }}).await.unwrap();
+    if cancel {
+        pending.abort();
+    }
+    blocker.commit().await.unwrap();
+    if !cancel {
+        assert_eq!(pending.await.unwrap().status(), StatusCode::NO_CONTENT);
+    }
     tokio::join!(
         fallback_close(&mut a1, CLOSE_ORGANIZATION_UNAVAILABLE),
-        fallback_close(&mut a2, CLOSE_ORGANIZATION_UNAVAILABLE)
+        fallback_close(&mut a2, CLOSE_ORGANIZATION_UNAVAILABLE),
+        fallback_close(&mut a3, CLOSE_ORGANIZATION_UNAVAILABLE)
     );
     // A public subscription has closed, while both Sessions still deliver in B.
     let response = request(
@@ -516,4 +562,43 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
     assert_eq!(event(&mut current).await["message"], canonical);
     ready(&mut current, f.channel, 2).await;
     fallback.release();
+}
+
+#[sqlx::test]
+async fn deactivation_self_denials_preserve_all_session_sockets(pool: PgPool) {
+    for role in ["owner", "admin"] {
+        let f = fixture(&pool).await;
+        sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2")
+            .bind(f.organization)
+            .bind(f.member)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second = another_session(&pool, f.organization, f.member).await;
+        let mut a = f.server.connect(&f.token).await;
+        let mut b = f.server.connect(&second).await;
+        for socket in [&mut a, &mut b] {
+            subscribe(socket, f.channel, 0).await;
+            ready(socket, f.channel, 0).await;
+        }
+        let response = request(
+            &f.app,
+            "POST",
+            &format!(
+                "/api/v1/orgs/{}/members/{}/deactivate",
+                f.organization, f.member
+            ),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(body, json!({"error":"forbidden"}));
+        let canonical = send(&f, &second, f.channel, Uuid::new_v4(), "Still usable").await;
+        assert_eq!(event(&mut a).await["message"], canonical);
+        assert_eq!(event(&mut b).await["message"], canonical);
+    }
 }

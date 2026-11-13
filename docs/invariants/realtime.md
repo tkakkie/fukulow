@@ -59,6 +59,8 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [auth](auth.md): `deactivation_http_cancellation_still_commits_and_signals_every_session`, `deactivation_self_denials_preserve_all_session_sockets`
+
 - [auth](auth.md): `sign_out_burst_over_1024_keeps_unrelated_sessions_open`, `failed_check_result_cannot_fail_reconnected_epoch`, `latched_membership_at_connect_yields_4003_and_session_end_wins`, `secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie`
 - [channels](channels.md): `notification_rechecks_public_visibility_after_http_response`, `guest_visibility_requires_explicit_current_grants_and_role_is_read_afresh`, `observed_loss_blocks_new_frame_handoff_but_allows_only_the_inflight_frame`, `noop_grant_mutations_skip_subscription_rechecks`, `fast_subscription_rechecks_and_failures_are_scoped`
 - [messages](messages.md): `notification_timeout_signals_and_releases_capacity`, `coalesced_failures_latch_all_epochs_without_closing_later_subscribers`, `spawned_wait_keeps_topology_and_epoch_races_latched`, `send_saturation_cannot_take_reserved_watermark_capacity`, `shared_gap_recovery_accepts_one_page_and_latches_above_the_bound`, `held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturation`

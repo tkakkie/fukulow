@@ -196,7 +196,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     const net = fakeNetwork()
     const capabilities = {
       can_invite: { allowed: true },
-      can_manage_roles: { allowed: true },
+      can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
       can_create_channels: { allowed: true },
     }
     const auth = createAuth({

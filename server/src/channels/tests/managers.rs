@@ -8,6 +8,7 @@ use std::sync::{
 };
 
 mod concurrency;
+mod deactivation;
 mod denials;
 mod lifetime;
 

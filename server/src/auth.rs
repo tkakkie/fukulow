@@ -724,7 +724,8 @@ pub(crate) fn candidate_members_sql() -> String {
     format!("{ACTIVE_MEMBERS_SQL} AND id = ANY($3)")
 }
 
-/// Foundation for Member administration (#144/#149); no removal endpoint is exposed.
+/// Internal fixture/maintenance helper taking an Account id; HTTP administration uses
+/// members::deactivate with actor authorization and Channel manager protection.
 pub async fn deactivate_member(
     state: &AppState,
     organization: Uuid,

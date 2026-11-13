@@ -983,6 +983,15 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
 // the production Channel guard supplied by the composition root.
 struct ActorRecheckGuard;
 impl members::RoleChangeGuard for ActorRecheckGuard {
+    async fn check_deactivation(
+        &self,
+        _: &mut sqlx::PgConnection,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<(), ApiError> {
+        Ok(())
+    }
+
     async fn lock(_: &mut sqlx::PgConnection, _: Uuid, _: Uuid) -> Result<Self, ApiError> {
         Ok(Self)
     }

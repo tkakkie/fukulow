@@ -23,6 +23,7 @@ pub enum Action {
     CreateChannel,
     Invite(Role),
     ChangeRole,
+    DeactivateMember,
     ReadChannel,
     AddChannelMembers,
     RemoveChannelMembers,
@@ -34,7 +35,15 @@ pub enum Action {
 pub enum Resource {
     Global,
     Organization(Uuid),
-    Channel { organization: Uuid, public: bool },
+    Member {
+        organization: Uuid,
+        role: Role,
+        is_self: bool,
+    },
+    Channel {
+        organization: Uuid,
+        public: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -62,9 +71,25 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
                 matches!(role, Role::Owner)
                     || (matches!(role, Role::Admin) && !matches!(target_role, Role::Owner))
             }
+            Action::DeactivateMember => matches!(role, Role::Owner | Role::Admin),
             Action::ChangeRole => matches!(role, Role::Owner),
             _ => false,
         },
+        (
+            Actor::Member {
+                organization, role, ..
+            },
+            Action::DeactivateMember,
+            Resource::Member {
+                organization: target,
+                role: target_role,
+                is_self,
+            },
+        ) => {
+            organization == target
+                && !is_self
+                && (role == Role::Owner || (role == Role::Admin && target_role != Role::Owner))
+        }
         (
             Actor::Member {
                 organization,
@@ -110,6 +135,7 @@ pub(crate) fn require(actor: Actor, action: Action, resource: Resource) -> Resul
 pub struct OrganizationCapabilities {
     pub can_invite: Capability,
     pub can_manage_roles: Capability,
+    pub can_deactivate_members: Capability,
     pub can_create_channels: Capability,
 }
 
@@ -125,6 +151,7 @@ impl OrganizationCapabilities {
         Self {
             can_invite: authorize(actor, Action::Invite(Role::Member), resource),
             can_manage_roles: authorize(actor, Action::ChangeRole, resource),
+            can_deactivate_members: authorize(actor, Action::DeactivateMember, resource),
             can_create_channels: authorize(actor, Action::CreateChannel, resource),
         }
     }

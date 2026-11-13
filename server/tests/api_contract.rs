@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 29 operations document shutdown, including readiness and manager PATCH.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 197;
+// All 30 operations document shutdown, including Member deactivation.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 205;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -105,7 +105,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 29);
+        assert_eq!(operations, 30);
     }
 }
 
@@ -143,7 +143,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 29);
+    assert_eq!(requests.len(), 30);
     requests.extend(
         [
             "/",
@@ -1124,4 +1124,70 @@ fn channel_membership_paths_capabilities_and_channel_only_loss_contract_are_gene
             .collect::<Vec<_>>(),
         vec!["id", "name", "role"]
     );
+}
+
+#[test]
+fn member_deactivation_contract_uses_member_id_empty_204_and_ordered_denials() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for doc in [committed, generated] {
+        let op = &doc["paths"]["/api/v1/orgs/{org}/members/{id}/deactivate"]["post"];
+        assert!(op["requestBody"].is_null());
+        assert!(op["responses"]["204"]["content"].is_null());
+        let target = op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "id")
+            .unwrap();
+        assert_eq!(target["description"], "Member id, not Account id");
+        for (status, errors) in [
+            ("401", &["Authentication"][..]),
+            (
+                "403",
+                &[
+                    "base authorization",
+                    "before target lookup",
+                    "self-deactivation",
+                    "Admin on Owner",
+                    "ahead of last_owner",
+                ][..],
+            ),
+            (
+                "404",
+                &[
+                    "organization_unavailable",
+                    "unknown, foreign or already inactive",
+                    "member_not_found",
+                    "repeat requests",
+                ][..],
+            ),
+            (
+                "409",
+                &[
+                    "last_owner precedes last_channel_manager",
+                    "Owner/Admin grant or Channel manager right",
+                    "Public/unmanaged Channels excepted",
+                    "no Channel details",
+                    "Every denial leaves state unchanged",
+                ][..],
+            ),
+        ] {
+            let response = &op["responses"][status];
+            assert_eq!(
+                response["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/ErrorBody"
+            );
+            let description = response["description"].as_str().unwrap();
+            for error in errors {
+                assert!(description.contains(error), "{status}: {error}");
+            }
+        }
+        assert!(
+            doc["components"]["schemas"]["OrganizationCapabilities"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("can_deactivate_members"))
+        );
+    }
 }

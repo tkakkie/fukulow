@@ -326,6 +326,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/members/{id}/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["deactivate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/members/{id}/role": {
         parameters: {
             query?: never;
@@ -667,6 +683,7 @@ export interface components {
         };
         OrganizationCapabilities: {
             can_create_channels: components["schemas"]["Capability"];
+            can_deactivate_members: components["schemas"]["Capability"];
             can_invite: components["schemas"]["Capability"];
             can_manage_roles: components["schemas"]["Capability"];
         };
@@ -2756,6 +2773,96 @@ export interface operations {
             };
             /** @description organization_unavailable */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deactivate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+                /** @description Member id, not Account id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member deactivated; no body. Authorship and Account Sessions retained; revision incremented, old grants/rights unusable */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid ids */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Authentication required (first check) */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: base authorization requires Owner/Admin before target lookup; after lookup self-deactivation and Admin on Owner are forbidden, ahead of last_owner */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Caller Membership organization_unavailable precedes authorization; then unknown, foreign or already inactive target member_not_found, including repeat requests */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description last_owner precedes last_channel_manager; a managed private Channel cannot lose its last usable manager (active/current Owner/Admin grant or Channel manager right). Public/unmanaged Channels excepted; no Channel details. Every denial leaves state unchanged */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

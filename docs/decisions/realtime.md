@@ -65,6 +65,8 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [auth](auth.md): `#305 owns the deactivation transaction`
+
 - [auth](auth.md): `#314 single-statement hot reads use`
 
 - [auth](auth.md): `#149 channel_access_lost carries only channel_id, keeps`, `#149 observed loss fences queued/replay frames`, `Two independent revocations: ending an Account`, `Revocation boundary: history/replay deny once revocation`, `Classification precedence: known Account Session end`

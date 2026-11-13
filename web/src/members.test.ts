@@ -3,7 +3,7 @@ import { createMembers, createInviteAcceptance, takeInvite } from './members'
 import type { Identity, Member, Result } from './api'
 
 const member: Member = { id: 'm', name: 'メンバー', role: 'member' }
-const identity: Identity = { member, organization: { organization_id: 'o', name: '組織', capabilities: { can_invite: { allowed: false }, can_manage_roles: { allowed: false }, can_create_channels: { allowed: true } } } }
+const identity: Identity = { member, organization: { organization_id: 'o', name: '組織', capabilities: { can_invite: { allowed: false }, can_deactivate_members: { allowed: false }, can_manage_roles: { allowed: false }, can_create_channels: { allowed: true } } } }
 const ok = <T>(data: T): Result<T> => ({ ok: true, data })
 const token = 'a'.repeat(64)
 const org = '00000000-0000-0000-0000-000000000001'
@@ -13,6 +13,7 @@ describe('Members controller', () => {
     const deps = {
       listMembers: vi.fn(async () => ok({ members: [member] })),
       changeRole: vi.fn(async () => ok({ ...member, role: 'admin' as const })),
+      deactivateMember: vi.fn(),
       createInvite: vi.fn(async () => ok({ id: 'i', organization_id: org, token, expires_at: 'later' })),
       baseUrl: () => 'https://chat.example/',
     }
@@ -30,6 +31,7 @@ describe('Members controller', () => {
     const c = createMembers(org, vi.fn(), vi.fn(), {
       listMembers: async () => ok({ members: [member] }),
       changeRole: async () => ({ ok: false, kind: 'http', status: 409, error: 'last_owner' }),
+      deactivateMember: vi.fn(),
       createInvite: vi.fn(), baseUrl: () => '',
     })
     await c.load(); expect(await c.role('m', 'guest')).toBe(false)
@@ -40,6 +42,7 @@ describe('Members controller', () => {
     const ended = vi.fn(), unavailable = vi.fn()
     const c = createMembers(org, ended, unavailable, {
       listMembers: vi.fn(), changeRole: vi.fn(),
+      deactivateMember: vi.fn(),
       createInvite: () => new Promise(r => { finish = r }), baseUrl: () => 'https://chat.example/',
     })
     const pending = c.invite('a@example.com', 'member'); c.close()
@@ -51,6 +54,7 @@ describe('Members controller', () => {
     const c = createMembers(org, vi.fn(), vi.fn(), {
       listMembers: async () => ok({ members: [member] }),
       changeRole: async () => ({ ok: false, kind: 'http', status: 409, error: 'last_channel_manager' }),
+      deactivateMember: vi.fn(),
       createInvite: vi.fn(), baseUrl: () => '',
     })
     await c.load()
@@ -78,4 +82,30 @@ it('acceptance uses the API, keeps failed invitations retryable, and consumes su
   expect(api).toHaveBeenLastCalledWith(org, { ...input, token })
   expect(c.get().accepted).toBe(true); expect(c.get().available).toBe(false)
   expect(await c.accept(input)).toBeNull(); expect(api).toHaveBeenCalledTimes(2)
+})
+
+it('deactivates through the API, preserves denied targets, and fences late results and duplicate submits', async () => {
+  let finish!: (r: Result<undefined>) => void
+  const api = vi.fn(() => new Promise<Result<undefined>>(r => { finish = r }))
+  const ended = vi.fn(), unavailable = vi.fn()
+  const c = createMembers(org, ended, unavailable, {
+    listMembers: async () => ok({ members: [member] }), changeRole: vi.fn(), createInvite: vi.fn(), baseUrl: () => '', deactivateMember: api,
+  })
+  await c.load()
+  for (const error of ['last_channel_manager', 'last_owner', 'member_not_found', 'forbidden']) {
+    const pending = c.deactivate(member.id)
+    expect(await c.deactivate(member.id)).toBe(false)
+    finish({ ok: false, kind: 'http', status: error === 'forbidden' ? 403 : 409, error })
+    expect(await pending).toBe(false)
+    expect(c.get().members).toEqual([member])
+    expect(c.get().error).not.toContain(error)
+  }
+  const pending = c.deactivate(member.id)
+  finish(ok(undefined)); expect(await pending).toBe(true)
+  expect(c.get().members).toEqual([])
+  expect(api).toHaveBeenLastCalledWith(org, member.id)
+  const late = c.deactivate(member.id); c.close()
+  finish({ ok: false, kind: 'http', status: 401 })
+  expect(await late).toBe(false); expect(ended).toHaveBeenCalledOnce()
+  expect(unavailable).not.toHaveBeenCalled()
 })

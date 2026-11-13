@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { Identity, Role } from './api'
+  import type { Identity, Member, Role } from './api'
   import { roles, roleNames } from './members'
   import type { membersAdapter } from './members.svelte'
   import Button from './ui/Button.svelte'
+  import Dialog from './ui/Dialog.svelte'
   import Input from './ui/Input.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
@@ -17,13 +18,15 @@
   } = $props()
 
   let email = $state('')
+  let deactivating = $state<Member | null>(null)
+  let summary = $state<HTMLElement | null>(null)
   let role = $state<Role>('member')
   const s = $derived(model.state)
   const capabilities = $derived(identity.organization.capabilities)
 </script>
 
 <details class="member-list">
-  <summary class="member-list__summary">メンバー</summary>
+  <summary bind:this={summary} class="member-list__summary">メンバー</summary>
   <div class="member-list__body">
     {#if s.loading}
       <p class="member-list__meta">読み込み中…</p>
@@ -54,6 +57,9 @@
                 {/each}
               </select>
             </label>
+          {/if}
+          {#if capabilities.can_deactivate_members.allowed && member.id !== identity.member.id && (identity.member.role === 'owner' || member.role !== 'owner')}
+            <Button disabled={s.busy} onclick={() => deactivating = member}>{member.name}を無効化</Button>
           {/if}
         </li>
       {/each}
@@ -90,6 +96,11 @@
     {/if}
   </div>
 </details>
+
+<Dialog open={deactivating !== null} title="メンバーを無効化しますか？"
+  description={`${deactivating?.name ?? ''}はこの組織を利用できなくなります。過去のメッセージは残ります。`}
+  confirmLabel="無効化する" returnFocusFallback={summary} oncancel={() => deactivating = null}
+  onconfirm={() => { const target = deactivating; deactivating = null; if (target) void model.deactivate(target.id).then(ok => { if (ok) { onchanged(target.id); summary?.focus() } }) }} />
 
 <style>
   .member-list {

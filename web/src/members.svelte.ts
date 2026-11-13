@@ -5,7 +5,7 @@ export function membersAdapter(controller: ReturnType<typeof createMembers>) {
   const subscribe = createSubscriber(update => controller.subscribe(update))
   return {
     get state() { subscribe(); return controller.get() },
-    load: controller.load, invite: controller.invite, role: controller.role, close: controller.close,
+    load: controller.load, invite: controller.invite, role: controller.role, deactivate: controller.deactivate, close: controller.close,
   }
 }
 export function inviteAcceptanceAdapter(controller: ReturnType<typeof createInviteAcceptance>) {

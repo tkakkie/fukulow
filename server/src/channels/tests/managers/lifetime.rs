@@ -294,12 +294,12 @@ async fn channel_manager_invite_reactivation_leaves_stale_right_unusable_and_ren
     .await;
     assert_eq!(invite.status(), StatusCode::CREATED);
     let invite = body(invite).await;
-    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
-        .bind(f.org)
-        .bind(target)
-        .execute(&f.pools.admin)
-        .await
-        .unwrap();
+    assert_eq!(
+        super::deactivation::deactivate(&f.app, &ot, target)
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
     let response = request(
         &f.app,
         "POST",
