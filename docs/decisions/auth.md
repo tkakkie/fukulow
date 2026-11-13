@@ -37,7 +37,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - #144 uses one deny-by-default authorize function, including SQL role sets derived from it. Owner changes Roles/invites any Role; Admin invites non-Owners. Guests need explicit current grants even for public Channels; private grants remain required for every Role.
 - #144 Invites bind email/Role for 7 days; SHA-256 of 256 random bits is stored. Existing Accounts authenticate; anonymous uniqueness conflicts require sign-in, never email attachment. Activation/consumption is atomic.
 - #144 Invites retain their same-Organization issuer. Acceptance re-checks active Membership and current Role under the Organization lock using the creation policy, so demotion/deactivation cannot be bypassed with a stored Invite.
-- #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. No removal endpoint; #146 identity/revisions stay.
+- #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. #305 deactivation retains #146 identity/revisions.
 - #293 A (#314 step 4): RLS is defense in depth on every organization_id table for fukulow_app (NOBYPASSRLS). USING and WITH CHECK compare organization_id to transaction-local fukulow.organization_id; unset fails closed. SQL organization_id predicates and authorize stay.
 - #314 Organization access uses transaction-local authenticated/internal Organization context; Account identity uses verified Account context. SQL scopes and authorize stay. Fallback batches group by Organization.
 - #314 Setup existence and its post-lock recheck call the boolean-only SECURITY DEFINER fukulow_setup_required(), enabled with RLS: RLS hides other Organizations from the app role, so a direct EXISTS would always see none (#334).
@@ -49,6 +49,9 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - #293 exceptions stay narrow, never BYPASSRLS: accounts/account_sessions have no RLS; /me uses a SELECT-only policy for the caller's own Members; setup uses a boolean-only SECURITY DEFINER function; fallback rechecks run one transaction per Organization.
 - #293 Owner jobs (migrations, pg_dump, restore drill) run as the superuser owner and bypass RLS by design; ENABLE without FORCE. RLS tests connect as a non-superuser role (AppState::for_test), because CI tests connect as postgres. Merge needs before/after hot-path measurements.
 - #294 A (planned, #315): a Guest lists only themself and active Members with a usable grant on a Channel the Guest can access; other Roles keep the full list. Sender names come from #301's author lookup scoped to readable Messages, never by widening the list.
+
+- #305 Owner may deactivate another active Member; Admin only non-Owners; no self-deactivation. Authorize before target disclosure, then target-specific denial before last_owner/last_channel_manager. Reason: offboarding without self-lockout or existence leaks.
+- #305 owns the deactivation transaction and post-COMMIT revision signal in one detached task. Reason: HTTP cancellation must not lose notification; 4003 affects all Sessions of only that Membership, with the documented revocation boundary and 35 s fallback.
 
 ## Sessions and revocation
 - #149 channel_access_lost carries only channel_id, keeps the socket open and retires the subscription. The same fallback worker checks captured grant lifetimes under its 35 s bound; failed/overdue passes fail closed. No retained notification state.
@@ -70,7 +73,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
-- [messages](messages.md): `#231 rejects Role demotion with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
+- [messages](messages.md): `#231/#305 reject Role demotion or deactivation with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
 - [messages](messages.md): `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`
 - [messages](messages.md): `#142/#144 triggers mirror Channel visibility, including`, `#144 Role/grant changes reconcile positions under`, `DeferredOrganizationAuth rejects Session/database errors before reading`
 - [realtime](realtime.md): `Message persistence and sign-out finish regardless`, `#57 item 4: auth owns the`

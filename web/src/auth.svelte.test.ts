@@ -14,10 +14,10 @@ afterEach(() => vi.useRealTimers())
 
 const member = (id: string) => ({
   member: { id, name: id, role: 'owner' as const },
-  organization: { organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } },
+  organization: { organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } },
 })
 
-const identity = (id: string) => ({ account: { id, email: `${id}@example.com` }, organizations: [{ organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } }] })
+const identity = (id: string) => ({ account: { id, email: `${id}@example.com` }, organizations: [{ organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } }] })
 
 /** Real controllers on fake transports; each opened session gets its own network, like a real page would. */
 function stack(over: Partial<AuthDeps> = {}) {

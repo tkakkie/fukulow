@@ -45,6 +45,8 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [auth](auth.md): `deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries`
+
 - [channels](channels.md): `session_cannot_access_another_organization`
 - [topics](topics.md): `shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish`
 - [realtime](realtime.md): `ambiguous_commit_rollback_allows_gap_free_same_key_retry`, `shared_gap_query_failure_latches_only_affected_channel_for_replay`, `organization_cap_rejection_is_channel_scoped_and_releases_partial_reservations`

@@ -1,4 +1,4 @@
-import { listMembers, changeRole, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
+import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
 export const roles = Object.keys(roleNames) as Role[]
@@ -16,8 +16,8 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   return '入力内容と権限を確認してください。'
 }
 
-type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; createInvite: typeof createInvite; baseUrl(): string }
-const defaults: MembersDeps = { listMembers, changeRole, createInvite, baseUrl: () => `${location.origin}${location.pathname}` }
+type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; baseUrl(): string }
+const defaults: MembersDeps = { listMembers, changeRole, deactivateMember, createInvite, baseUrl: () => `${location.origin}${location.pathname}` }
 export function createMembers(organizationId: string, onEnded: () => void, onUnavailable: () => void, deps: MembersDeps = defaults) {
   let state = { members: [] as Member[], loading: true, busy: false, error: '', inviteLink: '' }
   let closed = false
@@ -45,6 +45,19 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       if (!r.ok) failed(r)
       else set({ inviteLink: `${deps.baseUrl()}#invite=${encodeURIComponent(r.data.organization_id)}:${encodeURIComponent(r.data.token)}` })
       set({ busy: false })
+    },
+    async deactivate(id: string) {
+      if (closed || state.busy) return false
+      set({ busy: true, error: '' })
+      const r = await deps.deactivateMember(organizationId, id)
+      if (!r.ok) {
+        failed(r)
+        if (r.kind === 'http' && r.error === 'last_owner') set({ error: '最後のオーナーは無効化できません。別のオーナーを追加してください。' })
+        if (r.kind === 'http' && r.error === 'last_channel_manager') set({ error: 'チャンネル管理者がいなくなるため、無効化できません。先に別のチャンネル管理者を追加してください。' })
+        if (r.kind === 'http' && r.error === 'member_not_found') set({ error: 'このメンバーは利用できません。メンバー一覧を開き直してください。' })
+      } else set({ members: state.members.filter(m => m.id !== id) })
+      set({ busy: false })
+      return r.ok && !closed
     },
     async role(id: string, role: Role) {
       if (closed || state.busy) return

@@ -263,3 +263,93 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
         assert_eq!(positions, vec![2, 2]);
     }
 }
+
+#[sqlx::test]
+async fn deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries(
+    pool: PgPool,
+) {
+    let (app, org, sender, channel, token) = fixture(&pool).await;
+    let owner = Uuid::new_v4();
+    let ot = member(&pool, org, owner).await;
+    sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
+        .bind(org)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let key = Uuid::new_v4();
+    let gate = Arc::new(Gate {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    GATES.lock().unwrap().insert(key, gate.clone());
+    let sending = {
+        let app = app.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            send(
+                &app,
+                &token,
+                channel,
+                json!({"client_message_id":key,"body":"Historical author"}),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let deactivating = {
+        let app = app.clone();
+        let ot = ot.clone();
+        tokio::spawn(async move {
+            request(
+                &app,
+                "POST",
+                &format!("/api/v1/orgs/{org}/members/{sender}/deactivate"),
+                &ot,
+                Value::Null,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5),async {loop {
+        let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT name,role,membership_revision%FOR NO KEY UPDATE')")
+            .fetch_one(&pool).await.unwrap();
+        if waiting {break;} tokio::task::yield_now().await;
+    }}).await.unwrap();
+    assert!(!deactivating.is_finished());
+    gate.release.add_permits(1);
+    let sent = sending.await.unwrap();
+    assert_eq!(sent.status(), StatusCode::CREATED);
+    let canonical = body(sent).await;
+    assert_eq!(deactivating.await.unwrap().status(), StatusCode::NO_CONTENT);
+    for key in [key, Uuid::new_v4()] {
+        let response = send(
+            &app,
+            &token,
+            channel,
+            json!({"client_message_id":key,"body":"Historical author"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body(response).await,
+            json!({"error":"organization_unavailable"})
+        );
+    }
+    let history = list(&app, &ot, channel, "").await;
+    assert_eq!(history["messages"][0], canonical);
+    assert_eq!(canonical["sender"], sender.to_string());
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM messages WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(org)
+    .bind(channel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+}

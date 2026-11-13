@@ -4,10 +4,10 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 
 ## Channels and Messages
 - #149 usable managers (Owner/Admin with access or usable Channel manager right, #311) add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
-- #231 rejects Role demotion with 409 last_channel_manager if any private Channel loses its last usable manager; all Channels change atomically and no Channel details leak. Reuse #149 locks/check via auth's injected guard to preserve module direction. Already unmanaged Channels stay allowed.
+- #231/#305 reject Role demotion or deactivation with 409 last_channel_manager if a private Channel loses its last usable manager; atomic, no Channel details. Reuse #149 locks/check via auth's injected guard for module direction. Unmanaged Channels stay allowed.
 - #292/#311: a private Channel's creator gets a Channel manager right on their grant, independent of Role; usable manager = usable grant with Owner/Admin Role or the right. Reason: a Member's private Channel must be able to add people without giving Owner/Admin implicit access.
 - #292/#311 The right lives and dies with its grant: removal, leave or a change to Guest ends it; renewal, re-grant and reactivation never restore it. Reason: no right outlives the access it came with (#146, #149).
-- #292/#311 last_channel_manager counts both kinds of usable manager for revoke, remove, leave and Role changes (#149/#231); #237 must reuse it for Membership changes; authorize, SQL rechecks and Capabilities share one rule. Reason: one count keeps a managed Channel managed.
+- #292/#311 last_channel_manager counts both kinds of usable manager for revoke, remove, leave and Role changes (#149/#231); #305/#237 reuse it for deactivation; authorize, SQL rechecks and Capabilities share one rule. Reason: one count keeps a managed Channel managed.
 - #292/#311 Guests cannot hold the right. Reason: Guests get least privilege and never add Members (#294).
 - #311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id} {manager:bool} and can_manage_managers control the right. No-op requests reauthorize and validate targets, preventing stale UI state from granting authority.
 - #311 Manager PATCH uses 400 channel_manager_private_only/channel_manager_guest, 404 member_not_found/channel_grant_not_found, 409 last_channel_manager. Inaccessible Channels keep 404 channel not found, preventing existence leaks.

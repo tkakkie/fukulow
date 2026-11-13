@@ -136,3 +136,11 @@ it('encodes Channel Member list, add, remove and manager PATCH with 204 success'
     ['/api/v1/orgs/o/channels/c/members/m1', 'PATCH', '{"manager":false}'],
   ])
 })
+
+it('deactivates a scoped Member with a bodyless POST and accepts empty 204', async () => {
+  const { deactivateMember } = await import('./api')
+  const f = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+  expect(await deactivateMember('org 1', 'member 1', f)).toEqual({ ok: true, data: undefined })
+  expect(f).toHaveBeenCalledWith('/api/v1/orgs/org%201/members/member%201/deactivate', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }))
+  expect(f.mock.calls[0][1].body).toBeUndefined()
+})

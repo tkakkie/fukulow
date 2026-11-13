@@ -142,6 +142,10 @@ pub fn app(state: AppState) -> Router {
             get(auth::members::list_members),
         )
         .route(
+            "/api/v1/orgs/{org}/members/{id}/deactivate",
+            axum::routing::post(auth::members::deactivate::<channels::members::RoleChangeGuard>),
+        )
+        .route(
             "/api/v1/orgs/{org}/members/{id}/role",
             axum::routing::patch(auth::members::change_role::<channels::members::RoleChangeGuard>),
         )

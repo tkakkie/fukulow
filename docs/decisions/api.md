@@ -14,6 +14,8 @@ API contract and generated types. Writing rules and the other parts: [index](../
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [auth](auth.md): `#305 Owner may deactivate another active Member`, `#305 owns the deactivation transaction`
+
 - [process](process.md): `#195: shutdown also returns 503 for`
 
 - [messages](messages.md): `#311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id}`, `#311 Manager PATCH uses`

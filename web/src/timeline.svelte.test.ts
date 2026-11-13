@@ -1536,7 +1536,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -1877,7 +1877,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
               capabilities: {
                 can_create_channels: { allowed: true },
                 can_invite: { allowed: true },
-                can_manage_roles: { allowed: true },
+                can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
               },
             },
           },
@@ -2103,7 +2103,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -2243,7 +2243,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -2375,7 +2375,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -2521,7 +2521,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -2649,7 +2649,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -2865,7 +2865,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -3082,7 +3082,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -3270,7 +3270,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         },
@@ -3491,7 +3491,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -3719,7 +3719,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -3913,7 +3913,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -3926,7 +3926,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           {
@@ -3935,7 +3935,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
         ],
@@ -4148,7 +4148,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -4315,7 +4315,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -4448,7 +4448,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -4622,7 +4622,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -4786,7 +4786,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -4954,7 +4954,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -5134,7 +5134,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -5321,7 +5321,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -5504,7 +5504,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -5691,7 +5691,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -5803,7 +5803,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -5967,7 +5967,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },
@@ -6186,7 +6186,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             capabilities: {
               can_create_channels: { allowed: true },
               can_invite: { allowed: true },
-              can_manage_roles: { allowed: true },
+              can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
             },
           },
           member: { id: 'me', name: '自分', role: 'admin' },

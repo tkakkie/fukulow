@@ -110,6 +110,8 @@ export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest']
 export type InviteResponse = components['schemas']['InviteResponse']
 export const listMembers = (organizationId: string, f: typeof fetch = fetch) =>
   call<components['schemas']['MemberList']>(f, `${orgPath(organizationId)}/members`, { cache: 'no-store' }, true)
+export const deactivateMember = (organizationId: string, memberId: string, f: typeof fetch = fetch) =>
+  call<undefined>(f, `${orgPath(organizationId)}/members/${encodeURIComponent(memberId)}/deactivate`, { method: 'POST' }, false)
 export const changeRole = (organizationId: string, memberId: string, role: Role, f: typeof fetch = fetch) =>
   call<Member>(f, `${orgPath(organizationId)}/members/${encodeURIComponent(memberId)}/role`, { ...json({ role }), method: 'PATCH' }, true)
 export const createInvite = (organizationId: string, body: CreateInviteRequest, f: typeof fetch = fetch) =>

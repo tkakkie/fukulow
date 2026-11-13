@@ -2920,6 +2920,135 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/members/{id}/deactivate": {
+      "post": {
+        "tags": [
+          "crate::auth::members"
+        ],
+        "operationId": "deactivate",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Member id, not Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Member deactivated; no body. Authorship and Account Sessions retained; revision incremented, old grants/rights unusable"
+          },
+          "400": {
+            "description": "Invalid ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required (first check)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden: base authorization requires Owner/Admin before target lookup; after lookup self-deactivation and Admin on Owner are forbidden, ahead of last_owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Caller Membership organization_unavailable precedes authorization; then unknown, foreign or already inactive target member_not_found, including repeat requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "last_owner precedes last_channel_manager; a managed private Channel cannot lose its last usable manager (active/current Owner/Admin grant or Channel manager right). Public/unmanaged Channels excepted; no Channel details. Every denial leaves state unchanged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/members/{id}/role": {
       "patch": {
         "tags": [
@@ -4284,10 +4413,14 @@
         "required": [
           "can_invite",
           "can_manage_roles",
+          "can_deactivate_members",
           "can_create_channels"
         ],
         "properties": {
           "can_create_channels": {
+            "$ref": "#/components/schemas/Capability"
+          },
+          "can_deactivate_members": {
             "$ref": "#/components/schemas/Capability"
           },
           "can_invite": {
