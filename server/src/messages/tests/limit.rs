@@ -435,3 +435,82 @@ fn limiter_refusals_map_to_429_and_503_with_retry_after() {
         assert_eq!(response.headers()[header::RETRY_AFTER], retry);
     }
 }
+
+#[sqlx::test]
+async fn a_charged_leader_refused_by_admission_charges_its_identical_waiters_nothing(pool: PgPool) {
+    let l = limited(&pool).await;
+    let other = Uuid::new_v4();
+    let other_token = member(&pool, l.organization, other).await;
+    let delivery = l.state.message_delivery.clone();
+    let mut events = delivery.queue(l.organization, (other, 0), 256);
+    events.subscribe(l.channel);
+    let admission = delivery.admission(&pool);
+    let queued: Vec<_> = (0..CHANNEL_QUEUE_CAP)
+        .map(|_| admission.reserve_send(l.organization, l.channel).unwrap())
+        .collect();
+    let key = Uuid::new_v4();
+    let gate = crate::messages::limiter::pause_after_charge(key);
+    let spawn = |body: &'static str| {
+        let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
+        tokio::spawn(async move { send(&app, &token, channel, input(key, body)).await })
+    };
+    let leader = spawn("once");
+    // The leader has paid its token and holds the key; admission is full.
+    gate.entered.acquire().await.unwrap().forget();
+    let identical = [spawn("once"), spawn("once"), spawn("once")];
+    let another = spawn("other");
+    let limiter = &delivery.send_limiter;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while limiter.waiters((l.organization, l.member, key)) < 4 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("all four requests wait on the leader");
+    assert!(identical.iter().all(|waiter| !waiter.is_finished()));
+    assert!(!another.is_finished());
+    gate.release.add_permits(1);
+    let settle = |task: tokio::task::JoinHandle<Response>| async move {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("every request settles")
+            .unwrap()
+    };
+    // The leader and every identical waiter end with the leader's 503.
+    let mut responses = vec![settle(leader).await];
+    for waiter in identical {
+        responses.push(settle(waiter).await);
+    }
+    for response in responses {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body(response).await["error"], "send admission unavailable");
+    }
+    // Another intent does not inherit the refusal: it executes, pays and is refused itself.
+    let response = settle(another).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(queued);
+    assert_eq!(l.sequence(&pool).await, 0);
+    delivery.flush().await;
+    assert!(events.events.try_recv().is_err());
+    assert_eq!(limiter_pending(&l), 0);
+    // One token for the shared intent and one for the other intent: BURST - 2 remain.
+    for _ in 2..BURST {
+        sent(&l.app, &l.token, l.channel, input(Uuid::new_v4(), "fill")).await;
+    }
+    l.throttled(&l.token, l.channel, input(Uuid::new_v4(), "over"))
+        .await;
+    // Another Member's budget is untouched.
+    for _ in 0..BURST {
+        sent(
+            &l.app,
+            &other_token,
+            l.channel,
+            input(Uuid::new_v4(), "other"),
+        )
+        .await;
+    }
+}
+
+fn limiter_pending(l: &Limited) -> usize {
+    l.state.message_delivery.send_limiter.pending()
+}

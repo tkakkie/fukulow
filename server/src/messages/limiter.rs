@@ -123,6 +123,10 @@ pub(crate) enum Settled {
     /// Persistence ran: waiters settle with it (its failure, if any) and never
     /// execute or pay again.
     Executed(Option<Arc<super::MessageError>>),
+    /// Past the limiter but refused before persistence (admission): an identical
+    /// waiter ends with this refusal instead of paying again; another intent
+    /// begins again.
+    Refused(Arc<super::MessageError>),
 }
 
 enum Pending {
@@ -290,6 +294,14 @@ impl SendLimiter {
     }
 
     #[cfg(test)]
+    pub(crate) fn waiters(&self, key: Key) -> usize {
+        match self.lock().pending.get(&key) {
+            Some(Pending::InFlight(sender, _)) => sender.receiver_count(),
+            _ => 0,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn buckets(&self) -> usize {
         self.lock().buckets.len()
     }
@@ -335,6 +347,15 @@ impl Lead {
         self.executing = true;
     }
 
+    /// Refused after the limiter, before persistence started: nothing ran, so an
+    /// unexpired free retry stays available.
+    pub(crate) fn refuse(mut self, failure: super::MessageError) {
+        self.settled = true;
+        let next = self.kept_marker();
+        self.limiter
+            .finish(self.key, next, Settled::Refused(Arc::new(failure)));
+    }
+
     /// After persistence. `unknown`: the COMMIT may have happened; only a charged
     /// execution earns a free retry, so free retries cannot chain.
     pub(crate) fn settle(mut self, unknown: bool, failure: Option<super::MessageError>) {
@@ -366,7 +387,40 @@ impl Drop for Lead {
         }
         // Nothing ran: an unexpired free retry stays available.
         let next = self.kept_marker();
-        self.limiter.finish(self.key, next, Settled::Released);
+        let settled = if self.charged {
+            // Paid but never executed: identical waiters must not pay again.
+            let failure = super::MessageError::Database(sqlx::Error::WorkerCrashed);
+            Settled::Refused(Arc::new(failure))
+        } else {
+            Settled::Released
+        };
+        self.limiter.finish(self.key, next, settled);
+    }
+}
+
+/// Test hook: holds the leader of `key` after its charge, before admission.
+#[cfg(test)]
+static CHARGE_GATES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, Arc<super::delivery::PublicationGate>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(crate) fn pause_after_charge(key: Uuid) -> Arc<super::delivery::PublicationGate> {
+    let gate = Arc::new(super::delivery::PublicationGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        task: Mutex::new(None),
+    });
+    CHARGE_GATES.lock().unwrap().insert(key, gate.clone());
+    gate
+}
+
+#[cfg(test)]
+pub(crate) async fn charged(key: Uuid) {
+    let gate = CHARGE_GATES.lock().unwrap().remove(&key);
+    if let Some(gate) = gate {
+        gate.entered.add_permits(1);
+        gate.release.acquire().await.unwrap().forget();
     }
 }
 
@@ -555,14 +609,40 @@ mod tests {
     fn dropping_before_execution_releases_the_key_and_wakes_waiters_to_begin_again() {
         let limiter = limiter();
         let key = key();
-        let mut lead = lead(&limiter, key);
+        let lead = lead(&limiter, key);
         let Ok(Begin::Wait(mut waiter, _)) = limiter.begin(key, 0) else {
             panic!("expected waiter");
         };
-        lead.charge().unwrap();
+        // Throttled or cancelled before paying: nothing was charged.
         drop(lead);
         assert_eq!(limiter.pending(), 0);
         assert!(matches!(&*waiter.borrow_and_update(), Settled::Released));
+    }
+
+    #[test]
+    fn a_charged_lead_that_never_executes_settles_waiters_without_a_second_charge() {
+        let limiter = limiter();
+        let key = key();
+        let sender = (key.0, key.1);
+        for refuse in [true, false] {
+            let mut lead = lead(&limiter, key);
+            let Ok(Begin::Wait(mut waiter, true)) = limiter.begin(key, 0) else {
+                panic!("expected identical waiter");
+            };
+            lead.charge().unwrap();
+            if refuse {
+                lead.refuse(super::super::MessageError::AdmissionRejected);
+            } else {
+                drop(lead);
+            }
+            assert_eq!(limiter.pending(), 0);
+            assert!(matches!(&*waiter.borrow_and_update(), Settled::Refused(_)));
+        }
+        // Two charges in total, one per lead: BURST - 2 tokens remain.
+        for _ in 2..BURST {
+            send(&limiter, sender).unwrap();
+        }
+        assert!(send(&limiter, sender).is_err());
     }
 
     #[test]

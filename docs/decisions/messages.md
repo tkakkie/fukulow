@@ -76,6 +76,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Bounded state, fail closed (503, Retry-After 1, uncharged): buckets <=100,000 at ~70 B (~7.5 MiB with table growth); a bucket is dropped only when refilled to full, equal to a fresh one, so eviction never resets debt.
 - Pending keys <=10,000 at ~200 B incl. the watch channel (~2 MiB), 16 waiters each; unknown markers live 120 s. In-process only, matching the single-process deployment (`docs/decisions/process.md`).
 - Identical waiters take the executed leader's outcome (canonical, else its failure), never re-execute: that would pay again or spend the free retry. Only a charged unknown COMMIT earns a marker, so retries cannot chain. Another intent on the key inherits neither.
+- A leader that paid but was refused before persistence (admission 503) hands that refusal to identical waiters; releasing them instead let each pay again, breaking one charge per concurrent identical send (#349 review). Another intent still begins again.
 - Burst and refill are operator env settings (maintainer, 2026-11-13) so CI load/e2e can send fast from one Member; defaults stay 10 and 1/s and Compose keeps them. Only the size changes: order, idempotency, caps and 503 fail-closed are fixed. CI numbers are not production-limit measurements.
 
 ## Entries in other parts

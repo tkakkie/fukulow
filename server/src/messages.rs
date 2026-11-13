@@ -249,6 +249,11 @@ pub async fn send_message(
         };
         let _ = settled.changed().await;
         let outcome = settled.borrow().clone();
+        if let limiter::Settled::Refused(refusal) = &outcome
+            && identical
+        {
+            return Err(refusal.replay());
+        }
         if let limiter::Settled::Executed(failure) = outcome {
             if let Some(message) =
                 committed(&state.pool, organization_id, sender, channel_id, &input).await?
@@ -267,10 +272,17 @@ pub async fn send_message(
         return Ok(created(message));
     }
     lead.charge()?;
-    let waiter = state
-        .message_delivery
-        .admission(&state.pool)
-        .reserve_send(organization_id, channel_id)?;
+    #[cfg(test)]
+    limiter::charged(input.client_message_id).await;
+    let admission = state.message_delivery.admission(&state.pool);
+    let waiter = match admission.reserve_send(organization_id, channel_id) {
+        Ok(waiter) => waiter,
+        Err(refusal) => {
+            // Identical waiters share this refusal rather than each paying again.
+            lead.refuse(refusal.replay());
+            return Err(refusal);
+        }
+    };
     // Finish persistence even if the HTTP caller disconnects; notification is detached.
     let work = state.message_delivery.work.enter();
     let message = tokio::spawn(async move {
