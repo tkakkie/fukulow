@@ -108,6 +108,7 @@ pub struct Delivery {
     organization_notifications: OrganizationReservations,
     admission: Arc<OnceLock<Arc<Admission>>>,
     failures: Failures,
+    pub(super) send_limiter: super::limiter::SendLimiter,
     #[cfg(test)]
     pub(crate) live_refills: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -125,6 +126,7 @@ impl Default for Delivery {
             organization_notifications: Default::default(),
             admission: Default::default(),
             failures: Default::default(),
+            send_limiter: Default::default(),
             #[cfg(test)]
             live_refills: Default::default(),
             #[cfg(test)]

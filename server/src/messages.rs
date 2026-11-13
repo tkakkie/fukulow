@@ -21,6 +21,7 @@ mod admission;
 mod commit;
 mod delivery;
 mod failure;
+mod limiter;
 pub(crate) mod replies;
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub(crate) mod topics;
@@ -193,7 +194,8 @@ pub async fn list_messages(
 
 /// Send a Message, optionally joining/creating a Topic by name in the same transaction.
 /// For all sends, Account Session authentication precedes input validation (400/413/415),
-/// which precedes organization_unavailable (404) and Channel authorization.
+/// which precedes organization_unavailable (404) and Channel authorization, then the
+/// per-Member send limit (429), then admission (503).
 /// The session supplies organization and sender. A successful retry returns the same
 /// canonical message with 201, allocating no new sequence and publishing no new event.
 /// A reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.
@@ -207,9 +209,11 @@ pub async fn list_messages(
         (status = 409, description = "Client message id reused with different body, Channel, normalized Topic name or reply target", body = ErrorBody),
         (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody),
+        (status = 429, description = "send_rate_limited: the per-(Organization, Member) send limit (burst 10, 1 per second) is exhausted; checked after Channel authorization and before admission; nothing was charged, queued or persisted; retry after the delay with the same request and client_message_id", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Whole seconds until the next token; at least 1"))),
         (status = 500, description = "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id", body = ErrorBody),
-        (status = 503, description = "Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id", body = ErrorBody,
-            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)")))))]
+        (status = 503, description = "Send admission queue is full or the 30 second admission wait expired (Retry-After 1 through 5, jittered), or a send-limiter tracking cap is full (Retry-After 1, nothing charged); persistence has not started; retry with the same client_message_id", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Retry delay in seconds, at least 1")))))]
 pub async fn send_message(
     State(state): State<AppState>,
     DeferredOrganizationAuth(auth): DeferredOrganizationAuth,
@@ -222,6 +226,23 @@ pub async fn send_message(
     let organization_id = auth.identity.organization.organization_id;
     let sender = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization_id, sender, channel_id).await?;
+    let limiter = &state.message_delivery.send_limiter;
+    // One execution per key at a time; identical requests wait without charge or slot.
+    let mut lead = loop {
+        match limiter.begin((organization_id, sender.0, input.client_message_id))? {
+            limiter::Begin::Leader(lead) => break lead,
+            limiter::Begin::Wait(mut settled) => {
+                let _ = settled.changed().await;
+            }
+        }
+    };
+    // A committed retry answers before the limiter and admission (S5).
+    if let Some(message) =
+        committed(&state.pool, organization_id, sender, channel_id, &input).await?
+    {
+        return Ok(created(message));
+    }
+    lead.charge()?;
     let waiter = state
         .message_delivery
         .admission(&state.pool)
@@ -230,7 +251,8 @@ pub async fn send_message(
     let work = state.message_delivery.work.enter();
     let message = tokio::spawn(async move {
         let _work = work;
-        persist(
+        lead.executing();
+        let result = persist(
             &state.pool,
             &state.message_delivery,
             organization_id,
@@ -239,16 +261,53 @@ pub async fn send_message(
             input,
             waiter,
         )
-        .await
+        .await;
+        // Only a database failure other than a definite rollback may have committed.
+        lead.settle(matches!(&result, Err(MessageError::Database(error)) if !commit::definitely_rolled_back(error)));
+        result
     })
     .await
     .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
-    Ok((
+    Ok(created(message))
+}
+
+fn created(message: Message) -> Response {
+    (
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
         Json(message),
     )
-        .into_response())
+        .into_response()
+}
+
+/// The canonical Message for a committed `client_message_id`, or 409 for changed intent.
+/// Access is rechecked first: a retry after access loss is denied, never answered.
+async fn committed(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    sender: (Uuid, i64),
+    channel_id: Uuid,
+    input: &SendMessageRequest,
+) -> Result<Option<Message>, MessageError> {
+    crate::database::organization_read_only(
+        pool,
+        organization_id,
+        async |tx: &mut sqlx::PgConnection| {
+            require_visible(&mut *tx, organization_id, sender, channel_id).await?;
+            let Some(message) =
+                existing(&mut *tx, organization_id, sender.0, input.client_message_id).await?
+            else {
+                return Ok(None);
+            };
+            let name_key = if message.reply_to.is_none() {
+                topics::name_key(&mut *tx, organization_id, message.topic_id).await?
+            } else {
+                None
+            };
+            canonical(message, channel_id, input, name_key).map(Some)
+        },
+    )
+    .await
 }
 
 impl SendMessageRequest {
@@ -298,7 +357,20 @@ pub enum MessageError {
     Conflict,
     AdmissionRejected,
     ProjectionAdmissionRejected,
+    /// Over the per-Member send limit: seconds until the next token.
+    Throttled(u64),
+    /// A send-limiter tracking cap was reached.
+    LimiterSaturated,
     Database(sqlx::Error),
+}
+
+impl From<limiter::Refusal> for MessageError {
+    fn from(refusal: limiter::Refusal) -> Self {
+        match refusal {
+            limiter::Refusal::Throttled(seconds) => Self::Throttled(seconds),
+            limiter::Refusal::Saturated => Self::LimiterSaturated,
+        }
+    }
 }
 
 impl From<sqlx::Error> for MessageError {
@@ -322,6 +394,16 @@ impl IntoResponse for MessageError {
                 "client message id reused with different body, channel, Topic or reply target",
             ),
             Self::Database(error) => return ApiError::from(error).into_response(),
+            Self::Throttled(seconds) => {
+                return retry_later(StatusCode::TOO_MANY_REQUESTS, seconds, "send_rate_limited");
+            }
+            Self::LimiterSaturated => {
+                return retry_later(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    1,
+                    "send limiter unavailable",
+                );
+            }
             rejection @ (Self::AdmissionRejected | Self::ProjectionAdmissionRejected) => {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -352,6 +434,20 @@ impl IntoResponse for MessageError {
         )
             .into_response()
     }
+}
+
+fn retry_later(status: StatusCode, seconds: u64, error: &str) -> Response {
+    (
+        status,
+        [
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+            (header::RETRY_AFTER, seconds.to_string()),
+        ],
+        Json(ErrorBody {
+            error: error.into(),
+        }),
+    )
+        .into_response()
 }
 
 pub(crate) async fn require_visible_scoped(
@@ -459,6 +555,7 @@ async fn persist_admitted(
     }
     #[cfg(test)]
     tests::removal::pause(input.client_message_id).await;
+    let member = sender;
     let sender = sender.0;
     if let Some(message) = existing(
         tx.connection()?,
@@ -531,22 +628,9 @@ async fn persist_admitted(
     }
     tx.rollback().await?;
     // The unique-key conflict implies a committed winner; absence is an invariant failure.
-    crate::database::organization_read_only(
-        pool,
-        organization_id,
-        async |tx: &mut sqlx::PgConnection| {
-            let message = existing(&mut *tx, organization_id, sender, input.client_message_id)
-                .await?
-                .ok_or(sqlx::Error::RowNotFound)?;
-            let name_key = if message.reply_to.is_none() {
-                topics::name_key(&mut *tx, organization_id, message.topic_id).await?
-            } else {
-                None
-            };
-            canonical(message, channel_id, &input, name_key)
-        },
-    )
-    .await
+    committed(pool, organization_id, member, channel_id, &input)
+        .await?
+        .ok_or(MessageError::Database(sqlx::Error::RowNotFound))
 }
 
 pub(crate) use delivery::LiveQueue;

@@ -614,7 +614,8 @@ async fn concurrent_sends(
 async fn concurrent_duplicate_sends_create_one_message_and_consume_one_sequence(pool: PgPool) {
     let (app, _, _, channel_id, token) = fixture(&pool).await;
     let mut canonical = None;
-    for response in concurrent_sends(&app, &token, &[channel_id; 24], true).await {
+    // The leader plus MAX_WAITERS identical waiters; one more may get 503 (#306).
+    for response in concurrent_sends(&app, &token, &[channel_id; 17], true).await {
         assert_eq!(response.status(), StatusCode::CREATED);
         let value = body(response).await;
         if let Some(expected) = &canonical {
@@ -910,4 +911,5 @@ mod replies;
 pub(super) mod removal;
 
 mod context;
+mod limit;
 mod rls_statements;

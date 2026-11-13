@@ -71,3 +71,11 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 ## Entries in other parts
 
 - [auth](auth.md): `#314 single-statement hot reads use`
+
+## Send limit (#306)
+- Per-(Organization, Member) bucket, burst 10, 1/s, initial 10 (maintainer, 2026-11-13): a person types well below 1/s sustained, bursts cover pastes and retries, and one Member or stolen session can no longer fill a Channel's 256-waiter queue for others.
+- The limiter runs after Channel authorization and before admission, so denials stay 404 and a 429 takes no slot, sequence or event. Committed retries answer before it after an access recheck (S5), so an exhausted bucket never blocks recovery.
+- Charge on passing the limiter, no refund: a refund would let failing sends (missing parent, rollback) loop free. COMMIT-unknown and in-flight duplicates are not charged again, so a client retrying per C6 never pays twice for one outcome.
+- Database failures other than a definite rollback count as COMMIT-unknown: conservative, since an extra free retry within 120 s costs one send at most, while a double charge would throttle honest C6 retries.
+- Bounded state, fail closed (503, Retry-After 1, uncharged): buckets <=100,000 at ~70 B (~7.5 MiB with table growth); a bucket is dropped only when refilled to full, equal to a fresh one, so eviction never resets debt.
+- Pending keys <=10,000 at ~200 B incl. the watch channel (~2 MiB), 16 waiters each; unknown markers live 120 s. In-process only, matching the single-process deployment (`docs/decisions/process.md`).
