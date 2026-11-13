@@ -26,7 +26,7 @@
     createdAt?: string
     senderName?: string
     mentioned?: boolean
-    pendingStatus?: 'sending' | 'failed'
+    pendingStatus?: 'sending' | 'throttled' | 'failed'
     retryable?: boolean
     targetUnavailable?: boolean
     failedReason?: string
@@ -105,6 +105,13 @@
   {#if pendingStatus === 'sending'}
     <footer class="ui-message-row__footer">
       <small class="ui-message-row__sending">送信中…</small>
+    </footer>
+  {:else if pendingStatus === 'throttled'}
+    <footer class="ui-message-row__footer">
+      <small class="ui-message-row__sending">送信が混み合っています。しばらくしてから自動で再送します。</small>
+      {#if ondiscard}
+        <Button variant="secondary" onclick={ondiscard}>破棄</Button>
+      {/if}
     </footer>
   {:else if pendingStatus === 'failed'}
     <footer class="ui-message-row__footer ui-message-row__footer--failed">

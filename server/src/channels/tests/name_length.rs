@@ -45,47 +45,76 @@ async fn channel_name_length_boundaries_count_unicode_scalars(pool: PgPool) {
                 (created, if visibility == "private" { created } else { 0 })
             );
         }
+        create(&app, &token, "a", visibility).await;
     }
 }
 
 #[sqlx::test]
-async fn oversized_channel_name_is_rejected_before_opening_transaction(pool: PgPool) {
+async fn invalid_channel_name_is_rejected_before_opening_transaction(pool: PgPool) {
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
     let state = AppState::for_test(pool.clone()).await;
     let auth = extract_auth(state.clone(), &token).await;
+    let auth_empty = extract_auth(state.clone(), &token).await;
+    let auth_nul = extract_auth(state.clone(), &token).await;
     // Auth may read the session; semantic validation must precede even BEGIN.
-    pool.close().await;
-    let response = create_channel(
-        State(state),
-        auth,
-        ApiJson(CreateChannelRequest {
-            name: "😀".repeat(129),
-            visibility: ChannelVisibility::Private,
-        }),
-    )
-    .await
-    .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(body(response).await, json!({"error": "invalid input"}));
+    state.pool.close().await;
+    for (auth, name) in [
+        (auth_empty, "".to_owned()),
+        (auth, "😀".repeat(129)),
+        (auth_nul, "nul\0name".into()),
+    ] {
+        let response = create_channel(
+            State(state.clone()),
+            auth,
+            ApiJson(CreateChannelRequest {
+                name,
+                visibility: ChannelVisibility::Private,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body(response).await, json!({"error": "invalid input"}));
+    }
 }
 
 #[sqlx::test]
-async fn channel_name_length_preserves_empty_names(pool: PgPool) {
+async fn empty_and_nul_channel_names_are_rejected_without_writes(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
-    for name in [""] {
-        create(&app, &token, name, "public").await;
+    for visibility in ["public", "private"] {
+        for name in ["", "\0", "a\0b"] {
+            let response = request(
+                &app,
+                "POST",
+                "/api/v1/channels",
+                &token,
+                json!({"name": name, "visibility": visibility}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(body(response).await, json!({"error": "invalid input"}));
+        }
     }
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM channels WHERE organization_id=$1), (SELECT count(*) FROM channel_members WHERE organization_id=$1)",
+    ).bind(organization_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(counts, (0, 0));
 }
 
 #[sqlx::test]
 async fn channel_name_length_check_rejects_direct_inserts_and_updates(pool: PgPool) {
     let organization_id = organization(&pool).await;
-    for scalar in ["a", "界", "😀"] {
+    for scalar in ["a", "界", "😀", ""] {
         let id = Uuid::new_v4();
-        let name = scalar.repeat(128);
+        let name = if scalar.is_empty() {
+            "kept".into()
+        } else {
+            scalar.repeat(128)
+        };
         sqlx::query(
             "INSERT INTO channels (organization_id, id, name, visibility) \
              VALUES ($1, $2, $3, 'public')",

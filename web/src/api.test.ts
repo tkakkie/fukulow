@@ -65,6 +65,26 @@ describe('channel and message calls', () => {
     expect(m.mock.calls[0][0]).toBe('/api/v1/orgs/o/channels/c/messages')
     expect(JSON.parse(m.mock.calls[0][1].body)).toEqual(input)
   })
+  it('preserves 429 ErrorBody and Retry-After with a safe one-second fallback', async () => {
+    for (const [header, retryAfterMs] of [
+      ['3', 3000], ['1', 1000], [null, 1000], ['', 1000], ['0', 1000], ['-1', 1000],
+      ['1.5', 1000], ['NaN', 1000], ['Infinity', 1000], ['1e3', 1000],
+      ['Thu, 01 Jan 2099 00:00:00 GMT', 1000], ['999999999999999999999999', 1000],
+    ] as const) {
+      const m = vi.fn().mockResolvedValue(new Response('{"error":"send_rate_limited"}', {
+        status: 429, headers: header === null ? {} : { 'Retry-After': header! },
+      }))
+      expect(await sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, m)).toEqual({
+        ok: false, kind: 'http', status: 429, error: 'send_rate_limited', retryAfterMs,
+      })
+    }
+  })
+  it('retains the 429 delay even when ErrorBody is malformed', async () => {
+    const m = vi.fn().mockResolvedValue(new Response('broken', { status: 429, headers: { 'Retry-After': '2' } }))
+    expect(await sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, m)).toEqual({
+      ok: false, kind: 'http', status: 429, retryAfterMs: 2000,
+    })
+  })
 })
 
 import { getOrganizationMe, isOrganizationUnavailable, postSession } from './api'

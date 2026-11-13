@@ -163,7 +163,8 @@ export interface paths {
         /**
          * Send a Message, optionally joining/creating a Topic by name in the same transaction.
          *     For all sends, Account Session authentication precedes input validation (400/413/415),
-         *     which precedes organization_unavailable (404) and Channel authorization.
+         *     which precedes organization_unavailable (404) and Channel authorization, then the
+         *     per-Member send limit (429), then admission (503).
          *     The session supplies organization and sender. A successful retry returns the same
          *     canonical message with 201, allocating no new sequence and publishing no new event.
          *     A reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.
@@ -565,7 +566,7 @@ export interface components {
             capabilities: components["schemas"]["ChannelCapabilities"];
             /** Format: uuid */
             id: string;
-            /** @description At most 128 Unicode scalar values. */
+            /** @description 1..=128 Unicode scalar values. */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
         };
@@ -605,9 +606,9 @@ export interface components {
         /** @description Identity and organization come from the session, never from request fields. */
         CreateChannelRequest: {
             /**
-             * @description At most 128 Unicode scalar values.
+             * @description 1..=128 Unicode scalar values; no NUL.
              *     Leading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.
-             *     Internal whitespace and empty names are allowed.
+             *     Internal whitespace is allowed.
              */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
@@ -1511,7 +1512,7 @@ export interface operations {
                     "application/json": components["schemas"]["Channel"];
                 };
             };
-            /** @description Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace */
+            /** @description Malformed Organization id, invalid Channel JSON or fields; name must be 1..=128 Unicode scalar values, NUL-free and without surrounding whitespace */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2133,6 +2134,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description send_rate_limited: the per-(Organization, Member) send limit (burst 10, 1 per second) is exhausted; checked after Channel authorization and before admission; nothing was charged, queued or persisted; retry after the delay with the same request and client_message_id */
+            429: {
+                headers: {
+                    /** @description Whole seconds until the next token; at least 1 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id */
             500: {
                 headers: {
@@ -2142,7 +2154,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Send admission queue is full or the 30 second admission wait expired (Retry-After 1 through 5, jittered), or a send-limiter tracking cap is full (Retry-After 1, nothing charged); persistence has not started; retry with the same client_message_id; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

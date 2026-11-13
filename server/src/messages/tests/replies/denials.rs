@@ -232,8 +232,14 @@ async fn reply_stale_member_and_queued_access_loss_deny_send_retry_and_chain(poo
             .acquire(org, channel, true)
             .await
             .unwrap();
+        // A committed retry answers before admission (#306), so the queued send
+        // is a new intent; the committed retry is denied below.
         let queued = {
-            let (app, token, intent) = (app.clone(), token.clone(), intent.clone());
+            let (app, token, intent) = (
+                app.clone(),
+                token.clone(),
+                reply_input(Uuid::new_v4(), &root),
+            );
             tokio::spawn(async move { send(&app, &token, channel, intent).await })
         };
         tokio::time::timeout(Duration::from_secs(2), async {

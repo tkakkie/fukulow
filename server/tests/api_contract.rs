@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 33 operations document shutdown, including author lookup.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 231;
+// All 33 operations document shutdown, including author lookup and Account security actions.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 232;
 
 #[test]
 fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
@@ -554,12 +554,12 @@ fn response_description_check_covers_reusable_and_nested_responses() {
 }
 
 #[test]
-fn channel_name_schemas_limit_length_to_128() {
+fn channel_name_schemas_limit_length_to_1_through_128() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     for schema in ["Channel", "CreateChannelRequest"] {
         let name = &document["components"]["schemas"][schema]["properties"]["name"];
         assert_eq!(name["maxLength"], 128);
-        assert!(name.get("minLength").is_none());
+        assert_eq!(name["minLength"], 1);
     }
 }
 

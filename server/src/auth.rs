@@ -24,6 +24,8 @@ pub mod invites;
 pub mod members;
 mod password;
 pub mod security;
+#[cfg(test)]
+mod text_input_tests;
 use password::{PasswordWorkers, check_password, hash_password};
 mod session;
 mod throttle;
@@ -224,7 +226,16 @@ impl IntoResponse for NativeSessionResponse {
     }
 }
 
+// PostgreSQL text cannot represent NUL. Check raw input before normalization or DB work.
+pub(crate) fn validate_text(value: &str) -> Result<(), ApiError> {
+    if value.contains('\0') {
+        return Err(ApiError::bad_request());
+    }
+    Ok(())
+}
+
 fn email(value: &str) -> Result<String, ApiError> {
+    validate_text(value)?;
     let value = value.trim().to_lowercase();
     let Some((local, domain)) = value.split_once('@') else {
         return Err(ApiError::bad_request());
@@ -311,6 +322,8 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
         return Err(ApiError::unauthorized());
     }
     let email = email(&input.email)?;
+    validate_text(&input.organization_name)?;
+    validate_text(&input.name)?;
     let organization_name = input.organization_name.trim();
     let name = input.name.trim();
     if organization_name.is_empty()

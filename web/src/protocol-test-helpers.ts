@@ -40,7 +40,9 @@ export function protocolClient() {
           code: i.code as string } }; break
         case 'history_result': input = { type: i.type, request: e!.id as number,
           page: { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more as boolean } }; break
-        case 'history_failed': case 'send_failed': input = { type: i.type, request: e!.id as number,
+        case 'send_failed': input = { type: i.type, request: e!.id as number,
+          status: i.status as number | 'network' | 'timeout', retryAfterMs: i.retry_after_ms as number | undefined }; break
+        case 'history_failed': input = { type: i.type, request: e!.id as number,
           status: i.status as number | 'network' | 'timeout' }; break
         case 'ack': input = { type: i.type, request: e!.id as number, message: msg() }; break
         case 'timer_elapsed': input = { type: i.type, id: e!.id as number }; break
