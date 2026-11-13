@@ -22,6 +22,9 @@ FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d
 RUN groupadd --gid 10001 fukulow \
  && useradd --uid 10001 --gid fukulow --no-create-home --shell /usr/sbin/nologin fukulow
 COPY --from=server /app/target/release/fukulow-server /usr/local/bin/fukulow-server
+# glibc malloc only (#340): Argon2's 19 MiB buffers go to mmap and return to the
+# OS on free. Re-evaluate whenever the base image or libc changes.
+ENV MALLOC_MMAP_THRESHOLD_=131072
 USER 10001:10001
 EXPOSE 8080
 CMD ["fukulow-server"]
