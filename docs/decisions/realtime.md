@@ -50,6 +50,9 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #307 clients coalesce refetches (one in flight, one queued, short debounce, jittered reset). Reason: bursts cost one request per target per round trip; retries retain dirty state and cannot bypass backoff.
 - #307 only post-access-invalidation lists add Channels; reappearance starts a client access generation; P8 selection stays within it. Directory invalidations fence old responses. Reason: stale snapshots must not restore lost access or visible Members; no exposed grant id is needed.
 - #307 `channel_access_revoked` is Organization-scoped and separate from subscription-scoped `channel_access_lost`. Reason: keeps C9/S4 semantics unchanged while unwatched Channels lose their badge at once.
+- #151 dm_list_changed targets only the affected Member's live/current-revision own sessions with DM access. DM activity/read changes reuse channel_activity/read_position_changed. Reason: empty/new DMs need discovery, and /dms is a separate REST target (B4).
+- #151 DM discovery reuses A5-A8's bounded buffer/provenance and A9-A14/O5's single reconciliation schedule; no DM poller. Reason: inactive badges, lost notices and delayed COMMITs converge without sending failure traffic to unproven recipients.
+- #151 DM list responses follow independent invalidation/access generations; renewal replaces only lapsed lifetimes, and unwatched recovery replaces baselines. Reason: stale responses/publishers must not revive old access or Unread, including after reactivation.
 
 ## Admission and timeouts
 - #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
@@ -83,6 +86,9 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
+
+- [messages](messages.md): `#151 DM is a Channel kind`, `#151 new sends hold`
+- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
 
 - [auth](auth.md): `#305 owns the deactivation transaction`
 

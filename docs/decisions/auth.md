@@ -22,6 +22,9 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - #146 migration refuses duplicate lower(email) across Organizations and reports all of them; it never merges Accounts or compares password hashes. Old sessions are dropped; users sign in again (no compatibility path).
 - Deactivation is `users.deactivated_at` (NULL = active). Member rows are never deleted and their Organization/id/Account cannot change (DB triggers), preserving historical senders; UNIQUE (organization_id, account_id) (#146).
 - Reactivation never restores old private Channel permissions: grants capture `membership_revision`, access needs the current revision, and a trigger bumps it on every deactivation, even via direct SQL (#146). Re-grant goes through #149.
+- #151 DM access needs participation plus an active current-revision grant; Owner/Admin never bypass it. Only active non-Guests may open, with an active same-Organization peer including Guest. Reason: Guest participation must not grant creation or third-party access.
+- #151 explicit non-Guest open renews both participants' lapsed DM grants atomically, including both stale, with new grant_ids/current revisions and Unread at committed seq; current grants stay unchanged. Reason: reactivation alone restores nothing, while the pair must remain unique (B2).
+- #151 peer eligibility belongs only to new sends, never shared history/mark-read visibility. Deactivation closes target sockets 4003 and leaves the active peer's read access intact. Reason: offboarding invalidates the target Membership, not the other participant's history.
 - Auth resolves the Account Session and optional active Member in one LEFT JOIN (no Session: 401; no Member: 404). Member SQL stays in `auth` as composable scoped fragments (#146 review).
 - Sign-in throttle, process-local 60 s windows: 20 failures per IPv4 or IPv6 /64 (IPv4-mapped shares IPv4), 5 per normalized email; in-flight attempts reserve capacity before Argon2; only failed credentials persist.
 - #196 each throttle map holds at most 10,000 keys: reclaim expired idle buckets first, then evict the oldest idle bucket so unknown-email churn cannot globally lock out Accounts. Never remove pending buckets; all-pending exhaustion remains 429 + Retry-After.
@@ -80,6 +83,9 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
+
+- [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`
 
 - [messages](messages.md): `#231/#305 reject Role demotion or deactivation with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
 - [messages](messages.md): `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`

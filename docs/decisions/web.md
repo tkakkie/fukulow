@@ -25,6 +25,10 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
+- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`
+
 - [process](process.md): `Web boundary check (#48, #60): Workers/SharedWorkers`, `Web storage is forbidden everywhere. A`, `Hand-written API types are review-enforced, not`
 - [auth](auth.md): `#197 app-wide CSP allows external same-origin`, `#197 Vite manifest outputs alone get`
 - [messages](messages.md): `#138: opt-in Topic composition bootstraps sync`, `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`, `#140 keeps one opt-in chain per`, `#140 composes over sync (or Topic`

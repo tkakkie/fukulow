@@ -47,7 +47,11 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #142 access changes serialize per Organization: public Channel inserts are set-based O(active Members + their Topics); Member activation is O(visible Channels + Topics), retaining shared #135 locks until COMMIT. Accept at current scale; remeasure larger Organizations.
 - #142 backfill blocks sends, Member and grant writes under SHARE ROW EXCLUSIVE; work scales with visible Member×Channel pairs plus their Topics. Startup lock acquisition times out at 5 s; once acquired, a large backfill can extend the write outage.
 - Move, Edit, Delete (principles only, #148): clients apply entries idempotently; a later change takes a Channel log position. Open: replay of a changed Message (current or as it was), of a deleted one, read positions after a Move. `channel_events` vs `channel_log`: Sprint 3 (#160).
-- DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
+- #151 DM is a Channel kind for one immutable, Organization-scoped Member pair; no name, visibility, Topics or manager right. Reason: reuse seq, Replies, sync and Unread without making private-Channel management apply to DMs. Contract: docs/spec/dms.md.
+- #151 POST /dms opens or renews one pair; GET /dms lists only accessible DMs with peer identity and Unread/Mention hooks. Ordinary Channel lists/sections exclude DMs. Reason: a DM has no Channel name or Topic navigation.
+- #151 new sends hold current peer eligibility through COMMIT; inactive peer gives 409 dm_peer_deactivated, active stale grant gives 409 dm_peer_access_lapsed. After sender authorization, committed retries return canonically first. Reason: peer loss must not undo an accepted send.
+- #151 DMs reject Topic intent and member/grant APIs; all management Capabilities deny. Exclude DMs from RoleChangeGuard and last-manager/grant counts. Reason: fixed two-person participation must neither confer management nor block Role changes.
+- Mention gets its own counter, separate from Unread (#148).
 
 ## Topics (#137, #138)
 - Messages owns Topics, nullable messages.topic_id and their atomic send updates; composite FKs bind a Message's Topic to its Organization and Channel. #139 appends its own migration, preserving #137's migration.
@@ -80,6 +84,9 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Burst and refill are operator env settings (maintainer, 2026-11-13) so CI load/e2e can send fast from one Member; defaults stay 10 and 1/s and Compose keeps them. Only the size changes: order, idempotency, caps and 503 fail-closed are fixed. CI numbers are not production-limit measurements.
 
 ## Entries in other parts
+
+- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`
 
 - [auth](auth.md): `#314 single-statement hot reads use`
 - [auth](auth.md): `#299 shared raw-text validation`
