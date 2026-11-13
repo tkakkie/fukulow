@@ -68,10 +68,6 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #140 keeps one opt-in chain per Channel, merged by Message id and stable reply_root_id. Page continuation uses only the last page seq; live appends cannot skip unpaged siblings or enter sync cursor/gap evidence.
 - #140 composes over sync (or Topic sync) and sends confirmed-parent Replies through its existing pending/retry path. Preserve reply_to with the id/body so retries cannot change intent; projection reads settle C5 with session/read fencing before teardown.
 
-## Entries in other parts
-
-- [auth](auth.md): `#314 single-statement hot reads use`
-
 ## Send limit (#306)
 - Per-(Organization, Member) bucket, burst 10, 1/s, initial 10 (maintainer, 2026-11-13): a person types well below 1/s sustained, bursts cover pastes and retries, and one Member or stolen session can no longer fill a Channel's 256-waiter queue for others.
 - The limiter runs after Channel authorization and before admission, so denials stay 404 and a 429 takes no slot, sequence or event. Committed retries answer before it after an access recheck (S5), so an exhausted bucket never blocks recovery.
@@ -79,3 +75,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Database failures other than a definite rollback count as COMMIT-unknown: conservative, since an extra free retry within 120 s costs one send at most, while a double charge would throttle honest C6 retries.
 - Bounded state, fail closed (503, Retry-After 1, uncharged): buckets <=100,000 at ~70 B (~7.5 MiB with table growth); a bucket is dropped only when refilled to full, equal to a fresh one, so eviction never resets debt.
 - Pending keys <=10,000 at ~200 B incl. the watch channel (~2 MiB), 16 waiters each; unknown markers live 120 s. In-process only, matching the single-process deployment (`docs/decisions/process.md`).
+
+## Entries in other parts
+
+- [auth](auth.md): `#314 single-statement hot reads use`

@@ -134,7 +134,8 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
           ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }) }
           : { ok: false, kind: 'network' }); break
         case 'history_failed': case 'send_failed': resolve(typeof i.status === 'number'
-          ? { ok: false, kind: 'http', status: i.status } : { ok: false, kind: 'network' }); break
+          ? { ok: false, kind: 'http', status: i.status,
+            ...(i.retry_after_ms === undefined ? {} : { retryAfterMs: i.retry_after_ms as number }) } : { ok: false, kind: 'network' }); break
         case 'open_reply_chain': void replies!.open(channel, message(i.message, channel)); break
         case 'load_reply_chain': void replies!.loadMore(channel); break
         case 'reply_chain_result': resolve({ ok: true, data: { root_id: i.root_id,

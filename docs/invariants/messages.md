@@ -44,6 +44,7 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 | Send-first holds Member/grant through COMMIT against removal/Guest demotion; removal-first denies ordinary/Topic/retry without writes or seq | `server/src/messages/tests/removal.rs::send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_first` |
 | Mark-read and grant removal serialize; stale marks cannot recreate Channel/Topic positions; re-grant starts both at committed seq | `server/src/messages/tests/removal.rs::unread_mark_and_removal_serialize_without_recreating_revoked_positions` |
 | Web Topic sends reject P7 reply_to+topic_name, keep topic_name on C6 retry, validate 1..60 OpenAPI scalars, and scope topic_not_found to that Topic | `web/src/messages-body.test.ts::matches openapi.json SendMessageRequest.topic_name rules`, `web/src/messages-body.test.ts::protocol rejects reply_to combined with topic_name (P7) and preserves topic_name on C6 retry`, `web/src/topics.test.ts::records notFound per Topic on 404 topic_not_found for summary and Topic history reads` |
+| Web preserves 429 ErrorBody and Retry-After; invalid/missing whole seconds >= 1 falls back to 1 s | `web/src/api.test.ts::preserves 429 ErrorBody and Retry-After with a safe one-second fallback`, `web/src/api.test.ts::retains the 429 delay even when ErrorBody is malformed` |
 
 ## Rows in other parts
 
@@ -58,3 +59,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [deployment](deployment.md): `channel_list_database_failure_returns_generic_500`
 
 - [auth](auth.md): `handlers_and_fanout_require_authenticated_context`
+- [sync](sync.md): `429 waits without resending early, re-arms with a new delay and preserves the entire request`, `throttled sends cancel waits on canonical settlement, discard, access loss and lifecycle changes`
+- [web](web.md): `shows accessible Japanese throttled status, automatic retry and discard without manual resend or edit`

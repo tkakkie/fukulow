@@ -49,6 +49,30 @@ function stack(over: Partial<AuthDeps> = {}) {
 }
 type Stack = ReturnType<typeof stack>
 
+it('Organization switch cancels a throttled send and returning never revives its timer', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  const old = await openChannelA(s)
+  void s.auth.session!.sync.channel('A').send('throttled')
+  await settle()
+  old.sends[0].resolve({ ok: false, kind: 'http', status: 429, retryAfterMs: 3000 })
+  await settle()
+  expect(s.auth.session!.sync.channel('A').timeline.pending[0].status).toBe('throttled')
+  await s.auth.selectOrganization('other')
+  await openChannelA(s)
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(old.sends).toHaveLength(1)
+  expect(old.socket.closed).toBe(true)
+  await s.auth.selectOrganization('o')
+  await openChannelA(s)
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(s.auth.session!.sync.channel('A').timeline.pending).toEqual([])
+  expect(old.sends).toHaveLength(1)
+  expect(s.nets.at(-1)!.sends).toHaveLength(0)
+  await s.auth.signOut()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
 async function signInAs(s: Stack, id: string) {
   expect(await s.auth.submitSignIn(`${id}@example.com`, 'pw')).toBe(true)
   await settle()
