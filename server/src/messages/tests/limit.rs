@@ -240,6 +240,48 @@ async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_r
 }
 
 #[sqlx::test]
+async fn a_waiter_with_another_intent_executes_itself_and_pays_without_the_free_retry(
+    pool: PgPool,
+) {
+    let l = limited(&pool).await;
+    for _ in 2..BURST {
+        sent(&l.app, &l.token, l.channel, input(Uuid::new_v4(), "fill")).await;
+    }
+    let key = Uuid::new_v4();
+    let gate = commit::pause_commit(key);
+    let pending = commit::ambiguous_commit(key);
+    let leader = {
+        let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
+        tokio::spawn(async move { send(&app, &token, channel, input(key, "maybe")).await })
+    };
+    gate.entered.acquire().await.unwrap().forget();
+    let other = {
+        let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
+        tokio::spawn(async move { send(&app, &token, channel, input(key, "other")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!other.is_finished());
+    gate.release.add_permits(1);
+    assert_error(leader.await.unwrap(), StatusCode::INTERNAL_SERVER_ERROR).await;
+    pending.await.unwrap().rollback().await.unwrap();
+    // The other intent does not inherit the leader's failure: it runs and pays.
+    let other = tokio::time::timeout(Duration::from_secs(5), other)
+        .await
+        .expect("the other intent executes")
+        .unwrap();
+    assert_eq!(other.status(), StatusCode::CREATED);
+    // The leader's retry finds "other" committed: 409 before any charge. The empty
+    // bucket shows "other" paid instead of taking the leader's free retry.
+    assert_error(
+        send(&l.app, &l.token, l.channel, input(key, "maybe")).await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    l.throttled(&l.token, l.channel, input(Uuid::new_v4(), "over"))
+        .await;
+}
+
+#[sqlx::test]
 async fn unknown_commit_retry_is_free_and_a_confirmed_failure_retry_is_charged(pool: PgPool) {
     let l = limited(&pool).await;
     let key = Uuid::new_v4();

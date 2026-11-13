@@ -229,12 +229,13 @@ pub async fn send_message(
     require_visible_scoped(&state.pool, organization_id, sender, channel_id).await?;
     let limiter = &state.message_delivery.send_limiter;
     let key = (organization_id, sender.0, input.client_message_id);
-    // One execution per key at a time; identical requests wait without charge or slot
-    // and settle with that execution (S6).
+    let intent = send_intent(channel_id, &input);
+    // One execution per key at a time; waiters take no charge or slot. Identical
+    // requests settle with that execution; another intent never inherits its failure (S6).
     let mut lead = loop {
-        let mut settled = match limiter.begin(key) {
+        let (mut settled, identical) = match limiter.begin(key, intent) {
             Ok(limiter::Begin::Leader(lead)) => break lead,
-            Ok(limiter::Begin::Wait(settled)) => settled,
+            Ok(limiter::Begin::Wait(settled, identical)) => (settled, identical),
             Err(limiter::Refusal::Saturated) => {
                 // A committed retry still answers canonically at the tracking cap (S5).
                 return match committed(&state.pool, organization_id, sender, channel_id, &input)
@@ -254,7 +255,7 @@ pub async fn send_message(
             {
                 return Ok(created(message));
             }
-            if let Some(failure) = failure {
+            if let Some(failure) = failure.filter(|_| identical) {
                 return Err(failure.replay());
             }
         }
@@ -294,6 +295,15 @@ pub async fn send_message(
     .await
     .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
     Ok(created(message))
+}
+
+/// Digest of what a send asks for, before normalization: requests that differ only
+/// in Topic-name spelling are treated as different and each executes on its own.
+fn send_intent(channel_id: Uuid, input: &SendMessageRequest) -> limiter::Intent {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    (channel_id, &input.body, &input.topic_name, input.reply_to).hash(&mut hasher);
+    hasher.finish()
 }
 
 fn created(message: Message) -> Response {

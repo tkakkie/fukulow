@@ -27,6 +27,9 @@ pub(crate) const UNKNOWN_TTL: Duration = Duration::from_secs(120);
 type Sender = (Uuid, Uuid);
 /// (Organization, Member, client_message_id).
 pub(crate) type Key = (Uuid, Uuid, Uuid);
+/// Digest of a send's intent (Channel, body, Topic name, reply target): only an
+/// identical request shares another's execution or free retry.
+pub(crate) type Intent = u64;
 
 /// Bucket size and refill. Only the operator sets it (`FUKULOW_SEND_BURST`,
 /// `FUKULOW_SEND_REFILL_PER_SECOND`); it changes no other limiter rule.
@@ -124,9 +127,10 @@ pub(crate) enum Settled {
 
 enum Pending {
     /// Followers subscribe; the leader publishes how it settled, then drops it.
-    InFlight(watch::Sender<Settled>),
-    /// The outcome of a charged COMMIT is unknown: one free retry until the deadline.
-    Unknown(Instant),
+    InFlight(watch::Sender<Settled>, Intent),
+    /// The outcome of a charged COMMIT is unknown: one free retry of the same
+    /// intent until the deadline.
+    Unknown(Instant, Intent),
 }
 
 #[derive(Default)]
@@ -164,8 +168,9 @@ impl Default for TestControl {
 pub(crate) enum Begin {
     /// This request executes the send for its key.
     Leader(Lead),
-    /// An identical request is in flight: wait for it to settle.
-    Wait(watch::Receiver<Settled>),
+    /// A request with this key is in flight: wait for it to settle. `true` when
+    /// its intent is identical, so its execution's outcome is this request's too.
+    Wait(watch::Receiver<Settled>, bool),
 }
 
 impl SendLimiter {
@@ -200,34 +205,38 @@ impl SendLimiter {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Claims `key` or joins the identical request already in flight. Charges nothing.
-    pub(crate) fn begin(&self, key: Key) -> Result<Begin, Refusal> {
+    /// Claims `key` or joins the request already in flight with it. Charges nothing.
+    pub(crate) fn begin(&self, key: Key, intent: Intent) -> Result<Begin, Refusal> {
         let now = self.now();
         let mut inner = self.lock();
         let marker = match inner.pending.get(&key) {
-            Some(Pending::InFlight(sender)) => {
+            Some(Pending::InFlight(sender, leader)) => {
                 if sender.receiver_count() >= MAX_WAITERS {
                     return Err(Refusal::Saturated);
                 }
-                return Ok(Begin::Wait(sender.subscribe()));
+                return Ok(Begin::Wait(sender.subscribe(), *leader == intent));
             }
-            Some(Pending::Unknown(until)) => Some(*until).filter(|until| *until > now),
+            Some(Pending::Unknown(until, of)) => {
+                Some((*until, *of)).filter(|(until, _)| *until > now)
+            }
             None => None,
         };
         if !inner.pending.contains_key(&key) && inner.pending.len() >= MAX_PENDING {
-            inner
-                .pending
-                .retain(|_, pending| !matches!(pending, Pending::Unknown(until) if *until <= now));
+            inner.pending.retain(
+                |_, pending| !matches!(pending, Pending::Unknown(until, _) if *until <= now),
+            );
             if inner.pending.len() >= MAX_PENDING {
                 return Err(Refusal::Saturated);
             }
         }
-        inner
-            .pending
-            .insert(key, Pending::InFlight(watch::channel(Settled::InFlight).0));
+        inner.pending.insert(
+            key,
+            Pending::InFlight(watch::channel(Settled::InFlight).0, intent),
+        );
         Ok(Begin::Leader(Lead {
             limiter: self.clone(),
             key,
+            intent,
             marker,
             charged: false,
             executing: false,
@@ -270,7 +279,7 @@ impl SendLimiter {
             Some(next) => inner.pending.insert(key, next),
             None => inner.pending.remove(&key),
         };
-        if let Some(Pending::InFlight(sender)) = previous {
+        if let Some(Pending::InFlight(sender, _)) = previous {
             sender.send_replace(settled);
         }
     }
@@ -290,17 +299,31 @@ impl SendLimiter {
 pub(crate) struct Lead {
     limiter: SendLimiter,
     key: Key,
-    /// Deadline of the unknown-COMMIT marker this request consumed, if any.
-    marker: Option<Instant>,
+    intent: Intent,
+    /// The unknown-COMMIT marker this request found, if any. It is free only for
+    /// the same intent; another intent pays and leaves the marker in place.
+    marker: Option<(Instant, Intent)>,
     charged: bool,
     executing: bool,
     settled: bool,
 }
 
 impl Lead {
+    fn free(&self) -> bool {
+        self.marker.is_some_and(|(_, of)| of == self.intent)
+    }
+
+    /// The found marker, if unexpired, unless this request consumed it.
+    fn kept_marker(&self) -> Option<Pending> {
+        let now = self.limiter.now();
+        self.marker
+            .filter(|(until, of)| *until > now && (*of != self.intent || !self.executing))
+            .map(|(until, of)| Pending::Unknown(until, of))
+    }
+
     /// Charges one token unless this is the free retry of an unknown COMMIT.
     pub(crate) fn charge(&mut self) -> Result<(), Refusal> {
-        if self.marker.is_some() || self.charged {
+        if self.free() || self.charged {
             return Ok(());
         }
         self.limiter.charge((self.key.0, self.key.1))?;
@@ -316,8 +339,10 @@ impl Lead {
     /// execution earns a free retry, so free retries cannot chain.
     pub(crate) fn settle(mut self, unknown: bool, failure: Option<super::MessageError>) {
         self.settled = true;
-        let next =
-            (unknown && self.charged).then(|| Pending::Unknown(self.limiter.now() + UNKNOWN_TTL));
+        self.executing = true;
+        let next = (unknown && self.charged)
+            .then(|| Pending::Unknown(self.limiter.now() + UNKNOWN_TTL, self.intent))
+            .or_else(|| self.kept_marker());
         self.limiter
             .finish(self.key, next, Settled::Executed(failure.map(Arc::new)));
     }
@@ -332,18 +357,15 @@ impl Drop for Lead {
             // Dropped mid-persistence (task cancelled): the outcome is unknown.
             let next = self
                 .charged
-                .then(|| Pending::Unknown(self.limiter.now() + UNKNOWN_TTL));
+                .then(|| Pending::Unknown(self.limiter.now() + UNKNOWN_TTL, self.intent))
+                .or_else(|| self.kept_marker());
             let failure = super::MessageError::Database(sqlx::Error::WorkerCrashed);
             self.limiter
                 .finish(self.key, next, Settled::Executed(Some(Arc::new(failure))));
             return;
         }
         // Nothing ran: an unexpired free retry stays available.
-        let now = self.limiter.now();
-        let next = self
-            .marker
-            .filter(|until| *until > now)
-            .map(Pending::Unknown);
+        let next = self.kept_marker();
         self.limiter.finish(self.key, next, Settled::Released);
     }
 }
@@ -357,9 +379,9 @@ mod tests {
     }
 
     fn lead(limiter: &SendLimiter, key: Key) -> Lead {
-        match limiter.begin(key).unwrap() {
+        match limiter.begin(key, 0).unwrap() {
             Begin::Leader(lead) => lead,
-            Begin::Wait(_) => panic!("expected leader"),
+            Begin::Wait(..) => panic!("expected leader"),
         }
     }
 
@@ -416,14 +438,14 @@ mod tests {
         let leader = lead(&limiter, key);
         let mut waiters = Vec::new();
         for _ in 0..MAX_WAITERS {
-            match limiter.begin(key).unwrap() {
-                Begin::Wait(receiver) => waiters.push(receiver),
+            match limiter.begin(key, 0).unwrap() {
+                Begin::Wait(receiver, _) => waiters.push(receiver),
                 Begin::Leader(_) => panic!("expected waiter"),
             }
         }
-        assert!(matches!(limiter.begin(key), Err(Refusal::Saturated)));
+        assert!(matches!(limiter.begin(key, 0), Err(Refusal::Saturated)));
         drop(waiters.pop());
-        assert!(matches!(limiter.begin(key), Ok(Begin::Wait(_))));
+        assert!(matches!(limiter.begin(key, 0), Ok(Begin::Wait(..))));
         leader.settle(false, Some(super::super::MessageError::ReplyParentNotFound));
         // Waiters see the leader's execution and its failure; they never begin again.
         assert!(waiters.iter_mut().all(|w| w.has_changed().is_err()));
@@ -463,6 +485,33 @@ mod tests {
         limiter.advance(UNKNOWN_TTL);
         exhaust(&limiter, sender);
         assert_eq!(lead(&limiter, key).charge(), Err(Refusal::Throttled(1)));
+    }
+
+    #[test]
+    fn another_intent_waits_without_sharing_and_pays_without_taking_the_free_retry() {
+        let limiter = limiter();
+        let key = key();
+        let mut paid = lead(&limiter, key);
+        assert!(matches!(limiter.begin(key, 0), Ok(Begin::Wait(_, true))));
+        assert!(matches!(limiter.begin(key, 1), Ok(Begin::Wait(_, false))));
+        paid.charge().unwrap();
+        paid.settle(true, None);
+        exhaust(&limiter, (key.0, key.1));
+        // Another intent pays even with the marker present, and leaves it in place.
+        let Ok(Begin::Leader(mut other)) = limiter.begin(key, 1) else {
+            panic!("expected leader");
+        };
+        assert_eq!(other.charge(), Err(Refusal::Throttled(1)));
+        drop(other);
+        limiter.advance(Duration::from_secs(1));
+        let Ok(Begin::Leader(mut other)) = limiter.begin(key, 1) else {
+            panic!("expected leader");
+        };
+        other.charge().unwrap();
+        other.executing();
+        other.settle(false, None);
+        // The original intent still has its free retry.
+        lead(&limiter, key).charge().unwrap();
     }
 
     #[test]
@@ -507,7 +556,7 @@ mod tests {
         let limiter = limiter();
         let key = key();
         let mut lead = lead(&limiter, key);
-        let Ok(Begin::Wait(mut waiter)) = limiter.begin(key) else {
+        let Ok(Begin::Wait(mut waiter, _)) = limiter.begin(key, 0) else {
             panic!("expected waiter");
         };
         lead.charge().unwrap();
@@ -539,9 +588,9 @@ mod tests {
         // Caps and duplicate tracking are unchanged.
         let key = key();
         let _leader = lead(&limiter, key);
-        let waiters: Vec<_> = (0..MAX_WAITERS).map(|_| limiter.begin(key)).collect();
-        assert!(waiters.iter().all(|w| matches!(w, Ok(Begin::Wait(_)))));
-        assert!(matches!(limiter.begin(key), Err(Refusal::Saturated)));
+        let waiters: Vec<_> = (0..MAX_WAITERS).map(|_| limiter.begin(key, 0)).collect();
+        assert!(waiters.iter().all(|w| matches!(w, Ok(Begin::Wait(..)))));
+        assert!(matches!(limiter.begin(key, 0), Err(Refusal::Saturated)));
         let max = SendLimit::configured(Some("1000000"), Some("1000000")).unwrap();
         let limiter = SendLimiter::new(max);
         limiter.enforce();
@@ -554,10 +603,10 @@ mod tests {
     fn pending_cap_refuses_new_keys_without_dropping_entries() {
         let limiter = limiter();
         let leads: Vec<_> = (0..MAX_PENDING).map(|_| lead(&limiter, key())).collect();
-        assert!(matches!(limiter.begin(key()), Err(Refusal::Saturated)));
+        assert!(matches!(limiter.begin(key(), 0), Err(Refusal::Saturated)));
         assert_eq!(limiter.pending(), MAX_PENDING);
         drop(leads);
-        assert!(matches!(limiter.begin(key()), Ok(Begin::Leader(_))));
+        assert!(matches!(limiter.begin(key(), 0), Ok(Begin::Leader(_))));
     }
 
     #[test]
@@ -569,9 +618,9 @@ mod tests {
             lead.charge().unwrap();
             lead.executing();
         }
-        assert!(matches!(limiter.begin(key()), Err(Refusal::Saturated)));
+        assert!(matches!(limiter.begin(key(), 0), Err(Refusal::Saturated)));
         limiter.advance(UNKNOWN_TTL);
-        assert!(matches!(limiter.begin(key()), Ok(Begin::Leader(_))));
+        assert!(matches!(limiter.begin(key(), 0), Ok(Begin::Leader(_))));
     }
 
     #[test]
