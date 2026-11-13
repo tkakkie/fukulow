@@ -115,6 +115,48 @@ it.each([204, 401])('Invite session recovery waits for explicit sign-out %i and 
   expect(c.get().accepted).toBe(true)
 })
 
+it('a rejected sign-out clears Invite busy, shows one actionable error, and permits recovery and manual acceptance', async () => {
+  const api = vi.fn().mockResolvedValueOnce({ ok: false, kind: 'http', status: 401 }).mockResolvedValueOnce(ok(identity))
+  const c = createInviteAcceptance({ organizationId: org, token }, api)
+  const input = { email: 'new@example.com', name: '名前', password: 'new account password' }
+  await c.accept(input)
+  const logout = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(true)
+  const pending = c.signOutAndContinue(logout)
+  expect(c.get().busy).toBe(true)
+  expect(await pending).toBe(false)
+  expect(c.get()).toEqual({
+    sessionRejected: true, available: true, accepted: false, busy: false,
+    error: 'ログアウトできませんでした。通信状況を確認して、もう一度お試しください。',
+  })
+  expect(api).toHaveBeenCalledOnce()
+  expect(await c.signOutAndContinue(logout)).toBe(true)
+  expect(logout).toHaveBeenCalledTimes(2)
+  expect(c.get()).toMatchObject({ busy: false, sessionRejected: false, available: true, error: '' })
+  expect(api).toHaveBeenCalledOnce()
+  expect(await c.accept(input)).toEqual(identity)
+  expect(api).toHaveBeenLastCalledWith(org, { ...input, token })
+  expect(c.get()).toMatchObject({ busy: false, available: false, accepted: true, error: '' })
+})
+
+it('a rejected acceptance clears Invite busy, shows the network error, and permits a later click with the same Invite', async () => {
+  const api = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(ok(identity))
+  const c = createInviteAcceptance({ organizationId: org, token }, api)
+  const ended = vi.fn()
+  const input = { email: 'new@example.com', name: '名前', password: 'new account password' }
+  const pending = c.accept(input, ended)
+  expect(c.get().busy).toBe(true)
+  expect(await pending).toBeNull()
+  expect(c.get()).toEqual({
+    sessionRejected: false, available: true, accepted: false, busy: false,
+    error: 'サーバーに接続できません。もう一度お試しください。',
+  })
+  expect(ended).not.toHaveBeenCalled()
+  expect(await c.accept(input, ended)).toEqual(identity)
+  expect(api).toHaveBeenCalledTimes(2)
+  expect(api).toHaveBeenLastCalledWith(org, { ...input, token })
+  expect(c.get()).toMatchObject({ busy: false, available: false, accepted: true, error: '' })
+})
+
 it.each(['network', 500, 503])('Invite session recovery keeps the Invite and an actionable error after sign-out %s', async (failure) => {
   const api = vi.fn().mockResolvedValue({ ok: false, kind: 'http', status: 401 })
   const c = createInviteAcceptance({ organizationId: org, token }, api)

@@ -224,7 +224,29 @@ describe('shared auth-operation guard', () => {
       s.deps.restore.mockRejectedValueOnce(error)
       pending = s.ops.load()
     }
-    await expect(pending).rejects.toThrow('test-only failure')
+    if (action === 'recovery' || action === 'Invite') {
+      await expect(pending).resolves.toBeUndefined()
+      expect(s.ops.get()).toEqual({ busy: false, error: '' })
+      expect(s.invitation.get()).toEqual({
+        busy: false, available: true, accepted: false, sessionRejected: action === 'recovery',
+        error: action === 'recovery'
+          ? 'ログアウトできませんでした。通信状況を確認して、もう一度お試しください。'
+          : 'サーバーに接続できません。もう一度お試しください。',
+      })
+      expect(s.account.accepted).not.toHaveBeenCalled()
+      expect(s.account.show).not.toHaveBeenCalled()
+      expect(s.api).toHaveBeenCalledOnce()
+      if (action === 'recovery') {
+        await s.ops.signOutAndContinue(s.invitation)
+        expect(s.deps.signOut).toHaveBeenCalledTimes(2)
+        expect(s.account.show).toHaveBeenCalledWith({ screen: 'signin' })
+        expect(s.api).toHaveBeenCalledOnce()
+      }
+      s.api.mockResolvedValueOnce({ ok: true, data: member })
+      await s.ops.acceptInvitation(s.invitation, input)
+      expect(s.account.accepted).toHaveBeenCalledWith(member)
+      expect(s.invitation.get()).toMatchObject({ busy: false, accepted: true, available: false, error: '' })
+    } else await expect(pending).rejects.toThrow('test-only failure')
     expect(s.ops.get().busy).toBe(false)
     expect(await s.ops.signOut()).toBe(true)
   })
