@@ -14,6 +14,9 @@ API contract and generated types. Writing rules and the other parts: [index](../
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [messages](messages.md): `#204 sections belong`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
+- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section display intersects`
+
 - [auth](auth.md): `#305 Owner may deactivate another active Member`, `#305 owns the deactivation transaction`
 
 - [process](process.md): `#195: shutdown also returns 503 for`

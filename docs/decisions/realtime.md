@@ -46,6 +46,12 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #307 fencing: only a list requested after the latest access notice adds Channels; `channel_access_gained` or reappearance starts a client access generation; P8 selection orders counts. Reason: publication after COMMIT orders request vs notice; no REST change or exposed grant id.
 - #307 `channel_access_revoked` is Organization-scoped and separate from subscription-scoped `channel_access_lost`. Reason: keeps C9/S4 semantics unchanged while unwatched Channels lose their badge at once.
 
+## Personal section notices (#204, specified)
+
+- #204 sections_changed goes only to the changed Member's current sessions in that Organization, including the caller and sockets with no subscriptions. It carries no section data. Reason: devices converge without disclosing personal grouping.
+- #204 section notices share #307's post-COMMIT publication, coalescing buffer, activity_reset and reconnect refetch. Reason: failure and burst recovery need one bounded path, with no parallel subscription or Message cursor.
+- #204 section display intersects authorized layout and Channel-list snapshots under A11/A12 fences; loss hides immediately. Reason: a stale personal-layout response must never restore a Channel hidden by access loss.
+
 ## Admission and timeouts
 - #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
 - Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).
@@ -78,6 +84,8 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
+
+- [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
 
 - [auth](auth.md): `#305 owns the deactivation transaction`
 

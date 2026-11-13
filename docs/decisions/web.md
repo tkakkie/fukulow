@@ -25,6 +25,9 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [messages](messages.md): `#204 sections belong`, `#204 access loss hides`
+- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
+
 - [process](process.md): `Web boundary check (#48, #60): Workers/SharedWorkers`, `Web storage is forbidden everywhere. A`, `Hand-written API types are review-enforced, not`
 - [auth](auth.md): `#197 app-wide CSP allows external same-origin`, `#197 Vite manifest outputs alone get`
 - [messages](messages.md): `#138: opt-in Topic composition bootstraps sync`, `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`, `#140 keeps one opt-in chain per`, `#140 composes over sync (or Topic`
