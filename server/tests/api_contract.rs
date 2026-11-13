@@ -25,7 +25,7 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // All 30 operations document shutdown, including Member deactivation.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 205;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 206;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
