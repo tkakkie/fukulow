@@ -26,25 +26,34 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   let closed = false
   let loadSequence = 0
   const listeners = new Set<() => void>()
-  const authors = createAuthors(organizationId, onEnded, onUnavailable, deps.lookupAuthors)
+  const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
+  function unavailable() { closed = true; loadSequence++; authors.unavailable() }
+  function membershipLost() {
+    if (closed) return
+    unavailable()
+    onUnavailable()
+  }
   function failed(r: Exclude<Result<unknown>, { ok: true }>) {
     if (r.kind === 'http' && r.status === 401) onEnded()
-    else if (!closed && isOrganizationUnavailable(r)) onUnavailable()
+    else if (isOrganizationUnavailable(r)) membershipLost()
     set({ error: memberError(r) })
   }
   return {
     authors,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
-    unavailable() { closed = true; loadSequence++; authors.unavailable() },
+    unavailable,
     close() { closed = true; authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
     async load() {
       if (closed) return
       const sequence = ++loadSequence
       const r = await deps.listMembers(organizationId)
       if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
-      if (closed || sequence !== loadSequence) return
+      if (closed) return
+      // Freshness changes cannot invalidate Membership loss within this selection.
+      if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
+      if (sequence !== loadSequence) return
       if (!r.ok) failed(r)
       else if (!closed) { authors.replaceMembers(r.data.members); set({ members: r.data.members }) }
       set({ loading: false })

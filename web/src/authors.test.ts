@@ -94,17 +94,45 @@ describe('author identities', () => {
     expect(unavailable).not.toHaveBeenCalled()
   })
 
-  it('reports current Organization loss but ignores loss from a replaced generation', async () => {
+  async function membershipLossAfterFreshness(trigger: 'retry' | 'replaceMembers') {
+    const finishes: ((result: ReturnType<typeof ok>) => void)[] = []
+    const unavailable = vi.fn()
+    const lookup = vi.fn(() => new Promise<ReturnType<typeof ok>>(resolve => { finishes.push(resolve) }))
+    const c = createAuthors('org', vi.fn(), unavailable, lookup)
+    c.watch(['a']); await settle()
+    if (trigger === 'retry') c.retry()
+    else c.replaceMembers([member('known')])
+    await settle()
+    expect(lookup).toHaveBeenCalledTimes(2)
+    finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+    await settle()
+    expect(unavailable).toHaveBeenCalledOnce()
+    finishes[1](ok([identity('a')]))
+    c.watch(['b']); c.retry(); c.replaceMembers([])
+    await settle()
+    expect(lookup).toHaveBeenCalledTimes(2)
+    expect(c.get().has('a')).toBe(false)
+  }
+
+  it('reports Membership loss after retry advances freshness and stops further lookups', () => membershipLossAfterFreshness('retry'))
+  it('reports Membership loss after Member-list replacement advances freshness and stops further lookups', () => membershipLossAfterFreshness('replaceMembers'))
+
+  it('ignores Membership loss from a previous Organization selection', async () => {
     let finish!: (result: ReturnType<typeof ok>) => void
     const unavailable = vi.fn()
     const lookup = vi.fn(() => new Promise<ReturnType<typeof ok>>(resolve => { finish = resolve }))
-    const c = createAuthors('org', vi.fn(), unavailable, lookup)
-    const loss = { ok: false as const, kind: 'http' as const, status: 404, error: 'organization_unavailable' }
-    c.watch(['a']); await settle(); const old = finish
-    c.replaceMembers([member('a')]); old(loss); await settle()
+    const previous = createAuthors('org', vi.fn(), unavailable, lookup)
+    previous.watch(['a']); await settle()
+    const old = finish
+    previous.close()
+    const current = createAuthors('org', vi.fn(), unavailable, lookup)
+    old({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+    await settle()
     expect(unavailable).not.toHaveBeenCalled()
-    c.watch(['b']); await settle(); finish(loss); await settle()
-    expect(unavailable).toHaveBeenCalledOnce()
+    current.watch(['b']); await settle(); finish(ok([identity('b')]))
+    await settle()
+    expect(current.get().get('b')).toEqual(identity('b'))
+    current.close()
   })
 
   it('stops lookups and fences in-flight identities on C10 while retaining cached names and late 401 handling', async () => {

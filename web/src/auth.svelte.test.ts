@@ -4,7 +4,7 @@ import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createInviteAcceptance, createMembers } from './members'
 import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
-import type { lookupAuthors } from './api'
+import type { lookupAuthors, listMembers, Result } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
@@ -392,6 +392,50 @@ describe('Organization selection fences data within one Account Session', () => 
     expect(s.auth.view.screen).toBe('app')
     expect(s.nets[1].socket.closed).toBe(false)
   })
+
+  async function oldMemberResponse(source: 'author lookup' | 'Member list', replacement: 'Organization selection' | 'Account') {
+    const finishes: ((result: Result<never>) => void)[] = []
+    const lookup = vi.fn<typeof lookupAuthors>(() => new Promise(resolve => { finishes.push(resolve) }))
+    const list = vi.fn<typeof listMembers>(async () => ok({ members: [] }))
+    const s = stack({
+      openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable, {
+        listMembers: list, lookupAuthors: lookup,
+        changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+      })),
+    })
+    await signInAs(s, 'm1')
+    const old = s.auth.members!
+    if (source === 'author lookup') {
+      old.authors.watch(['a']); await settle()
+      old.authors.watch(['b']); await settle()
+    } else {
+      list.mockImplementationOnce(() => new Promise(resolve => { finishes.push(resolve) }))
+        .mockImplementationOnce(() => new Promise(resolve => { finishes.push(resolve) }))
+      void old.load(); void old.load()
+    }
+    expect(finishes).toHaveLength(2)
+    if (replacement === 'Account') await signInAs(s, 'm2')
+    else await s.auth.selectOrganization('o') // Re-selecting the same Organization still replaces its lifetime.
+    const current = s.auth.session!, members = s.auth.members!
+    finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+    await settle()
+    expect(s.auth.view.screen).toBe('app')
+    expect(s.auth.organizationStatus).toBe('ready')
+    expect(s.auth.session).toBe(current)
+    await members.load()
+    members.authors.watch(['fresh']); await settle()
+    expect(list).toHaveBeenLastCalledWith('o')
+    expect(lookup).toHaveBeenLastCalledWith('o', { ids: ['fresh'] })
+    finishes[1]({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(s.auth.view.screen).toBe(replacement === 'Account' ? 'app' : 'signin')
+    if (replacement === 'Account') expect(s.auth.session).toBe(current)
+  }
+
+  it('fences old author lookup 404s after Organization re-selection while late 401 ends the same Account Session', () => oldMemberResponse('author lookup', 'Organization selection'))
+  it('fences old Member-list 404s after Organization re-selection while late 401 ends the same Account Session', () => oldMemberResponse('Member list', 'Organization selection'))
+  it('fences old author lookup 404s and 401s after Account replacement', () => oldMemberResponse('author lookup', 'Account'))
+  it('fences old Member-list 404s and 401s after Account replacement', () => oldMemberResponse('Member list', 'Account'))
 
   it('Membership loss is terminal only for its Organization and switching to another remains possible', async () => {
     const s = stack()
@@ -904,7 +948,6 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
 })
 
 import { createAccountSecurity } from './account-security'
-import type { Result } from './api'
 
 it('account settings 403 preserves the live session, while 401 closes it and its drafts', async () => {
   const putPassword = vi.fn(async (): Promise<Result<undefined>> => ({ ok: false, kind: 'http', status: 403, error: 'current_password_incorrect' }))

@@ -35,11 +35,13 @@ export function createAuthors(
       const result = await lookup(organizationId, { ids: batch })
       // A late 401 still belongs to the Account Session owner.
       if (!result.ok && result.kind === 'http' && result.status === 401) { onEnded(); return }
-      if (closed || unavailable || current !== generation) return
+      if (closed || unavailable) return
+      // Freshness changes cannot invalidate Membership loss within this selection.
       if (!result.ok) {
         if (isOrganizationUnavailable(result)) { stop(); onUnavailable() }
         return
       }
+      if (current !== generation) return
       const next = new Map(identities)
       const requested = new Set(batch)
       for (const identity of result.data.identities) {
