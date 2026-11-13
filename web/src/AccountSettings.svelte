@@ -18,7 +18,8 @@
   let newPassword = $state('')
   const title = $derived(action === 'password' ? 'パスワードを変更' : '他のセッションをログアウト')
   const error = $derived(s.error === 'incorrect' ? '現在のパスワードが正しくありません。もう一度入力してください。'
-    : s.error === 'invalid' ? '入力内容を確認してください。新しいパスワードは12文字以上、1024バイト以内で入力してください。'
+    : s.error === 'invalid_new' ? '新しいパスワードは12文字以上、1024バイト以内で入力してください。'
+    : s.error === 'invalid' ? '入力内容を確認してください。現在のパスワードは1024バイト以内で入力してください。'
     : s.error === 'throttled' ? '試行回数が多すぎます。しばらく待ってからもう一度お試しください。'
     : s.error === 'unconfirmed' ? '処理の結果を確認できませんでした。通信状況を確認して、もう一度お試しください。' : '')
 

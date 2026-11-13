@@ -1,7 +1,7 @@
 import { putPassword, revokeOtherSessions, type ChangePasswordRequest, type RevokeOtherSessionsRequest, type Result } from './api'
 
 export type SecurityAction = 'password' | 'sessions'
-export type SecurityError = 'incorrect' | 'invalid' | 'throttled' | 'unconfirmed' | null
+export type SecurityError = 'incorrect' | 'invalid_new' | 'invalid' | 'throttled' | 'unconfirmed' | null
 export type SecurityState = { busy: boolean; error: SecurityError; success: SecurityAction | null }
 type Dependencies = { putPassword: typeof putPassword; revokeOtherSessions: typeof revokeOtherSessions }
 
@@ -25,6 +25,7 @@ export function createAccountSecurity(onEnded: () => void, deps: Dependencies = 
     }
     const error: SecurityError = result.ok ? null
       : result.kind === 'http' && result.status === 403 && result.error === 'current_password_incorrect' ? 'incorrect'
+      : result.kind === 'http' && result.status === 400 && result.error === 'invalid_new_password' ? 'invalid_new'
       : result.kind === 'http' && result.status === 400 ? 'invalid'
       : result.kind === 'http' && result.status === 429 ? 'throttled' : 'unconfirmed'
     update({ busy: false, error, success: result.ok ? action : null })

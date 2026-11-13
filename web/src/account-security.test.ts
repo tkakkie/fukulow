@@ -19,7 +19,8 @@ it('both security actions preserve the current session on 403 and classify other
     const run = () => password ? f.controller.changePassword(input) : f.controller.revokeOthers({ current_password: input.current_password })
     for (const [result, error] of [
       [{ ok: false, kind: 'http', status: 403, error: 'current_password_incorrect' }, 'incorrect'],
-      [{ ok: false, kind: 'http', status: 400, error: 'invalid_new_password' }, 'invalid'],
+      [{ ok: false, kind: 'http', status: 400, error: 'invalid_new_password' }, 'invalid_new'],
+      [{ ok: false, kind: 'http', status: 400, error: 'invalid input' }, 'invalid'],
       [{ ok: false, kind: 'http', status: 429 }, 'throttled'],
       [{ ok: false, kind: 'network' }, 'unconfirmed'],
     ] as const) {
