@@ -20,6 +20,9 @@ services:
       FUKULOW_SETUP_TOKEN: ${FUKULOW_SETUP_TOKEN:?Set FUKULOW_SETUP_TOKEN in .env}
       FUKULOW_TRUSTED_PROXIES: ${FUKULOW_EDGE_PREFIX:-172.30.94}.2
       FUKULOW_CLIENT_IP_HEADER: x-forwarded-for
+      # Send limit per (Organization, Member); production keeps 10 and 1/s.
+      FUKULOW_SEND_BURST: ${FUKULOW_SEND_BURST:-10}
+      FUKULOW_SEND_REFILL_PER_SECOND: ${FUKULOW_SEND_REFILL_PER_SECOND:-1}
     depends_on:
       migrate:
         condition: service_completed_successfully

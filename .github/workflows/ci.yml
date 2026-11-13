@@ -166,6 +166,10 @@ jobs:
       - run: docker compose --profile caddy up -d --no-build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
+          # CI-only: the light k6 run sends from one Member (follow-up: many Members).
+          # Its numbers are not production-limit measurements.
+          FUKULOW_SEND_BURST: '10000'
+          FUKULOW_SEND_REFILL_PER_SECOND: '1000'
       - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
       - name: Light k6 run (10 seconds; hard limit 55 seconds)
         env:

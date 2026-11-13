@@ -678,7 +678,7 @@
             }
           },
           "400": {
-            "description": "Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace",
+            "description": "Malformed Organization id, invalid Channel JSON or fields; name must be 1..=128 Unicode scalar values, NUL-free and without surrounding whitespace",
             "content": {
               "application/json": {
                 "schema": {
@@ -1508,7 +1508,7 @@
         "tags": [
           "crate::messages"
         ],
-        "summary": "Send a Message, optionally joining/creating a Topic by name in the same transaction.\nFor all sends, Account Session authentication precedes input validation (400/413/415),\nwhich precedes organization_unavailable (404) and Channel authorization.\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.",
+        "summary": "Send a Message, optionally joining/creating a Topic by name in the same transaction.\nFor all sends, Account Session authentication precedes input validation (400/413/415),\nwhich precedes organization_unavailable (404) and Channel authorization, then the\nper-Member send limit (429), then admission (503).\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.",
         "operationId": "send_message",
         "parameters": [
           {
@@ -1613,6 +1613,26 @@
               }
             }
           },
+          "429": {
+            "description": "send_rate_limited: the per-(Organization, Member) send limit (burst 10, 1 per second) is exhausted; checked after Channel authorization and before admission; nothing was charged, queued or persisted; retry after the delay with the same request and client_message_id",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Whole seconds until the next token; at least 1"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Database or worker failure while resolving the session, checking Channel visibility, or persisting the Message, including unknown COMMIT outcome or the 10 second database-work deadline; retry with the same client_message_id",
             "content": {
@@ -1624,7 +1644,7 @@
             }
           },
           "503": {
-            "description": "Send admission queue is full or the 30 second admission wait expired; persistence has not started; retry with the same client_message_id; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "description": "Send admission queue is full or the 30 second admission wait expired (Retry-After 1 through 5, jittered), or a send-limiter tracking cap is full (Retry-After 1, nothing charged); persistence has not started; retry with the same client_message_id; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -4199,8 +4219,9 @@
           },
           "name": {
             "type": "string",
-            "description": "At most 128 Unicode scalar values.",
-            "maxLength": 128
+            "description": "1..=128 Unicode scalar values.",
+            "maxLength": 128,
+            "minLength": 1
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"
@@ -4337,8 +4358,9 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "At most 128 Unicode scalar values.\nLeading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.\nInternal whitespace and empty names are allowed.",
-            "maxLength": 128
+            "description": "1..=128 Unicode scalar values; no NUL.\nLeading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.\nInternal whitespace is allowed.",
+            "maxLength": 128,
+            "minLength": 1
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"

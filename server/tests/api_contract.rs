@@ -25,7 +25,7 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // All 32 operations document shutdown, including Account security actions.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 223;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 224;
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -519,12 +519,12 @@ fn response_description_check_covers_reusable_and_nested_responses() {
 }
 
 #[test]
-fn channel_name_schemas_limit_length_to_128() {
+fn channel_name_schemas_limit_length_to_1_through_128() {
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     for schema in ["Channel", "CreateChannelRequest"] {
         let name = &document["components"]["schemas"][schema]["properties"]["name"];
         assert_eq!(name["maxLength"], 128);
-        assert!(name.get("minLength").is_none());
+        assert_eq!(name["minLength"], 1);
     }
 }
 

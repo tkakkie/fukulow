@@ -985,6 +985,66 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it('shows accessible Japanese throttled status, automatic retry and discard without manual resend or edit', async () => {
+    vi.useFakeTimers()
+    const net = fakeNetwork()
+    const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.socket.onReady()
+    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    const ch = syncAdapter(session.sync).channel('A')
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Timeline, {
+      target: host as unknown as Element,
+      props: { channel: ch, channelId: 'A', selfId: 'me', ongoToChannelList: () => {} },
+    })
+    await settle()
+    ch.setDraft('待機中の本文')
+    void ch.submit()
+    await settle()
+    const original = net.sends[0].body
+    ch.setDraft('次の下書き')
+    net.sends[0].resolve({ ok: false, kind: 'http', status: 429, retryAfterMs: 2000 })
+    await settle()
+    const copy = '送信が混み合っています。しばらくしてから自動で再送します。'
+    expect(host.textContent).toContain('待機中の本文')
+    expect(host.textContent).toContain(copy)
+    const status = host.querySelector('.ui-message-row__sending')!
+    expect(status.textContent).toBe(copy)
+    expect(status.getAttribute('aria-hidden')).not.toBe('true')
+    expect(status.getAttribute('role')).toBeNull() // own sends add no second live region (§6)
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    expect(buttonsByText(host, '再送する')).toHaveLength(0)
+    expect(buttonsByText(host, '編集して送り直す')).toHaveLength(0)
+    expect(buttonsByText(host, '破棄')).toHaveLength(1)
+    expect(ch.composer.draft).toBe('次の下書き')
+    await vi.advanceTimersByTimeAsync(1999)
+    expect(net.sends).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await settle()
+    expect(net.sends[1].body).toEqual(original)
+    expect(host.textContent).toContain('送信中…')
+    expect(host.textContent).not.toContain(copy)
+    net.sends[1].resolve({ ok: false, kind: 'http', status: 429, retryAfterMs: 4000 })
+    await settle()
+    expect(host.textContent).toContain(copy)
+    buttonsByText(host, '破棄')[0].click()
+    await settle()
+    expect(host.textContent).not.toContain('待機中の本文')
+    expect(testDoc.activeElement).toBe(host.querySelector('textarea'))
+    expect(ch.composer.draft).toBe('次の下書き')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(net.sends).toHaveLength(2)
+    await unmount(instance)
+    host.remove()
+    session.close()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('renders no 再送する or 編集して送り直す when target is unavailable and keeps 破棄 working', async () => {
     // 1. Direct MessageRow check across both retryable and refused failed states under targetUnavailable
     const host = testDoc.createElement('div')
