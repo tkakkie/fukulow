@@ -629,6 +629,198 @@ Result: every pass met the 5,000 ms deadline under RLS. With 1,000 Organizations
 
 Limits: one run per layout on a shared development host, local PostgreSQL, no WebSockets or concurrent publishing; the second layout is measured on a larger table.
 
+## RLS before/after (#314 step 5, 2026-11-13 JST)
+
+Purpose: isolate RLS enablement: B = a999a35^ (6dcadb7, context plumbing without policies), A = a999a35 (#343, RLS enabled). Fresh reruns replace the historical step 2 numbers as the comparison denominator; later context plumbing is present on both sides. Ran B/A/B/A/B/A in this session, 11:30–11:49 JST, with one fresh isolated PostgreSQL database per side/run for plans + latency and another fresh database for each end-to-end run. The detached B worktree was unchanged.
+
+Conditions: Apple M5 / 10 CPUs / 32 GiB, macOS 27.0.1 arm64; Docker 29.9.3, VM 10 CPUs / 7.748 GiB; pinned PostgreSQL 18.6 image e3d24f69…, shared_buffers 128MB, work_mem 4MB, default JIT; k6 1.8.2 (00fdceba…); Rust 1.99.0 release images built separately from each source before timing, container Node 26.13.0, host orchestration Node 26.8.1. No competing cargo suite/build or load run was found before starting or during spot checks, so no wait was needed. Six pre-existing development PostgreSQL containers remained running, near idle; interactive desktop activity continued. No TLS/proxy, Docker bridge transport to the loopback-published app, no load warm-up. All app/pgbench/EXPLAIN connections used non-owner fukulow_app (NOBYPASSRLS).
+
+Reproduce (test-only database/password variables supplied via environment; never record their values):
+
+- Create B with `git worktree add --detach /private/tmp/fukulow-314-step5-before 6dcadb7`; use this worktree at a999a35 for A. Build a separate release Docker image from each source; run the same A measurement harness with `LOAD_SERVER_SOURCE` and `LOAD_APP_IMAGE` selecting that side. Before/after SQL harness files are identical. Exact runner and raw outputs: `/private/tmp/fukulow-314-step5/run.ts`, `before/run{1,2,3}/`, `after/run{1,2,3}/`; analysis and index-condition audit also stay there, outside Git.
+- Plans: pinned fresh PostgreSQL 18.6, `sqlx migrate run --source "$SIDE_TREE/server/migrations"`, that side's `deploy/db-roles.sql` and `deploy/db-grants.sql`, then the unchanged `load/hot-plans/seed.sql` as owner. Same step 2 dataset: Org A 10,000 Members, 50 Channels, hot Channel 100,000 Messages (70,000 in 2,000 Topics), other Channels 2,000 each; Org B 1,000 Members and 10 × 5,000 Messages; 406,800 Channel positions and 2,000 measured-Member Topic positions, last-100 cut-off. As app role: `psql -X -v org_context=1 [-v generic=1] -f load/hot-plans/plans.sql`, six fresh-session passes per mode per run. Default's first executions are Custom; its repeated `auto.*` sections test Auto. All writes roll back. Tables use medians of passes 2–6, then the median of the three run medians; buffers are execution-root shared hits + reads, excluding planning, reported Custom; Generic. † marks >10% **and** >0.05 ms Execution Time growth in at least one mode.
+- Latency: `HOTPLANS_CONTAINER="$DB" LATENCY_CTX=1 LATENCY_SECONDS=30 LATENCY_RESULT_DIR="$OUT/latency-reports" node load/hot-latency.ts`, prepared pgbench, 1 and 8 clients, three runs per side. Same historical harness: “History latest page” actually pages 51 Messages before a uniformly random cursor; Replay returns 50 after a random cursor. Each transaction uses BEGIN/local context/query/COMMIT. Each percentile and transactions/s is independently medianed across three runs; ranges are per-run p95.
+- Load: `CHANNELS=1 SUBSCRIBERS=20 PUBLISHERS=2 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=30 READY_TIMEOUT_SECONDS=15 DRAIN_TIMEOUT_SECONDS=10 LOAD_RESULT_DIR="$OUT/load" LOAD_SERVER_SOURCE="$SIDE_TREE" LOAD_APP_IMAGE="$SIDE_IMAGE" make load-record`. Three runs per side, identical step 2 offered load, fresh DB and app each time.
+
+| Query (Execution Time, ms) | Custom B → A (change) | Generic B → A (change) | Shared buffers C; G (B → A) |
+|---|---:|---:|---:|
+| `auth` | 0.029 → 0.037 (+27.6%) | 0.028 → 0.040 (+42.9%) | 6 → 6; 6 → 6 |
+| `vis` | 0.018 → 0.023 (+27.8%) | 0.019 → 0.022 (+15.8%) | 5 → 5; 5 → 5 |
+| `watermark.shared_lock` | 0.011 → 0.011 (+0.0%) | 0.012 → 0.013 (+8.3%) | 0 → 0; 0 → 0 |
+| `watermark` | 0.007 → 0.011 (+57.1%) | 0.007 → 0.010 (+42.9%) | 1 → 1; 1 → 1 |
+| `send.member_lock` | 0.018 → 0.021 (+16.7%) | 0.017 → 0.022 (+29.4%) | 4 → 4; 4 → 4 |
+| `send.channel_public` | 0.005 → 0.006 (+20.0%) | 0.005 → 0.007 (+40.0%) | 1 → 1; 1 → 1 |
+| `send.existing` | 0.020 → 0.013 (-35.0%) | 0.011 → 0.012 (+9.1%) | 3 → 3; 3 → 3 |
+| `send.reply_parent` | 0.036 → 0.039 (+8.3%) | 0.038 → 0.042 (+10.5%) | 4 → 4; 4 → 4 |
+| `send.channel_lock` | 0.005 → 0.005 (+0.0%) | 0.008 → 0.006 (-25.0%) | 0 → 0; 0 → 0 |
+| `send.next_seq` | 0.045 → 0.046 (+2.2%) | 0.047 → 0.047 (+0.0%) | 11 → 11; 11 → 11 |
+| `send.topic_join` | 0.042 → 0.038 (-9.5%) | 0.041 → 0.040 (-2.4%) | 17 → 17; 17 → 17 |
+| `send.topic_id` | 0.007 → 0.007 (+0.0%) | 0.009 → 0.008 (-11.1%) | 5 → 5; 5 → 5 |
+| `send.insert_message` | 0.201 → 0.181 (-10.0%) | 0.190 → 0.190 (+0.0%) | 30 → 30; 30 → 30 |
+| `send.topic_record` | 0.031 → 0.034 (+9.7%) | 0.031 → 0.039 (+25.8%) | 12 → 12; 12 → 12 |
+| `history.latest` | 0.035 → 0.039 (+11.4%) | 0.036 → 0.042 (+16.7%) | 8 → 8; 8 → 8 |
+| `history.before_old` | 0.033 → 0.039 (+18.2%) | 0.035 → 0.041 (+17.1%) | 6 → 6; 6 → 6 |
+| `timeline.latest` † | 36.760 → 41.628 (+13.2%) | 145.103 → 184.700 (+27.3%) | 5566 → 5566; 644704 → 644704 |
+| `timeline.topic` | 0.135 → 0.161 (+19.3%) | 7.104 → 7.404 (+4.2%) | 336 → 336; 12478 → 12478 |
+| `replay` | 0.052 → 0.056 (+7.7%) | 0.061 → 0.066 (+8.2%) | 10 → 10; 10 → 10 |
+| `fanout.member_access_1024` † | 0.992 → 1.422 (+43.3%) | 1.105 → 1.560 (+41.2%) | 2181 → 2181; 3119 → 3119 |
+| `fanout.access_rows_1024` † | 2.522 → 5.102 (+102.3%) | 2.679 → 2.746 (+2.5%) | 226 → 226; 9862 → 5819 |
+| `unread.visible_list` † | 0.636 → 1.512 (+137.7%) | 0.700 → 1.535 (+119.3%) | 74 → 74; 74 → 74 |
+| `unread.list_counts` | 20.512 → 22.418 (+9.3%) | 4.053 → 4.254 (+5.0%) | 3814 → 3864; 3814 → 3864 |
+| `read.position_lock` | 0.012 → 0.015 (+25.0%) | 0.011 → 0.013 (+18.2%) | 7 → 7; 7 → 7 |
+| `read.mark_channel` | 0.039 → 0.042 (+7.7%) | 0.036 → 0.038 (+5.6%) | 15 → 15; 15 → 15 |
+| `read.topic_exists` | 0.011 → 0.013 (+18.2%) | 0.012 → 0.014 (+16.7%) | 3 → 3; 3 → 3 |
+| `read.mark_topic` | 0.027 → 0.029 (+7.4%) | 0.026 → 0.029 (+11.5%) | 12 → 12; 12 → 12 |
+
+| Auto (default cache mode) | Execution Time B → A, ms | Shared buffers B → A |
+|---|---:|---:|
+| `auto.timeline` † | 142.723 → 184.177 (+29.0%) | 644699 → 644699 |
+| `auto.list_counts` | 3.828 → 4.034 (+5.4%) | 3814 → 3864 |
+
+| Latency script / clients | B p50 / p95 / p99 ms | A p50 / p95 / p99 ms | p95 change (B; A ranges) | Transactions/s B → A |
+|---|---:|---:|---:|---:|
+| history-1 | 0.155 / 0.174 / 0.185 | 0.163 / 0.178 / 0.189 | +2.3% (0.172–0.179; 0.174–0.184) | 6326.8 → 6074.4 (-4.0%) |
+| history-8 | 0.154 / 0.312 / 0.381 | 0.192 / 0.351 / 0.431 | +12.5% (0.306–0.358; 0.314–0.471) | 45324.1 → 38465.6 (-15.1%) |
+| replay-1 | 0.151 / 0.165 / 0.174 | 0.151 / 0.166 / 0.177 | +0.6% (0.163–0.168; 0.161–0.170) | 6568.7 → 6537.8 (-0.5%) |
+| replay-8 | 0.177 / 0.350 / 0.436 | 0.183 / 0.338 / 0.408 | -3.4% (0.291–0.383; 0.306–0.437) | 40492.2 → 40406.8 (-0.2%) |
+
+| Load side/run | Accepted sends / s | Deliveries / missing / errors | Delivery median / p95 / p99 ms | Send HTTP median / p95 / p99 ms | Queries/send | Peak CPU app / DB / generator % |
+|---|---:|---|---|---|---:|---|
+| B1 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 12 / 15 | 7 / 10 / 13 | 11.010 | 5.97 / 8.85 / 8.98 |
+| A1 | 600 / 20.0000 | 12,000 / 0 / 0 | 8 / 14 / 16 | 7 / 12 / 14 | 11.010 | 5.83 / 13.12 / 8.82 |
+| B2 | 600 / 20.0000 | 12,000 / 0 / 0 | 8 / 11 / 13 | 6 / 10 / 11 | 11.010 | 5.99 / 9.63 / 7.74 |
+| A2 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 12 / 14 | 7 / 10 / 12 | 11.010 | 6.03 / 13.19 / 8.49 |
+| B3 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 11 / 13 | 7 / 9 / 11 | 11.010 | 5.68 / 11.02 / 7.34 |
+| A3 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 12 / 14 | 7 / 10 / 12 | 11.010 | 6.01 / 11.64 / 7.95 |
+
+Load medians: accepted rate 19.9993 → 19.9993/s (0.0%); send HTTP median/p95/p99 7/10/11 → 7/10/12 ms (p95 0.0%); delivery 8/11/13 → 8/12/14 ms (p95 +9.1%). Every run accepted 600/600 sends, delivered 12,000/12,000, passed all 1,244 checks, and peaked at 20 sockets / 2 publishes. Harness-reported top-level queries/send stayed 11.010 (transaction control excluded). CPU peaks above sample the whole generator run, including provisioning/boundaries/drain; 100% is one core.
+
+Plan findings and analysis:
+
+- Index names, scan methods and conflict-arbiter indexes are retained on every query. Node shapes are **not** identical. Added Result/One-Time Filter gates change `vis`, `watermark`, `send.member_lock`, `send.channel_public`, `send.existing`, `send.reply_parent`, `send.topic_id`, `send.topic_record`, `history.latest`, `history.before_old`, `timeline.latest`, `timeline.topic`, `replay`, `fanout.member_access_1024`, `unread.visible_list`, `unread.list_counts`, `read.position_lock`, `read.mark_channel`, `read.topic_exists`, `auto.timeline` and `auto.list_counts`. AUTH additionally gains the Account-policy users_account_id subplan (not executed with the Organization policy already true); timeline reorders access/w CTE joins and, for custom single Topic, the position joins. `fanout.access_rows_1024` retains node topology but gains policy filters. The two advisory locks, sequence upsert, Topic join, Message INSERT and Topic-position upsert retain node topology (write policy checks do not appear as separate nodes). Shape/index-name findings were stable across all retained passes.
+- Policy expressions inline fukulow_current_org() as `NULLIF(current_setting('fukulow.organization_id', true), '')::uuid`. Single-Organization scans mostly get startup gates; users additionally has the Account-read OR predicate, evaluated per row. Generic/Auto timeline retains Incremental Sort + GroupAggregate over 70,000 Topic Messages, with 70,000 read-position and Topic-position probes each. Added Result gates evaluate context on those repeated probes: generic 145.103 → 184.700 ms (+27.3%), Auto 142.723 → 184.177 (+29.0%); buffer counts stay about 644,700. Custom timeline remains HashAggregate/bulk scans at 36.760 → 41.628 ms (+13.2%). This compounds the existing #326 generic-plan cost.
+- Custom `access_rows` still scans 11,000 users and 5,000 grants: per-row context/Account OR filters raise 2.522 → 5.102 ms (+102.3%). `member_access` retains its bounded users index access but filters 1,024 Members and adds Channel gates per candidate: +43.3% Custom / +41.2% Generic. Unread visible list still hashes/scans 5,000 grants; their policy filter accounts for most of its increase (0.636 → 1.512 ms, +137.7%; Generic +119.3%). These and timeline.latest/auto.timeline are every † query; no other median meets both thresholds.
+- Index bounds do change in two places. Generic `access_rows` adds Organization to channel_members_by_member's condition, reducing buffers 9,862 → 5,819. Conversely Unread Topic counts in Custom/Generic/Auto lose `seq > COALESCE(tr.read_seq, p.initial_seq)` from messages_topic_seq's Index Cond: it becomes a Filter (about 29 discarded rows per probe), raising that subscan's hits 46 → 96 and total hits 3,814 → 3,864. Index-name retention therefore does not establish identical index use. Custom counts also JIT-compiles 72 vs 69 functions; the measured total rises 9.3% (Generic 5.0%, Auto 5.4%). Other index conditions are unchanged except the added AUTH policy subplan and randomized idempotency keys.
+- History's unchanged sequence index/buffers (8) gains a startup policy gate: Custom 0.035 → 0.039 ms, Generic 0.036 → 0.042. This supports incremental SQL overhead, but cannot attribute the full eight-client p95 increase (0.312 → 0.351 ms) to one node: transaction/context round trips and shared VM scheduling also contribute. Replay uses the same indexed page and authorization gates; its median p95 changes +0.6% / −3.4% at 1 / 8 clients.
+
+Verdict: **report to the maintainer before merge**, because eight-client history p95 rises **12.5%**, exceeding #314's 10% criterion. One-client history is +2.3%; Replay stays below the criterion; offered-rate-bound accepted send throughput and send HTTP p95 are unchanged. First load pair alone had HTTP p95 10 → 12 ms (+20%), but the three-run medians are 10 → 10. The flagged hot-query costs and changed Unread index bound remain review points independently of the end-to-end send result.
+
+Candidate mitigations, not implemented: test scalar-subquery/InitPlan context predicates to evaluate settings once, and a policy form that avoids repeated Account/Organization OR evaluation; reduce repeated timeline position probes or select a custom timeline plan (#326), rather than globally forcing custom (Unread custom pays JIT). Explore explicit Organization/candidate bounds for batch scans. For Unread, investigate RLS security ordering and predicate leakproofness before changing the correlated bound/query shape; the existing index already has the seq key. The context functions are already STABLE; that does not make each nested-loop invocation free. Do not mark a function LEAKPROOF without proving its error/data behavior. Any hoisting or policy change must preserve fail-closed semantics and revalidate one-statement context-before-read ordering, reuse and cancellation under both plan modes; no production mitigation was made here.
+
+Limits: one shared desktop/VM and dataset, short warm-plan samples with EXPLAIN overhead, small end-to-end offered load, millisecond generator timing and sampled CPU peaks; no capacity claim. Eight-client p95 ranges overlap substantially, and performance drifts across runs (history B 0.306–0.358, A 0.314–0.471 ms; replay B 0.291–0.383, A 0.306–0.437); the history threshold breach is reported, not claimed to be a fully isolated causal estimate. pgbench measures explicit context transactions, not the server's single-statement adapter. The maintainer decision is recorded below ("Maintainer decision"); the extra pairs below ran on the same shared host, so a steadier isolated rerun is tracked in #357. Harness-only changes expose pgbench's actual transactions/s and optionally preserve its raw report; workload SQL, durations and plans are unchanged on both sides. `node --test load/*.test.ts` passed all 34 tests. All created containers/images and the detached worktree were removed; raw reports remain outside Git.
+
+### Mitigation candidates (#314 step 5)
+
+Follow-up on HEAD 56e0d21 (same machine, Docker allocation, pinned PostgreSQL 18.6 and seed as above). B/A schemas were extracted with `git show` from 6dcadb7/a999a35 into external scratch directories; no production file was changed. Confirmation ran five further interleaved B/A pairs, fresh container/database per side/run, unchanged prepared pgbench SQL, `LATENCY_CTX=1 LATENCY_CLIENTS=8 LATENCY_SECONDS=30`. One A setup failed before timing and was retried after a TCP-readiness check; the failed setup is excluded. Retained all completed timing runs. The original three plus five new runs give the following independently medianed percentiles; for eight values, median is the mean of the central two.
+
+| Script | B median p50/p95/p99 ms | B min–max p50; p95; p99 ms | A median p50/p95/p99 ms | A min–max p50; p95; p99 ms | p95 change |
+|---|---|---|---|---|---:|
+| history-8 | 0.1735/0.3350/0.4090 | 0.090–0.293; 0.292–0.688; 0.347–1.166 | 0.2095/0.3890/0.4850 | 0.094–0.289; 0.301–0.743; 0.348–1.267 | 16.1% |
+| replay-8 | 0.1925/0.3665/0.4510 | 0.084–0.262; 0.269–0.616; 0.324–0.948 | 0.2025/0.3895/0.4835 | 0.098–0.267; 0.283–0.668; 0.346–1.128 | 6.3% |
+
+History-8 still exceeds +10% on the requested pooled medians (**+16.1%**); Replay-8 is +6.3%. This does not establish a repeatable causal +16.1% RLS cost: the new-five medians alone are History 0.520→0.409 ms (−21.3%) and Replay 0.553→0.438 ms (−20.8%); median within-pair changes are +3.1%/+5.2%. All five new p95 pairs (ms), in order: History 0.292→0.301, 0.298→0.409, 0.520→0.743, 0.688→0.670, 0.626→0.369; Replay 0.269→0.283, 0.299→0.438, 0.553→0.668, 0.616→0.615, 0.584→0.342. Large shared-host drift, overlapping ranges and the last-pair setup retry limit attribution. Spot checks found no competing suite/build; the six pre-existing PostgreSQL containers stayed near idle; no thermal warning was recorded.
+
+Forms: **a** hoists every Organization policy predicate, both USING and WITH CHECK, and Account predicates (including the Organizations EXISTS) into scalar-subquery InitPlans. **b** adds `(SELECT fukulow_current_account()) IS NOT NULL AND ...` to both Account-read policies. **c** instead puts both Account-read expressions inside `CASE WHEN (SELECT fukulow_current_account()) IS NULL THEN false ELSE ... END`. These are policy-only changes, applied as owner after seeding; context functions, queries, indexes, grants and data are unchanged.
+
+Plans below are Execution Time ms, Custom/Generic; the last two rows are Auto. Each side/form uses six fresh-session `plans.sql` passes per mode with `org_context=1`, medians of passes 2–6; B/A were remeasured in confirmation run 4, not reused from the earlier three-run table. Candidate plans use run 1; latency uses three fresh databases per form, a/b interleaved, then c.
+
+| Query | B C/G | A C/G | a C/G | b C/G | c C/G |
+|---|---:|---:|---:|---:|---:|
+| `auth` | 0.029/0.026 | 0.041/0.042 | 0.057/0.053 | 0.061/0.061 | 0.071/0.079 |
+| `vis` | 0.021/0.022 | 0.021/0.021 | 0.020/0.021 | 0.020/0.020 | 0.022/0.024 |
+| `watermark.shared_lock` | 0.011/0.012 | 0.011/0.013 | 0.011/0.013 | 0.012/0.013 | 0.013/0.014 |
+| `watermark` | 0.007/0.008 | 0.009/0.009 | 0.010/0.010 | 0.011/0.011 | 0.012/0.012 |
+| `send.member_lock` | 0.018/0.017 | 0.021/0.023 | 0.022/0.023 | 0.022/0.022 | 0.024/0.026 |
+| `send.channel_public` | 0.005/0.005 | 0.007/0.006 | 0.006/0.007 | 0.007/0.007 | 0.008/0.008 |
+| `send.existing` | 0.010/0.010 | 0.011/0.011 | 0.010/0.012 | 0.011/0.011 | 0.014/0.017 |
+| `send.reply_parent` | 0.036/0.036 | 0.038/0.039 | 0.038/0.040 | 0.037/0.038 | 0.048/0.043 |
+| `send.channel_lock` | 0.005/0.008 | 0.005/0.005 | 0.004/0.006 | 0.005/0.005 | 0.005/0.007 |
+| `send.next_seq` | 0.043/0.047 | 0.048/0.048 | 0.045/0.057 | 0.044/0.053 | 0.054/0.065 |
+| `send.topic_join` | 0.038/0.037 | 0.036/0.036 | 0.037/0.040 | 0.038/0.039 | 0.044/0.041 |
+| `send.topic_id` | 0.007/0.008 | 0.006/0.009 | 0.006/0.008 | 0.006/0.009 | 0.008/0.009 |
+| `send.insert_message` | 0.173/0.182 | 0.181/0.192 | 0.182/0.194 | 0.176/0.189 | 0.203/0.207 |
+| `send.topic_record` | 0.026/0.029 | 0.036/0.035 | 0.031/0.033 | 0.031/0.036 | 0.039/0.041 |
+| `history.latest` | 0.031/0.034 | 0.034/0.036 | 0.036/0.040 | 0.037/0.039 | 0.046/0.050 |
+| `history.before_old` | 0.033/0.035 | 0.038/0.040 | 0.038/0.045 | 0.042/0.042 | 0.051/0.047 |
+| `timeline.latest` | 36.179/144.268 | 41.744/184.199 | 41.070/157.209 | 41.513/158.278 | 50.695/191.599 |
+| `timeline.topic` | 0.127/7.070 | 0.164/7.295 | 0.145/7.045 | 0.151/7.376 | 0.186/8.260 |
+| `replay` | 0.050/0.061 | 0.054/0.066 | 0.056/0.076 | 0.054/0.070 | 0.069/0.079 |
+| `fanout.member_access_1024` | 0.959/1.113 | 1.384/1.531 | 1.059/25.950 | 1.107/27.330 | 1.298/1.394 |
+| `fanout.access_rows_1024` | 2.499/2.628 | 4.929/2.625 | 2.526/2.243 | 2.542/2.310 | 3.007/2.789 |
+| `unread.visible_list` | 0.620/0.700 | 1.472/1.482 | 0.699/0.707 | 0.691/0.743 | 0.871/0.900 |
+| `unread.list_counts` | 20.380/4.012 | 22.087/4.187 | 21.723/4.136 | 22.163/4.155 | 26.335/5.099 |
+| `read.position_lock` | 0.012/0.012 | 0.015/0.012 | 0.016/0.013 | 0.016/0.013 | 0.018/0.016 |
+| `read.mark_channel` | 0.039/0.035 | 0.042/0.036 | 0.044/0.038 | 0.041/0.038 | 0.050/0.043 |
+| `read.topic_exists` | 0.011/0.011 | 0.012/0.013 | 0.012/0.014 | 0.012/0.015 | 0.015/0.015 |
+| `read.mark_topic` | 0.029/0.026 | 0.029/0.026 | 0.032/0.028 | 0.032/0.029 | 0.037/0.033 |
+| `auto.timeline` | 141.143 | 180.588 | 154.145 | 155.276 | 192.513 |
+| `auto.list_counts` | 3.799 | 4.013 | 4.008 | 3.973 | 4.982 |
+
+Latency p95 medians [run min–max], ms; B/A use all eight runs for 8 clients, original three for 1 client; every candidate uses three runs per cell. One-client controls were not rerun in this follow-up. Cells are descriptive comparisons, not isolated improvement estimates. Full p50/p95/p99 and transactions/s medians, ranges and individual runs are in external `summary.json`.
+
+| Script/clients | B | A | a | b | c |
+|---|---:|---:|---:|---:|---:|
+| history-1 | 0.1740 [0.172–0.179] | 0.1780 [0.174–0.184] | 0.1960 [0.178–0.204] | 0.1980 [0.182–0.201] | 0.1940 [0.189–0.195] |
+| history-8 | 0.3350 [0.292–0.688] | 0.3890 [0.301–0.743] | 0.5260 [0.327–0.542] | 0.5140 [0.437–0.552] | 0.5140 [0.509–0.527] |
+| replay-1 | 0.1650 [0.163–0.168] | 0.1660 [0.161–0.170] | 0.1840 [0.167–0.184] | 0.1790 [0.165–0.187] | 0.1780 [0.173–0.178] |
+| replay-8 | 0.3665 [0.269–0.616] | 0.3895 [0.283–0.668] | 0.4830 [0.347–0.516] | 0.4760 [0.461–0.532] | 0.4800 [0.474–0.517] |
+
+Candidate p95 change vs B / vs A, in the same row order:
+
+| Form | History-1 | History-8 | Replay-1 | Replay-8 |
+|---|---:|---:|---:|---:|
+| a | +12.6% / +10.1% | +57.0% / +35.2% | +11.5% / +10.8% | +31.8% / +24.0% |
+| b | +13.8% / +11.2% | +53.4% / +32.1% | +8.5% / +7.8% | +29.9% / +22.2% |
+| c | +11.5% / +9.0% | +53.4% / +32.1% | +7.9% / +7.2% | +31.0% / +23.2% |
+
+Recommendation: **none for production from this investigation**. a/b remove much of Custom access_rows and visible-list overhead, but introduce a large Generic fan-out regression: member_access 25.950/27.330 ms versus B 1.113 and A 1.531. Every retained Generic pass uses a Nested Loop with 523,776 discarded join pairs (users estimate 2, actual 1,024). c changes that to a Hash Join and 1.394 ms, but still estimates only 4 users; this is a fragile join-choice tipping point, not a demonstrated cardinality fix. Its Custom access_rows/visible-list costs are 3.007/0.871 versus A 4.929/1.472 ms, while Generic timeline is 191.599 versus B 144.268/A 184.199 and Custom counts 26.335 versus B 20.380/A 22.087. All queries in this later c batch are generally slower, so do not attribute the entire raw difference to CASE. The latency table does not demonstrate that any form clears History-8's +10% criterion under steady matched conditions. c is the best partial follow-up for fan-out, not a merge recommendation.
+
+Unread Topic counts: **none restores the sequence bound to Index Cond**. All five retained passes in Custom/Generic/Auto keep `seq > COALESCE(tr.read_seq, p.initial_seq)` as a Filter for A/a/b/c; B has it in Index Cond. No LEAKPROOF claim or query/index change was attempted. Scalar subqueries do execute settings through InitPlans, but their unknown parameter selectivity changes planning, and per-loop gates/InitPlan reads still have costs.
+
+Exact tested c SQL follows (investigation artifact, not a proposed production migration). a uses the same ten Organization policy replacements with plain Account equality/EXISTS; b adds the non-NULL AND guard; full literal scripts for all three remain in the external artifact directory.
+
+```sql
+BEGIN;
+DROP POLICY org_isolation ON organizations;
+CREATE POLICY org_isolation ON organizations FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON users;
+CREATE POLICY org_isolation ON users FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON channels;
+CREATE POLICY org_isolation ON channels FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON channel_members;
+CREATE POLICY org_isolation ON channel_members FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON channel_message_sequences;
+CREATE POLICY org_isolation ON channel_message_sequences FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON messages;
+CREATE POLICY org_isolation ON messages FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON topics;
+CREATE POLICY org_isolation ON topics FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON channel_read_positions;
+CREATE POLICY org_isolation ON channel_read_positions FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON topic_read_positions;
+CREATE POLICY org_isolation ON topic_read_positions FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY org_isolation ON invites;
+CREATE POLICY org_isolation ON invites FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
+DROP POLICY account_read ON users;
+DROP POLICY account_read ON organizations;
+CREATE POLICY account_read ON users FOR SELECT USING (CASE WHEN (SELECT fukulow_current_account()) IS NULL THEN false ELSE account_id = (SELECT fukulow_current_account()) END);
+CREATE POLICY account_read ON organizations FOR SELECT USING (CASE WHEN (SELECT fukulow_current_account()) IS NULL THEN false ELSE EXISTS (SELECT 1 FROM users u WHERE u.organization_id = organizations.organization_id AND u.account_id = (SELECT fukulow_current_account())) END);
+COMMIT;
+```
+
+Semantics: every form passed the psql substitute for the requested Rust suites: 60 table×context×plan-mode cells (ten target tables, unset/Organization-only/Account-only, Custom/Generic), with expected SELECT visibility, INSERT-other denied (42501), UPDATE/DELETE-other affecting zero rows, context-free/Account-only writes denied, and Organization moves rejected (42501; users identity trigger P0001). Same-Organization other-Account Members stay hidden in Account context. Both-context SELECT union and Account-only write denial also passed. Prepared copies of the production materialized-CTE/correlated-LATERAL wrapper passed 80 alternating-Organization reads plus 80 unset follow-ups per plan mode/form on the same backend, with identical Member/Channel IDs in both Organizations. The semantic clone alone temporarily disabled Member triggers for fixture truncation and re-enabled them before seeding/checks; timing data was never changed. This is not execution of `server/src/database/tests/rls.rs` or `server/src/messages/tests/rls_statements.rs`: their SQLx fixtures recreate production policies. Full production-path assertions, cancellation/abort behavior, private-Channel authorization and Account-context performance remain unverified for these forms.
+
+Reproduction/raw evidence (outside Git): `/private/tmp/fukulow-314-step5/mitigation/` contains `run.ts`, `case-run.ts`, `candidate-{a,b,c}.sql`, `semantics.ts`, `analyze.ts`, `summary.json`, conditions, complete plan outputs and pgbench reports. Run `node run.ts` for confirmation/a/b, then `node case-run.ts` for c; completion markers skip retained runs, so use a new external root for an independent repeat. The scripts extract schemas, migrate, apply role/grant SQL, run the unchanged seed, apply candidate SQL, collect plans and invoke `load/hot-latency.ts` with 30 seconds and 1/8 clients for candidates; passwords are ephemeral environment values. Failed fixture/setup attempts remain separately named and are excluded from summaries. No end-to-end send-load rerun, production mitigation, new dependency or LEAKPROOF/IMMUTABLE annotation. All created containers/volumes were removed; no worktree or app image was created. Shared desktop/VM, one seed, short EXPLAIN samples, one plan set per form and sequential form groups limit generalization; the original single-statement adapter is not the explicit-transaction latency harness.
+
+### Maintainer decision: exception to the 10% criterion (#314 step 5, 2026-11-13)
+
+The maintainer accepted the current RLS policies with this regression as a **one-time, recorded exception** to #314's 10% criterion:
+- Accepted: History p95 at 8 clients 0.335 → 0.389 ms (+16.1%, about +0.05 ms per page; medians of 8 interleaved runs per side). Replay +6.3%; send throughput and send p95 0.0%.
+- The causal regression rate is not established: ranges are wide (before 0.292–0.688, after 0.301–0.743 ms) and the 5 extra pairs alone favoured RLS.
+- This does **not** relax the performance criterion for later changes. Small, shared-host, synthetic measurements here are not a production performance guarantee.
+- Current policies stay; candidates a/b/c are not adopted; no optimisation may weaken the security guarantees.
+- Follow-ups: fan-out `access_rows`/`member_access` (#354), Unread list/counts (#355), Unread Topic-count `seq` index bound (#356), History re-measurement on a stable host with realistic API-path load and query-level improvements (#357). The timeline Generic-plan cost, increased by RLS, stays tracked in #326.
+
 ## Sign-in admission under a credential flood (#196 C, 2026-11-13 JST)
 
 Reproduce from the repository root, one run at a time, nothing else running (add `LOAD_MALLOC_MMAP_THRESHOLD=131072` for the allocator check):
