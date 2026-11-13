@@ -4708,6 +4708,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
     expect(href).toBe(`/o/org-1/c/c1?panel=reply:${r1.id}`)
     expect(pushSpy).toHaveBeenCalledTimes(1)
     expect(replaceSpy).toHaveBeenCalledWith(`/o/org-1/c/c1?panel=reply:${r1.id}`)
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
     expect(testDoc.activeElement).toBe(panel.querySelector('textarea'))
     expect(panel.querySelector(`[data-message-id="${mRoot.id}"]`)!.classList.contains('reply-panel__item--root')).toBe(true)
 
@@ -4734,7 +4735,23 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
     expect(href).toBe(`/o/org-1/c/c1?panel=reply:${r2.id}`)
     expect(pushSpy).toHaveBeenCalledTimes(1)
     expect(replaceSpy).toHaveBeenLastCalledWith(`/o/org-1/c/c1?panel=reply:${r2.id}`)
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r2.id)
     expect(testDoc.activeElement).toBe(panel.querySelector('textarea'))
+
+    // URL navigation has no row-click handler to update the controller's anchor.
+    const reads = net.replyHistory.length
+    navigation.navigate({ type: 'reply', messageId: r1.id })
+    flushSync(); await settle(); flushSync()
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
+    expect(net.replyHistory).toHaveLength(reads + 1)
+    // Rendering and live eviction of that anchor's body must not reopen the chain.
+    for (let seq = 4; seq <= 254; seq++) net.event({ type: 'message', message: {
+      ...record(seq, 'c1'), sender: 'other', reply_to: mRoot.id, reply_root_id: mRoot.id,
+    } })
+    await settle(); flushSync()
+    expect(rawSession.replies.get('c1').messages.some(m => m.id === r1.id)).toBe(false)
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
+    expect(net.replyHistory).toHaveLength(reads + 1)
 
     navigation.destroy()
     await unmount(instance)

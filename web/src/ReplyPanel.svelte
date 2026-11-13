@@ -277,6 +277,28 @@
     if (rState.rootId) await rowWindow?.reveal(rState.rootId)
   }
 
+  let previousAnchorKey = ''
+  let previousRootId: string | null = null
+  let revealAnchorKey = $state('')
+  $effect(() => {
+    const key = currentKey, root = targetRootId
+    if (!root) return
+    if (previousAnchorKey !== key) revealAnchorKey = previousRootId === root ? key : ''
+    previousAnchorKey = key
+    previousRootId = root
+  })
+  $effect(() => {
+    const key = currentKey, id = anchorMessageId
+    if (revealAnchorKey !== key || !isCurrentAnchor || rState.loading || !rowWindow ||
+      !visibleMessages.some(m => m.id === id)) return
+    revealAnchorKey = ''
+    void tick().then(async () => {
+      if (currentKey !== key) return
+      await rowWindow?.reveal(id)
+      handleScroll()
+    }).catch(console.error)
+  })
+
   function handleRestoreRequest(clientMessageId: string) {
     const decision = decideEditAndResend(clientMessageId, composerState.draft)
     if (decision.action === 'restore_now') {

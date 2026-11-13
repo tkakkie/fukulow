@@ -103,8 +103,11 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     c.requiredBase = Math.max(c.requiredBase, c.lostThrough)
     if (visit?.scope.channel === id) for (const seq of visit.presented) if (!c.records.has(seq)) visit.presented.delete(seq)
-    void refresh()
-    for (const topic of c.topics.keys()) void refreshTopic(id, topic)
+    // A pending read (including its backoff) absorbs newer recovery requirements.
+    // Its completion checks the latest requiredBase before scheduling another read.
+    if (!list && listTimer === undefined && listNeedsRecovery(c)) void refresh()
+    for (const [topic, s] of c.topics) if (needsRecovery(c, s) &&
+      !c.summaryReads.has(topic) && !c.summaryTimers.has(topic)) void refreshTopic(id, topic)
   }
   function collectRecord(c: Channel, m: Message): boolean {
     if (m.sender === sync.get().selfId) return false

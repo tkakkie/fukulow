@@ -70,8 +70,9 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     body: 'トピック内の最初の返信',
     reply_to: topicRoot.id,
   })
+  let lastInitialTopicReply = topicReply
   for (let i = 2; i <= 49; i++) {
-    await sendApiMessage(page.request, {
+    lastInitialTopicReply = await sendApiMessage(page.request, {
       body: `トピック内の返信-${String(i).padStart(2, '0')}`,
       reply_to: topicRoot.id,
     })
@@ -251,6 +252,18 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await panel.locator('.reply-panel__scroll').evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')) })
     await expect(panelTopicRootItem).toHaveClass(/reply-panel__item--root/)
 
+    // A URL-driven change to another anchor in this chain updates the controller and
+    // reveals an anchor outside the mounted rows, without relying on a row click.
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/messages/' + lastInitialTopicReply.id + '/chain') && r.ok()),
+      page.evaluate(url => {
+        history.replaceState(history.state, '', url)
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }, `/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}?panel=reply:${lastInitialTopicReply.id}`),
+    ])
+    await expect(panel.locator(`[data-message-id="${lastInitialTopicReply.id}"]`)).toBeInViewport()
+    await expect(replyComposer(page)).toBeFocused()
+
     // Fetch the newer history explicitly; a cached recent suffix no longer bypasses Reply paging.
     await loadMoreButton.click()
     await expect(loadMoreButton).toHaveCount(0)
@@ -278,9 +291,12 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await expect(latestTopicRow).toHaveAttribute('tabindex', '0')
     await mainComposer(page).fill('消さずに残すトピック下書き')
     await mainComposer(page).focus()
-    await page.keyboard.press('Shift+Tab')
-    await expect(latestTopicRow).toBeFocused()
+    // Focusing an overscan row scrolls it into view and can mount more rows below it.
+    // Keep the chosen roving row identity, rather than following the changing last mounted row.
     const keyboardOpenerId = await latestTopicRow.locator('..').getAttribute('data-message-id')
+    const keyboardOpener = page.locator(`#main-content [data-message-id="${keyboardOpenerId}"] .ui-message-row`)
+    await page.keyboard.press('Shift+Tab')
+    await expect(keyboardOpener).toBeFocused()
     await page.keyboard.press('r')
     await expect(panel).toBeVisible()
     await expect(replyComposer(page)).toBeFocused()

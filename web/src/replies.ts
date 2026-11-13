@@ -188,11 +188,18 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     async open(channel: string, anchor: Message) {
       if (anchor.channel_id !== channel || closed || !sync.get().running || sync.get().organization !== 'available' ||
         !sync.get().channels[channel]?.watched || sync.get().channels[channel]?.state === 'unavailable') return
+      const old = chains.get(channel)
+      const seekAnchor = old?.rootId === (anchor.reply_root_id ?? anchor.id) && old.anchor.id !== anchor.id
       const w = chain(anchor, sync.get().channels[channel]?.cursor ?? 0)
       for (const old of chains.values()) release(old)
       chains.clear(); snapshots.clear()
       chains.set(channel, w); mergeStream(channel, w); notify()
       await loadMore(channel)
+      // A same-chain anchor change is an explicit navigation intent. Read the
+      // intervening pages rather than retaining a disconnected cached suffix.
+      while (seekAnchor && current(channel, w) && !w.error && w.hasMore && w.after < anchor.seq) {
+        await loadMore(channel)
+      }
     },
     loadMore,
     setPinned(channel: string, pinned: boolean) { const w = chains.get(channel); if (w) w.following = pinned },

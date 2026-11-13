@@ -33,6 +33,28 @@ it('pages the root and siblings from root and descendant anchors without cursor 
 })
 const recordOther = (seq: number): Message => ({ ...root(), seq, id: `other${seq}` })
 
+it('pages through a different same-chain anchor beyond the first page without skipping history or moving sync', async () => {
+  const c = replyClient(); await c.boot()
+  const queries: number[] = []
+  c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
+    const after = query?.after_seq ?? 0
+    queries.push(after)
+    return ok({ root_id: 'id1', has_more: after + 50 < 450,
+      messages: Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1)) })
+  })
+  await c.replies.open('A', root())
+  for (let seq = 2; seq <= 450; seq++) c.event(reply(seq))
+  const before = c.sync.get().channels.A
+  await c.replies.open('A', reply(350))
+  expect(c.replies.get('A').anchor?.id).toBe('id350')
+  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(Array.from({ length: 200 }, (_, i) => i + 151))
+  expect(queries).toEqual([0, 0, 50, 100, 150, 200, 250, 300])
+  await c.replies.loadMore('A')
+  expect(queries.at(-1)).toBe(350)
+  expect(c.sync.get().channels.A).toMatchObject({ cursor: before.cursor, advancing: before.advancing, wait: before.wait })
+  await c.sync.close()
+})
+
 it('live append during an initial page never skips unpaged siblings', async () => {
   const c = replyClient(); await c.boot()
   const read = deferred<Result<ReplyChainPage>>()
