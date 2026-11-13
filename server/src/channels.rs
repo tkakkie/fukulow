@@ -27,8 +27,8 @@ pub enum ChannelVisibility {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Channel {
     pub id: Uuid,
-    /// At most 128 Unicode scalar values.
-    #[schema(max_length = 128)]
+    /// 1..=128 Unicode scalar values.
+    #[schema(min_length = 1, max_length = 128)]
     pub name: String,
     pub visibility: ChannelVisibility,
     pub capabilities: ChannelCapabilities,
@@ -79,10 +79,10 @@ impl ChannelCapabilities {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateChannelRequest {
-    /// At most 128 Unicode scalar values.
+    /// 1..=128 Unicode scalar values; no NUL.
     /// Leading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.
-    /// Internal whitespace and empty names are allowed.
-    #[schema(max_length = 128)]
+    /// Internal whitespace is allowed.
+    #[schema(min_length = 1, max_length = 128)]
     pub name: String,
     pub visibility: ChannelVisibility,
 }
@@ -149,7 +149,7 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     params(("org" = Uuid, Path, description = "Organization id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, description = "Created Channel; a private Channel includes its creator as a Member", body = Channel),
-        (status = 400, description = "Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, invalid Channel JSON or fields; name must be 1..=128 Unicode scalar values, NUL-free and without surrounding whitespace", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 403, description = "forbidden: Guests cannot create Channels", body = ErrorBody),
         (status = 409, description = "Channel name already exists", body = ErrorBody),
@@ -162,15 +162,10 @@ pub async fn create_channel(
     auth: Auth,
     ApiJson(input): ApiJson<CreateChannelRequest>,
 ) -> Result<Response, ApiError> {
-    if input.name.chars().count() > 128 || input.name != input.name.trim() {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(ErrorBody {
-                error: "invalid input".into(),
-            }),
-        )
-            .into_response());
+    auth::validate_text(&input.name)?;
+    if input.name.is_empty() || input.name.chars().count() > 128 || input.name != input.name.trim()
+    {
+        return Err(ApiError::bad_request());
     }
     let organization_id = auth.identity.organization.organization_id;
     let channel = crate::database::organization(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {

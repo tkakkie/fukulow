@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 mod admission;
+mod text_input;
 pub(super) mod unread;
 
 async fn router(pool: &PgPool) -> Router {

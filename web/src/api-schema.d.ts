@@ -537,7 +537,7 @@ export interface components {
             capabilities: components["schemas"]["ChannelCapabilities"];
             /** Format: uuid */
             id: string;
-            /** @description At most 128 Unicode scalar values. */
+            /** @description 1..=128 Unicode scalar values. */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
         };
@@ -577,9 +577,9 @@ export interface components {
         /** @description Identity and organization come from the session, never from request fields. */
         CreateChannelRequest: {
             /**
-             * @description At most 128 Unicode scalar values.
+             * @description 1..=128 Unicode scalar values; no NUL.
              *     Leading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.
-             *     Internal whitespace and empty names are allowed.
+             *     Internal whitespace is allowed.
              */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
@@ -1474,7 +1474,7 @@ export interface operations {
                     "application/json": components["schemas"]["Channel"];
                 };
             };
-            /** @description Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace */
+            /** @description Malformed Organization id, invalid Channel JSON or fields; name must be 1..=128 Unicode scalar values, NUL-free and without surrounding whitespace */
             400: {
                 headers: {
                     [name: string]: unknown;

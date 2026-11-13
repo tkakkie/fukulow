@@ -678,7 +678,7 @@
             }
           },
           "400": {
-            "description": "Malformed Organization id, invalid Channel JSON or fields, name over 128 Unicode scalar values, or surrounding whitespace",
+            "description": "Malformed Organization id, invalid Channel JSON or fields; name must be 1..=128 Unicode scalar values, NUL-free and without surrounding whitespace",
             "content": {
               "application/json": {
                 "schema": {
@@ -4199,8 +4199,9 @@
           },
           "name": {
             "type": "string",
-            "description": "At most 128 Unicode scalar values.",
-            "maxLength": 128
+            "description": "1..=128 Unicode scalar values.",
+            "maxLength": 128,
+            "minLength": 1
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"
@@ -4337,8 +4338,9 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "At most 128 Unicode scalar values.\nLeading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.\nInternal whitespace and empty names are allowed.",
-            "maxLength": 128
+            "description": "1..=128 Unicode scalar values; no NUL.\nLeading or trailing whitespace, as defined by Rust `str::trim()`, is rejected, not trimmed.\nInternal whitespace is allowed.",
+            "maxLength": 128,
+            "minLength": 1
           },
           "visibility": {
             "$ref": "#/components/schemas/ChannelVisibility"
