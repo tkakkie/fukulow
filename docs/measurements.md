@@ -615,6 +615,20 @@ Limits: one deterministic process run per mode; heap includes controller metadat
 - The measured SQL itself is unchanged (pgbench per-statement averages: history 0.087 vs 0.088 ms, replay 0.072 vs 0.076 ms with one client); the added cost is the three extra round trips (BEGIN, `set_config`, COMMIT ≈ 0.08 ms per transaction on loopback). This is why #314 step 3b sets the context inside the same statement for single-statement hot reads.
 - Limits: loopback inside the container (no network latency; a real network multiplies the round-trip cost), one dataset, warm cache, no RLS yet, pgbench rather than the server. Not a guarantee. Raw outputs stay outside Git.
 
+### Distinct-session fallback pass under RLS (#314 step 4, 2026-11-13 JST)
+
+Reproduce from `server/`: `cargo test --release --lib measure_distinct_session_pass_within_five_seconds -- --ignored --nocapture` against a disposable PostgreSQL 18 database (local Docker, loopback). The pass runs as the RLS-restricted test app role, one Organization transaction per Organization. Layouts are provisioned one after the other with disjoint ids (Member rows cannot be truncated), so the 1,000-Organization run also holds the 10-Organization run's 100,000 rows.
+
+| Sessions (chunks) | 10 Organizations (ms) | 1,000 Organizations (ms) |
+| ---: | ---: | ---: |
+| 1,000 (1) | 23 | 792 |
+| 10,000 (10) | 38 | 823 |
+| 100,000 (100) | 380 | 1,146 |
+
+Result: every pass met the 5,000 ms deadline under RLS. With 1,000 Organizations the per-Organization transactions add about 0.8 s, independent of the session count. Compare with the #157 one-Organization pass above (16/90/253 ms, without RLS).
+
+Limits: one run per layout on a shared development host, local PostgreSQL, no WebSockets or concurrent publishing; the second layout is measured on a larger table.
+
 ## Sign-in admission under a credential flood (#196 C, 2026-11-13 JST)
 
 Reproduce from the repository root, one run at a time, nothing else running (add `LOAD_MALLOC_MMAP_THRESHOLD=131072` for the allocator check):
