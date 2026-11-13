@@ -265,7 +265,9 @@ async fn check_row_level_security(pool: &PgPool) -> Result<(), String> {
          WHERE p.policy <> 'org_isolation'
            AND NOT (p.schema = 'public' AND p.policy = 'account_read' AND p.cmd = 'SELECT'
                     AND p.with_check IS NULL AND p.roles = '{public}' AND p.permissive = 'PERMISSIVE'
-                    AND p.name IN ('users', 'organizations'))
+                    AND (p.name, regexp_replace(p.qual, '\\s+', ' ', 'g')) IN (
+                        ('users', '(account_id = fukulow_current_account())'),
+                        ('organizations', '(EXISTS ( SELECT 1 FROM users u WHERE ((u.organization_id = organizations.organization_id) AND (u.account_id = fukulow_current_account()))))')))
          ORDER BY 1, 2, 3",
     )
     .fetch_all(pool)
@@ -297,6 +299,8 @@ async fn schema_guard_rejects_tables_without_reviewed_row_level_security(pool: P
              USING (organization_id = fukulow_current_org());
          CREATE POLICY broad ON channels FOR SELECT USING (true);
          CREATE POLICY account_read ON messages FOR SELECT USING (true);
+         DROP POLICY account_read ON users;
+         CREATE POLICY account_read ON users FOR SELECT USING (account_id IS NOT NULL);
          CREATE SCHEMA other;
          CREATE TABLE other.accounts (organization_id uuid NOT NULL);
          ALTER TABLE invites DISABLE ROW LEVEL SECURITY;",
@@ -315,11 +319,14 @@ async fn schema_guard_rejects_tables_without_reviewed_row_level_security(pool: P
          (\"public\", \"no_policy\", \"missing org_isolation\"), \
          (\"public\", \"no_rls\", \"missing org_isolation\"), \
          (\"public\", \"no_rls\", \"row level security disabled\"), \
-         (\"public\", \"read_only_policy\", \"missing org_isolation\")]"
+         (\"public\", \"read_only_policy\", \"missing org_isolation\"), \
+         (\"public\", \"users\", \"unexpected policy account_read\")]"
     );
     sqlx::raw_sql(
         "DROP SCHEMA other CASCADE; DROP TABLE no_rls, no_policy, read_only_policy;
          DROP POLICY broad ON channels; DROP POLICY account_read ON messages;
+         DROP POLICY account_read ON users;
+         CREATE POLICY account_read ON users FOR SELECT USING (account_id = fukulow_current_account());
          ALTER TABLE invites ENABLE ROW LEVEL SECURITY;",
     )
     .execute(&pool)

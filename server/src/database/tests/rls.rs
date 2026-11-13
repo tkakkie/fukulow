@@ -20,6 +20,7 @@ const TABLES: [&str; 10] = [
 struct Tenant {
     organization: Uuid,
     account: Uuid,
+    member: Uuid,
 }
 
 /// One row (or more) in every target table, written as the owner.
@@ -65,6 +66,7 @@ async fn tenant(admin: &PgPool) -> Tenant {
     Tenant {
         organization,
         account,
+        member,
     }
 }
 
@@ -230,7 +232,32 @@ async fn rls_without_context_reads_nothing_and_writes_nothing(pool: PgPool) {
 async fn rls_account_context_reads_only_own_members_and_writes_nothing(pool: PgPool) {
     let pools = pools(pool).await;
     let (a, b) = (tenant(&pools.admin).await, tenant(&pools.admin).await);
+    // Another Account's Member in the same Organization stays invisible too.
+    let (other_account, other_member) = (Uuid::new_v4(), Uuid::new_v4());
+    sqlx::query(
+        "WITH a AS (INSERT INTO accounts (id, email, password_hash) VALUES ($2, $2::text || '@example.com', 'unused'))
+         INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $3, $2, 'Other', 'member')",
+    )
+    .bind(a.organization)
+    .bind(other_account)
+    .bind(other_member)
+    .execute(&pools.admin)
+    .await
+    .unwrap();
     database::account(&pools.app, a.account, async |tx: &mut PgConnection| {
+        let members: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM users")
+            .fetch_all(&mut *tx)
+            .await?;
+        assert_eq!(members, [a.member], "Account context: Members");
+        let organizations: Vec<Uuid> =
+            sqlx::query_scalar("SELECT organization_id FROM organizations")
+                .fetch_all(&mut *tx)
+                .await?;
+        assert_eq!(
+            organizations,
+            [a.organization],
+            "Account context: Organizations"
+        );
         for (table, (all, own)) in TABLES.iter().zip(counts(tx, a.organization).await) {
             let expected = if matches!(*table, "users" | "organizations") {
                 1
