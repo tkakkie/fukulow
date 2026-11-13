@@ -667,3 +667,25 @@ Conditions: server and harness 6f95221 (clean). Apple M5, 10 CPUs, 32 GiB; Docke
 Result: across many Channels, one node sustained about 4,000 accepted sends/s with p95 21 ms. At 4,000/s the generator used 137% CPU on the shared host and server p95 stayed low, so the generator likely set that ceiling, but this run cannot prove it. So the `docs/spec.md` "thousands of writes/s per node" target holds for spread writes on this host. One hot Channel reached about 1,750 accepted sends/s under these conditions (at most 100 VUs): p50 jumps to about 55 ms while app and DB CPU stay low. The leading hypothesis is the one-send-at-a-time-per-Channel serialization (about 0.57 ms per send), a per-Channel limit rather than a node limit; this run does not isolate it.
 
 Limits: one run per mode on a shared single host, with the generator competing for the same CPUs. At most 100 VUs means at most 100 requests in flight, so open bursts larger than that (the #57 2,048-send burst that returned 87% 503) are not exercised here. 17-byte bodies, one Organization, no WebSocket fan-out load and no TLS. The server ceiling for `many` is unmeasured. Raw artifacts stay outside Git (`LOAD_RESULT_DIR`).
+
+### Image default `MALLOC_MMAP_THRESHOLD_=131072` (#340, 2026-11-13 JST)
+
+Reproduce from the repository root with the #309 write commands and the #196 C sign-in command above, without `SERVER_REF` or `LOAD_MALLOC_*` (the working-tree image applies its own default); before = f676d77, after = f676d77 plus the Dockerfile `ENV`. Same host and Docker VM as #309/#196 C; runs one at a time, before then after.
+
+Writes (accepted/s, p50/p95/p99 ms):
+
+| Offered/s | many before | many after | hot before | hot after |
+| ---: | --- | --- | --- | --- |
+| 50 | 50, 3/5/9 | 50, 3/5/10 | 50, 3/5/7 | 50, 3/5/6 |
+| 250 | 248*, 1/3/61 | 250, 1/2/4 | 250, 1/2/8 | 250, 1/2/5 |
+| 1,000 | 997*, 1/4/21 | 1,000*, 1/2/5 | 997*, 1/8/72 | 999*, 1/3/11 |
+| 2,000 | 1,967*, 2/10/67 | 1,991*, 2/7/37 | 1,552*, 62/74/94 | 1,578*, 61/72/93 |
+| 4,000 | 3,553*, 12/44/66 | 3,971*, 6/24/37 | 1,498*, 63/85/123 | 1,566*, 61/74/94 |
+
+\* k6 dropped iterations (all VUs busy). At 100 and 500/s, after was equal or lower (worst p99 before 28/32 ms, after 3/7 ms). Zero 429, 503 and other errors in every step. Peak CPU app/DB: many 166/298% before, 169/271% after; hot 65/76% before, 65/72% after. App container memory peak: 138-145 MiB before, 14-15 MiB after (the fixture's Argon2 sign-ins no longer stay resident).
+
+Sign-in flood with the image default: 30,000 sent, 85.8% of correct sign-ins succeeded, 4,074 503, success p95 134 ms, App RSS peak 90 MiB, idle RSS 14 MiB 12 s after drain, app CPU mean 355%, DB connections peak 4, Organization B reads 120/120 (p95 6.8 ms).
+
+Result: no write regression; after was equal or better at every step, which is within this host's run-to-run noise (the before `many` run dropped more iterations). The sign-in run matches the #196 C "fixed + mmap threshold" row, now from the image default rather than a run-time variable.
+
+Limits: one run per variant on a shared host; glibc (Debian bookworm) only, so a base image or libc change needs a new measurement; 60 s steps do not show long-run fragmentation.
