@@ -283,11 +283,16 @@ async fn silence_barrier_rejects_late_wrong_delivery_and_close() {
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            let request = socket.next().await.unwrap().unwrap();
-            assert_eq!(
-                serde_json::from_str::<Value>(request.to_text().unwrap()).unwrap(),
-                json!({"type":"subscribe","channel_id":channel,"after_seq":0})
-            );
+            for expected in [
+                json!({"type":"unsubscribe","channel_id":channel}),
+                json!({"type":"subscribe","channel_id":channel,"after_seq":0}),
+            ] {
+                let request = socket.next().await.unwrap().unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(request.to_text().unwrap()).unwrap(),
+                    expected
+                );
+            }
             tokio::time::sleep(Duration::from_millis(150)).await;
             match wrong {
                 1 => socket
@@ -347,11 +352,11 @@ async fn silence_barrier_rejects_late_wrong_delivery_and_close() {
 
 #[tokio::test]
 async fn silence_barrier_returns_typed_failure_for_each_closed_socket_write() {
-    for fail_at in [0, 1] {
+    for fail_at in [0, 1, 2] {
         // Inject the close at each write, after the initial read could have polled
         // Pending. TCP timing cannot deterministically exercise both write errors.
         let sink = futures_util::sink::unfold(0, move |sent, frame| async move {
-            if sent == 0 {
+            if sent < 2 {
                 assert!(matches!(frame, tungstenite::Message::Text(_)));
             } else {
                 assert!(matches!(frame, tungstenite::Message::Ping(_)));

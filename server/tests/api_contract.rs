@@ -124,6 +124,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
         session_changes: Default::default(),
         session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     };
     let shutdown = state.shutdown.clone();
     let router = app(state);
@@ -693,6 +694,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     });
     for (method, path) in [(
         "GET",

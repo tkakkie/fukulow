@@ -32,6 +32,7 @@ fn router_with_cookie_security(pool: &PgPool, cookie_secure: bool) -> Router {
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     })
 }
 
@@ -252,6 +253,7 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
             session_cleanup: Default::default(),
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
+            socket_gate: Default::default(),
         });
         let response = app
             .oneshot(Request::get("/api/v1/setup").body(Body::empty()).unwrap())
@@ -357,6 +359,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
             session_cleanup: Default::default(),
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
+            socket_gate: Default::default(),
         });
         let valid_input = if path == "/api/v1/setup" {
             setup_input()
@@ -452,6 +455,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     });
     let expected = json!({"error": "invalid credentials"});
     for completed in [false, true] {
@@ -521,6 +525,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
     });
     for token in [None, Some(""), Some("wrong-token-test-only")] {
         let mut input = setup_input();
@@ -1250,6 +1255,7 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
             session_cleanup: Default::default(),
             shutdown: Default::default(),
             ws_allowed_origins: Default::default(),
+            socket_gate: Default::default(),
         });
         let organization: Uuid = first["organization"]["organization_id"]
             .as_str()

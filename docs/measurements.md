@@ -847,6 +847,45 @@ Results:
 
 Limits: one host, loopback, short 60 s runs, one to three runs per variant; DB connection peaks varied between runs. The client caps in-flight requests at 64, so it does not model an attacker with unbounded concurrency. The allocator setting was tested only as a run-time environment variable, not as an image default.
 
+## WebSocket socket caps, frame budget and read buffer (#196 A, 2026-11-13 JST)
+
+Reproduce in `server/` against a local PostgreSQL (`DATABASE_URL` set), `ulimit -n 100000`, nothing else heavy running:
+
+```bash
+MEASURE_READ_BUFFER=8192 cargo test --release --lib realtime::tests::limits::measure_idle_socket_rss_by_read_buffer -- --ignored --exact --nocapture
+MEASURE_SECONDS=30 MEASURE_FLOODERS=8 cargo test --release --lib realtime::tests::limits::measure_reconnect_flood_subscribe_load -- --ignored --exact --nocapture
+```
+
+Add `MEASURE_UNLIMITED=1` to the flood run for the no-limit variant. RSS and CPU time come from `ps -o rss=,time=` on the test process, sampled 5 s and 25 s after the ready line it prints.
+
+Conditions: Apple M5, 10 CPUs, 32 GiB, macOS 27 / Darwin 27.0.0; release test binary at this PR's head; PostgreSQL in Docker; server and loopback clients in one process. Another build/test job ran on the host during some runs.
+
+**Idle sockets.** 10,000 subscribed idle sockets, two rounds per variant:
+
+| Server read buffer | RSS (MiB), rounds 1 / 2 | CPU time over 20 s idle (s) |
+| --- | --- | --- |
+| 128 KiB (tungstenite default) | 2,693 / 2,693 | 0.64 / 0.69 |
+| 16 KiB | 1,595 / 1,595 | 0.60 / 0.62 |
+| 8 KiB (chosen) | 1,516 / 1,516 | 0.53 / 0.62 |
+| 4 KiB | 1,477 / 1,476 | 0.55 / 0.59 |
+
+The process also holds the 10,000 client sockets, so only differences are meaningful: 128 KiB -> 8 KiB saves about 1.18 GiB (~120 KiB per socket); 8 KiB -> 4 KiB saves about 40 MiB.
+
+**Reconnect flood.** One Account, 8 sockets looping subscribe/unsubscribe as fast as possible and reconnecting at once on any close or refusal, for 30 s. Meanwhile a Member of another Organization re-subscribes every 500 ms (1 s deadline). App pool in use sampled every 5 ms. Three runs per variant:
+
+| Variant | Subscribes/s | Upgrades accepted | Upgrades refused (503) | Pool in use, peak | Other Organization ok / failed | Other p50 / p99 (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| no limits | 299–306 | 8 | 0 | 5 | 58 / 0 | 24–25 / 31–40 |
+| budget, upgrade admitted when empty (first version) | 15.6–15.7 | 19,059–19,848 | 0 | 5 | 56 / 0 | 35–37 / 51–56 |
+| budget + refusal at upgrade when empty (chosen) | 12.1–13.8 | 247–457 | 74,611–91,552 | 5 | 23–28 / 0 | 26–37 / 35–43 |
+
+Results:
+- The budget cuts subscribe work (authorization query, two watermark transactions, replay) from ~300/s to ~13/s for a flooding Account.
+- Admitting an exhausted Account turned the flood into ~660 upgrades/s, each with a session check, and the other Organization's p50 rose. Refusing at upgrade removed those connections.
+- No other-Organization probe failed in any run. Its lower count with refusals is client-side: the flood and the probe share one test runtime.
+
+Limits: one host, loopback, short runs, server and clients in one process, so absolute RSS and the probe's timing include client cost. Each refused upgrade still runs one authentication query (~3,000/s here); handshake admission and accept pacing are #212. The per-Account (32) and global (12,000) caps were not load-tested beyond the cap tests; their values come from the 10,000-socket target and the RSS above. Not a fairness guarantee between Accounts.
+
 ## Sustained write throughput (#309, 2026-11-13 JST)
 
 Reproduce from the repository root, one mode at a time, nothing else running:

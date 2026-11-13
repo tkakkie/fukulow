@@ -23,6 +23,7 @@ Web real-time client: protocol, sync controller, Organization sync, shared contr
 | Channel-only loss events validate transport shape; ambiguous watched events reconnect; same-session late 401 retains Account scope | `web/src/realtime.test.ts::validates the channel-only access-loss event and rejects missing, malformed or extra fields`, `web/src/sync.test.ts::ambiguous access-loss events during pending subscribe or rewatch reconnect with backoff`, `web/src/protocol.test.ts::runs every implemented protocol-layer client fixture against the protocol`, `web/src/sync.test.ts::runs every implemented client fixture through controller transports and timers` |
 | Unwatched Channel loss is ignored without reconnect, even with a pending subscribe; other Channels keep receiving Messages | `web/src/sync.test.ts::ignores access loss after unwatch without reconnecting` |
 | Channel loss fails every pending send with only discard; no retry, other Channels unaffected | `web/src/protocol.test.ts::access loss fails sending unknown and refused sends only in that Channel and leaves only discard` |
+| A 4029 rate-limit close reconnects with growing backoff; only a confirmed subscribed resets it | `web/src/protocol.test.ts::backs off longer on each 4029 rate-limit close until a subscription is confirmed` |
 
 ## Rows in other parts
 

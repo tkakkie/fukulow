@@ -32,6 +32,7 @@ pub(super) struct Connection<'a> {
     pub queue: LiveQueue,
     pub cursors: HashMap<Uuid, i64>,
     pub access: HashMap<Uuid, crate::channels::AccessWatch>,
+    pub permit: super::limits::Permit,
 }
 
 impl Connection<'_> {
@@ -273,9 +274,12 @@ impl Connection<'_> {
                 if after_seq < 0 {
                     return Self::error(socket, Some(channel_id), "invalid_input").await;
                 }
-                if !self.cursors.contains_key(&channel_id)
-                    && self.cursors.len() >= MAX_SUBSCRIPTIONS
-                {
+                // Already subscribed here: no authorization query, watermark or replay.
+                // The client holds this subscription's cursor; older history is REST.
+                if self.cursors.contains_key(&channel_id) {
+                    return Ok(());
+                }
+                if self.cursors.len() >= MAX_SUBSCRIPTIONS {
                     return Self::error(socket, Some(channel_id), "subscription_limit").await;
                 }
                 match self.visible(channel_id).await {
@@ -381,6 +385,10 @@ impl Connection<'_> {
             if matches!(frame, Some(Ok(_))) {
                 ping_sent_at = None;
                 heartbeat.reset_at(next_ping);
+            }
+            if matches!(frame, Some(Ok(Frame::Text(_) | Frame::Binary(_)))) && !self.permit.charge()
+            {
+                return Err(super::CLOSE_RATE_LIMITED);
             }
             match frame {
                 Some(Ok(Frame::Text(text))) => match serde_json::from_str(&text) {
