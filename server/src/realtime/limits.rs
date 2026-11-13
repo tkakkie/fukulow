@@ -86,8 +86,9 @@ impl Bucket {
             self.at = now;
             return;
         }
-        // Credit only the time those milli-tokens took; the rest carries over.
-        let used = added * NANOS_PER_MILLI / rate;
+        // Credit only the time those milli-tokens took, rounded up so no time is
+        // credited twice; the rest carries over.
+        let used = (added * NANOS_PER_MILLI).div_ceil(rate);
         self.level += u64::try_from(added).unwrap_or(0);
         self.at += std::time::Duration::from_nanos(u64::try_from(used).unwrap_or(u64::MAX));
     }
@@ -329,9 +330,9 @@ mod tests {
         };
         let start = Instant::now();
         let mut bucket = empty(budget, start);
-        // Every 0.5 ms for one second: each check alone adds under a milli-token.
-        for step in 1..=2000u64 {
-            bucket.refill(budget, start + std::time::Duration::from_micros(500 * step));
+        // Every 50 µs for one second: each check alone adds 0.4 milli-tokens.
+        for step in 1..=20_000u64 {
+            bucket.refill(budget, start + std::time::Duration::from_micros(50 * step));
         }
         assert_eq!(bucket.level, 8 * MILLIS_PER_TOKEN);
     }
