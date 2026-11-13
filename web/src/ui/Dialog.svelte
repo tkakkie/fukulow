@@ -14,6 +14,7 @@
 
   let {
     open = false,
+    busy = false,
     title,
     description,
     confirmLabel,
@@ -24,6 +25,7 @@
     children,
   }: {
     open?: boolean
+    busy?: boolean
     title: string
     description?: string
     confirmLabel?: string
@@ -71,7 +73,7 @@
     if (shouldCloseOnEscape(e)) {
       e.preventDefault()
       e.stopPropagation()
-      oncancel?.()
+      if (!busy) oncancel?.()
       return
     }
     if (e.key === 'Tab' && !isImeComposing(e) && !e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -110,10 +112,10 @@
       {#if onconfirm || oncancel}
         <footer class="ui-dialog__actions">
           {#if oncancel}
-            <Button variant="secondary" onclick={oncancel}>{cancelLabel}</Button>
+            <Button variant="secondary" disabled={busy} onclick={oncancel}>{cancelLabel}</Button>
           {/if}
           {#if onconfirm && confirmLabel}
-            <Button variant="primary" onclick={onconfirm}>{confirmLabel}</Button>
+            <Button variant="primary" disabled={busy} onclick={onconfirm}>{confirmLabel}</Button>
           {/if}
         </footer>
       {/if}

@@ -842,3 +842,39 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
   expect(recovered.sync.channel('A').topic('T').composer.draft).toBe('Topic draft survives C10')
   recovered.close()
 })
+
+import { createAccountSecurity } from './account-security'
+import type { Result } from './api'
+
+it('account settings 403 preserves the live session, while 401 closes it and its drafts', async () => {
+  const putPassword = vi.fn(async (): Promise<Result<undefined>> => ({ ok: false, kind: 'http', status: 403, error: 'current_password_incorrect' }))
+  const s = stack({ openSecurity: ended => createAccountSecurity(ended, { putPassword, revokeOtherSessions: putPassword }) })
+  await signInAs(s, 'owner')
+  const session = s.auth.session
+  const security = s.auth.security!
+  await security.changePassword({ current_password: 'wrong password', new_password: 'new password' })
+  expect(s.auth.view.screen).toBe('app')
+  expect(s.auth.session).toBe(session)
+  expect(s.closes[0]).not.toHaveBeenCalled()
+  expect(security.state.error).toBe('incorrect')
+  putPassword.mockResolvedValueOnce({ ok: false, kind: 'http', status: 401 })
+  await security.revokeOthers({ current_password: 'current password' })
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.security).toBeNull()
+  expect(s.closes[0]).toHaveBeenCalledOnce()
+})
+
+it('an old account settings 401 cannot end a replacement Account session', async () => {
+  let finish!: (result: Result<undefined>) => void
+  const putPassword = vi.fn(() => new Promise<Result<undefined>>(resolve => { finish = resolve }))
+  const s = stack({ openSecurity: ended => createAccountSecurity(ended, { putPassword, revokeOtherSessions: putPassword }) })
+  await signInAs(s, 'owner')
+  const pending = s.auth.security!.changePassword({ current_password: 'current password', new_password: 'new password' })
+  await signInAs(s, 'replacement')
+  const replacement = s.auth.session
+  finish({ ok: false, kind: 'http', status: 401 })
+  await pending
+  expect(s.auth.view.screen).toBe('app')
+  expect(s.auth.session).toBe(replacement)
+  expect(s.closes[1]).not.toHaveBeenCalled()
+})

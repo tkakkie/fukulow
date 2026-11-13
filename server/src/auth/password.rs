@@ -106,6 +106,37 @@ async fn check_password_with_hash(
     permit: PasswordPermit,
     dummy_hash: impl FnOnce(&[u8]) -> Result<String, ApiError> + Send + 'static,
 ) -> Result<bool, ApiError> {
+    verify_and_hash(password, stored, attempt, permit, None, dummy_hash)
+        .await
+        .map(|(valid, _)| valid)
+}
+
+pub(super) async fn check_and_hash_password(
+    password: String,
+    stored: String,
+    attempt: throttle::Attempt,
+    permit: PasswordPermit,
+    new_password: Option<String>,
+) -> Result<(bool, Option<String>), ApiError> {
+    verify_and_hash(
+        password,
+        Some(stored),
+        attempt,
+        permit,
+        new_password,
+        hash_password_sync,
+    )
+    .await
+}
+
+async fn verify_and_hash(
+    password: String,
+    stored: Option<String>,
+    attempt: throttle::Attempt,
+    permit: PasswordPermit,
+    new_password: Option<String>,
+    dummy_hash: impl FnOnce(&[u8]) -> Result<String, ApiError> + Send + 'static,
+) -> Result<(bool, Option<String>), ApiError> {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         #[cfg(test)]
@@ -130,7 +161,14 @@ async fn check_password_with_hash(
         } else {
             drop(attempt);
         }
-        Ok(valid)
+        let hash = if valid {
+            new_password
+                .map(|password| hash_password_sync(password.as_bytes()))
+                .transpose()?
+        } else {
+            None
+        };
+        Ok((valid, hash))
     })
     .await
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None))?

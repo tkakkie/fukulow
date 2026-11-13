@@ -144,3 +144,20 @@ it('deactivates a scoped Member with a bodyless POST and accepts empty 204', asy
   expect(f).toHaveBeenCalledWith('/api/v1/orgs/org%201/members/member%201/deactivate', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }))
   expect(f.mock.calls[0][1].body).toBeUndefined()
 })
+
+import { putPassword, revokeOtherSessions } from './api'
+
+it('uses generated account security bodies with PUT or POST and preserves 403 without ending the session', async () => {
+  const current_password = 'current password'
+  const passwordBody = { current_password, new_password: 'new password' }
+  for (const { run, path, method, body } of [
+    { run: (f: typeof fetch) => putPassword(passwordBody, f), path: '/api/v1/me/password', method: 'PUT', body: passwordBody },
+    { run: (f: typeof fetch) => revokeOtherSessions({ current_password }, f), path: '/api/v1/me/sessions/revoke-others', method: 'POST', body: { current_password } },
+  ]) {
+    const f = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ error: 'current_password_incorrect' }), { status: 403 }))
+    expect(await run(f)).toEqual({ ok: false, kind: 'http', status: 403, error: 'current_password_incorrect' })
+    expect(f).toHaveBeenCalledWith(path, expect.objectContaining({ method, credentials: 'same-origin', body: JSON.stringify(body) }))
+    f.mockResolvedValue(new Response(null, { status: 204 }))
+    expect(await run(f)).toEqual({ ok: true, data: undefined })
+  }
+})
