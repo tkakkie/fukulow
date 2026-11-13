@@ -3,6 +3,7 @@
 Web client. Writing rules and the other parts: [index](../decisions.md).
 
 ## Web client
+- #301 rebuilds the identity Map on Member list fetch; no push/polling. Unknown authors batch at 100; omissions/failures retry only on list fetch, Channel selection or reconnect. Deactivated names keep the accessible `（無効）` hint. `members.load()` is #315's refetch hook.
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec/realtime.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
 - Web sync is layered (components, adapter, controller, pure protocol, API/transport) so ordering and dedup are testable without Svelte or I/O; only message sync has a protocol (#91/#94). No CI layer check yet (needs a negative test).
 - Capabilities (`{allowed, reason?}`) come from authorize: Organization invite/manage-Roles/create-Channels, Channel add-Members (#144). Server requests re-check independently; #149 owns Channel management endpoints.

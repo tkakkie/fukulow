@@ -1,7 +1,7 @@
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ReadPosition, Result } from './api'
+import type { Member, ReadPosition, Result } from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
@@ -14,6 +14,9 @@ import TopicView from './TopicView.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter } from './unread.svelte'
 import MessageRow from './ui/MessageRow.svelte'
+import { senderName } from './authors'
+import { createMembers } from './members'
+import { membersAdapter } from './members.svelte'
 import Workspace from './Workspace.svelte'
 
 type ListenerEntry = {
@@ -985,6 +988,19 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it('renders the deactivated sender name and hint as accessible text in the shared Message row', async () => {
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(MessageRow, { target: host as unknown as Element, props: {
+      body: '本文', senderName: senderName({ id: 'author', name: '田中', deactivated: true }),
+    } })
+    flushSync()
+    const label = host.querySelector('.ui-message-row__sender')!
+    expect(label.textContent).toBe('田中（無効）')
+    expect(label.getAttribute('aria-hidden')).not.toBe('true')
+    expect(label.getAttribute('aria-label')).toBeNull()
+    await unmount(instance)
+  })
   it('renders no 再送する or 編集して送り直す when target is unavailable and keeps 破棄 working', async () => {
     // 1. Direct MessageRow check across both retryable and refused failed states under targetUnavailable
     const host = testDoc.createElement('div')
@@ -1427,6 +1443,14 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
   it('renders Topic summary lines at latest activity, creates Topics from Composer, expands sidebar/panel Topic lists, and operates Topic view with isolated drafts and return focus', async () => {
     vi.useFakeTimers()
+    let directory: Member[] = []
+    let deactivated = false
+    const memberController = createMembers('org-1', vi.fn(), vi.fn(), {
+      listMembers: async () => ok({ members: directory }),
+      lookupAuthors: async () => ok({ identities: [{ id: 'other', name: '田中', deactivated }] }),
+      changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    await memberController.load()
     const net = fakeNetwork()
     const rawSession = createSession({
       selfId: 'me',
@@ -1541,7 +1565,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           },
         },
         selectedOrganizationId: 'org-1',
-        resolveSenderName: (id: string) => (id === 'other' ? '田中' : '自分'),
+        members: membersAdapter(memberController),
         onannounce: (msg: string) => announcements.push(msg),
       },
     })
@@ -1767,6 +1791,20 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     )!
     expect(restoredMainComposer.value).toBe('チャンネルに残す下書き')
 
+    // Names absent from the directory resolve in every view and refresh both cached states on list fetch.
+    deactivated = true
+    await memberController.load()
+    await settle()
+    flushSync()
+    expect(queryAll(host, '#main-content .ui-message-row__sender').some(el => el.textContent === '田中（無効）')).toBe(true)
+    directory = [{ id: 'other', name: '田中', role: 'member' }]
+    deactivated = false
+    await memberController.load()
+    await settle()
+    flushSync()
+    expect(queryAll(host, '#main-content .ui-message-row__sender').some(el => el.textContent === '田中')).toBe(true)
+    expect(host.textContent).not.toContain('田中（無効）')
+
     // 6. Unknown Topic (404 topic_not_found) shows unavailable EmptyState and disables Topic Composer while Channel stays usable
     navigation.navigate({ type: 'topic', topicId: 'missing-topic', phone: false })
     flushSync()
@@ -1781,6 +1819,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     navigation.destroy()
     await unmount(instance)
     sessionModel.close()
+    memberController.close()
   })
 
   it('keeps TopicView, Topic draft, loaded Topic history and failed Topic send 破棄 visible across C9 and C10', async () => {

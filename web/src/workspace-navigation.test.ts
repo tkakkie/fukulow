@@ -14,15 +14,15 @@ const handler = source.statements.find(node => isFunctionDeclaration(node) && no
 if (!handler) throw new Error('Workspace Channel selection handler not found')
 const handlerCode = transpileModule(handler.getText(source), { compilerOptions: { target: ScriptTarget.ESNext } }).outputText
 
-function selectionHandler(nav: Navigation, channels: ChannelsAdapter) {
-  return new Function('nav', 'channels', 'currentOrganizationId', `
+function selectionHandler(nav: Navigation, channels: ChannelsAdapter, retryAuthors = () => {}) {
+  return new Function('nav', 'channels', 'currentOrganizationId', 'members', `
     return id => {
       const s = channels.state;
       let drawerOpen = true;
       ${handlerCode}
       handleSelectChannel(id);
     };
-  `)(nav, channels, 'org') as (id: string) => void
+  `)(nav, channels, 'org', { authors: { retry: retryAuthors } }) as (id: string) => void
 }
 
 function navigation(topicId: string | null) {
@@ -56,7 +56,9 @@ it.each([null, 'topic'])('explicitly selecting the current C9 Channel from view 
     expect(watch).toHaveBeenCalledTimes(1)
     expect(net.history).toHaveLength(1)
 
-    selectionHandler(nav, channelsAdapter(session.channels))('A')
+    const retryAuthors = vi.fn()
+    selectionHandler(nav, channelsAdapter(session.channels), retryAuthors)('A')
+    expect(retryAuthors).toHaveBeenCalledOnce()
     await settle()
     expect(pushState).toHaveBeenCalledTimes(topicId ? 1 : 0)
     expect(replaceState).not.toHaveBeenCalled()
@@ -91,7 +93,9 @@ it.each([null, 'topic'])('explicitly selecting the current ready Channel from vi
     await settle()
     expect(session.sync.get().channels.A.state).toBe('ready')
 
-    selectionHandler(nav, channelsAdapter(session.channels))('A')
+    const retryAuthors = vi.fn()
+    selectionHandler(nav, channelsAdapter(session.channels), retryAuthors)('A')
+    expect(retryAuthors).toHaveBeenCalledOnce()
     await settle()
     expect(nav.get().target).toMatchObject({ channelId: 'A', topicId: null })
     expect(pushState).toHaveBeenCalledTimes(topicId ? 1 : 0)

@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod admission;
+pub mod authors;
 mod commit;
 mod delivery;
 mod failure;

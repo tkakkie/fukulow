@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import { checkHealth } from './api'
+import { checkHealth, lookupAuthors } from './api'
+
+it('looks up display identities in the selected Organization using generated request and response types', async () => {
+  const identities = [{ id: 'author', name: '名前', deactivated: true }]
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({ identities }), { status: 200 }))
+  expect(await lookupAuthors('org/1', { ids: ['author'] }, fetcher)).toEqual({ ok: true, data: { identities } })
+  expect(fetcher).toHaveBeenCalledWith('/api/v1/orgs/org%2F1/message-authors', {
+    credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: ['author'] }),
+  })
+})
 
 describe('checkHealth', () => {
   it('is true when the server responds ok', async () => {

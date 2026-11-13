@@ -105,6 +105,9 @@ export type ClientMessage = import('./api-schema').ClientMessage
 
 export type Role = components['schemas']['Role']
 export type Member = components['schemas']['Member']
+export type DisplayIdentity = components['schemas']['DisplayIdentity']
+export const lookupAuthors = (organizationId: string, body: components['schemas']['AuthorLookupRequest'], f: typeof fetch = fetch) =>
+  call<components['schemas']['AuthorIdentities']>(f, `${orgPath(organizationId)}/message-authors`, json(body), true)
 export type CreateInviteRequest = components['schemas']['CreateInviteRequest']
 export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest']
 export type InviteResponse = components['schemas']['InviteResponse']
