@@ -64,7 +64,7 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #196 A budget: every client text/binary frame is charged before DB access to the connection (burst 300, 4/s) and its Account (burst 600, 8/s, kept across reconnects). Bursts fit a 256-Channel bootstrap (two per Account). Over budget closes with new code 4029; clients back off as after 1011.
 - #196 A: an Account with an empty budget is refused at upgrade (503), not after it: measured, reconnecting after 4029 otherwise cost ~660 upgrades/s each with a session check. Refused upgrades still cost one authentication query; handshake admission is #212.
 - #196 A: a duplicate subscribe is a charged no-op whatever its after_seq (maintainer, 2026-11-13): the client already holds that cursor; replay again via unsubscribe+subscribe (charged twice) or REST. It closed the re-subscribe bypass of the 256-subscription and query costs.
-- #196 A read buffer 8 KiB (tungstenite default 128 KiB): measured ~120 KiB less RSS per idle socket (~1.2 GiB at 10,000); 4 KiB saved only ~4 KiB more per socket, so 8 KiB keeps a 16 KiB message to two reads. Idle CPU did not differ.
+- #196 A read buffer 8 KiB (tungstenite default 128 KiB): measured ~120 KiB less RSS per idle socket (~1.15 GiB at 10,000); 4 KiB saved only ~4 KiB more per socket, so 8 KiB keeps a 16 KiB message to two reads. Idle CPU did not differ.
 
 ## Entries in other parts
 

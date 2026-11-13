@@ -8,6 +8,7 @@ use std::{
 use uuid::Uuid;
 
 const MILLIS_PER_TOKEN: u64 = 1000;
+const NANOS_PER_MILLI: u128 = 1_000_000;
 /// Account entries kept for budgets that outlive their connections; only idle
 /// entries with a full budget are reclaimed.
 pub(crate) const MAX_ACCOUNTS: usize = 100_000;
@@ -52,6 +53,8 @@ impl Default for SocketLimits {
 #[derive(Clone, Copy)]
 struct Bucket {
     level: u64,
+    /// Time already credited; never moves backwards, and the uncredited remainder of
+    /// elapsed time is kept so frequent checks still refill.
     at: Instant,
 }
 
@@ -65,13 +68,28 @@ impl Bucket {
 
     fn refill(&mut self, budget: Budget, now: Instant) {
         let capacity = budget.burst * MILLIS_PER_TOKEN;
-        let elapsed =
-            u64::try_from(now.saturating_duration_since(self.at).as_millis()).unwrap_or(u64::MAX);
-        self.level = self
-            .level
-            .saturating_add(elapsed.saturating_mul(budget.per_second))
-            .min(capacity);
-        self.at = now;
+        if self.level >= capacity || budget.per_second == 0 {
+            self.level = self.level.min(capacity);
+            self.at = self.at.max(now);
+            return;
+        }
+        // per_second tokens/s is per_second milli-tokens per millisecond.
+        let elapsed = now.saturating_duration_since(self.at).as_nanos();
+        let rate = u128::from(budget.per_second);
+        let added = elapsed * rate / NANOS_PER_MILLI;
+        if added == 0 {
+            return;
+        }
+        let space = u128::from(capacity - self.level);
+        if added >= space {
+            self.level = capacity;
+            self.at = now;
+            return;
+        }
+        // Credit only the time those milli-tokens took; the rest carries over.
+        let used = added * NANOS_PER_MILLI / rate;
+        self.level += u64::try_from(added).unwrap_or(0);
+        self.at += std::time::Duration::from_nanos(u64::try_from(used).unwrap_or(u64::MAX));
     }
 
     fn has_token(&mut self, budget: Budget, now: Instant) -> bool {
@@ -122,9 +140,14 @@ impl SocketGate {
     /// Takes one per-Account slot and one global slot, or neither. The Account cap and
     /// budget are checked first, so a refused Account never holds a global slot.
     pub(crate) fn admit(&self, account: Uuid) -> Option<Permit> {
-        let now = Instant::now();
+        self.admit_within(account, MAX_ACCOUNTS)
+    }
+
+    fn admit_within(&self, account: Uuid, max_accounts: usize) -> Option<Permit> {
         let limits = self.limits;
         let mut inner = self.lock();
+        // Read under the lock, so shared buckets see time in lock order.
+        let now = Instant::now();
         let (connections, exhausted) = match inner.accounts.get_mut(&account) {
             Some(a) => (
                 a.connections,
@@ -137,12 +160,12 @@ impl SocketGate {
         if connections >= limits.per_account || exhausted || inner.open >= limits.global {
             return None;
         }
-        if !inner.accounts.contains_key(&account) && inner.accounts.len() >= MAX_ACCOUNTS {
+        if !inner.accounts.contains_key(&account) && inner.accounts.len() >= max_accounts {
             let budget = limits.account_frames;
             inner
                 .accounts
                 .retain(|_, a| a.connections > 0 || !a.frames.is_full(budget, now));
-            if inner.accounts.len() >= MAX_ACCOUNTS {
+            if inner.accounts.len() >= max_accounts {
                 return None;
             }
         }
@@ -180,12 +203,15 @@ impl Permit {
     /// Charges one control frame to this connection and its Account. `false`: over
     /// budget, nothing charged.
     pub(crate) fn charge(&mut self) -> bool {
-        let now = Instant::now();
         let limits = self.gate.limits;
-        if !self.frames.has_token(limits.connection_frames, now) {
+        if !self
+            .frames
+            .has_token(limits.connection_frames, Instant::now())
+        {
             return false;
         }
         let mut inner = self.gate.lock();
+        let now = Instant::now();
         let Some(account) = inner.accounts.get_mut(&self.account) else {
             return false;
         };
@@ -200,9 +226,9 @@ impl Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let now = Instant::now();
         let budget = self.gate.limits.account_frames;
         let mut inner = self.gate.lock();
+        let now = Instant::now();
         inner.open = inner.open.saturating_sub(1);
         let idle = match inner.accounts.get_mut(&self.account) {
             Some(account) => {
@@ -287,5 +313,62 @@ mod tests {
         drop(fresh);
         // An Account whose budget is full leaves no entry.
         assert_eq!(gate.open(), (0, 1));
+    }
+
+    fn empty(budget: Budget, at: Instant) -> Bucket {
+        let mut bucket = Bucket::full(budget, at);
+        bucket.level = 0;
+        bucket
+    }
+
+    #[test]
+    fn frequent_checks_keep_the_elapsed_remainder() {
+        let budget = Budget {
+            burst: 600,
+            per_second: 8,
+        };
+        let start = Instant::now();
+        let mut bucket = empty(budget, start);
+        // Every 0.5 ms for one second: each check alone adds under a milli-token.
+        for step in 1..=2000u64 {
+            bucket.refill(budget, start + std::time::Duration::from_micros(500 * step));
+        }
+        assert_eq!(bucket.level, 8 * MILLIS_PER_TOKEN);
+    }
+
+    #[test]
+    fn an_earlier_timestamp_never_credits_time_twice() {
+        let budget = Budget {
+            burst: 600,
+            per_second: 8,
+        };
+        let start = Instant::now();
+        let second = std::time::Duration::from_secs(1);
+        let mut bucket = empty(budget, start);
+        bucket.refill(budget, start + 2 * second);
+        // A caller that sampled its time earlier arrives late.
+        bucket.refill(budget, start + second);
+        bucket.refill(budget, start + 2 * second);
+        assert_eq!(bucket.level, 16 * MILLIS_PER_TOKEN);
+        // Refill saturates at the burst.
+        bucket.refill(budget, start + 1000 * second);
+        assert_eq!(bucket.level, 600 * MILLIS_PER_TOKEN);
+    }
+
+    #[test]
+    fn the_account_table_bound_keeps_active_and_depleted_entries() {
+        let gate = gate(4, 10, 10, 10);
+        let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let _a = gate.admit_within(a, 2).unwrap();
+        let mut b1 = gate.admit_within(b, 2).unwrap();
+        assert!((0..5).all(|_| b1.charge()));
+        drop(b1);
+        // B is idle but depleted (5 s to refill): its budget is kept, so C is refused.
+        assert!(gate.admit_within(c, 2).is_none());
+        assert_eq!(gate.open(), (1, 2));
+        // Accounts already in the table are still admitted at the bound.
+        let _a2 = gate.admit_within(a, 2).unwrap();
+        let _b2 = gate.admit_within(b, 2).unwrap();
+        assert_eq!(gate.open(), (3, 2));
     }
 }

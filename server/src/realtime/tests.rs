@@ -70,6 +70,11 @@ async fn try_connect_at(
     );
     Ok(tokio_tungstenite::connect_async(request).await?.0)
 }
+const UNMETERED: Budget = Budget {
+    burst: 1 << 40,
+    per_second: 1,
+};
+
 struct Server {
     address: std::net::SocketAddr,
     task: JoinHandle<()>,
@@ -141,11 +146,13 @@ async fn state(pool: &PgPool) -> AppState {
         session_cleanup: Default::default(),
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
-        // Caps and budgets are exercised in tests/limits.rs; other tests open many
-        // sockets for one Account.
+        // Caps and budgets are exercised in tests/limits.rs; other tests and the
+        // manual measurements open many sockets and subscriptions for one Account.
         socket_gate: SocketGate::new(SocketLimits {
             per_account: 100_000,
             global: 100_000,
+            connection_frames: UNMETERED,
+            account_frames: UNMETERED,
             ..SocketLimits::default()
         }),
     }

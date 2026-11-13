@@ -869,7 +869,7 @@ Conditions: Apple M5, 10 CPUs, 32 GiB, macOS 27 / Darwin 27.0.0; release test bi
 | 8 KiB (chosen) | 1,516 / 1,516 | 0.53 / 0.62 |
 | 4 KiB | 1,477 / 1,476 | 0.55 / 0.59 |
 
-The process also holds the 10,000 client sockets, so only differences are meaningful: 128 KiB -> 8 KiB saves about 1.18 GiB (~120 KiB per socket); 8 KiB -> 4 KiB saves about 40 MiB.
+The process also holds the 10,000 client sockets, so only differences are meaningful: 128 KiB -> 8 KiB saves about 1.15 GiB (1,177 MiB) (~120 KiB per socket); 8 KiB -> 4 KiB saves about 40 MiB.
 
 **Reconnect flood.** One Account, 8 sockets looping subscribe/unsubscribe as fast as possible and reconnecting at once on any close or refusal, for 30 s. Meanwhile a Member of another Organization re-subscribes every 500 ms (1 s deadline). App pool in use sampled every 5 ms. Three runs per variant:
 

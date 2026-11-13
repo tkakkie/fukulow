@@ -140,8 +140,10 @@ async fn slots_are_released_on_every_path(pool: PgPool) {
     let mut tcp = TcpStream::connect(f.server.address).await.unwrap();
     let path = scoped_path("/api/v1/ws", &f.token);
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-        f.server.address, f.token
+        "GET {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {}\r\n\r\n",
+        f.server.address,
+        f.token,
+        tungstenite::handshake::client::generate_key()
     );
     tokio::io::AsyncWriteExt::write_all(&mut tcp, request.as_bytes())
         .await
@@ -240,10 +242,13 @@ async fn a_duplicate_subscribe_is_a_charged_no_op_whatever_its_after_seq(pool: P
 
 #[sqlx::test]
 async fn reconnecting_after_4029_does_not_reset_the_account_budget(pool: PgPool) {
-    let f = limited(&pool, limits(5, 100, 100, 6)).await;
+    // No Account refill, so the refusals below cannot race a refill; refill is
+    // covered by the limiter unit tests.
+    let mut no_refill = limits(5, 100, 100, 6);
+    no_refill.account_frames.per_second = 0;
+    let f = limited(&pool, no_refill).await;
     let session = second_membership(&pool, f.member).await;
     let mut socket = f.server.connect(&f.token).await;
-    let started = std::time::Instant::now();
     let mut subscribed = 0;
     loop {
         subscribe(&mut socket, f.channel, 0).await;
@@ -264,26 +269,18 @@ async fn reconnecting_after_4029_does_not_reset_the_account_budget(pool: PgPool)
             frame => panic!("unexpected frame {frame:?}"),
         }
     }
-    // Six tokens plus one per elapsed second, two per subscribe/unsubscribe cycle.
-    let refill = started.elapsed().as_secs() as usize + 1;
-    assert!(
-        subscribed <= (6 + refill).div_ceil(2),
-        "{subscribed} subscriptions in {refill} s"
-    );
+    // Six tokens, two per subscribe/unsubscribe cycle.
+    assert_eq!(subscribed, 3);
     // The exhausted Account is refused before the upgrade, whatever its Session.
     open_sockets(&f, 0).await;
     refused(f.server.handshake(Some(&f.token), None, None).await);
     refused(f.server.handshake(Some(&session), None, None).await);
     assert_eq!(f.state.socket_gate.open(), (0, 1));
-    // Another Account is unaffected; the refill admits this one again.
+    // Another Account is unaffected.
     let other = fixture(&pool).await;
     let mut unaffected = f.server.connect(&other.token).await;
     subscribe(&mut unaffected, other.channel, 0).await;
     ready(&mut unaffected, other.channel, 0).await;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    let mut socket = f.server.connect(&f.token).await;
-    subscribe(&mut socket, f.channel, 0).await;
-    ready(&mut socket, f.channel, 0).await;
 }
 
 fn unlimited(read_buffer: usize) -> SocketLimits {
