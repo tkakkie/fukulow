@@ -32,6 +32,7 @@ export type PendingMessageState = {
   topicName?: string
   topicId?: string
   replyTo?: string
+  replyRootId?: string
   status: 'sending' | 'throttled' | 'failed'
   retryable: boolean
 }
@@ -494,7 +495,7 @@ export function createSync(options: SyncOptions) {
     composerListeners.set(channel, compListeners)
     async function send(
       body: string,
-      target: Pick<SendMessageRequest, 'reply_to' | 'topic_name'> = {},
+      target: Pick<SendMessageRequest, 'reply_to' | 'topic_name'> & { replyRootId?: string } = {},
       restore?: () => void,
       originTopicId?: string,
     ) {
@@ -630,7 +631,7 @@ export function createSync(options: SyncOptions) {
               setReplyExtra(channel, replyRootId, topicId, { draft: text })
             }
           }
-          const accepted = await send(text, { reply_to: replyTo }, restore, topicId ?? undefined)
+          const accepted = await send(text, { reply_to: replyTo, replyRootId }, restore, topicId ?? undefined)
           if (!accepted) restore()
           return accepted
         },
@@ -684,7 +685,7 @@ export function createSync(options: SyncOptions) {
             body: p.body,
             ...(p.topic_name ? { topicName: p.topic_name } : {}),
             ...(pendingTopics.get(p.clientMessageId) ? { topicId: pendingTopics.get(p.clientMessageId) } : {}),
-            ...(p.reply_to ? { replyTo: p.reply_to } : {}),
+            ...(p.reply_to ? { replyTo: p.reply_to, replyRootId: p.replyRootId } : {}),
             status: p.state === 'sending' || p.state === 'throttled' ? p.state : 'failed',
             retryable: p.state !== 'failed',
           })),

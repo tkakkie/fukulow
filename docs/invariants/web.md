@@ -37,3 +37,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [unread](unread.md): `positions at the first Unread Message after loading needed older pages, then preserves anchor on further older loads`
 
 - [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
+
+- [replies](replies.md): `keeps an unknown descendant Reply visible with retry and discard after its parent body is evicted`

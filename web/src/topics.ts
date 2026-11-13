@@ -4,7 +4,7 @@ import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, 
 import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import { selectMainTimeline, selectTopicMessages, type TopicBaseline, type TopicSummaryError } from './topic-selectors'
-import { countSequencesAfter, rememberTopicMessages, trimMessages, type TopicEvidence } from './message-window'
+import { countSequencesAfter, rememberTopicMessages, trimMessages, topicEvidence, boundTopicEvidence } from './message-window'
 import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
 
 type Sync = ReturnType<typeof createSync>
@@ -30,7 +30,7 @@ const paging = (): Paging => ({ hasMore: true, hasNewer: false, following: true,
 const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false, notFound: false })
 const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
   mainTopics: new Set<string>(), mainPositions: new Map<string, number>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
-  evidence: new Map() as TopicEvidence,
+  evidence: topicEvidence(), evidenceRefresh: new Set<string>(),
   summaryThrough: new Map<string, number>(),
   summaries: new Set<string>(), summaryRetries: new Map<string, SummaryRetry>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
 type Window = ReturnType<typeof window>
@@ -183,8 +183,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   const needsSummary = (w: Window, topicId: string) => {
     const baseline = w.baselines.get(topicId)
-    if (!baseline) return true
-    const known = w.evidence.get(topicId)?.at(-1)?.end ?? 0
+    if (!baseline || baseline.asOfSeq < w.evidence.floor) return true
+    const known = w.evidence.sequences.get(topicId)?.at(-1)?.end ?? 0
     return known > baseline.summary.latest_message.seq && w.messages.get(known)?.topic_id !== topicId &&
       known > (w.summaryThrough.get(topicId) ?? 0)
   }
@@ -229,6 +229,14 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (!old || response.as_of_seq > old.asOfSeq) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
     }
   }
+  async function ensureSummaryForWindow(w: Window, topicId: string) {
+    if (w.evidenceRefresh.has(topicId)) return
+    w.evidenceRefresh.add(topicId)
+    try {
+      await Promise.resolve()
+      for (const [channel, value] of windows) if (value === w && current(channel, w)) await ensureSummary(channel, topicId)
+    } finally { w.evidenceRefresh.delete(topicId) }
+  }
   function trimMain(w: Window, edge: 'older' | 'newer') {
     const lines = selectMainTimeline([], w.messages.values(), w.baselines.values(), w.evidence)
     const liveTopics = new Set([...w.messages.values()].flatMap(m => m.topic_id ? [m.topic_id] : []))
@@ -250,13 +258,18 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     for (const m of w.messages.values()) if (m.topic_id) latest.set(m.topic_id, Math.max(latest.get(m.topic_id) ?? 0, m.seq))
     for (const [seq, m] of w.messages) if (m.topic_id && seq !== latest.get(m.topic_id)) w.messages.delete(seq)
     if (trimmed) {
-      w.main.before = Math.min((w.main.asOfSeq ?? Infinity) + 1, ...kept.map(l => l.kind === 'message' ? l.message.seq : w.mainPositions.get(l.topicId) ?? l.position))
+      // Auxiliary summaries do not prove that any main-page history was fetched.
+      const covered = kept.filter(l => l.kind === 'message' || w.mainTopics.has(l.topicId) || liveTopics.has(l.topicId))
+      const positions = covered.map(l => l.kind === 'message' ? l.message.seq : w.mainPositions.get(l.topicId) ?? l.position)
+      if (positions.length) w.main.before = Math.min((w.main.asOfSeq ?? Infinity) + 1, ...positions)
       if (edge === 'older') {
         w.main.hasNewer = true
-        w.main.through = Math.min(w.main.through ?? Infinity, Math.max(...kept.map(l => l.kind === 'message' ? l.message.seq : w.mainPositions.get(l.topicId) ?? l.position)))
+        w.main.through = positions.length ? Math.min(w.main.through ?? Infinity, Math.max(...positions)) : 0
       }
       else w.main.hasMore = true
     }
+    boundTopicEvidence(w.evidence)
+    for (const id of w.baselines.keys()) if (w.baselines.get(id)!.asOfSeq < w.evidence.floor) void ensureSummaryForWindow(w, id)
     let total = [...windows.values()].reduce((n, value) => n + value.messages.size + value.baselines.size, 0)
     for (const [id, other] of windows) {
       if (total <= MAIN_MESSAGE_LIMIT) break
@@ -264,7 +277,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       total -= other.messages.size + other.baselines.size
       other.messages.clear(); other.baselines.clear(); other.mainTopics.clear(); other.mainPositions.clear()
       other.main = paging(); other.list = paging()
-      other.summaryThrough.clear(); other.summaries.clear()
+      other.summaryThrough.clear(); other.summaries.clear(); other.evidence = topicEvidence()
       for (const slot of other.reads.keys()) if (!slot.startsWith('topic:')) other.reads.delete(slot)
       clearWindowTimers(other)
       snapshots.delete(id); pendingChannels.add(id)
@@ -334,7 +347,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       p.through = Math.min(result.data.as_of_seq, Math.max(p.through ?? p.asOfSeq ?? 0, sync.get().channels[channel]?.cursor ?? 0))
       p.asOfSeq = result.data.as_of_seq
       for (const id of w.mainTopics) {
-        const ranges = w.evidence.get(id) ?? []
+        const ranges = w.evidence.sequences.get(id) ?? []
         const range = [...ranges].reverse().find(r => r.start <= p.asOfSeq!)
         if (range) w.mainPositions.set(id, Math.max(w.mainPositions.get(id) ?? 0, Math.min(range.end, p.asOfSeq)))
       }
@@ -389,7 +402,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       pendingRetry.timer = undefined
     }
     w.summaries.add(topicId)
-    const through = w.evidence.get(topicId)?.at(-1)?.end ?? 0
+    const through = w.evidence.sequences.get(topicId)?.at(-1)?.end ?? 0
     const { result, isCurrent } = await read(channel, w, `summary:${topicId}`, () => options.api.getTopicSummary(channel, topicId))
     if (!isCurrent()) return
     w.summaries.delete(topicId)
@@ -463,7 +476,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       return
     }
     const attempt = latestRetry?.attempt ?? 0
-    if (result.ok || !isRetryableSummaryFailure(result)) {
+    if ((result.ok && w.baselines.get(topicId)!.asOfSeq >= w.evidence.floor) || (!result.ok && !isRetryableSummaryFailure(result))) {
       w.summaryRetries.set(topicId, { attempt, terminal: 'non_retryable' })
       notify(channel)
       return
@@ -621,7 +634,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         for (const m of result.data.messages) t.messages.set(m.seq, m)
         if (!older) {
           const suffix = (sync.get().channels[channel]?.messages ?? []).filter(m => m.topic_id === topicId && m.seq > (t!.through ?? 0))
-          if (countSequencesAfter(w.evidence.get(topicId) ?? [], t.through ?? 0) > suffix.length) t.hasNewer = true
+          if (w.evidence.floor > (t.through ?? 0) || countSequencesAfter(w.evidence.sequences.get(topicId) ?? [], t.through ?? 0) > suffix.length) t.hasNewer = true
           else for (const m of suffix) t.messages.set(m.seq, m)
         }
         t.before = result.data.messages[0]?.seq; t.hasMore = result.data.has_more

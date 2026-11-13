@@ -12,15 +12,16 @@ export const TOTAL_MESSAGE_LIMIT = 1500
 export const SYNC_MESSAGE_LIMIT = TOTAL_MESSAGE_LIMIT - MAIN_MESSAGE_LIMIT - TOPIC_MESSAGE_LIMIT - REPLY_MESSAGE_LIMIT
 export type Failure = number | 'network' | 'timeout'
 export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff' | 'send_retry'
-export type Pending = SendTarget & { clientMessageId: string; body: string; state: 'sending' | 'throttled' | 'unknown' | 'failed'; request: number; retryWait?: number }
+export type Pending = SendTarget & { replyRootId?: string; clientMessageId: string; body: string; state: 'sending' | 'throttled' | 'unknown' | 'failed'; request: number; retryWait?: number }
 export type ChannelState = {
   state: 'loading' | 'ready' | 'unavailable'
   watched: boolean
   cursor: number | null
   messages: Message[]
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
-  advancing: number[]
+  advancing: { start: number; end: number }[]
   heldThrough?: number
+  forgottenThrough?: number
   lastUsed?: number
   retainedCount?: number
   streamBase?: number
@@ -72,7 +73,7 @@ export type Input =
   | { type: 'socket_closed'; connection: number; code: number }
   | { type: 'event'; connection: number; event: ServerEvent; subscription?: number }
   | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }
-  | (SendTarget & { type: 'user_send'; channel: string; clientMessageId: string; body: string })
+  | (SendTarget & { replyRootId?: string; type: 'user_send'; channel: string; clientMessageId: string; body: string })
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
   | { type: 'history_result'; request: number; page: MessagePage }
   | { type: 'history_failed'; request: number; status: Failure }
@@ -199,7 +200,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     effects.push({ type: 'fetch_history', id: n, channel: id, page, seq })
   }
   const gap = (c: ChannelState) => c.cursor !== null &&
-    ((c.heldThrough ?? 0) > c.cursor + 1 || (c.subscription?.confirmed && c.subscription.watermark > c.cursor))
+    ((c.heldThrough ?? 0) > c.cursor + 1 || (c.forgottenThrough ?? 0) > c.cursor || (c.subscription?.confirmed && c.subscription.watermark > c.cursor))
   const reconcile = (id: string, immediate = false) => {
     const c = channel(id)
     if (!c.watched || c.state === 'unavailable' || c.cursor === null) return
@@ -258,13 +259,23 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     }
     settle(id, valid)
     if (source !== 'window') {
-      const added = valid.map(m => m.seq).filter(n => (c.cursor === null || n > c.cursor) && !c.advancing.includes(n))
-      if (added.length) c.advancing = [...new Set([...c.advancing, ...added])]
-    }
-    if (source === 'stream' && c.cursor !== null && valid.some(m => m.seq === c.cursor! + 1)) {
-      const eligible = new Set(c.advancing)
-      while (eligible.has(c.cursor + 1)) c.cursor++
-      c.advancing = c.advancing.filter(n => n > c.cursor!)
+      const ranges = [...c.advancing.map(r => ({ ...r })), ...valid
+        .filter(m => c.cursor === null || m.seq > c.cursor).map(m => ({ start: m.seq, end: m.seq }))]
+        .sort((a, b) => a.start - b.start)
+      const merged: typeof c.advancing = []
+      for (const range of ranges) {
+        const last = merged.at(-1)
+        if (last && range.start <= last.end + 1) last.end = Math.max(last.end, range.end)
+        else merged.push(range)
+      }
+      // Adjacent input alone advances C3. Forgotten disjoint ranges are recovered by unfiltered fill.
+      if (source === 'stream' && c.cursor !== null && valid.some(m => m.seq === c.cursor! + 1)) {
+        while (merged[0] && merged[0].start <= c.cursor + 1) c.cursor = Math.max(c.cursor, merged.shift()!.end)
+      }
+      if (merged.length > MAIN_MESSAGE_LIMIT) c.forgottenThrough = Math.max(c.forgottenThrough ?? 0, merged.at(-1)!.end)
+      if (c.forgottenThrough !== undefined && c.cursor !== null && c.cursor >= c.forgottenThrough) delete c.forgottenThrough
+      const bounded = merged.slice(0, MAIN_MESSAGE_LIMIT)
+      if (bounded.length !== c.advancing.length || bounded.some((r, i) => r.start !== c.advancing[i].start || r.end !== c.advancing[i].end)) c.advancing = bounded
     }
   }
   const attempt = (id: string, p: Pending) => {
@@ -387,7 +398,8 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const c = channel(input.channel)
       if (c.state === 'unavailable' || c.pending.some(p => p.clientMessageId === input.clientMessageId)) break
       const p: Pending = { clientMessageId: input.clientMessageId, body: input.body, state: 'sending', request: 0,
-        ...(input.reply_to ? { reply_to: input.reply_to } : {}),
+        ...(input.reply_to ? { reply_to: input.reply_to, replyRootId: input.replyRootId ??
+          c.messages.find(m => m.id === input.reply_to)?.reply_root_id ?? input.reply_to } : {}),
         ...(input.topic_name ? { topic_name: input.topic_name } : {}) }
       attempt(input.channel, p)
       break

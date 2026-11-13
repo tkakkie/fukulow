@@ -4,6 +4,8 @@ Reply chains, server and web, incl. their real-time delivery tests. Writing rule
 
 | Rule | Test |
 |---|---|
+| Cached recent Replies cannot evict requested history pages or advance their continuation | `web/src/message-window-review.test.ts::keeps fetched Reply pages contiguous when the newest 200 same-chain records are cached` |
+| Pending Replies retain root membership and retry/discard after parent body eviction and same-chain navigation | `web/src/message-window-review.test.ts::keeps an unresolved descendant Reply visible and retryable after selecting its root and evicting the parent`, `web/src/timeline.svelte.test.ts::keeps an unknown descendant Reply visible with retry and discard after its parent body is evicted` |
 | Reply migration preserves null fields; parent/root FKs bind Organization and Channel and reject self-parent and mismatched nulls | `server/src/messages/tests/replies/atomicity.rs::reply_migration_preserves_existing_rows_and_scopes_both_foreign_keys` |
 | Replies inherit Topic/root; identical retries are canonical; changed reply_to conflicts before parent lookup; invalid selectors reject first | `server/src/messages/tests/replies/sends.rs::reply_inherits_root_and_topic_and_retry_compares_parent_before_lookup` |
 | Concurrent duplicate Replies consume one seq/count/publication; cross-Channel key races roll back the loser without gaps | `server/src/messages/tests/replies/sends.rs::reply_concurrent_duplicates_and_cross_channel_conflict_consume_one_seq_and_count` |

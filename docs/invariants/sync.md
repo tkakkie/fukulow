@@ -4,6 +4,8 @@ Web real-time client: protocol, sync controller, Organization sync, shared contr
 
 | Rule | Test |
 |---|---|
+| Topic evidence is bounded; discarded evidence requires fresh W before counts become authoritative | `web/src/message-window-review.test.ts::bounds interleaved Topic evidence and rejects stale counts until a safe baseline refresh`, `web/src/message-window-review.test.ts::bounds production evidence under interleaved Topic arrivals while a baseline refresh is stalled` |
+| Disjoint cursor evidence is bounded; forgotten sequences require unfiltered recovery before cursor advancement | `web/src/message-window-review.test.ts::caps disjoint cursor evidence and refetches its forgotten final sequence without advancing across a gap` |
 | Display eviction preserves gap evidence, reconnect cursor, replay uniqueness and C8 reset | `web/src/message-window.test.ts::bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8` |
 | Named body budgets preserve pending sends and cursors; inactive Channels have at most five LRU slots of 50 | `web/src/message-window.test.ts::enforces named caps and five inactive Channel LRU slots without discarding pending sends or cursors` |
 | Main refetches retain fixed W continuation; latest refetch never advances the sync cursor | `web/src/message-window.test.ts::refetches main pages at fixed W beyond the cap in both directions during live arrivals without moving the cursor` |
@@ -48,3 +50,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [unread](unread.md): `refetches counts after bootstrap covers history newer than the initial Channel-list snapshot`
 - [realtime](realtime.md): `timeline_contract_rejects_incorrect_pages`
 - [web](web.md): `releases its controller listener with the last observer`, `an unavailable Channel stays in the session: no sign-out and no automatic retry`, `a REST 401 after a handshake failure ends the Account Session`
+
+- [replies](replies.md): `keeps an unresolved descendant Reply visible and retryable after selecting its root and evicting the parent`

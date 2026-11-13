@@ -143,7 +143,7 @@
     new Set([anchorMessageId, effectiveRootId, ...visibleMessages.map((m) => m.id)]),
   )
   const pending = $derived(
-    s.pending.filter((p) => p.replyTo !== undefined && chainMessageIds.has(p.replyTo)),
+    s.pending.filter((p) => p.replyTo !== undefined && (p.replyRootId === effectiveRootId || chainMessageIds.has(p.replyTo))),
   )
 
   const channelUnavailable = $derived(s.status === 'unavailable' || rState.unavailable)

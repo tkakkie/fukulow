@@ -203,13 +203,18 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await page.locator('#main-content .topic-view__scroll').evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')) })
     await expect(topicMessageRow).toContainText('トピック内の親メッセージ')
     const topicReplyOpener = topicMessageRow.getByRole('button', { name: /返信/ })
-    await topicReplyOpener.click()
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/messages/' + topicRoot.id + '/chain') && r.ok()),
+      topicReplyOpener.click(),
+    ])
 
     await expect(panel).toBeVisible()
     await expect(page).toHaveURL(
       new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}\\?panel=reply:${topicRoot.id}$`),
     )
     await expect(replyComposer(page)).toBeFocused()
+    // Early history rows are mounted only after scrolling the virtualized panel to that page.
+    await panel.locator('.reply-panel__scroll').evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')) })
     await expect(panel.locator(`[data-message-id="${topicRoot.id}"]`)).toContainText(
       'トピック内の親メッセージ',
     )
@@ -235,20 +240,28 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await expect(panelTopicRootItem.getByRole('button', { name: '返信 50件›', exact: true })).toBeVisible()
     const nestedReplyBtn = panelTopicReplyItem.getByRole('button', { name: '返信', exact: true })
     await expect(nestedReplyBtn).toBeVisible()
-    await nestedReplyBtn.click()
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/messages/' + topicReply.id + '/chain') && r.ok()),
+      nestedReplyBtn.click(),
+    ])
     await expect(page).toHaveURL(
       new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}\\?panel=reply:${topicReply.id}$`),
     )
     await expect(replyComposer(page)).toBeFocused()
+    await panel.locator('.reply-panel__scroll').evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')) })
     await expect(panelTopicRootItem).toHaveClass(/reply-panel__item--root/)
 
+    // Fetch the newer history explicitly; a cached recent suffix no longer bypasses Reply paging.
+    await loadMoreButton.click()
+    await expect(loadMoreButton).toHaveCount(0)
+    await replyComposer(page).focus()
     // ArrowUp from empty Reply Composer focuses the latest row in ReplyPanel; pressing R opens its chain and focuses Reply Composer
     await page.keyboard.press('ArrowUp')
     const latestPanelRow = panel.locator('.ui-message-row[data-focusable="true"]').last()
     await expect(latestPanelRow).toBeFocused()
-    await page.keyboard.press('r')
     const confirmedTopicReplyId = await confirmedTopicReply.getAttribute('data-message-id')
     expect(confirmedTopicReplyId).toBeTruthy()
+    await page.keyboard.press('r')
     await expect(page).toHaveURL(
       new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}\\?panel=reply:${confirmedTopicReplyId}$`),
     )

@@ -976,3 +976,42 @@ Browser probe (`web/e2e/message-window.spec.ts`): real endpoints seed 450 main M
 The browser uses CDP cumulative CPU metrics for script/layout/style deltas; mutation-to-frame samples cover the first main view's active lifetime, including its arrival, keyboard and anchor checks. They measure frame readiness, not GPU paint time. Arrival wall time includes HTTP, PostgreSQL, WebSocket delivery and the Playwright driver. This is not a server throughput claim. Element counts include controls and spacers; row counts count mounted confirmed rows. Separate Vitest coverage windows 1,000 pending sends without dropping them, and Playwright covers first-Unread entry through 450 Messages beyond the main cap.
 
 These results keep the approved 400/300/200 caps and 560px overscan: record and DOM counts remain bounded through the workload, with p95 mutation-to-frame time below one 60Hz frame on this machine. No API extension was needed. Limits: one run per probe, headless desktop browser and debug server; no production capacity or low-end-device claim, no heap-size bound, and no claim that sequence/ID evidence or user-authored pending sends have fixed cardinality. Cache-slot counts can include the same canonical Message in more than one store; caller-held snapshots and transient HTTP response allocations are not heap measurements. Older Reply history still requires restarting from the chain start with existing endpoints.
+
+### #308 round-1 evidence and active-Unread remeasurement (2026-11-14 JST)
+
+Source: `codex/message-window-308`, ede344c plus the round-1 working-tree fixes. Same macOS 27.0.1 / Apple M5 / 10 CPUs / 32 GiB host; Node 26.13.0 and Vitest 5.1.0. The final controller run was sequential, without another task build, test or load probe running. This adds evidence omitted by the original record above; that record is historical and does not establish a metadata bound.
+
+Targets fixed before this run: keep the approved 400/300/200/50 body caps and 1,500 shared display slots; retain at most 400 Topic range objects per projection window, 400 Reply availability ranges, 400 disjoint sync ranges, 1,100 Unread records per Channel, 1,100 presented seqs per active visit and one first-Unread identity. The Unread record allowance is the union of the 400 sync, 400 main and 300 active Topic bodies, so refetched pages can still supply presentation evidence. Unread Topic scopes are capped at 400. Discarded evidence invalidates insufficient baselines and uses existing endpoints to refresh; positions never advance just to reclaim metadata. A scalar sync recovery target retains forgotten gaps until unfiltered recovery.
+
+Reproduce with the original command:
+
+```bash
+MEASURE_WINDOW=1 npm --prefix web test -- src/message-window-memory.test.ts --disableConsoleIntercept
+```
+
+The file now runs two production-controller probes. The original navigation probe again peaked at sync/main/Topic/Reply = 600/400/300/200 and 1,500 combined display slots; main/Topic/Reply reads were 131/80/60. Arrival p50/p95/max were 0.04425/0.06246/1.01613 ms. No body cap or overscan adjustment was made.
+
+The added probe instantiates sync, Topics, Replies **and Unread**. It starts with one Message in each of T/U, opens T's history and Reply root, and enters T's Unread scope at position 0 with one Unread. Then 100,000 arrivals alternate T/U; every T arrival is a Reply in the open chain. The same Unread visit remains active throughout. Every 1,000 arrivals it presents only the recent T rows and drains async refreshes; the unseen first Message must prevent mark-read progress. Instrumentation observes the actual private evidence/record stores, not only display snapshots. Counts are sampled after every arrival and after each async drain.
+
+| Sampled retained-store peak | Value |
+| --- | --- |
+| Topic range objects / Topic evidence keys | 400 / 2 |
+| Reply availability range objects | 400 |
+| Unread identity/sequence records | 1,100 |
+| Visit presented seqs / separately pinned first-Unread identity | 350 / 1 |
+| Unread Topic scopes | 2 |
+| Sync disjoint ranges in this contiguous stream | 0 |
+| Main latest bodies / summary baselines / active Topic windows | 2 / 2 / 1 |
+| Main Topic membership / W-relative positions / summary-through entries | 2 / 2 / 2 |
+| Projection refresh jobs / persistent read slots | 2 / 4 |
+| Unread summary reads / queued summaries / held Topic positions | 2 / 2 / 0 |
+| Unread summary retry timers / attempt entries at samples | 0 / 0 |
+| Combined retained display body slots | 904 |
+
+At 25k/50k/75k/100k arrivals, Unread retained 942/1,080/817/955 records and presented sets held 300/340/300/300 seqs; Topic/Reply ranges were 400/400 at every point. Arrival dispatch p50/p95/max: 0.09400/0.10579/1.53954 ms. Baseline traffic is a cost of the bound: the complete probe used one main read, 819 Topic-summary reads and 313 Channel-list reads, including initial reads and the final validation. It also made one Reply read and 996 Topic-history reads; 995 of those history reads are the final refetch back to the first Message, outside the timed arrival block.
+
+After all arrivals the visit still had boundary 0, entry Unread 1 and first-Unread seq 1, with zero mark-read requests; the refreshed T count was exactly 50,001. Refetching the evicted prefix and presenting seq 1 then made one mark-read request, persisted position 1 and recovered count 50,000 without changing the visit marker. CI regressions also hold a refresh indefinitely while 10,000 arrivals retain at most 1,100 records, limit 500 one-off Topics to 400 scope/evidence identities, and cap 1,000 disjoint sync ranges at 400 before refetching the forgotten final seq. Against the original production code, the new reproductions fail with 10,000 Unread records and 2,400 range objects for 2,400 alternating arrivals.
+
+The four affected Playwright specs (`message-window`, `topics`, `replies`, `unread`) passed all 11 tests against the rebuilt Rust 1.99.0 debug server and a fresh, migrated, disposable PostgreSQL 18.6 instance, using only the app role. The windowing probe sampled 13/18/12 mounted main/Topic/Reply rows, 139/188/129 descendant elements, and 652 application elements with Topic and Reply open. Reply assertions explicitly scroll to early rows and fetch newer pages before checking the latest keyboard target.
+
+Limits: one final controller run; these are retained-store cardinalities, not a process heap/RSS bound or a controlled latency comparison. The full fixture history, timing samples, caller-held snapshots, transient HTTP/fixture allocations and microtask-only peaks are excluded. Weak baseline-identity sets do not strongly retain old baselines. Pending sends and authored drafts remain exempt; Channel cardinality is not capped by this probe. Cursor-gap recovery, stale/denied responses, P4 merge and parent-eviction retry/discard have separate CI tests. The browser recheck proves the exercised viewport/navigation behavior, not low-end-device or production capacity.

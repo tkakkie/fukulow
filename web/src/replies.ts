@@ -2,7 +2,7 @@ import * as api from './api'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
 import { REPLY_MESSAGE_LIMIT } from './protocol'
-import { countSequencesAfter, rememberSequence, trimMessages } from './message-window'
+import { countSequencesAfter, rememberSequence, trimMessages, EVIDENCE_LIMIT } from './message-window'
 
 type Sync = ReturnType<typeof createSync>
 export type RepliesApi = {
@@ -11,10 +11,11 @@ export type RepliesApi = {
 export const repliesApi = (organizationId: string): RepliesApi => ({
   listReplyChain: (channel, anchor, query) => api.listReplyChain(organizationId, channel, anchor, query),
 })
-const chain = (anchor: Message) => ({ anchor, rootId: anchor.reply_root_id ?? anchor.id,
+const chain = (anchor: Message, openedThrough: number) => ({ anchor, openedThrough, rootId: anchor.reply_root_id ?? anchor.id,
   messages: new Map<string, Message>([[anchor.id, anchor]]), after: 0, hasMore: true, hasOlder: false,
   following: true, hasNewer: false, newerCount: 0,
   restart: false,
+  liveFloor: 0,
   liveSequences: [] as Parameters<typeof rememberSequence>[0],
   loading: false, error: false, read: Symbol() })
 type Chain = ReturnType<typeof chain>
@@ -40,13 +41,14 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   }
   const belongs = (w: Chain, m: Message) => m.id === w.rootId || m.reply_root_id === w.rootId
   const pending = (w: Chain, c: ReturnType<Sync['get']>['channels'][string] | undefined) =>
-    (c?.pending ?? []).filter(p => p.reply_to && (p.reply_to === w.rootId || w.messages.has(p.reply_to)))
-  const mergeStream = (channel: string, w: Chain, incoming = sync.get().channels[channel]?.messages ?? []) => {
+    (c?.pending ?? []).filter(p => p.reply_to && (p.replyRootId === w.rootId || p.reply_to === w.rootId || w.messages.has(p.reply_to)))
+  const mergeStream = (channel: string, w: Chain, incoming?: Message[]) => {
     let changed = false
-    for (const m of incoming) if (belongs(w, m) && (!w.hasOlder || m.seq > w.after) && w.messages.get(m.id) !== m) {
-      const isNew = countSequencesAfter(w.liveSequences, m.seq - 1) === countSequencesAfter(w.liveSequences, m.seq)
-      rememberSequence(w.liveSequences, m.seq)
-      if (!w.following && w.messages.size >= REPLY_MESSAGE_LIMIT && !w.messages.has(m.id)) {
+    for (const m of incoming ?? sync.get().channels[channel]?.messages ?? []) if (belongs(w, m) && (!w.hasOlder || m.seq > w.after) && w.messages.get(m.id) !== m) {
+      const isNew = m.seq > w.liveFloor && countSequencesAfter(w.liveSequences, m.seq - 1) === countSequencesAfter(w.liveSequences, m.seq)
+      if (m.seq > w.liveFloor) rememberSequence(w.liveSequences, m.seq)
+      while (w.liveSequences.length > EVIDENCE_LIMIT) w.liveFloor = Math.max(w.liveFloor, w.liveSequences.shift()!.end)
+      if ((incoming === undefined && w.hasMore && m.seq > w.after && !w.messages.has(m.id)) || (!w.following && w.messages.size >= REPLY_MESSAGE_LIMIT && !w.messages.has(m.id))) {
         if (isNew) { w.hasNewer = w.hasMore = true; w.newerCount++; changed = true }
         continue
       }
@@ -54,6 +56,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     }
     if (trimMessages(w.messages, REPLY_MESSAGE_LIMIT, w.hasMore ? 'older' : 'newer')) {
       if (!w.hasMore) w.hasOlder = true
+      else w.hasNewer = true
     }
     return changed
   }
@@ -117,7 +120,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         const messages = result.data.messages.filter(m => m.channel_id === channel && belongs(w, m))
         if (w.restart) {
           w.messages.clear(); w.after = 0; w.hasOlder = w.hasNewer = false; w.newerCount = 0
-          w.liveSequences = []; w.following = true; w.restart = false
+          w.liveSequences = []; w.liveFloor = 0; w.following = true; w.restart = false
         }
         for (const m of messages) w.messages.set(m.id, m)
         // Only the returned page advances continuation: a live append may be far beyond an unpaged sibling.
@@ -125,9 +128,18 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         // An empty or non-advancing filtered page cannot safely continue, even if has_more is set.
         w.hasMore = result.data.has_more && after > requestedAfter
         w.after = Math.max(w.after, after)
+        if (requestedAfter === 0) for (const [id, m] of w.messages) {
+          if (m.seq > after && m.seq <= w.openedThrough) w.messages.delete(id)
+        }
+        // Requested history wins over a disconnected live suffix once the combined window is full.
+        if (w.hasMore && w.messages.size > REPLY_MESSAGE_LIMIT) {
+          for (const [id, m] of w.messages) if (m.seq > after) w.messages.delete(id)
+          w.hasNewer = true
+        }
         if (trimMessages(w.messages, REPLY_MESSAGE_LIMIT)) w.hasOlder = true
         void sync.settleHistory(channel, messages)
         mergeStream(channel, w)
+        if (!w.hasMore) { w.hasNewer = false; w.newerCount = 0 }
       }
       notify()
     })
@@ -176,7 +188,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     async open(channel: string, anchor: Message) {
       if (anchor.channel_id !== channel || closed || !sync.get().running || sync.get().organization !== 'available' ||
         !sync.get().channels[channel]?.watched || sync.get().channels[channel]?.state === 'unavailable') return
-      const w = chain(anchor)
+      const w = chain(anchor, sync.get().channels[channel]?.cursor ?? 0)
       for (const old of chains.values()) release(old)
       chains.clear(); snapshots.clear()
       chains.set(channel, w); mergeStream(channel, w); notify()
@@ -206,13 +218,13 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       const w = chains.get(channel)
       const parent = parentId ?? w?.anchor.id
       if (!w || !current(channel, w) || !parent || (!w.messages.has(parent) && parent !== w.anchor.id && parent !== w.rootId)) return false
-      return sync.getTimeline(channel).send(body, { reply_to: parent })
+      return sync.getTimeline(channel).send(body, { reply_to: parent, replyRootId: w.rootId })
     },
     retry(channel: string, clientMessageId: string) {
       const w = chains.get(channel)
       if (!w || !current(channel, w)) return
       const p = sync.get().channels[channel]?.pending.find(p => p.clientMessageId === clientMessageId)
-      if (p?.reply_to && (p.reply_to === w.rootId || w.messages.has(p.reply_to))) return sync.getTimeline(channel).retry(clientMessageId)
+      if (p?.reply_to && (p.replyRootId === w.rootId || p.reply_to === w.rootId || w.messages.has(p.reply_to))) return sync.getTimeline(channel).retry(clientMessageId)
     },
     replaceSession() { sessionToken++; chains.forEach(release); chains.clear(); cancelReads(); notify() },
     close() { closed = true; unsubscribe(); chains.forEach(release); chains.clear(); cancelReads(); notify(); listeners.clear() },

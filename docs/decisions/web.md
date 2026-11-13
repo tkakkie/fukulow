@@ -3,10 +3,11 @@
 Web client. Writing rules and the other parts: [index](../decisions.md).
 
 ## Web client
-- #308 separates display bodies from cursor/gap evidence and compressed Topic sequences. Unread retains ID/sequence metadata and weak baseline identities, so body eviction cannot hide gaps, lose counts or pin old history.
+- #308 bounds Topic/Reply/cursor evidence at 400 ranges and Unread at 1,100 records/presented seqs, 400 Topic scopes and one visit marker. Checkpoints refetch existing baselines; insufficient counts stay unresolved and forgotten gaps refill, avoiding per-arrival memory growth.
 - #308 uses 400 main/300 Topic/200 Reply records, five inactive Channel slots of 50, and a shared sync budget of 600: at most 1,500 display records, reserving room for simultaneous main and panel histories. Pending sends are exempt.
 - #308 writes variable-height row windowing without a dependency. ResizeObserver measures attached rows, one IntersectionObserver reports presentation, and ID-based focus mounts offscreen destinations. Measured spacer geometry is a CSS custom property.
-- #308 refetches older main pages at fixed W, newer history with a fresh first page, and older Reply pages from the root. Sequence metadata survives body eviction; evicted latest Topic excerpts use existing summary reads. No API extension is needed.
+- #308 refetches older main pages at fixed W, newer history with a fresh first page, and older Reply pages from the root. Evidence checkpoints and evicted Topic excerpts use existing summary reads. No API extension is needed.
+- #308 auxiliary Topic-list positions never prove main-page coverage. Requested Reply history takes priority over cached recent bodies; pending intents carry their root through settlement/discard. This prevents skipped history and hidden unresolved sends.
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec/realtime.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
 - Web sync is layered (components, adapter, controller, pure protocol, API/transport) so ordering and dedup are testable without Svelte or I/O; only message sync has a protocol (#91/#94). No CI layer check yet (needs a negative test).
 - Capabilities (`{allowed, reason?}`) come from authorize: Organization invite/manage-Roles/create-Channels, Channel add-Members (#144). Server requests re-check independently; #149 owns Channel management endpoints.

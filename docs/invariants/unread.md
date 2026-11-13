@@ -4,6 +4,9 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 
 | Rule | Test |
 |---|---|
+| Long visits bound Unread metadata even with stalled refreshes; the first-Unread marker survives eviction | `web/src/message-window-review.test.ts::bounds a long active Unread visit including stalled refreshes while preserving its first-Unread marker` |
+| Checkpointed Unread counts refresh; evicted unread prefixes must be refetched and presented before marking | `web/src/message-window-review.test.ts::refreshes bounded Unread counts and refetches the evicted first-Unread prefix before marking it` |
+| One-off Topics cannot grow Unread scope identities or Topic evidence without a bound | `web/src/message-window-review.test.ts::bounds Topic identities and Unread scope bookkeeping across one-off Topics during the same visit` |
 | Unread bookkeeping retains Message identity and sequence metadata, never display bodies | `web/src/unread-retention.test.ts::retains only Message identity and sequence metadata without holding display bodies` |
 | Own Messages need no Unread records; coverage still permits progress across them to presented Messages from other senders | `web/src/unread-retention.test.ts::skips own Message bookkeeping and still advances across own rows to a presented other-sender Message` |
 | Unread positions are per Member and independent per Channel/Topic; max/clamp excludes own Messages; sending moves no position; refetch persists maxima | `server/src/messages/tests/unread.rs::unread_main_timeline_and_topics_are_independent_monotonic_and_exclude_own_sends` |
@@ -44,3 +47,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [channels](channels.md): `channel_manager_creation_management_and_capabilities_match_authorize`, `channel_manager_denial_matrix_preserves_grants_unread_and_notifications`, `channel_manager_rechecks_right_grant_role_and_revision_after_auth`, `channel_manager_last_manager_denials_and_unmanaged_controls`, `channel_manager_role_changes_are_atomic_and_preserve_grant_subscription_and_unread`, `channel_manager_new_lifetimes_never_revive_right_or_old_subscription`, `channel_manager_invite_reactivation_leaves_stale_right_unusable_and_renewal_clears_it`, `channel_manager_inactive_and_stale_rights_never_count_as_managers`, `channel_manager_migration_has_no_backfill_and_rejects_public_or_guest_rights`, `channel_manager_concurrent_revoke_leave_role_and_removal_preserve_manager`, `channel_manager_mutation_locks_members_before_grants`
 
 - [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
+
+- [sync](sync.md): `caps disjoint cursor evidence and refetches its forgotten final sequence without advancing across a gap`

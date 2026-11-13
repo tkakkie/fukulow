@@ -1,3 +1,5 @@
+import ReplyPanel from './ReplyPanel.svelte'
+import { replyClient, reply, root } from './reply-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -985,6 +987,37 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it('keeps an unknown descendant Reply visible with retry and discard after its parent body is evicted', async () => {
+    const c = replyClient(); await c.boot(); c.event(reply(2))
+    await c.replies.open('A', reply(2))
+    c.sendMessage.mockResolvedValue({ ok: false, kind: 'network' })
+    const composer = c.sync.getTimeline('A').reply('id1')
+    composer.setDraft('親が消えても残る返信'); await composer.submit('id2')
+    await c.replies.open('A', root())
+    c.listReplyChain.mockResolvedValue(ok({ root_id: 'id1', messages: [], has_more: false }))
+    await c.replies.loadMore('A')
+    const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+    const instance = mount(ReplyPanel, { target: host as unknown as Element, props: {
+      channel: syncAdapter(c.sync).channel('A'), replies: repliesAdapter(c.replies, 'A'),
+      channelId: 'A', anchorMessageId: 'id1', resolvedAnchor: root(), selfId: 'me',
+    } })
+    await settle(); flushSync()
+    for (let seq = 3; seq <= 500; seq++) c.event(reply(seq))
+    await settle(); flushSync()
+    expect(c.replies.get('A').messages.some(m => m.id === 'id2')).toBe(false)
+    const scroll = host.querySelector('.reply-panel__scroll')!
+    scroll.clientHeight = 600; scroll.scrollHeight = 23316; scroll.scrollTop = 22716
+    scroll.dispatchEvent(new MiniDomEvent('scroll')); await settle(); flushSync()
+    expect(host.textContent).toContain('親が消えても残る返信')
+    expect(buttonsByText(host, '再送する')).toHaveLength(1)
+    buttonsByText(host, '再送する')[0].click(); await settle(); flushSync()
+    expect(c.sendMessage).toHaveBeenCalledTimes(2)
+    buttonsByText(host, '破棄')[0].click(); await settle(); flushSync()
+    expect(c.sync.get().channels.A.pending).toHaveLength(0)
+    expect(host.textContent).not.toContain('親が消えても残る返信')
+    await unmount(instance); await c.sync.close()
+  })
+
   it('windows a thousand pending sends without dropping them and Composer Up mounts the latest confirmed Message', async () => {
     const net = fakeNetwork()
     const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })

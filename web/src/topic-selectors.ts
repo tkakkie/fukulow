@@ -39,9 +39,9 @@ export function selectMainTimeline(messages: Message[], pageMessages: Iterable<M
     }
   }
   if (evidence) for (const topic of topics.values()) {
-    topic.position = Math.max(topic.position, evidence.get(topic.topicId)?.at(-1)?.end ?? 0)
-    if (topic.baseline) topic.messageCount = topic.baseline.summary.message_count +
-      countSequencesAfter(evidence.get(topic.topicId) ?? [], topic.baseline.asOfSeq)
+    topic.position = Math.max(topic.position, evidence.sequences.get(topic.topicId)?.at(-1)?.end ?? 0)
+    if (topic.baseline) topic.messageCount = topic.baseline.asOfSeq < evidence.floor ? null : topic.baseline.summary.message_count +
+      countSequencesAfter(evidence.sequences.get(topic.topicId) ?? [], topic.baseline.asOfSeq)
   }
   return [...lines, ...topics.values()].sort((a, b) => linePosition(a) - linePosition(b))
 }
