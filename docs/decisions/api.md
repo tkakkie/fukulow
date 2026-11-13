@@ -14,6 +14,9 @@ API contract and generated types. Writing rules and the other parts: [index](../
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [auth](auth.md): `#299 shared raw-text validation`
+- [messages](messages.md): `#299 Channel names are`, `#299 migration validates`
+
 - [auth](auth.md): `#305 Owner may deactivate another active Member`, `#305 owns the deactivation transaction`
 
 - [process](process.md): `#195: shutdown also returns 503 for`

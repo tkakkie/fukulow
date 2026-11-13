@@ -54,12 +54,12 @@ async fn surrounding_channel_name_whitespace_is_rejected_without_writes(pool: Pg
 }
 
 #[sqlx::test]
-async fn channel_name_whitespace_preserves_internal_whitespace_and_empty_names(pool: PgPool) {
+async fn channel_name_whitespace_preserves_internal_whitespace(pool: PgPool) {
     let app = router(&pool).await;
     for visibility in ["public", "private"] {
         let organization_id = organization(&pool).await;
         let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
-        for name in ["a b", "a\u{3000}b", "a\u{a0}b", "a\u{2003}b", ""] {
+        for name in ["a b", "a\u{3000}b", "a\u{a0}b", "a\u{2003}b"] {
             create(&app, &token, name, visibility).await;
         }
     }
@@ -72,7 +72,7 @@ async fn surrounding_channel_name_whitespace_is_rejected_before_opening_transact
     let state = AppState::for_test(pool.clone()).await;
     let auth = extract_auth(state.clone(), &token).await;
     // Auth may read the session; semantic validation must precede even BEGIN.
-    pool.close().await;
+    state.pool.close().await;
     let response = create_channel(
         State(state),
         auth,
@@ -82,7 +82,8 @@ async fn surrounding_channel_name_whitespace_is_rejected_before_opening_transact
         }),
     )
     .await
-    .unwrap();
+    .unwrap_err()
+    .into_response();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(body(response).await, json!({"error": "invalid input"}));
 }

@@ -23,8 +23,8 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Inaccessible Channels return the same 404 for reads and sends, so private Channels are not disclosed (#17).
 - Channel names are unique per Organization across visibility, `lower(name COLLATE "C")` (ASCII folds, non-ASCII as-is); duplicates 409. Existing duplicates fail the migration for the operator to resolve; no auto-rename (#51).
 - Accepted (#51): a 409 on creation lets an Organization Member infer a private Channel name exists (names only, no members or messages).
-- Channel names are at most 128 Unicode scalars (Rust and PostgreSQL CHECK, OpenAPI `maxLength`), 400 before a write transaction. Reason: keeps 4-byte names inside the unique btree entry limit; generated TS cannot enforce it (#63).
-- #63 migration never truncates, renames or deletes names; a violation aborts deployment. Before deploying, stop Channel writes and run `SELECT organization_id, id, name FROM channels WHERE char_length(name) > 128`; resolve, re-run until empty.
+- #299 Channel names are 1..=128 Unicode scalars, NUL-free (400 before a write transaction); Rust, PostgreSQL CHECK and OpenAPI enforce length. Empty-name acceptance is superseded. Reason: usable names and the unique btree entry limit (#63).
+- #299 migration validates existing rows before replacing the CHECK; violations abort, preserving rows. No automatic rename/truncate/delete. Stop Channel writes; run `SELECT organization_id, id, name FROM channels WHERE char_length(name) NOT BETWEEN 1 AND 128`; correct and re-run until empty.
 - #63 accepted lock: the plain CHECK validates rows under ACCESS EXCLUSIVE during ALTER, also blocking reads; acceptable at current scale.
 - Channel names with leading/trailing `str::trim()` whitespace are rejected (400), never trimmed: trimming changes what was typed, invisible differences allow look-alikes (#72). Checked in the API, not a DB CHECK: PostgreSQL whitespace differs from Rust (#77).
 - Per-Channel seq comes from a messages-owned counter row updated in the insert transaction, not a PostgreSQL sequence, so a rollback consumes no number. Cost: it serializes writes to a hot Channel (#17).
@@ -82,3 +82,4 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 ## Entries in other parts
 
 - [auth](auth.md): `#314 single-statement hot reads use`
+- [auth](auth.md): `#299 shared raw-text validation`
