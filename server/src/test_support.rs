@@ -9,20 +9,6 @@ const APP_ROLE: &str = "fukulow_sqlx_test_app";
 /// Close `pools.app` before returning so SQLx can drop the test database.
 /// This conventional module path keeps the invariants check's module tree resolvable;
 /// integration tests share it through `tests/support/pools.rs`.
-/// The restricted application pool for `admin`, or `admin` itself when it
-/// already connects as the test app role (e.g. `pools.app`).
-pub async fn app_pool(admin: PgPool) -> PgPool {
-    let user: String = sqlx::query_scalar("SELECT current_user::text")
-        .fetch_one(&admin)
-        .await
-        .unwrap();
-    if user == APP_ROLE {
-        admin
-    } else {
-        TestPools::new(admin).await.app
-    }
-}
-
 pub struct TestPools {
     pub admin: PgPool,
     pub app: PgPool,

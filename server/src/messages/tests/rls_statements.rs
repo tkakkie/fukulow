@@ -25,7 +25,7 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
         .unwrap();
         tenants.push((organization_id, token, revision));
     }
-    let app_pool = crate::test_support::app_pool(pool.clone()).await;
+    let app_pool = crate::test_app_pool(pool.clone()).await;
     for mode in ["force_custom_plan", "force_generic_plan"] {
         let single = PgPoolOptions::new()
             .max_connections(1)

@@ -453,7 +453,7 @@ async fn large_session_pass_fails_closed_by_production_deadline(pool: PgPool) {
 #[ignore = "manual many-distinct-sessions measurement; run alone with --ignored --nocapture"]
 async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
     // Runs as the RLS-restricted app role (#314): one transaction per Organization.
-    let app = crate::test_support::app_pool(pool.clone()).await;
+    let app = crate::test_app_pool(pool.clone()).await;
     for organizations in [10_u32, 1_000] {
         // Distinct Accounts/Members spread over the Organizations; provisioning is untimed.
         sqlx::raw_sql(&format!("TRUNCATE organizations, accounts CASCADE;

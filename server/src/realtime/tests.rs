@@ -113,18 +113,21 @@ impl Server {
             .map(|(client, _)| client)
     }
 }
-async fn state(pool: &PgPool) -> AppState {
-    AppState {
-        pool: crate::test_support::app_pool(pool.clone()).await,
-        cookie_secure: false,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-    }
+fn state(pool: &PgPool) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppState> + Send>> {
+    let pool = pool.clone();
+    Box::pin(async move {
+        AppState {
+            pool: crate::test_app_pool(pool).await,
+            cookie_secure: false,
+            setup_token: "setup-token-test-only".into(),
+            sign_in_throttle: Default::default(),
+            message_delivery: Default::default(),
+            session_changes: Default::default(),
+            session_cleanup: Default::default(),
+            shutdown: Default::default(),
+            ws_allowed_origins: Default::default(),
+        }
+    })
 }
 struct Fixture {
     app: Router,
@@ -195,7 +198,7 @@ async fn fixture_with_app_pool(admin: &PgPool, app_pool: &PgPool) -> Fixture {
     let organization = organization(admin).await;
     let (member, token) = member(admin, organization).await;
     let channel = channel(admin, organization, member, false).await;
-    let state = state(app_pool);
+    let state = state(app_pool).await;
     let app = crate::app(state.clone());
     let server = Server::start(app.clone()).await;
     Fixture {

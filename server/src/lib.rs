@@ -73,9 +73,12 @@ pub struct AppState {
 impl AppState {
     /// Application queries run as the restricted, RLS-subject test role (#314);
     /// keep fixtures, DDL and fault injection on the administrative pool passed in.
-    /// A pool that already connects as that role is used as is.
     pub(crate) async fn for_test(pool: sqlx::PgPool) -> Self {
-        let pool = test_support::app_pool(pool).await;
+        Self::with_test_pool(test_app_pool(pool).await)
+    }
+
+    /// Test state over `pool` as given (e.g. a pool that never connects).
+    pub(crate) fn with_test_pool(pool: sqlx::PgPool) -> Self {
         Self {
             pool,
             cookie_secure: true,
@@ -88,6 +91,27 @@ impl AppState {
             ws_allowed_origins: Default::default(),
         }
     }
+}
+
+/// The restricted application pool for `admin`, or `admin` itself when it is
+/// already non-superuser (e.g. `TestPools::app`). Boxed so callers inside
+/// `tokio::spawn` see a concrete `Send` future.
+#[cfg(test)]
+pub(crate) fn test_app_pool(
+    admin: sqlx::PgPool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = sqlx::PgPool> + Send>> {
+    Box::pin(async move {
+        let superuser: bool =
+            sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        if superuser {
+            test_support::TestPools::new(admin).await.app
+        } else {
+            admin
+        }
+    })
 }
 
 pub fn app(state: AppState) -> Router {
@@ -526,7 +550,7 @@ mod tests {
         for secure in [false, true] {
             let router = app(AppState {
                 cookie_secure: secure,
-                ..AppState::for_test(pool.clone())
+                ..AppState::with_test_pool(pool.clone())
             });
             for (method, path, content_type, input, status) in [
                 ("GET", "/", "application/json", "", 200),
