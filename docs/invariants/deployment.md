@@ -5,7 +5,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 | Rule | Test |
 |---|---|
 | Startup and task panics emit only a fixed JSON panic event, never payload text, secrets or backtraces | `server/tests/config.rs::startup_panics_never_echo_payloads_or_secrets`, `server/src/observability/tests.rs::task_panics_never_echo_payloads_or_secrets` |
-| Migrate preserves the fixed missing-role recovery instruction, leaves schema untouched and suppresses raw database errors | `server/tests/config.rs::migrate_command_preserves_missing_role_instruction_and_suppresses_database_errors` |
+| Migrate keeps the missing-role recovery instruction/schema; role lookup, migration and grants failures emit one fixed kind/operation without raw DB details | `server/tests/config.rs::migrate_command_preserves_missing_role_instruction_and_suppresses_database_errors` |
 | Cleanup DB failures retain a fixed session_cleanup operation without raw details | `server/src/auth/cleanup/tests.rs::cleanup_database_failure_identifies_operation_without_raw_details` |
 | Real socket admission refusals and server Close attempts increment their counters exactly once; successful admission and allowed frames do not | `server/src/realtime/tests/limits.rs::socket_admission_and_close_counters_follow_production_paths` |
 | HTTP logs exclude credentials, tokens, bodies, raw paths/queries and inbound IDs; errors never format DB details or sources; dependency logs stay off | `server/src/observability/tests.rs::request_spans_redact_secrets_and_use_templates_and_generated_ids`, `server/src/observability/tests.rs::database_errors_never_format_sensitive_details_or_sources`, `server/tests/config.rs::startup_database_diagnostics_never_echo_sensitive_inputs` |
@@ -47,6 +47,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [realtime](realtime.md): `connection_database_failures_emit_once_with_fixed_operation_and_no_details`
 - [auth](auth.md): `startup_requires_setup_token_regardless_of_cookie_security`, `proxy_cidrs_match_only_peers_in_the_configured_networks`
 - [messages](messages.md): `send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort`, `send_context_cancelled_begin_setting_work_and_cleanup_discard`
 - [topics](topics.md): `topic_openapi_contract_includes_all_shapes_and_discriminators`

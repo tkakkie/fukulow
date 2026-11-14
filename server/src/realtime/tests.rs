@@ -1138,4 +1138,5 @@ mod replies;
 pub(super) mod access_loss;
 
 mod account_security;
+mod observability;
 mod round_trips;

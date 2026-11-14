@@ -4,6 +4,7 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 | Rule | Test |
 |---|---|
+| Connection DB failures emit one allowlisted database_failure with a fixed operation before 1011; subscription authorization, refresh and replay omit raw details | `server/src/realtime/tests/observability.rs::connection_database_failures_emit_once_with_fixed_operation_and_no_details` |
 | SIGTERM/SIGINT stop acceptance, close sockets with 1001 and drain HTTP, detached sends and notifications before pool close; normal fallback exit is not fatal | `server/src/realtime/tests/shutdown.rs::sigterm_drains_http_persistence_and_detached_notification_then_replays_without_duplicates`, `server/src/realtime/tests/shutdown.rs::sigint_drains_and_closes_idle_sockets_normally` |
 | A shutdown deadline expires without waiting for unfinished persistence/notification or closing their pool first | `server/src/realtime/tests/shutdown.rs::sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work` |
 | Shutdown send retries keep the canonical Message; replay recovers every committed seq without duplicates or gaps | `server/src/realtime/tests/shutdown.rs::sigterm_drains_http_persistence_and_detached_notification_then_replays_without_duplicates` |

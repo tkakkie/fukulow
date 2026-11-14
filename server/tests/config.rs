@@ -69,19 +69,59 @@ async fn migrate_command_preserves_missing_role_instruction_and_suppresses_datab
             .unwrap();
     assert!(history.is_none());
 
-    // Both the role lookup and the migration itself can fail with raw DB details.
-    for setup in [
-        "DROP VIEW public.pg_roles; CREATE FUNCTION public.fail_roles() RETURNS name LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-role-query-payload'; END $$; CREATE VIEW public.pg_roles AS SELECT public.fail_roles() AS rolname",
-        "DROP VIEW public.pg_roles; CREATE VIEW public.pg_roles AS SELECT 'fukulow_app'::name AS rolname; CREATE TABLE public.organizations (secret_migration_column text)",
+    // Drive each production conversion, including SQLx's wrapped migration error.
+    for (setup, operation) in [
+        (
+            "DROP VIEW public.pg_roles; CREATE FUNCTION public.fail_roles() RETURNS name LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-role-query-payload'; END $$; CREATE VIEW public.pg_roles AS SELECT public.fail_roles() AS rolname",
+            "migrate_role_lookup",
+        ),
+        (
+            "DROP VIEW public.pg_roles; CREATE VIEW public.pg_roles AS SELECT 'fukulow_app'::name AS rolname; CREATE TABLE public.organizations (secret_migration_column text)",
+            "migrate",
+        ),
+        ("DROP TABLE public.organizations", "migrate_grants"),
     ] {
         sqlx::raw_sql(setup).execute(&pool).await.unwrap();
+        if operation == "migrate_grants" {
+            fukulow_server::database::migrate(&pool).await.unwrap();
+            // Fail grants even when another test has already created the role.
+            sqlx::raw_sql("CREATE FUNCTION public.fail_grants() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-grants-payload'; END $$; CREATE EVENT TRIGGER fail_grants ON ddl_command_start WHEN TAG IN ('REVOKE') EXECUTE FUNCTION public.fail_grants()")
+                .execute(&pool).await.unwrap();
+        }
         let output = run();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(
-            String::from_utf8(output.stderr).unwrap().trim(),
-            "Error: \"Database migration failed (diagnostics suppressed)\""
+            stderr.lines().count(),
+            2,
+            "one event and one fixed diagnostic"
         );
+        let mut lines = stderr.lines();
+        let event: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(
+            event["fields"],
+            serde_json::json!({"event":"database_failure", "kind":"database"}),
+        );
+        assert_eq!(
+            event["span"],
+            serde_json::json!({"name":"database", "operation":operation}),
+        );
+        assert_eq!(
+            lines.next(),
+            Some("Error: \"Database migration failed (diagnostics suppressed)\"")
+        );
+        assert_eq!(lines.next(), None, "exactly one database_failure event");
+        for forbidden in [
+            "secret-",
+            "secret_",
+            "postgres://",
+            "fukulow_app",
+            "ERROR:",
+            "STATEMENT:",
+        ] {
+            assert!(!stderr.contains(forbidden), "{stderr}");
+        }
     }
 }
 
