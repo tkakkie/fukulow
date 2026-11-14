@@ -891,12 +891,21 @@ impl Activity {
                     .iter()
                     .map(|(selected, _, _)| selected.clone())
                     .collect();
+                #[cfg(test)]
+                for (entry, channel) in &selected {
+                    test_pause(
+                        entry.organization,
+                        channel.unwrap_or(Uuid::nil()),
+                        "fallback_snapshot",
+                        Some(entry.member.0),
+                    )
+                    .await;
+                }
                 let result = authorize_batch(pool, &selected).await;
                 for (index, ((entry, _), epoch, proof)) in chunk.iter().enumerate() {
                     let current = result.as_ref().ok().and_then(|rows| rows[index].as_ref());
-                    if current.is_some()
-                        && proof.as_ref().is_none_or(|proof| current == Some(proof))
-                    {
+                    // An unproved snapshot cannot establish the in-flight grant's lifetime.
+                    if proof.as_ref().is_some_and(|proof| current == Some(proof)) {
                         continue;
                     }
                     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());

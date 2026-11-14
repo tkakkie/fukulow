@@ -502,10 +502,18 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
             "phase={phase}: {before:?}"
         );
         let control = notices(&f, &mut allowed).await;
-        assert!(control.contains(&activity(private, 1)), "{control:?}");
+        // A fallback during the unproved query may conservatively retire the control's epoch too.
+        if phase != "query" {
+            assert!(control.contains(&activity(private, 1)), "{control:?}");
+        }
         post(&f, private).await;
         assert!(
             notices(&f, &mut denied)
+                .await
+                .contains(&activity(private, 2))
+        );
+        assert!(
+            notices(&f, &mut allowed)
                 .await
                 .contains(&activity(private, 2))
         );
@@ -1159,11 +1167,86 @@ async fn fallback_fences_first_in_flight_notice_without_buffered_provenance(pool
                 notices(&f, &mut denied).await.is_empty(),
                 "{phase}, watched={watched}"
             );
-            assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
+            // The All pass also retires an unproved control, even though its grant is unchanged.
+            let expected = if phase == "query" {
+                vec![]
+            } else {
+                vec![activity(private, 1)]
+            };
+            assert_eq!(notices(&f, &mut allowed).await, expected);
             post(&f, private).await;
             assert_eq!(notices(&f, &mut denied).await, vec![activity(private, 2)]);
+            assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 2)]);
         }
     }
+}
+
+#[fukulow_test::test]
+async fn fallback_unproved_snapshot_rejects_authorization_completed_before_regrant(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (target, token) = member(&pool, f.organization).await;
+    let (control, other) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, target).await;
+    grant(&pool, &f, private, control).await;
+    let mut denied = connect(&f, &token).await;
+    let mut allowed = connect(&f, &other).await;
+    let query = crate::channels::activity::pause(f.organization, private, "query");
+    let authorized = crate::channels::activity::pause(f.organization, private, "authorized");
+    let fallback = crate::channels::activity::pause_member(
+        f.organization,
+        private,
+        "fallback_snapshot",
+        Some(target),
+    );
+    post(&f, private).await;
+    tokio::time::timeout(Duration::from_secs(5), query.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let checker = f.state.message_delivery.channel_access.activity.clone();
+    let check_pool = f.state.pool.clone();
+    let organization = f.organization;
+    let check = tokio::spawn(async move {
+        checker
+            .check(
+                &check_pool,
+                crate::auth::SubscriptionScope::Member(organization, target),
+            )
+            .await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), fallback.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    // Fallback has copied None; publication now establishes its G1 proof before enqueue.
+    query.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), authorized.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    // Replace G1 with G2 without mutation hooks or fast signals, before fallback SQL.
+    sqlx::query(
+        "DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3",
+    )
+    .bind(f.organization)
+    .bind(private)
+    .bind(target)
+    .execute(&pool)
+    .await
+    .unwrap();
+    grant(&pool, &f, private, target).await;
+    fallback.release.add_permits(1);
+    check.await.unwrap();
+    authorized.release.add_permits(1);
+    assert!(notices(&f, &mut denied).await.is_empty());
+    assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
+    post(&f, private).await;
+    assert_eq!(notices(&f, &mut denied).await, vec![activity(private, 2)]);
+    assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 2)]);
 }
 
 #[fukulow_test::test]
