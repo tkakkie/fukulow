@@ -1126,7 +1126,7 @@ mod tests {
             let app = app_with_workers(
                 AppState {
                     sign_in_throttle: throttle,
-                    ..AppState::for_test(pool.clone()).await
+                    ..AppState::with_test_pool(pool.clone())
                 },
                 &WORKERS,
             );
@@ -1188,7 +1188,7 @@ mod tests {
             .unwrap();
         let app = crate::app(AppState {
             sign_in_throttle: throttle,
-            ..AppState::for_test(pool).await
+            ..AppState::with_test_pool(pool)
         });
         let request = Request::post("/api/v1/session")
             .extension(ConnectInfo(

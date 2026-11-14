@@ -1,3 +1,5 @@
+import ReplyPanel from './ReplyPanel.svelte'
+import { replyClient, reply, root } from './reply-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,6 +20,8 @@ import { senderName } from './authors'
 import { createMembers } from './members'
 import { membersAdapter } from './members.svelte'
 import Workspace from './Workspace.svelte'
+import { windowClient } from './message-window-test-helpers'
+import { msg, summary } from './topic-test-helpers'
 import CreateChannelForm from './CreateChannelForm.svelte'
 
 type ListenerEntry = {
@@ -1119,6 +1123,137 @@ describe('Channel creation visibility', () => {
 })
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it('TopicView handles an active summary evicted by 400 newer main Messages without rejection or a render loop', async () => {
+    vi.useFakeTimers()
+    const c = windowClient(), report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await c.boot()
+      for (let page = 0; page < 7; page++) await c.topics.loadMain('A')
+      c.options.listTopicMessages = async () => ok({ messages: [msg(1, 'T')], has_more: false })
+      const getSummary = vi.fn(async () => ok({ as_of_seq: 1000, topic: summary('T', 1, 1) }))
+      c.options.getTopicSummary = getSummary
+      const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+      const instance = mount(TopicView, { target: host as unknown as Element, props: {
+        channel: syncAdapter(c.sync).channel('A'), topics: topicsAdapter(c.topics, 'A'),
+        channelId: 'A', topicId: 'T', topicName: 'Topic T',
+      } })
+      try {
+        await settle(); await settle()
+        await vi.advanceTimersByTimeAsync(60_000); await settle()
+        expect(getSummary).toHaveBeenCalledTimes(1)
+        expect(report).not.toHaveBeenCalled()
+        expect(c.topics.get('A').lines).toHaveLength(400)
+        expect(c.topics.get('A').topic('T').messages).toEqual([msg(1, 'T')])
+        expect(host.querySelector('[data-message-id="id1"]')).not.toBeNull()
+        expect(c.sync.get().channels.A.cursor).toBe(1000)
+      } finally { await unmount(instance) }
+    } finally { await c.close(); report.mockRestore() }
+  })
+
+  it.each(['Timeline', 'TopicView', 'ReplyPanel'] as const)('%s reports detached task rejections without leaving them unhandled', async view => {
+    const c = windowClient(), report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const failure = new Error(`${view} task failed`)
+    try {
+      await c.boot()
+      const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+      const channel = syncAdapter(c.sync).channel('A')
+      if (view === 'Timeline') {
+        const topics = topicsAdapter(c.topics, 'A')
+        topics.loadMain = vi.fn().mockRejectedValue(failure)
+        const instance = mount(Timeline, { target: host as unknown as Element,
+          props: { channel, topics, channelId: 'A' } })
+        try {
+          await settle()
+          buttonsByText(host, '以前のメッセージを読み込む')[0].click()
+          await settle()
+          expect(report).toHaveBeenCalledExactlyOnceWith(failure)
+        } finally { await unmount(instance) }
+      } else if (view === 'TopicView') {
+        const topics = topicsAdapter(c.topics, 'A')
+        topics.ensureSummary = vi.fn().mockRejectedValue(failure)
+        const instance = mount(TopicView, { target: host as unknown as Element, props: {
+          channel, topics, channelId: 'A', topicId: 'T', topicName: 'Topic T',
+        } })
+        try {
+          await settle(); await settle()
+          expect(report).toHaveBeenCalledWith(failure)
+        } finally { await unmount(instance) }
+      } else {
+        await c.replies.open('A', c.records[0])
+        const replies = repliesAdapter(c.replies, 'A')
+        replies.loadMore = vi.fn().mockRejectedValue(failure)
+        const instance = mount(ReplyPanel, { target: host as unknown as Element, props: {
+          channel, replies, channelId: 'A', anchorMessageId: 'id1', resolvedAnchor: c.records[0],
+        } })
+        try {
+          await settle()
+          buttonsByText(host, 'さらに返信を読み込む')[0].click()
+          await settle()
+          expect(report).toHaveBeenCalledExactlyOnceWith(failure)
+        } finally { await unmount(instance) }
+      }
+    } finally { await c.close(); report.mockRestore() }
+  })
+
+  it('keeps an unknown descendant Reply visible with retry and discard after its parent body is evicted', async () => {
+    const c = replyClient(); await c.boot(); c.event(reply(2))
+    await c.replies.open('A', reply(2))
+    c.sendMessage.mockResolvedValue({ ok: false, kind: 'network' })
+    const composer = c.sync.getTimeline('A').reply('id1')
+    composer.setDraft('親が消えても残る返信'); await composer.submit('id2')
+    await c.replies.open('A', root())
+    c.listReplyChain.mockResolvedValue(ok({ root_id: 'id1', messages: [], has_more: false }))
+    await c.replies.loadMore('A')
+    const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+    const instance = mount(ReplyPanel, { target: host as unknown as Element, props: {
+      channel: syncAdapter(c.sync).channel('A'), replies: repliesAdapter(c.replies, 'A'),
+      channelId: 'A', anchorMessageId: 'id1', resolvedAnchor: root(), selfId: 'me',
+    } })
+    await settle(); flushSync()
+    for (let seq = 3; seq <= 500; seq++) c.event(reply(seq))
+    await settle(); flushSync()
+    expect(c.replies.get('A').messages.some(m => m.id === 'id2')).toBe(false)
+    const scroll = host.querySelector('.reply-panel__scroll')!
+    scroll.clientHeight = 600; scroll.scrollHeight = 23316; scroll.scrollTop = 22716
+    scroll.dispatchEvent(new MiniDomEvent('scroll')); await settle(); flushSync()
+    expect(host.textContent).toContain('親が消えても残る返信')
+    expect(buttonsByText(host, '再送する')).toHaveLength(1)
+    buttonsByText(host, '再送する')[0].click(); await settle(); flushSync()
+    expect(c.sendMessage).toHaveBeenCalledTimes(2)
+    buttonsByText(host, '破棄')[0].click(); await settle(); flushSync()
+    expect(c.sync.get().channels.A.pending).toHaveLength(0)
+    expect(host.textContent).not.toContain('親が消えても残る返信')
+    await unmount(instance); await c.sync.close()
+  })
+
+  it('windows a thousand pending sends without dropping them and Composer Up mounts the latest confirmed Message', async () => {
+    const net = fakeNetwork()
+    const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.socket.onReady()
+    net.pages.general = ok({ messages: [record(1, 'general')], has_more: false })
+    net.lists[0].resolve(ok({ channels: [channel('general')] }))
+    await settle(); net.subscribed('general', 1); await settle()
+    const ch = syncAdapter(session.sync).channel('general')
+    const sends = Array.from({ length: 1000 }, (_, n) => ch.send(`未確認 ${n}`))
+    await settle()
+    const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+    const instance = mount(Timeline, { target: host as unknown as Element,
+      props: { channel: ch, channelId: 'general', selfId: 'me' } })
+    await settle()
+    const scroll = host.querySelector('.timeline-scroll')!
+    scroll.clientHeight = 600; scroll.scrollHeight = 116116; scroll.scrollTop = 115516
+    scroll.dispatchEvent(new MiniDomEvent('scroll'))
+    await settle()
+    expect(queryAll(host, '[data-status]').length).toBeLessThan(25)
+    expect(host.textContent).toContain('未確認 999')
+    expect(ch.timeline.pending).toHaveLength(1000)
+    const up = new MiniDomEvent('keydown', { bubbles: true, cancelable: true }); up.key = 'ArrowUp'
+    host.querySelector('textarea')!.dispatchEvent(up)
+    await settle()
+    expect(testDoc.activeElement?.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe('id1')
+    await unmount(instance); session.close(); await Promise.all(sends)
+  })
+
   it('renders the deactivated sender name and hint as accessible text in the shared Message row', async () => {
     const host = testDoc.createElement('div')
     testDoc.body.appendChild(host)
@@ -4931,6 +5066,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(href).toBe(`/o/org-1/c/c1?panel=reply:${r1.id}`)
     expect(pushSpy).toHaveBeenCalledTimes(1)
     expect(replaceSpy).toHaveBeenCalledWith(`/o/org-1/c/c1?panel=reply:${r1.id}`)
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
     expect(testDoc.activeElement).toBe(panel.querySelector('textarea'))
     expect(panel.querySelector(`[data-message-id="${mRoot.id}"]`)!.classList.contains('reply-panel__item--root')).toBe(true)
 
@@ -4957,7 +5093,23 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(href).toBe(`/o/org-1/c/c1?panel=reply:${r2.id}`)
     expect(pushSpy).toHaveBeenCalledTimes(1)
     expect(replaceSpy).toHaveBeenLastCalledWith(`/o/org-1/c/c1?panel=reply:${r2.id}`)
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r2.id)
     expect(testDoc.activeElement).toBe(panel.querySelector('textarea'))
+
+    // URL navigation has no row-click handler to update the controller's anchor.
+    const reads = net.replyHistory.length
+    navigation.navigate({ type: 'reply', messageId: r1.id })
+    flushSync(); await settle(); flushSync()
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
+    expect(net.replyHistory).toHaveLength(reads)
+    // Rendering and live eviction of that anchor's body must not reopen the chain.
+    for (let seq = 4; seq <= 254; seq++) net.event({ type: 'message', message: {
+      ...record(seq, 'c1'), sender: 'other', reply_to: mRoot.id, reply_root_id: mRoot.id,
+    } })
+    await settle(); flushSync()
+    expect(rawSession.replies.get('c1').messages.some(m => m.id === r1.id)).toBe(false)
+    expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
+    expect(net.replyHistory).toHaveLength(reads)
 
     navigation.destroy()
     await unmount(instance)
