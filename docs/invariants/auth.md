@@ -78,9 +78,7 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 
 ## Rows in other parts
 
-- [deployment](deployment.md): `cleanup_database_failure_identifies_operation_without_raw_details`, `startup_panics_never_echo_payloads_or_secrets`
-
-- [deployment](deployment.md): `ordinary_statement_timeout_fires_and_local_context_clears`
+- [deployment](deployment.md): `cleanup_database_failure_identifies_operation_without_raw_details`, `startup_panics_never_echo_payloads_or_secrets`, `ordinary_statement_timeout_fires_and_local_context_clears`
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
