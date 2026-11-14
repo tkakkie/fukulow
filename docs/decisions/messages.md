@@ -49,7 +49,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Move, Edit, Delete (principles only, #148): clients apply entries idempotently; a later change takes a Channel log position. Open: replay of a changed Message (current or as it was), of a deleted one, read positions after a Move. `channel_events` vs `channel_log`: Sprint 3 (#160).
 - #151 DM is a Channel kind for one immutable, Organization-scoped Member pair; no name, visibility, Topics or manager right. Reason: reuse seq, Replies, sync and Unread without making private-Channel management apply to DMs. Contract: docs/spec/dms.md.
 - #151 POST /dms opens or renews one pair; GET /dms lists only accessible DMs with peer identity and Unread/Mention hooks. Ordinary Channel lists/sections exclude DMs. Reason: a DM has no Channel name or Topic navigation.
-- #151 new sends hold current peer eligibility through COMMIT; inactive peer gives 409 dm_peer_deactivated; the active stale-grant error remains proposed in spec Open decisions. Authorized committed retries return canonically first. Reason: peer loss must not undo an accepted send.
+- #151 new sends hold peer eligibility through COMMIT: inactive peer gives 409 dm_peer_deactivated, active lapsed grant gives 409 dm_peer_access_lapsed (2026-11-14). Authorized committed retries resolve first. Reason: sending never renews access or undoes an accepted send.
 - #151 DMs reject Topic intent and member/grant APIs; all management Capabilities deny. Exclude DMs from RoleChangeGuard and last-manager/grant counts. Reason: fixed two-person participation must neither confer management nor block Role changes.
 - Mention gets its own counter, separate from Unread (#148).
 
@@ -86,7 +86,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 ## Entries in other parts
 
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
-- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`
 
 - [auth](auth.md): `#314 single-statement hot reads use`
 - [auth](auth.md): `#299 shared raw-text validation`

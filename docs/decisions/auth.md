@@ -24,7 +24,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - Deactivation is `users.deactivated_at` (NULL = active). Member rows are never deleted and their Organization/id/Account cannot change (DB triggers), preserving historical senders; UNIQUE (organization_id, account_id) (#146).
 - Reactivation never restores old private Channel permissions: grants capture `membership_revision`, access needs the current revision, and a trigger bumps it on every deactivation, even via direct SQL (#146). Re-grant goes through #149.
 - #151 DM access needs participation plus an active current-revision grant; Owner/Admin never bypass it. Only active non-Guests may open; create/renew needs an active same-Organization peer including Guest. Reason: participation grants neither creation nor third-party access.
-- #151 explicit non-Guest open renewal replaces all lapsed grants atomically with new ids/revisions and Unread at committed seq; current grants stay unchanged. Reason: reactivation restores nothing. Resolution/renewal intent remains proposed in spec B2/Open decisions.
+- #151 explicit non-Guest open resolves accessible DMs without renewal by default; renew:true requests peer renewal. Renewal replaces all lapsed grants atomically, preserving current grants. Reason: lost-response recovery must not change access; reactivation restores nothing (2026-11-14).
 - #151 peer eligibility belongs to new sends and create/renew, never shared history/mark-read visibility. Deactivation closes target sockets 4003 and leaves the active peer's read access intact. Reason: offboarding invalidates the target Membership, not the other participant's history.
 - Auth resolves the Account Session and optional active Member in one LEFT JOIN (no Session: 401; no Member: 404). Member SQL stays in `auth` as composable scoped fragments (#146 review).
 - Sign-in throttle, process-local 60 s windows: 20 failures per IPv4 or IPv6 /64 (IPv4-mapped shares IPv4), 5 per normalized email; in-flight attempts reserve capacity before Argon2; only failed credentials persist.
@@ -86,7 +86,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 Entries that also govern this area, listed by the start of the entry in that part.
 
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
-- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`
 - [web](web.md): `#300 Invite session 401 offers`, `#300 Sign-in, sign-out and Invite acceptance share`
 
 - [messages](messages.md): `#231/#305 reject Role demotion or deactivation with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`

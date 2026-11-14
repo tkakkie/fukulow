@@ -53,6 +53,7 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #151 dm_list_changed targets only the affected Member's live/current-revision own sessions with DM access. DM activity/read changes reuse channel_activity/read_position_changed. Reason: empty/new DMs need discovery, and /dms is a separate REST target (B4).
 - #151 DM discovery reuses A5-A8's bounded buffer/provenance and A9-A14/O5's single reconciliation schedule; no DM poller. Reason: inactive badges, lost notices and delayed COMMITs converge without sending failure traffic to unproven recipients.
 - #151 DM list responses follow independent invalidation/access generations; renewal replaces only lapsed lifetimes, and unwatched recovery replaces baselines. Reason: stale responses/publishers must not revive old access or Unread, including after reactivation.
+- #151 DM list base limits: 50-row (created_at DESC, id DESC) cursor pages, 200 retained rows, at most five requests/O5 run (2026-11-14). Reason: bound client work. B4 still requires discovery beyond those limits; the mechanism remains open in spec/dms.md.
 
 ## Admission and timeouts
 - #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
