@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 33 operations document shutdown, including author lookup and Account security actions.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 232;
+// All 35 operations document shutdown, including Invite listing and revocation.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 246;
 
 #[test]
 fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
@@ -140,7 +140,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 33);
+        assert_eq!(operations, 35);
     }
 }
 
@@ -179,7 +179,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 33);
+    assert_eq!(requests.len(), 35);
     requests.extend(
         [
             "/",

@@ -304,7 +304,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: operations["list_invites"];
         put?: never;
         post: operations["create_invite"];
         delete?: never;
@@ -324,6 +324,22 @@ export interface paths {
         put?: never;
         post: operations["accept_invite"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/invites/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revoke_invite"];
         options?: never;
         head?: never;
         patch?: never;
@@ -699,6 +715,11 @@ export interface components {
             member: components["schemas"]["Member"];
             organization: components["schemas"]["Organization"];
         };
+        InvitePage: {
+            invites: components["schemas"]["OutstandingInvite"][];
+            /** @description Opaque, Role- and Organization-bound continuation; omitted on the last page. */
+            next_cursor?: string | null;
+        };
         InviteResponse: {
             expires_at: string;
             /** Format: uuid */
@@ -834,6 +855,18 @@ export interface components {
             can_deactivate_members: components["schemas"]["Capability"];
             can_invite: components["schemas"]["Capability"];
             can_manage_roles: components["schemas"]["Capability"];
+        };
+        OutstandingInvite: {
+            /**
+             * Format: uuid
+             * @description Same-Organization issuer Member id, including inactive issuers.
+             */
+            created_by: string;
+            email: string;
+            expires_at: string;
+            /** Format: uuid */
+            id: string;
+            role: components["schemas"]["Role"];
         };
         ReadPosition: {
             /** Format: int64 */
@@ -1088,6 +1121,7 @@ export type DisplayIdentity = components['schemas']['DisplayIdentity'];
 export type ErrorBody = components['schemas']['ErrorBody'];
 export type ErrorEvent = components['schemas']['ErrorEvent'];
 export type Identity = components['schemas']['Identity'];
+export type InvitePage = components['schemas']['InvitePage'];
 export type InviteResponse = components['schemas']['InviteResponse'];
 export type ListMessagesQuery = components['schemas']['ListMessagesQuery'];
 export type ListProjectionQuery = components['schemas']['ListProjectionQuery'];
@@ -1101,6 +1135,7 @@ export type MessagePage = components['schemas']['MessagePage'];
 export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
 export type Organization = components['schemas']['Organization'];
 export type OrganizationCapabilities = components['schemas']['OrganizationCapabilities'];
+export type OutstandingInvite = components['schemas']['OutstandingInvite'];
 export type ReadPosition = components['schemas']['ReadPosition'];
 export type ReadPositionChanged = components['schemas']['ReadPositionChanged'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
@@ -2835,6 +2870,89 @@ export interface operations {
             };
         };
     };
+    list_invites: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+                /** @description Opaque continuation from the preceding page. Invalid/foreign cursors return 400. */
+                cursor: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Outstanding manageable Invites, ordered by creation time then id; up to 100, never tokens. Admin pages exclude Owner-Role Invites before filling */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitePage"];
+                };
+            };
+            /** @description Malformed or foreign cursor or invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: Member/Guest cannot manage Invites */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     create_invite: {
         parameters: {
             query?: never;
@@ -2990,7 +3108,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description invite_unavailable: unknown, expired, used, foreign Organization or wrong email */
+            /** @description invite_unavailable: unknown, expired, used, revoked, foreign Organization or wrong email */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -3036,6 +3154,87 @@ export interface operations {
                 };
             };
             /** @description Argon2 queue is full or the one second admission wait expired; password admission unavailable; Invite is not consumed; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+                /** @description Invite id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Outstanding manageable Invite permanently revoked; empty body */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid ids */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: Member/Guest cannot manage Invites */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable; otherwise uniform invite_unavailable for accepted, revoked, expired, unknown, foreign or not-manageable Invites */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
