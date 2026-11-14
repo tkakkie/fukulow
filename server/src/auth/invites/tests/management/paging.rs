@@ -1,6 +1,64 @@
 use super::*;
 
 #[fukulow_test::test]
+async fn issued_admin_anchor_denies_after_invite_becomes_owner_role(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let (_, issuer, _, _) = account(&pool, org, Role::Owner).await;
+    let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
+    seed(&pool, org, issuer, 101, false).await;
+    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let first = page(&app, org, &admin, None).await;
+    let anchor = id(&first["invites"][99]);
+    sqlx::query("UPDATE invites SET role='owner' WHERE organization_id=$1 AND id=$2")
+        .bind(org)
+        .bind(anchor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = snapshot(&pool).await;
+    let r = req(
+        &app,
+        "GET",
+        &format!(
+            "{}?cursor={}",
+            path(org),
+            first["next_cursor"].as_str().unwrap()
+        ),
+        Some(&admin),
+        Value::Null,
+    )
+    .await;
+    denied(&pool, r, &before, StatusCode::BAD_REQUEST, "invalid input").await;
+}
+
+#[fukulow_test::test]
+async fn issued_admin_anchor_denies_under_another_organization(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let other = org_fn(&pool).await;
+    let (_, issuer, _, _) = account(&pool, org, Role::Owner).await;
+    let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
+    let (_, other_issuer, _, other_admin) = account(&pool, other, Role::Admin).await;
+    seed(&pool, org, issuer, 101, false).await;
+    seed(&pool, other, other_issuer, 101, false).await;
+    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let first = page(&app, org, &admin, None).await;
+    let before = snapshot(&pool).await;
+    let r = req(
+        &app,
+        "GET",
+        &format!(
+            "{}?cursor={}",
+            path(other),
+            first["next_cursor"].as_str().unwrap()
+        ),
+        Some(&other_admin),
+        Value::Null,
+    )
+    .await;
+    denied(&pool, r, &before, StatusCode::BAD_REQUEST, "invalid input").await;
+}
+
+#[fukulow_test::test]
 async fn invite_pages_reach_250_in_order_and_every_invite_can_be_revoked(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, issuer, _, owner) = account(&pool, org, Role::Owner).await;

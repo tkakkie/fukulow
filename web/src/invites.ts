@@ -53,18 +53,30 @@ export function createInvites(org: string, onEnded: () => void, onUnavailable: (
   }
   async function revoke(id: string) {
     if (closed || state.busy || state.loading) return false
-    generation++
+    const own = ++generation
     set({ busy: true, error: '', retryable: false })
-    const r = observe(await deps.revokeInvite(org, id).catch((): api.Result<undefined> => ({ ok: false, kind: 'network' })))
-    if (closed) return false
-    if (!r.ok) {
-      failed(r)
-      // Retrying an uncertain DELETE could succeed and then appear unavailable.
-      set({ retryable: false, error: r.kind === 'network'
-        ? '招待の取消を確認できませんでした。一覧を更新して確認してください。' : state.error })
-    } else set({ invites: state.invites.filter(i => i.id !== id) })
-    set({ busy: false })
-    return r.ok
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const pending = deps.revokeInvite(org, id)
+      .catch((): api.Result<undefined> => ({ ok: false, kind: 'network' })).then(r => {
+        // Account Session loss still applies after this operation's deadline.
+        return own === generation || !r.ok && r.kind === 'http' && r.status === 401 ? observe(r) : r
+      })
+    try {
+      const r = await Promise.race([pending, new Promise<api.Result<undefined>>(resolve => {
+        timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), 10_000)
+      })])
+      if (closed || own !== generation) return false
+      // Retire this operation before refresh can reconcile an uncertain outcome.
+      generation++
+      if (!r.ok) {
+        failed(r)
+        // Retrying an uncertain DELETE could succeed and then appear unavailable.
+        set({ retryable: false, error: r.kind === 'network'
+          ? '招待の取消を確認できませんでした。一覧を更新して確認してください。' : state.error })
+      } else set({ invites: state.invites.filter(i => i.id !== id) })
+      set({ busy: false })
+      return r.ok
+    } finally { clearTimeout(timer) }
   }
   return {
     get: () => state,

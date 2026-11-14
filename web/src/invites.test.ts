@@ -5,7 +5,56 @@ import { listInvites, revokeInvite, type InvitePage, type OutstandingInvite, typ
 const row = (n: number): OutstandingInvite => ({ id: `${n}`, email: `${n}@example.invalid`, role: 'member', created_by: 'issuer', expires_at: '2027-01-01T00:00:00Z' })
 const ok = <T>(data: T): Result<T> => ({ ok: true, data })
 
+async function stalledRevoke(late: Result<undefined>) {
+  vi.useFakeTimers()
+  try {
+    let finish!: (r: Result<undefined>) => void
+    let refresh!: (r: Result<InvitePage>) => void
+    const revoke = vi.fn(() => new Promise<Result<undefined>>(resolve => { finish = resolve }))
+    const list = vi.fn().mockResolvedValueOnce(ok({ invites: [row(1)] }))
+      .mockImplementationOnce(() => new Promise<Result<InvitePage>>(resolve => { refresh = resolve }))
+    const ended = vi.fn(), unavailable = vi.fn()
+    const c = createInvites('org', ended, unavailable, { listInvites: list, revokeInvite: revoke })
+    await c.load()
+    const pending = c.revoke('1')
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(c.get().busy).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    // Resolving false also lets the confirmation dialog's completion handler close it.
+    expect(await pending).toBe(false)
+    expect(c.get().busy).toBe(false)
+    expect(c.get().invites).toEqual([row(1)])
+    expect(c.get().retryable).toBe(false)
+    expect(c.get().error).toBe('招待の取消を確認できませんでした。一覧を更新して確認してください。')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(revoke).toHaveBeenCalledOnce()
+    expect(list).toHaveBeenCalledOnce()
+    // A late failure arrives before refresh; a late success races the new read.
+    const refreshing = late.ok ? c.load() : undefined
+    const before = c.get()
+    finish(late)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(c.get()).toEqual(before)
+    expect(ended).not.toHaveBeenCalled(); expect(unavailable).not.toHaveBeenCalled()
+    const reconciliation = refreshing ?? c.load()
+    refresh(ok({ invites: late.ok ? [] : [row(1)] }))
+    await reconciliation
+    expect(c.get().invites).toEqual(late.ok ? [] : [row(1)])
+    expect(c.get().loading).toBe(false); expect(c.get().error).toBe('')
+    expect(list).toHaveBeenCalledTimes(2); expect(revoke).toHaveBeenCalledOnce()
+    c.close()
+  } finally { vi.useRealTimers() }
+}
+
 describe('Invite management', () => {
+  it('bounds stalled revocation and fences late success while refresh reconciles', async () => {
+    await stalledRevoke(ok(undefined))
+  })
+
+  it('bounds stalled revocation and fences late failure while refresh reconciles', async () => {
+    await stalledRevoke({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+  })
+
   it('loads all 250 Invites across pages and revokes an Invite on the last page', async () => {
     const list = vi.fn(async (_org: string, cursor?: string): Promise<Result<InvitePage>> => {
       const start = Number(cursor ?? 0), end = Math.min(250, start + 100)

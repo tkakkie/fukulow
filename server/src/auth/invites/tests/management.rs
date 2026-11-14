@@ -81,3 +81,4 @@ async fn waiting(pool: &sqlx::PgPool, pattern: &str) {
 mod concurrency;
 mod denials;
 mod paging;
+mod upgrade;
