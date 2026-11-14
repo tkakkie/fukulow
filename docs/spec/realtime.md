@@ -160,12 +160,10 @@ Round-1 acceptance additions (requirements, not implemented tests):
 
 Decided (maintainer, 2026-11-14):
 - O5. **Loss/uncertain-outcome recovery (B1/B2): adopt Option A, client-side periodic REST reconciliation.** Every active client unconditionally repeats reconciliation of only its currently held A9 targets, with ready/reset access/directory generation fencing and A10/N2 coalescing, backoff and terminal semantics. The provisional period is 30 s: for each socket/session generation, draw the first-run offset uniformly across the whole period; 0-2 s jitter alone is insufficient. Later runs keep the period with jitter. The schedule is independent of notices, mutations, failures and successful requests; none restarts, postpones or completes it. A successful fetch before an uncertain COMMIT resolves never completes recovery by itself: later runs cover a delayed COMMIT, including after reconnect/re-registration or process restart with a surviving database backend. Periodic demand coalesces with in-flight/queued refetches of the same target, never bypassing backoff or generation fencing. Measure REST load at 10,000 concurrent connections in the implementation PR and adjust the period if needed (A14/item 5). Reason: recurring authorized REST reads recover lost notices and delayed outcomes without mutation-triggered traffic to denied recipients or an unbounded server retry queue. Option B (persistence and per-mutation recovery/outcome fences) is not introduced now.
-
-Open decisions (maintainer), with recommended defaults:
-- O1. Fixture vocabulary: add A1-A14 to `contract/realtime/schema.json` `Rule` and the notice/refetch vocabulary in the implementation PR, not in this spec PR. Default: implementation PR.
-- O2. Server-issued access generation in REST (e.g. exposing a per-grant id): default none; A11/A12 plus P8 selection suffice and avoid exposing grant lifetimes. Revisit if a native client needs it.
-- O3. Debounce 200 ms, reset jitter 0-2 s, buffer 256 keys: default as stated; tune with #307 item 5 measurements.
-- O4. Sender's own other sockets get no `channel_activity`: default yes (no count changes); revisit if the Channel list gains a latest-activity order.
+- O1. Fixture vocabulary: A1-A14 are added to `contract/realtime/schema.json` `Rule`, with the notice/refetch vocabulary, in the #307 item 5 implementation PR.
+- O2. No server-issued access generation in REST (no per-grant id): A11/A12 plus P8 selection suffice and avoid exposing grant lifetimes. Revisit if a native client needs it.
+- O3. Debounce 200 ms, reset jitter 0-2 s, buffer 256 keys; tuned only with #307 item 5 measurements.
+- O4. A sender's own other sockets get no `channel_activity` (no count changes); revisit if the Channel list gains a latest-activity order.
 
 ### Observable vocabulary (used by `contract/realtime` fixtures)
 Fixtures assert only what a client shows or emits to the outside; they do not name internal state, functions or timers. Any implementation (Rust, TypeScript, a future Kotlin client) with different internals satisfies the contract if these observations hold.
