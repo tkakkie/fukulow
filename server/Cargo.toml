@@ -23,6 +23,8 @@ subtle = "2.6"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "macros", "migrate"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 utoipa = { version = "=6.0.0", features = ["uuid"] }
+tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json"] }
 
 [dev-dependencies]
 fukulow-test = { path = "test-macros" }

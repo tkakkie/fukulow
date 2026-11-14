@@ -87,7 +87,7 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #161 caps queued send waiters at 256 per Organization/Channel and 2,048 globally, reserved before spawning. #178 kept these values; one Organization can still consume all global slots.
 - #161: queue-cap rejection and 30 s admission expiry return 503 `ErrorBody` with a random 1-5 s Retry-After (shared saturation, so not 429). DB failures, unknown COMMIT and the 10 s work deadline stay 500/unknown outcome.
 - A dropped connection or response timeout is not evidence of non-persistence (detached work may run 30 s + 10 s): clients retry with the same client_message_id, never a new key (#158, #161).
-- Admission rejections log `admission_rejected operation=watermark|send scope=channel|global organization=... channel=...` to stderr, unthrottled for now (counters/rate limiting deferred); no logging dependency (#156).
+- #198 B: admission sites only increment fixed categories; report nonzero cumulative counts every 60 s to bound rejection diagnostics. WebSocket gauges count established callbacks through Drop; closes count server attempts by fixed code, not confirmed peer receipt. No entity labels.
 - Admission is a bounded-wait guard, not a dedicated HTTP pool: auth, history, replay and notification share the same pool (#156).
 - Known limits for the 10k target: FIFO budgets can delay unrelated Organizations; four watermarks per Channel cap popular-Channel reconnects (~1,000/s at ~4 ms each); 10,000 simultaneous reconnects need client backoff (#156).
 - #178 keeps send queue caps 256/2,048: smaller caps raised refusals; larger ones roughly doubled accepted HTTP/delivery delay with no shown capacity benefit; RSS did not discriminate. A conservative choice, not an optimality or fairness claim.
@@ -107,6 +107,8 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 Entries that also govern this area, listed by the start of the entry in that part.
 
 - [messages](messages.md): `#152 proposes exact`, `#152 Message and message_mentions`, `#152 locks sorted`, `#152 Mention counts share`
+
+- [process](process.md): `#198 B: pinned tracing/subscriber`, `#198 B: a domain-independent observability`
 
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 new sends hold`

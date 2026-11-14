@@ -63,7 +63,7 @@ async fn supervise(
         for signal in sessions.entries.values() {
             signal.send_modify(|status| status.failed = true);
         }
-        eprintln!("session fallback worker stopped; WebSockets fail closed: {result:?}");
+        tracing::warn!(target: "fukulow", event = "session_worker_stopped", abnormal);
     }
     if abnormal {
         // Do not wait on sockets: a stuck Close frame must not prevent recovery.
@@ -157,6 +157,9 @@ async fn pass(
         .map(|(key, signal)| (key.0, key.1.clone(), signal.borrow().membership_revision))
         .collect();
     let result = check(pool, &keys, bound).await;
+    if let Err(error) = &result {
+        crate::observability::database_failure(error);
+    }
     #[cfg(test)]
     super::tests::pause_gate(gate, super::tests::Phase::Queried).await;
     for (key, signal) in &snapshot {

@@ -74,7 +74,13 @@ impl Connection<'_> {
     }
     async fn refresh(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<bool, u16> {
         if let Some(watch) = self.access.get(&channel) {
-            watch.refresh(&self.state.pool).await.map_err(|_| 1011u16)?;
+            #[cfg(test)]
+            super::tests::access_loss::pause(channel, "refresh", 0).await;
+            watch.refresh(&self.state.pool).await.map_err(|error| {
+                tracing::info_span!(target: "fukulow", "database", operation = "websocket_refresh")
+                    .in_scope(|| crate::observability::database_failure(&error));
+                1011u16
+            })?;
         }
         self.protected(socket, channel).await
     }
@@ -198,7 +204,11 @@ impl Connection<'_> {
             .message_delivery
             .latest_seq(&self.state.pool, organization, channel)
             .await
-            .map_err(|_| 1011u16)?;
+            .map_err(|error| {
+                tracing::info_span!(target: "fukulow", "database", operation = "websocket_latest_seq")
+                    .in_scope(|| crate::observability::database_failure(&error));
+                1011u16
+            })?;
         if !self.refresh(socket, channel).await? {
             return Ok(());
         }
@@ -231,6 +241,11 @@ impl Connection<'_> {
                 }
                 Err(MessageError::OrganizationUnavailable) => {
                     return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
+                }
+                Err(MessageError::Database(error)) => {
+                    tracing::info_span!(target: "fukulow", "database", operation = "websocket_replay")
+                        .in_scope(|| crate::observability::database_failure(&error));
+                    return Err(1011);
                 }
                 Err(_) => return Err(1011),
             };
@@ -283,6 +298,8 @@ impl Connection<'_> {
                 if self.cursors.len() >= MAX_SUBSCRIPTIONS {
                     return Self::error(socket, Some(channel_id), "subscription_limit").await;
                 }
+                #[cfg(test)]
+                super::tests::access_loss::pause(channel_id, "authorize", 0).await;
                 match self.visible(channel_id).await {
                     Ok(()) => {}
                     Err(MessageError::NotFound) => {
@@ -291,8 +308,17 @@ impl Connection<'_> {
                     Err(MessageError::OrganizationUnavailable) => {
                         return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                     }
+                    Err(MessageError::Database(error)) => {
+                        tracing::info_span!(
+                            target: "fukulow", "database", operation = "websocket_authorize"
+                        )
+                        .in_scope(|| crate::observability::database_failure(&error));
+                        return Err(1011);
+                    }
                     Err(_) => return Err(1011),
                 }
+                #[cfg(test)]
+                super::tests::access_loss::pause(channel_id, "access_subscribe", 0).await;
                 let watch = self
                     .state
                     .message_delivery
@@ -304,7 +330,13 @@ impl Connection<'_> {
                         channel_id,
                     )
                     .await
-                    .map_err(|_| 1011u16)?;
+                    .map_err(|error| {
+                        tracing::info_span!(
+                            target: "fukulow", "database", operation = "websocket_subscribe"
+                        )
+                        .in_scope(|| crate::observability::database_failure(&error));
+                        1011u16
+                    })?;
                 let Some(watch) = watch else {
                     return Self::error(socket, Some(channel_id), "channel_not_found").await;
                 };
@@ -324,6 +356,8 @@ impl Connection<'_> {
                 if !self.refresh(socket, channel_id).await? {
                     return Ok(());
                 }
+                #[cfg(test)]
+                super::tests::access_loss::pause(channel_id, "subscribed_seq", 0).await;
                 if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
                     let latest = self
                         .state
@@ -334,7 +368,11 @@ impl Connection<'_> {
                             channel_id,
                         )
                         .await
-                        .map_err(|_| 1011u16)?;
+                        .map_err(|error| {
+                            tracing::info_span!(target: "fukulow", "database", operation = "websocket_subscribed_seq")
+                                .in_scope(|| crate::observability::database_failure(&error));
+                            1011u16
+                        })?;
                     if !self.protected(socket, channel_id).await? {
                         return Ok(());
                     }

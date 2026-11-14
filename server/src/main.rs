@@ -4,6 +4,7 @@ use sqlx::postgres::PgPoolOptions;
 mod probe;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    fukulow_server::observability::init()?;
     let command: Vec<String> = std::env::args().skip(1).collect();
     if command.as_slice() == ["probe"] {
         let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
@@ -40,7 +41,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         Ok(token) => token,
         Err(_) => return Err("FUKULOW_SETUP_TOKEN must be set to a nonempty value".into()),
     };
-    let database_url = std::env::var("DATABASE_URL")?;
+    let database_url =
+        std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL must be set to valid text")?;
     let origins = std::env::var("FUKULOW_WS_ALLOWED_ORIGINS").ok();
     let ws_allowed_origins =
         fukulow_server::realtime::AllowedOrigins::configured(origins.as_deref())?;
@@ -64,17 +66,24 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let pool = fukulow_server::database::PoolConfig::from_env()?
         .options()
         .connect(&database_url)
-        .await?;
+        .await
+        .map_err(|error| {
+            fukulow_server::observability::database_failure(&error);
+            "Database connection failed (diagnostics suppressed)"
+        })?;
     fukulow_server::database::validate_migrations(&pool).await?;
     let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    println!("listening on {addr}");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|_| "Listener bind failed (diagnostics suppressed)")?;
+    tracing::info!(target: "fukulow", event = "server_listening");
     let signal = fukulow_server::signal()?;
     let shutdown = fukulow_server::shutdown::Shutdown::default();
     let reclamation = tokio::spawn(fukulow_server::channels::dms::reclamation::run(
         pool.clone(),
         shutdown.clone(),
     ));
+    let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
     let completed = fukulow_server::serve(
         listener,
         AppState {
@@ -95,8 +104,9 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     .await?;
     reclamation.abort();
     let _ = reclamation.await;
+    metrics.abort();
     if !completed {
-        eprintln!("shutdown drain deadline expired; send outcomes may be unknown; exiting");
+        tracing::warn!(target: "fukulow", event = "shutdown_drain_deadline", send_outcomes = "unknown");
         // Runtime destruction can outlast the drain deadline while blocking tasks finish.
         std::process::exit(0);
     }
@@ -104,9 +114,14 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
 }
 
 async fn migration_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("DATABASE_URL")?;
+    let database_url =
+        std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL must be set to valid text")?;
     Ok(PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
-        .await?)
+        .await
+        .map_err(|error| {
+            fukulow_server::observability::database_failure(&error);
+            "Database connection failed (diagnostics suppressed)"
+        })?)
 }

@@ -3,6 +3,149 @@
 use std::process::Command;
 
 #[test]
+fn startup_panics_never_echo_payloads_or_secrets() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+        .env_clear()
+        .env(
+            "TOKIO_WORKER_THREADS",
+            "postgres://user:secret-startup-password@localhost/db",
+        )
+        .env("RUST_BACKTRACE", "full")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for forbidden in [
+        "secret-",
+        "postgres://",
+        "TOKIO_WORKER_THREADS",
+        "panicked",
+        "invalid digit",
+    ] {
+        assert!(!stderr.contains(forbidden), "{stderr}");
+    }
+    let event: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(
+        event,
+        serde_json::json!({"level":"ERROR", "target":"fukulow", "fields":{"event":"panic"}})
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn migrate_command_preserves_missing_role_instruction_and_suppresses_database_errors(
+    pool: sqlx::PgPool,
+) {
+    use sqlx::ConnectOptions;
+    // Shadow only this database's catalog lookup, without changing cluster-global
+    // roles used by parallel tests. The executable still performs the real query.
+    sqlx::raw_sql("CREATE VIEW public.pg_roles AS SELECT NULL::name AS rolname WHERE false")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut database_url = pool.connect_options().to_url_lossy();
+    database_url
+        .query_pairs_mut()
+        .append_pair("options", "-c search_path=public,pg_catalog");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+            .env_clear()
+            .arg("migrate")
+            .env("DATABASE_URL", database_url.as_str())
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "Error: \"Database role fukulow_app is missing; run `migrate roles` first\""
+    );
+    let history: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations')::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(history.is_none());
+
+    // Drive each production conversion, including SQLx's wrapped migration error.
+    for (setup, operation) in [
+        (
+            "DROP VIEW public.pg_roles; CREATE FUNCTION public.fail_roles() RETURNS name LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-role-query-payload'; END $$; CREATE VIEW public.pg_roles AS SELECT public.fail_roles() AS rolname",
+            "migrate_role_lookup",
+        ),
+        (
+            "DROP VIEW public.pg_roles; CREATE VIEW public.pg_roles AS SELECT 'fukulow_app'::name AS rolname; CREATE TABLE public.organizations (secret_migration_column text)",
+            "migrate",
+        ),
+        ("DROP TABLE public.organizations", "migrate_grants"),
+    ] {
+        sqlx::raw_sql(setup).execute(&pool).await.unwrap();
+        if operation == "migrate_grants" {
+            fukulow_server::database::migrate(&pool).await.unwrap();
+            // Fail grants even when another test has already created the role.
+            sqlx::raw_sql("CREATE FUNCTION public.fail_grants() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'secret-grants-payload'; END $$; CREATE EVENT TRIGGER fail_grants ON ddl_command_start WHEN TAG IN ('REVOKE') EXECUTE FUNCTION public.fail_grants()")
+                .execute(&pool).await.unwrap();
+        }
+        let output = run();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr.lines().count(),
+            2,
+            "one event and one fixed diagnostic"
+        );
+        let mut lines = stderr.lines();
+        let event: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(
+            event["fields"],
+            serde_json::json!({"event":"database_failure", "kind":"database"}),
+        );
+        assert_eq!(
+            event["span"],
+            serde_json::json!({"name":"database", "operation":operation}),
+        );
+        assert_eq!(
+            lines.next(),
+            Some("Error: \"Database migration failed (diagnostics suppressed)\"")
+        );
+        assert_eq!(lines.next(), None, "exactly one database_failure event");
+        for forbidden in [
+            "secret-",
+            "secret_",
+            "postgres://",
+            "fukulow_app",
+            "ERROR:",
+            "STATEMENT:",
+        ] {
+            assert!(!stderr.contains(forbidden), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn startup_database_diagnostics_never_echo_sensitive_inputs() {
+    for args in [vec![], vec!["migrate"], vec!["migrate", "roles"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+            .env_clear()
+            .args(args)
+            .env("DATABASE_URL", "secret-invalid-database-url")
+            .env("FUKULOW_SETUP_TOKEN", "secret-setup-value")
+            .env("POSTGRES_APP_PASSWORD", "secret-role-value")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(!error.contains("secret-"), "{error}");
+        assert!(error.contains("database_failure"), "{error}");
+        assert!(error.contains("diagnostics suppressed"), "{error}");
+    }
+}
+
+#[test]
 fn roles_command_requires_password_before_connecting_and_rejects_unknown_commands() {
     for password in [None, Some("")] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
