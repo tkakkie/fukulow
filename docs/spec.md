@@ -24,7 +24,7 @@ Later: attachments, reactions, push notifications, bots/webhooks, multiple organ
 - [Accounts](spec/accounts.md): Accounts and Memberships; Password and Account Session security; Members, Roles and Invites; Channel membership and Channel managers; Setup.
 - [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability; Operations: backup and restore (#198 C).
 - [Realtime](spec/realtime.md): Real-time sync contract; Organization activity notices (#307, specified).
-- [Sections](spec/sections.md): Personal sections, effective-access projection, ordering and concurrency; proposed REST contract and planned acceptance tests (#204).
+- [Sections](spec/sections.md): Personal sections, effective-access projection, ordering and concurrency; REST contract (decided, not implemented) and planned acceptance tests (#204).
 
 ## Performance targets (first)
 One node: 10k concurrent connections, thousands of message writes/s. Measure with load tests before optimizing.
