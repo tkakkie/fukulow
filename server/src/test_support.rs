@@ -1,6 +1,6 @@
 use futures_util::FutureExt;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::{cell::RefCell, future::Future, panic::AssertUnwindSafe, sync::Arc};
+use std::{cell::RefCell, future::Future, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 use tokio::sync::OnceCell;
 
 struct AppPool {
@@ -13,21 +13,49 @@ tokio::task_local! {
 }
 
 pub async fn run<F: Future>(test: F) -> F::Output {
+    run_with_close_timeout(test, Duration::from_secs(10)).await
+}
+
+pub(crate) async fn run_with_close_timeout<F: Future>(
+    test: F,
+    close_timeout: Duration,
+) -> F::Output {
     APP_POOLS
         .scope(RefCell::new(Vec::new()), async {
             let result = AssertUnwindSafe(test).catch_unwind().await;
             let pools = APP_POOLS.with(|pools| pools.take());
-            for pool in pools {
-                if let Some(app) = pool.app.get() {
-                    app.close().await;
-                }
-            }
+            let timeouts = close_app_pools(pools, close_timeout).await;
             match result {
-                Ok(output) => output,
+                Ok(output) => {
+                    assert!(timeouts.is_empty(), "{}", timeouts.join("\n"));
+                    output
+                }
                 Err(panic) => std::panic::resume_unwind(panic),
             }
         })
         .await
+}
+
+async fn close_app_pools(pools: Vec<AppPool>, close_timeout: Duration) -> Vec<String> {
+    let mut timeouts = Vec::new();
+    for (index, pool) in pools.into_iter().enumerate() {
+        if let Some(app) = pool.app.get()
+            && tokio::time::timeout(close_timeout, app.close())
+                .await
+                .is_err()
+        {
+            let message = format!(
+                "timed out after {close_timeout:?} closing app pool #{} (database {:?}); \
+                 a checked-out connection may have leaked",
+                index + 1,
+                app.connect_options().get_database(),
+            );
+            // Cleanup must not replace a panic from the test body.
+            eprintln!("{message}");
+            timeouts.push(message);
+        }
+    }
+    timeouts
 }
 
 const APP_ROLE: &str = "fukulow_sqlx_test_app";

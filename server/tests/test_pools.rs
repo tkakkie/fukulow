@@ -1,11 +1,11 @@
 #![cfg(test)]
 
-#[path = "support/pools.rs"]
+#[path = "../src/test_support.rs"]
 mod test_support;
 
 use futures_util::FutureExt;
 use sqlx::PgPool;
-use std::panic::AssertUnwindSafe;
+use std::{panic::AssertUnwindSafe, time::Duration};
 use test_support::TestPools;
 
 #[fukulow_test::test]
@@ -98,6 +98,73 @@ async fn harness_closes_app_pools_on_error_and_panic(pool: PgPool) {
     assert!(result.is_err());
     assert_eq!(retained.as_ref().unwrap().size(), 0);
     assert!(retained.as_ref().unwrap().is_closed());
+}
+
+#[fukulow_test::test]
+async fn harness_bounds_leaked_connections_and_attempts_every_app_pool(pool: PgPool) {
+    let mut admins = Vec::new();
+    let mut apps = Vec::new();
+    let mut connections = Vec::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        AssertUnwindSafe(test_support::run_with_close_timeout(
+            async {
+                for index in 0..3 {
+                    let admin = sqlx::postgres::PgPoolOptions::new()
+                        .connect_lazy_with(pool.connect_options().as_ref().clone());
+                    admins.push(admin.clone());
+                    let app = TestPools::new(admin).await.app;
+                    if index < 2 {
+                        connections.push(app.acquire().await.unwrap());
+                    }
+                    apps.push(app);
+                }
+            },
+            Duration::from_millis(20),
+        ))
+        .catch_unwind(),
+    )
+    .await;
+    let closed = apps.iter().all(PgPool::is_closed);
+    let healthy_pool_size = apps.last().unwrap().size();
+    connections.clear();
+    for app in apps.iter().chain(&admins) {
+        app.close().await;
+    }
+    let panic = result.expect("pool cleanup must be bounded").unwrap_err();
+    let message = panic.downcast_ref::<String>().unwrap();
+    assert!(message.contains("app pool #1"));
+    assert!(message.contains("app pool #2"));
+    assert!(message.contains(pool.connect_options().get_database().unwrap()));
+    assert!(message.contains("checked-out connection may have leaked"));
+    assert!(closed);
+    assert_eq!(healthy_pool_size, 0);
+}
+
+#[fukulow_test::test]
+async fn harness_preserves_body_panic_when_app_pool_close_times_out(pool: PgPool) {
+    let mut retained = None;
+    let mut connection = None;
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        AssertUnwindSafe(test_support::run_with_close_timeout(
+            async {
+                let app = TestPools::new(pool.clone()).await.app;
+                connection = Some(app.acquire().await.unwrap());
+                retained = Some(app);
+                panic!("original body panic");
+            },
+            Duration::from_millis(20),
+        ))
+        .catch_unwind(),
+    )
+    .await;
+    drop(connection);
+    let app = retained.unwrap();
+    assert!(app.is_closed());
+    app.close().await;
+    let panic = result.expect("pool cleanup must be bounded").unwrap_err();
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"original body panic"));
 }
 
 // Negative guard: a test without the wrapper fails before opening app connections.
