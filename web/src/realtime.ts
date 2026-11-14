@@ -41,6 +41,12 @@ function isMessage(value: unknown): value is Message {
 function isServerEvent(value: unknown): value is ServerEvent {
   if (!isObject(value)) return false
   switch (value.type) {
+    case 'activity_ready': case 'activity_reset': case 'channel_list_changed': case 'members_changed':
+      return Object.keys(value).every(k => k === 'type')
+    case 'channel_activity': return typeof value.channel_id === 'string' && isSequence(value.seq, 1) && Object.keys(value).every(k => ['type', 'channel_id', 'seq'].includes(k))
+    case 'read_position_changed': return typeof value.channel_id === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') && isSequence(value.read_seq, 0) && Object.keys(value).every(k => ['type', 'channel_id', 'topic_id', 'read_seq'].includes(k))
+    case 'channel_access_gained': case 'channel_access_revoked': case 'channel_members_changed':
+      return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
     case 'message': return isMessage(value.message)
     case 'channel_access_lost': return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
     case 'subscribed': return typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)

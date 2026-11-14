@@ -24,7 +24,7 @@ Later: attachments, reactions, push notifications, bots/webhooks, multiple organ
 ## Parts
 - [Accounts](spec/accounts.md): Accounts and Memberships; Password and Account Session security; Members, Roles and Invites; Channel membership and Channel managers; Setup.
 - [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability; Operations: backup and restore (#198 C).
-- [Realtime](spec/realtime.md): Real-time sync contract; Organization activity notices (#307, specified).
+- [Realtime](spec/realtime.md): Real-time sync contract; Mention and Mention unread (#152, approved, not implemented); Organization activity notices (#307, implemented).
 - [Direct messages](spec/dms.md): DM kind, pair/grant lifetimes, REST, permissions, send eligibility, discovery and planned tests (#151, specification for approval).
 - [Sections](spec/sections.md): Personal sections, effective-access projection, ordering and concurrency; REST contract (decided, not implemented) and planned acceptance tests (#204).
 

@@ -94,6 +94,53 @@ async function reselectChannel(page: Page, viaName: string, targetName: string):
   await expect(page.getByRole('heading', { name: targetName })).toBeVisible()
 }
 
+test('capability reconciliation preserves creation focus between selection and text insertion and notice-before-POST discovery keeps one Channel row', async ({ page }) => {
+  let socket: WebSocketRoute | undefined
+  await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => { ws.connectToServer(); socket = ws })
+  const org = await signIn(page)
+  await createChannel(page, nextChannelName('creation-baseline'))
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+  const name = nextChannelName('creation-reconcile')
+  await page.getByRole('radio', { name: '非公開', exact: true }).check()
+  const input = page.getByLabel('チャンネル名')
+  // fill() focuses/selects first, then inserts text in a separate browser command.
+  // Reconcile exactly between those commands, before there is any draft to retain.
+  await input.focus()
+  let releaseIdentity!: () => void
+  const identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
+  await page.route(`**/api/v1/orgs/${org}/me`, async route => { await identityGate; await route.continue() })
+  try {
+    const refreshing = page.waitForRequest(`**/api/v1/orgs/${org}/me`)
+    socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
+    await refreshing
+    await expect(input).toBeFocused()
+    await page.keyboard.insertText(name)
+    await expect(input).toHaveValue(name)
+    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeDisabled()
+    await input.press('Enter')
+  } finally { releaseIdentity() }
+  await expect(page.getByLabel('チャンネル名')).toHaveValue(name)
+  await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
+
+  let releaseCreation!: () => void
+  const creationGate = new Promise<void>(resolve => { releaseCreation = resolve })
+  await page.route(`**/api/v1/orgs/${org}/channels`, async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    const response = await route.fetch()
+    await creationGate
+    await route.fulfill({ response })
+  })
+  const row = page.getByRole('navigation', { name: 'チャンネル' }).getByRole('button', { name })
+  await page.getByRole('button', { name: 'チャンネルを作成' }).click()
+  try {
+    // The committed mutation is discovered through its notice while its HTTP acknowledgement is held.
+    await expect(row).toHaveCount(1)
+  } finally { releaseCreation() }
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+  await expect(row).toHaveCount(1)
+  await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
+})
+
 test('keeps loaded Messages and the unsent draft visible in error and unavailable states', async ({ page }) => {
   let clientSocket: WebSocketRoute | undefined
   await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
@@ -230,11 +277,10 @@ test('disables the Composer when the Channel is unavailable', async ({ page }) =
 
   // Retryable `error` keeps the Composer enabled, and `再試行` from `error` clears it.
   const existingIds = new Set([target.id, other.id])
-  let failOnce = true
+  let failHistory = true
   await page.route('**/api/v1/orgs/*/channels/*/*', async route => {
     const channelId = /\/channels\/([^/]+)\/(?:messages|timeline)$/.exec(new URL(route.request().url()).pathname)?.[1]
-    if (route.request().method() === 'GET' && channelId && !existingIds.has(channelId) && failOnce) {
-      failOnce = false
+    if (route.request().method() === 'GET' && channelId && !existingIds.has(channelId) && failHistory) {
       return route.fulfill({ status: 503, ...errorJson('internal_error') })
     }
     return route.continue()
@@ -246,6 +292,7 @@ test('disables the Composer when the Channel is unavailable', async ({ page }) =
   await expect(composer).toBeEnabled()
   await expect(sendButton).toBeEnabled()
 
+  failHistory = false
   await timeline.getByRole('button', { name: '再試行' }).click()
   await expect(timeline.getByRole('alert')).toHaveCount(0)
   await expect(composer).toBeEnabled()
@@ -429,10 +476,11 @@ test('shows Composer validation error and keeps the draft when body exceeds 4000
   await expect(composer).toHaveValue(oversized)
 })
 
-test('single-Channel C9 チャンネル一覧へ focuses heading only when visible and reselecting recovers with one retry at 1280, 768 and 375px', async ({
+test('single-Channel C9 チャンネル一覧へ focuses the empty list and re-grant permits one explicit retry at 1280, 768 and 375px', async ({
   page,
   browser,
 }) => {
+  test.setTimeout(120_000)
   const orgId = await signIn(page)
   const base = `/api/v1/orgs/${orgId}`
 
@@ -526,38 +574,35 @@ test('single-Channel C9 チャンネル一覧へ focuses heading only when visib
       await expect(goToListButton).toBeVisible()
       await expect(composer).toBeDisabled()
 
-      // Visibility guard: while the heading is hidden from assistive tech (aria-hidden), チャンネル一覧へ must never focus it
-      await channelListHeading.evaluate(el => {
-        el.setAttribute('aria-hidden', 'true')
-      })
-      await goToListButton.click()
-      await expect(channelListHeading).toHaveAttribute('aria-hidden', 'true')
-      await expect(channelListHeading).not.toBeFocused()
-      await channelListHeading.evaluate(el => {
-        el.removeAttribute('aria-hidden')
-      })
+      const beforeRecovery = subscribeAttempts
+      // A9 removes the revoked row immediately; C9 keeps the open timeline terminal.
+      // Conservative server epoch retirement may discard a transition notice; O5 still converges within one period.
+      await expect(singleChannelButton).toHaveCount(0, { timeout: 35_000 })
+      // Keep the phone's single upward transition for the visible-heading path below.
+      if (width >= 600) {
+        await channelListHeading.evaluate(el => {
+          el.setAttribute('aria-hidden', 'true')
+        })
+        await goToListButton.click()
+        await expect(channelListHeading).toHaveAttribute('aria-hidden', 'true')
+        await expect(channelListHeading).not.toBeFocused()
+        await channelListHeading.evaluate(el => {
+          el.removeAttribute('aria-hidden')
+        })
+      }
       if (width === 768) {
         await guestPage.keyboard.press('Escape')
-        await expect(nav).toBeHidden()
-      } else if (width === 375) {
-        await expect(guestPage).toHaveURL(`/o/${orgId}`)
-        expect(await guestPage.evaluate(() => history.length)).toBe(initialHistoryLen)
-        // Return to the C9 Channel view on phone to exercise the visible heading path
-        const beforeViewReturn = subscribeAttempts
-        await singleChannelButton.click()
-        await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
-        await expect.poll(() => subscribeAttempts).toBe(beforeViewReturn + 1)
-        await expect(c9Alert).toBeVisible()
         await expect(nav).toBeHidden()
       }
 
       const lenBeforeList = await guestPage.evaluate(() => history.length)
       await goToListButton.click()
       await expect(nav).toBeVisible()
-      await expect(nav.locator('.channel-list button')).toHaveCount(1)
+      await expect(nav.locator('.channel-list button')).toHaveCount(0)
       await expect(channelListHeading).toBeVisible()
       await expect(channelListHeading).toBeFocused()
       expect(await guestPage.evaluate(() => history.length)).toBe(lenBeforeList)
+      expect(await guestPage.evaluate(() => history.length)).toBe(initialHistoryLen)
 
       if (width < 600) {
         await expect(guestPage).toHaveURL(`/o/${orgId}`)
@@ -571,29 +616,15 @@ test('single-Channel C9 チャンネル一覧へ focuses heading only when visib
         )
       }
 
-      // Reselecting while still denied tries once and does not loop
-      const beforeDeniedReselect = subscribeAttempts
-      await singleChannelButton.click()
-      await expect.poll(() => subscribeAttempts).toBe(beforeDeniedReselect + 1)
+      // A9 leaves no denied row to reselect; neither list recovery nor notices retry C9.
       await guestPage.waitForTimeout(300)
-      expect(subscribeAttempts).toBe(beforeDeniedReselect + 1)
-      await expect(c9Alert).toBeVisible()
-
-      if (width === 768) {
-        await expect(guestPage.locator('.workspace')).toHaveAttribute('data-drawer-open', 'false')
-        await goToListButton.click()
-        await expect(channelListHeading).toBeFocused()
-      } else if (width === 375) {
-        await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
-        await goToListButton.click()
-        await expect(guestPage).toHaveURL(`/o/${orgId}`)
-        await expect(channelListHeading).toBeFocused()
-      }
+      expect(subscribeAttempts).toBe(beforeRecovery)
 
       // Re-granting does not auto-retry C9; reselecting the same single Channel recovers with one retry
       await grantGuest()
+      await expect(singleChannelButton).toHaveCount(1)
       await guestPage.waitForTimeout(300)
-      expect(subscribeAttempts).toBe(beforeDeniedReselect + 1)
+      expect(subscribeAttempts).toBe(beforeRecovery)
       if (width >= 600) {
         await expect(composer).toBeDisabled()
       } else {
@@ -602,7 +633,7 @@ test('single-Channel C9 チャンネル一覧へ focuses heading only when visib
 
       const lenBeforeRecover = await guestPage.evaluate(() => history.length)
       await singleChannelButton.click()
-      await expect.poll(() => subscribeAttempts).toBe(beforeDeniedReselect + 2)
+      await expect.poll(() => subscribeAttempts).toBe(beforeRecovery + 1)
       await expect(guestPage.getByText('リアルタイム接続済み')).toBeVisible()
       await expect(c9Alert).toHaveCount(0)
       await expect(composer).toBeEnabled()
@@ -620,7 +651,7 @@ test('single-Channel C9 チャンネル一覧へ focuses heading only when visib
         const readyLen = await guestPage.evaluate(() => history.length)
         await singleChannelButton.click()
         await guestPage.waitForTimeout(200)
-        expect(subscribeAttempts).toBe(beforeDeniedReselect + 2)
+        expect(subscribeAttempts).toBe(beforeRecovery + 1)
         expect(await guestPage.evaluate(() => history.length)).toBe(readyLen)
       }
     }

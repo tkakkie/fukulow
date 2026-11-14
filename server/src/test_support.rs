@@ -1,9 +1,15 @@
 use futures_util::FutureExt;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::{cell::RefCell, future::Future, panic::AssertUnwindSafe};
+use std::{cell::RefCell, future::Future, panic::AssertUnwindSafe, sync::Arc};
+use tokio::sync::OnceCell;
+
+struct AppPool {
+    admin: PgPool,
+    app: Arc<OnceCell<PgPool>>,
+}
 
 tokio::task_local! {
-    static APP_POOLS: RefCell<Vec<PgPool>>;
+    static APP_POOLS: RefCell<Vec<AppPool>>;
 }
 
 pub async fn run<F: Future>(test: F) -> F::Output {
@@ -12,7 +18,9 @@ pub async fn run<F: Future>(test: F) -> F::Output {
             let result = AssertUnwindSafe(test).catch_unwind().await;
             let pools = APP_POOLS.with(|pools| pools.take());
             for pool in pools {
-                pool.close().await;
+                if let Some(app) = pool.app.get() {
+                    app.close().await;
+                }
             }
             match result {
                 Ok(output) => output,
@@ -29,7 +37,8 @@ const APP_ROLE: &str = "fukulow_sqlx_test_app";
 /// and fault injection on `pools.admin`. Never use this against a shared cluster.
 /// The test-only role persists across runs; no real `fukulow_app` is changed.
 /// The test harness closes every app pool before returning to SQLx, even when
-/// application state or background tasks retain pool handles.
+/// application state or background tasks retain pool handles. Apps over the same
+/// admin pool share one restricted pool, including concurrent initialization.
 /// This conventional module path keeps the invariants check's module tree resolvable;
 /// integration tests share it through `tests/support/pools.rs`.
 pub struct TestPools {
@@ -43,6 +52,26 @@ impl TestPools {
             APP_POOLS.try_with(|_| ()).is_ok(),
             "TestPools requires #[fukulow_test::test] to close app pools before SQLx teardown"
         );
+        let cell = APP_POOLS.with(|pools| {
+            let mut pools = pools.borrow_mut();
+            if let Some(pool) = pools.iter().find(|pool| {
+                std::ptr::eq(pool.admin.options(), admin.options())
+                    && pool.app.get().is_none_or(|app| !app.is_closed())
+            }) {
+                return pool.app.clone();
+            }
+            let app = Arc::new(OnceCell::new());
+            pools.push(AppPool {
+                admin: admin.clone(),
+                app: app.clone(),
+            });
+            app
+        });
+        let app = cell.get_or_init(|| Self::open(&admin)).await.clone();
+        Self { admin, app }
+    }
+
+    async fn open(admin: &PgPool) -> PgPool {
         let mut transaction = admin.begin().await.unwrap();
         // Serialize grants when callers initialize the same test database together.
         // Advisory locks are database-local; role creation also handles cross-DB races.
@@ -92,8 +121,11 @@ impl TestPools {
             .await
             .unwrap();
         transaction.commit().await.unwrap();
-        let app = PgPoolOptions::new()
+        // Closed pools may retain handles until teardown. SQLx parent permits are
+        // returned only on Drop, so keep the app budget independent of the admin pool.
+        PgPoolOptions::new()
             .max_connections(admin.options().get_max_connections())
+            .idle_timeout(admin.options().get_idle_timeout())
             .connect_with(
                 admin
                     .connect_options()
@@ -103,8 +135,6 @@ impl TestPools {
                     .password("sqlx-app-test-only"),
             )
             .await
-            .unwrap();
-        APP_POOLS.with(|pools| pools.borrow_mut().push(app.clone()));
-        Self { admin, app }
+            .unwrap()
     }
 }

@@ -53,8 +53,35 @@ pub enum ClientMessage {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    ActivityReady,
+    ActivityReset,
+    ChannelActivity {
+        channel_id: Uuid,
+        #[schema(minimum = 1)]
+        seq: i64,
+    },
+    ReadPositionChanged {
+        channel_id: Uuid,
+        #[schema(required = true)]
+        topic_id: Option<Uuid>,
+        #[schema(minimum = 0)]
+        read_seq: i64,
+    },
+    ChannelAccessGained {
+        channel_id: Uuid,
+    },
+    ChannelAccessRevoked {
+        channel_id: Uuid,
+    },
+    ChannelListChanged,
+    ChannelMembersChanged {
+        channel_id: Uuid,
+    },
+    MembersChanged,
     /// Live and replayed messages have exactly the same canonical shape.
-    Message { message: Message },
+    Message {
+        message: Message,
+    },
     /// Sent after committed replay and queued live events have been handed off.
     Subscribed {
         channel_id: Uuid,
@@ -63,7 +90,9 @@ pub enum ServerEvent {
         caught_up_seq: i64,
     },
     /// Effective Channel access loss; the socket and other Channels stay open.
-    ChannelAccessLost { channel_id: Uuid },
+    ChannelAccessLost {
+        channel_id: Uuid,
+    },
     Error {
         code: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,3 +261,34 @@ async fn close(socket: &mut WebSocket, code: u16) {
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::channels::activity::Notice> for ServerEvent {
+    fn from(notice: crate::channels::activity::Notice) -> Self {
+        use crate::channels::activity::Notice;
+        match notice {
+            Notice::ActivityReady => Self::ActivityReady,
+            Notice::ActivityReset => Self::ActivityReset,
+            Notice::ChannelActivity { channel_id, seq } => {
+                Self::ChannelActivity { channel_id, seq }
+            }
+            Notice::ReadPositionChanged {
+                channel_id,
+                topic_id,
+                read_seq,
+            } => Self::ReadPositionChanged {
+                channel_id,
+                topic_id,
+                read_seq,
+            },
+            Notice::ChannelAccessGained { channel_id } => Self::ChannelAccessGained { channel_id },
+            Notice::ChannelAccessRevoked { channel_id } => {
+                Self::ChannelAccessRevoked { channel_id }
+            }
+            Notice::ChannelListChanged => Self::ChannelListChanged,
+            Notice::ChannelMembersChanged { channel_id } => {
+                Self::ChannelMembersChanged { channel_id }
+            }
+            Notice::MembersChanged => Self::MembersChanged,
+        }
+    }
+}

@@ -11,6 +11,7 @@ import { Deliveries, positiveInteger } from './delivery.ts';
 import { schedule, sessionIndex } from './scheduler.ts';
 import { summaryForReport } from './summary.ts';
 import { organizationPath } from './compat.ts';
+import { isActivityNotice } from './events.ts';
 import { baseUrl, params, requireStatus, seed, revoke, uuid, type Setup } from './seed.ts';
 import { reconnectDelay } from '../web/src/reconnect.ts';
 
@@ -155,6 +156,7 @@ export default async function (data: Setup): Promise<void> {
     socket.onmessage = (frame) => {
       try {
         const event = JSON.parse(String(frame?.data)) as ServerEvent;
+        if (isActivityNotice(event)) return;
         if (event.type === 'error') throw new Error('Subscription refused');
         if (event.type === 'subscribed') {
           if (subscribed || event.channel_id !== channelId || (reconnect ? event.caught_up_seq < afterSeq : event.caught_up_seq !== 0)) {

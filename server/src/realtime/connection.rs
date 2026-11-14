@@ -392,6 +392,13 @@ impl Connection<'_> {
     }
 
     pub async fn run(&mut self, socket: &mut WebSocket, lifecycle: Lifecycle) -> Result<(), u16> {
+        let activity = self
+            .state
+            .message_delivery
+            .channel_access
+            .activity
+            .register(self.auth);
+        Self::event(socket, ServerEvent::ActivityReady).await?;
         let mut ping_sent_at: Option<Instant> = None;
         let mut next_ping = Instant::now() + lifecycle.ping_interval;
         let mut heartbeat = tokio::time::interval_at(next_ping, lifecycle.ping_interval);
@@ -400,6 +407,10 @@ impl Connection<'_> {
             let frame = tokio::select! {
                 biased;
                 _ = Self::access_changed(&mut self.access) => { self.retire_lost(socket).await?; continue; },
+                Some(notice) = activity.next() => {
+                    if let Some(result) = notice.handoff(Self::event(socket, notice.event.clone().into())).await { result?; }
+                    continue;
+                },
                 frame = socket.recv() => frame,
                 _ = heartbeat.tick() => {
                     if ping_sent_at.is_some_and(|sent| sent.elapsed() >= lifecycle.idle_timeout) {

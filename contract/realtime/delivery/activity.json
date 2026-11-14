@@ -1,0 +1,22 @@
+{
+  "kind": "delivery",
+  "scenarios": [{
+    "id":"activity-without-subscriptions",
+    "title":"Unwatched activity reaches only authorized non-senders and carries no Message body",
+    "covers":["A1","A2","A3","A7","A13"],
+    "rust":{"existing_tests":["server/src/realtime/tests/activity.rs::private_channel_activity_skips_non_members"]},
+    "setup":{"organizations":["org"],"members":[{"id":"alice","organization":"org"},{"id":"bob","organization":"org"},{"id":"denied","organization":"org"}],"channels":[{"id":"private","organization":"org","creator":"alice","visibility":"private","members":["bob"]}]},
+    "steps":[
+      {"do":"connect","socket":"a","as":"alice"},
+      {"do":"connect","socket":"b","as":"bob"},
+      {"do":"connect","socket":"d","as":"denied"},
+      {"do":"activity_expect","socket":"a","events":[{"type":"activity_ready"}]},
+      {"do":"activity_expect","socket":"b","events":[{"type":"activity_ready"}]},
+      {"do":"activity_expect","socket":"d","events":[{"type":"activity_ready"}]},
+      {"do":"post","as":"alice","channel":"private"},
+      {"do":"activity_expect","socket":"b","events":[{"type":"channel_activity","channel_id":"private","seq":1}]},
+      {"do":"activity_expect","socket":"a","events":[]},
+      {"do":"activity_expect","socket":"d","events":[]}
+    ]
+  }]
+}

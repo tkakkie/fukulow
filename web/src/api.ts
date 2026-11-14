@@ -72,8 +72,8 @@ export const getMe = (f: typeof fetch = fetch) => call<AccountIdentity>(f, '/api
 
 const orgPath = (organizationId: string) => `/api/v1/orgs/${encodeURIComponent(organizationId)}`
 
-export const getOrganizationMe = (organizationId: string, f: typeof fetch = fetch) =>
-  call<Identity>(f, `${orgPath(organizationId)}/me`, { cache: 'no-store' }, true)
+export const getOrganizationMe = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<Identity>(f, `${orgPath(organizationId)}/me`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const isOrganizationUnavailable = (r: Result<unknown>) =>
   !r.ok && r.kind === 'http' && r.status === 404 && r.error === 'organization_unavailable'
@@ -88,8 +88,8 @@ export type ListMessagesQuery = NonNullable<
   import('./api-schema').operations['list_messages']['parameters']['query']
 >
 
-export const listChannels = (organizationId: string, f: typeof fetch = fetch) =>
-  call<components['schemas']['ChannelList']>(f, `${orgPath(organizationId)}/channels`, { cache: 'no-store' }, true)
+export const listChannels = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['ChannelList']>(f, `${orgPath(organizationId)}/channels`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
   call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)
@@ -116,8 +116,8 @@ export const lookupAuthors = (organizationId: string, body: components['schemas'
 export type CreateInviteRequest = components['schemas']['CreateInviteRequest']
 export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest']
 export type InviteResponse = components['schemas']['InviteResponse']
-export const listMembers = (organizationId: string, f: typeof fetch = fetch) =>
-  call<components['schemas']['MemberList']>(f, `${orgPath(organizationId)}/members`, { cache: 'no-store' }, true)
+export const listMembers = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['MemberList']>(f, `${orgPath(organizationId)}/members`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 export const deactivateMember = (organizationId: string, memberId: string, f: typeof fetch = fetch) =>
   call<undefined>(f, `${orgPath(organizationId)}/members/${encodeURIComponent(memberId)}/deactivate`, { method: 'POST' }, false)
 export const changeRole = (organizationId: string, memberId: string, role: Role, f: typeof fetch = fetch) =>
@@ -147,11 +147,11 @@ const querySuffix = (query: object) => {
 export const listTimeline = (organizationId: string, channelId: string, query: ListTimelineQuery = {}, f: typeof fetch = fetch) =>
   call<TimelinePage>(f, `${channelPath(organizationId, channelId)}/timeline${querySuffix(query)}`, { cache: 'no-store' }, true)
 
-export const listTopics = (organizationId: string, channelId: string, query: ListTopicsQuery = {}, f: typeof fetch = fetch) =>
-  call<TopicPage>(f, `${channelPath(organizationId, channelId)}/topics${querySuffix(query)}`, { cache: 'no-store' }, true)
+export const listTopics = (organizationId: string, channelId: string, query: ListTopicsQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<TopicPage>(f, `${channelPath(organizationId, channelId)}/topics${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
-export const getTopicSummary = (organizationId: string, channelId: string, topicId: string, f: typeof fetch = fetch) =>
-  call<TopicSummaryResponse>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}`, { cache: 'no-store' }, true)
+export const getTopicSummary = (organizationId: string, channelId: string, topicId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<TopicSummaryResponse>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch) =>
   call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store' }, true)
@@ -166,8 +166,8 @@ export type ChannelMember = components['schemas']['ChannelMember']
 export type ChannelMemberList = components['schemas']['ChannelMemberList']
 export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelManagerRequest']
 
-export const listChannelMembers = (org: string, channel: string, f: typeof fetch = fetch) =>
-  call<ChannelMemberList>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, { cache: 'no-store' }, true)
+export const listChannelMembers = (org: string, channel: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<ChannelMemberList>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 export const addChannelMember = (org: string, channel: string, body: components['schemas']['AddChannelMemberRequest'], f: typeof fetch = fetch) =>
   call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, json(body), false)
 export const removeChannelMember = (org: string, channel: string, member: string, f: typeof fetch = fetch) =>

@@ -155,3 +155,4 @@ Keyboard first: every action has a keyboard path; frequent ones have shortcuts a
 - Unread badges use `未読 n件` as their accessible label (`Badge`); the timeline read marker uses `未読` (`ReadMarker`).
 - Terms only from `docs/spec.md`; no synonyms (not スレッド for 返信のつながり, not ワークスペース for 組織).
 - Channel creation: `公開範囲` groups the native radio choices `公開` (default) / `非公開`. The form uses `can_create_channels`; Guests see neither the form nor the choices. Successful creation resets the choices to `公開`; a refusal preserves the selection.
+  Capability revalidation keeps an already allowed form and its input focus mounted; drafting stays usable, submission waits for current permission. A confirmed denial removes the form.

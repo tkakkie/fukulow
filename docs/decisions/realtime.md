@@ -3,6 +3,7 @@
 Real-time delivery, admission, queues and timeouts. Writing rules and the other parts: [index](../decisions.md).
 
 ## Real-time delivery
+- #152 Mention counts inherit P8 baselines/dedup/stale rejection and #307/#151 invalidate-and-refetch/O5, with no Mention event or timer. Reason: unwatched activity and cross-device marks need authoritative REST counts; notices alone never add/subtract counts (spec M4).
 - #195: SIGTERM/SIGINT stop acceptance and reject new requests, broadcast 1001, then drain HTTP, detached sends/notifications and sockets before closing the pool. Count before spawn/upgrade so caller disconnects and task handoffs cannot hide work.
 - #195: retain provisional 60 s drain / 75 s Compose stop_grace_period from measured drains: 2,048-send SIGTERM <=814 ms; idle 10k restart <1 s (measurements.md). These are not guaranteed worst-case times; pre-admission SQL can exceed them. Expiry skips runtime teardown.
 - #195 known limit: on normal exit, Tokio runtime teardown is outside the drain and can run past its 60 s deadline. Retain the current teardown behavior; no larger change now.
@@ -63,6 +64,9 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #204 section notices share #307's post-COMMIT publication, buffer, proven-recipient resets and O5 periodic REST reconciliation of held targets. Reason: recovery must converge without another mutation or disclosing personal activity to other Members.
 - #204 section display intersects authorized layout and Channel-list snapshots under A11/A12 fences; loss hides immediately. Reason: a stale personal-layout response must never restore a Channel hidden by access loss.
 
+- #307 one conservative socket epoch plus at most 256 retained authorization lifetimes fences notice publication and handoff; the existing batched fallback checks them. Reason: bounded provenance without one subscription per visible Channel.
+- #307 auth exposes injected mutation hooks implemented by channels; all held REST targets share one refetch controller. Reason: preserve the module DAG and apply identical retry, debounce and generation fences without dependencies.
+
 ## Admission and timeouts
 - #196 B app pool: FUKULOW_DB_MAX_CONNECTIONS=20 (3..=100), FUKULOW_DB_ACQUIRE_TIMEOUT_MS=1000 (1..=5000); invalid values fail. Cap 100 matches PostgreSQL's usual default, bounding SQLx queue/per-connection memory; 10k sockets share DB slots. Budget DB capacity for operator connections.
 - #196 B keeps #156/#158's min(16, P-ceil(P/5)) budget: send ceil(B/2), watermark floor(B/2). P=3 gives 1+1 and 1 spare; P=20 gives 8+8 and 4 spare; above 20 budgets stay 8+8. Reject P=1/2: no watermark slot. Raising P above 20 does not raise admitted concurrency.
@@ -101,6 +105,8 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
+
+- [messages](messages.md): `#152 proposes exact`, `#152 Message and message_mentions`, `#152 locks sorted`, `#152 Mention counts share`
 
 - [process](process.md): `#198 B: pinned tracing/subscriber`, `#198 B: a domain-independent observability`
 

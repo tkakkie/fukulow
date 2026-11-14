@@ -836,3 +836,24 @@ it('refetches counts after bootstrap covers history newer than the initial Chann
   expect(c.unread.get('A').unreadCount).toBe(3)
   await c.sync.close()
 })
+
+it('an authoritative regrant baseline updates the badge without reviving a C9 Channel', async () => {
+  const c = unreadClient(); await c.boot()
+  await c.sync.channelUnavailable('A')
+  c.unread.activityAccess('A')
+  c.unread.activitySnapshot([row({ as_of_seq: 8, read_seq: 7, unread_count: 1, main_unread_count: 1 })])
+  expect(c.unread.get('A').unreadCount).toBe(1)
+  expect(c.sync.get().channels.A.state).toBe('unavailable')
+  await c.sync.close()
+})
+
+it('periodic access reconciliation replaces unwatched baselines even when the new W and read position are lower', async () => {
+  const c = unreadClient(); await c.boot(); await c.sync.unwatch('A')
+  c.unread.activitySnapshot([row({ as_of_seq: 100, read_seq: 90, main_unread_count: 2, unread_count: 5 })])
+  const generation = c.unread.get('A').generation
+  c.unread.activityReconcile()
+  c.unread.activitySnapshot([row({ as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0 })])
+  expect(c.unread.get('A')).toMatchObject({ asOfSeq: 2, unreadCount: 0 })
+  expect(c.unread.get('A').generation).not.toBe(generation)
+  await c.sync.close()
+})
