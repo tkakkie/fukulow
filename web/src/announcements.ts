@@ -29,6 +29,7 @@ export type AnnouncementState = {
   maxSeq: number | null
   seenSeqs: ReadonlySet<number>
   announcedSeqs: ReadonlySet<number>
+  deferredMessages: readonly AnnounceableMessage[]
   burstStartMs: number | null
   burstCount: number
   offlineSinceMs: number | null
@@ -54,6 +55,7 @@ export type AnnouncementInput =
       selfId: string
       nowMs: number
       resolveSenderName?: (senderId: string) => string
+      isSenderPending?: (senderId: string) => boolean
     }
   | {
       type: 'offline_timer_elapsed'
@@ -139,6 +141,7 @@ export function initialAnnouncementState(): AnnouncementState {
     maxSeq: null,
     seenSeqs: new Set(),
     announcedSeqs: new Set(),
+    deferredMessages: [],
     burstStartMs: null,
     burstCount: 0,
     offlineSinceMs: null,
@@ -167,6 +170,7 @@ export function stepAnnouncements(
           maxSeq: null,
           seenSeqs: new Set(),
           announcedSeqs: new Set(),
+          deferredMessages: [],
           burstStartMs: null,
           burstCount: 0,
           offlineSinceMs: null,
@@ -233,6 +237,7 @@ export function stepAnnouncements(
             maxSeq,
             seenSeqs,
             announcedSeqs: new Set(seenSeqs),
+            deferredMessages: [],
             offlineSinceMs: null,
             reconnecting: false,
           },
@@ -265,6 +270,7 @@ export function stepAnnouncements(
 
       if (
         seqsUnchanged &&
+        prev.deferredMessages.length === 0 &&
         everLive === prev.everLive &&
         input.live === prev.wasLive &&
         offlineSinceMs === prev.offlineSinceMs &&
@@ -293,7 +299,7 @@ export function stepAnnouncements(
         addedBelowTail.length === 0 &&
         isContiguousTail
 
-      const liveFromOthers = isLiveTailDelivery
+      const newLiveFromOthers = isLiveTailDelivery
         ? addedAtTail.filter(
             (m) =>
               m.sender !== input.selfId &&
@@ -309,10 +315,19 @@ export function stepAnnouncements(
           )
         : []
 
+      // Preserve arrival order: only the ready prefix enters the normal coalescing
+      // window. Known senders wait only when an earlier live Message is pending.
+      const queued = [...prev.deferredMessages, ...newLiveFromOthers]
+      const pendingIndex = queued.findIndex(m => input.isSenderPending?.(m.sender))
+      const liveFromOthers = pendingIndex < 0 ? queued : queued.slice(0, pendingIndex)
+      const deferredMessages = pendingIndex < 0 ? [] : queued.slice(pendingIndex)
+
       let announcedSeqs = prev.announcedSeqs
-      if (!seqsUnchanged) {
+      if (!seqsUnchanged || prev.deferredMessages.length > 0) {
         const nextAnnounced = new Set(prev.announcedSeqs)
         for (const s of seenSeqs) nextAnnounced.add(s)
+        for (const m of liveFromOthers) nextAnnounced.add(m.seq)
+        for (const m of deferredMessages) nextAnnounced.delete(m.seq)
         announcedSeqs = nextAnnounced
       }
 
@@ -326,6 +341,7 @@ export function stepAnnouncements(
             maxSeq,
             seenSeqs,
             announcedSeqs,
+            deferredMessages,
             offlineSinceMs,
             reconnecting,
             lastAnnouncement: connectionAnnouncement ?? prev.lastAnnouncement,
@@ -368,6 +384,7 @@ export function stepAnnouncements(
           maxSeq,
           seenSeqs,
           announcedSeqs,
+          deferredMessages,
           burstStartMs,
           burstCount,
           offlineSinceMs,
@@ -508,6 +525,7 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
       messages: readonly AnnounceableMessage[]
       selfId: string
       resolveSenderName?: (senderId: string) => string
+      isSenderPending?: (senderId: string) => boolean
     }): void {
       if (input.viewId !== state.viewId) clearMessageTimer()
       // A delayed timer must not merge Messages from a later window into the old one.
@@ -553,6 +571,7 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
     },
     destroy(): void {
       clearMessageTimer()
+      state = initialAnnouncementState()
       clearOfflineTimer()
       clearChannelListTimer()
       listeners.clear()

@@ -2,7 +2,7 @@ import type { Result, ServerEvent } from './api'
 
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile'
-export type ActivityTarget = { invalidate(reason?: Invalidation, delay?: number): void; suspend?(): void; close(): void }
+export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; suspend?(): void; close(): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
@@ -109,7 +109,7 @@ export function createActivity(options: {
     }, first ? random() * period : period + random() * 2000)
   }
   return {
-    hold(key: string, target: ActivityTarget) { if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
+    hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
     notice(event: ActivityNotice) {
       if (closed) return
       switch (event.type) {

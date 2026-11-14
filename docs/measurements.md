@@ -935,6 +935,112 @@ Result: no write regression; after was equal or better at every step, which is w
 
 Limits: one run per variant on a shared host; glibc (Debian bookworm) only, so a base image or libc change needs a new measurement; 60 s steps do not show long-run fragmentation.
 
+## Bounded web message windows (#308, 2026-11-14 JST)
+
+Source: main 68b888c plus the #308 working tree. macOS 27.0.1 / arm64, Apple M5, 10 CPUs, 32 GiB; Node 26.13.0, Vitest 5.1.0, Playwright 1.65.0 / Chromium 158.0.8127.18. Browser run: Rust 1.99.0 debug server, PostgreSQL 18.6 from the compose-pinned image on Docker Desktop 29.9.3, disposable migrated database, loopback HTTP/WebSocket, 1440×900 viewport. Runs were sequential, with no other task tests or builds running.
+
+Named body budgets: main projections 400, one active Topic history 300, one Reply panel 200; sync 400 per watched Channel, 50 per inactive Channel in at most five LRU slots, and 600 shared across sync caches. Main/Topic budgets are shared across Channels. The 600 sync budget reserves the other 900 slots for simultaneous projection histories; it may release an older inactive slot before all five slots are full. Total history budget: 1,500 slots. Pending sends and active navigation anchors are separate; Unread keeps other-sender identity/sequence metadata, not display bodies. Topic sequence ranges and gap evidence also survive body eviction.
+
+Reproduce with the pinned Node version, from the repository root:
+
+```bash
+MEASURE_WINDOW=1 npm --prefix web test -- src/message-window-memory.test.ts --disableConsoleIntercept
+npm --prefix web run build
+cargo build -p fukulow-server --bins
+DATABASE_URL=<disposable-app-role-url> npm --prefix web run e2e -- message-window.spec.ts
+```
+
+Provision a fresh disposable PostgreSQL database with the role/migration steps in `.github/workflows/e2e.yml` before the browser command. The local runs used `npx --yes --package=node@26.13.0 -c '<command>'` to select the repository pin without changing dependencies. Both probes print one JSON measurement record and assert their bounds.
+
+Controller probe (`web/src/message-window-memory.test.ts`): 2,000 initial synthetic records; ten cycles of 1,000 timed main-Channel arrivals, ten older main pages, eight Topic pages and six Reply pages (50 records/page), then Topic release, Reply dismissal and a Channel round trip. Each of the ten distinct other Channels receives another 100 untimed events before unwatch. Thus 10,000 timed arrivals, 1,000 additional events, 20 Channel changes and ten Topic/Reply visits. Transport fixtures exercise the production sync/projection controllers; they are not a server-data or browser benchmark. Timing includes dispatch plus reading main/Reply snapshots.
+
+| Controller result | Value |
+| --- | --- |
+| Peak retained sync / main / Topic / Reply records | 600 / 400 / 300 / 200 |
+| Peak combined retained history slots | 1,500 |
+| Arrival p50 / p95 / maximum | 0.0508 / 0.1360 / 1.4417 ms |
+| Main / Topic / Reply reads, including initial loads | 131 / 80 / 60 |
+
+Browser probe (`web/e2e/message-window.spec.ts`): real endpoints seed 450 main Messages, 450 Topic Messages and a 300-Message Reply chain. After paging main beyond its cap, 2,000 arrivals use response-paced batches of eight HTTP sends; every tenth body repeats its text ten times to vary row heights. One Composer send follows, then 450 further arrivals while unpinned. The run makes six Channel round trips, repeatedly opens Topic and Reply views, pages both past their caps, refetches in both directions, and exercises Composer Up, Home/End and Arrow navigation beyond mounted rows. A 300-record Topic window and 200-record Reply window are open together. The anchor moves less than 3px during the unpinned arrival block.
+
+| Browser result | Value |
+| --- | --- |
+| Mounted main / Topic / Reply rows at samples | 13 / 18 / 12 |
+| Descendant DOM elements in main / Topic / Reply at samples | 139 / 188 / 129 |
+| All application DOM elements with Topic and Reply open | 386 |
+| 2,000 timed arrivals, HTTP submission through final DOM update | 11,603 ms |
+| Mutation to next animation frame p50 / p95 (2,643 samples) | 5.1 / 14.8 ms |
+| Renderer script / layout / style recalculation during timed arrivals | 2,497 / 372 / 148 ms |
+| Projection/navigation reads across the complete browser workload | 43 |
+
+The browser uses CDP cumulative CPU metrics for script/layout/style deltas; mutation-to-frame samples cover the first main view's active lifetime, including its arrival, keyboard and anchor checks. They measure frame readiness, not GPU paint time. Arrival wall time includes HTTP, PostgreSQL, WebSocket delivery and the Playwright driver. This is not a server throughput claim. Element counts include controls and spacers; row counts count mounted confirmed rows. Separate Vitest coverage windows 1,000 pending sends without dropping them, and Playwright covers first-Unread entry through 450 Messages beyond the main cap.
+
+These results keep the approved 400/300/200 caps and 560px overscan: record and DOM counts remain bounded through the workload, with p95 mutation-to-frame time below one 60Hz frame on this machine. No API extension was needed. Limits: one run per probe, headless desktop browser and debug server; no production capacity or low-end-device claim, no heap-size bound, and no claim that sequence/ID evidence or user-authored pending sends have fixed cardinality. Cache-slot counts can include the same canonical Message in more than one store; caller-held snapshots and transient HTTP response allocations are not heap measurements. Older Reply history still requires restarting from the chain start with existing endpoints.
+
+### #308 round-1 evidence and active-Unread remeasurement (2026-11-14 JST)
+
+Source: `codex/message-window-308`, ede344c plus the round-1 working-tree fixes. Same macOS 27.0.1 / Apple M5 / 10 CPUs / 32 GiB host; Node 26.13.0 and Vitest 5.1.0. The final controller run was sequential, without another task build, test or load probe running. This adds evidence omitted by the original record above; that record is historical and does not establish a metadata bound.
+
+Targets fixed before this run: keep the approved 400/300/200/50 body caps and 1,500 shared display slots; retain at most 400 Topic range objects per projection window, 400 Reply availability ranges, 400 disjoint sync ranges, 1,100 Unread records per Channel, 1,100 presented seqs per active visit and one first-Unread identity. The Unread record allowance is the union of the 400 sync, 400 main and 300 active Topic bodies, so refetched pages can still supply presentation evidence. Unread Topic scopes are capped at 400. Discarded evidence invalidates insufficient baselines and uses existing endpoints to refresh; positions never advance just to reclaim metadata. A scalar sync recovery target retains forgotten gaps until unfiltered recovery.
+
+Reproduce with the original command:
+
+```bash
+MEASURE_WINDOW=1 npm --prefix web test -- src/message-window-memory.test.ts --disableConsoleIntercept
+```
+
+The file now runs two production-controller probes. The original navigation probe again peaked at sync/main/Topic/Reply = 600/400/300/200 and 1,500 combined display slots; main/Topic/Reply reads were 131/80/60. Arrival p50/p95/max were 0.04425/0.06246/1.01613 ms. No body cap or overscan adjustment was made.
+
+The added probe instantiates sync, Topics, Replies **and Unread**. It starts with one Message in each of T/U, opens T's history and Reply root, and enters T's Unread scope at position 0 with one Unread. Then 100,000 arrivals alternate T/U; every T arrival is a Reply in the open chain. The same Unread visit remains active throughout. Every 1,000 arrivals it presents only the recent T rows and drains async refreshes; the unseen first Message must prevent mark-read progress. Instrumentation observes the actual private evidence/record stores, not only display snapshots. Counts are sampled after every arrival and after each async drain.
+
+| Sampled retained-store peak | Value |
+| --- | --- |
+| Topic range objects / Topic evidence keys | 400 / 2 |
+| Reply availability range objects | 400 |
+| Unread identity/sequence records | 1,100 |
+| Visit presented seqs / separately pinned first-Unread identity | 350 / 1 |
+| Unread Topic scopes | 2 |
+| Sync disjoint ranges in this contiguous stream | 0 |
+| Main latest bodies / summary baselines / active Topic windows | 2 / 2 / 1 |
+| Main Topic membership / W-relative positions / summary-through entries | 2 / 2 / 2 |
+| Projection refresh jobs / persistent read slots | 2 / 4 |
+| Unread summary reads / queued summaries / held Topic positions | 2 / 2 / 0 |
+| Unread summary retry timers / attempt entries at samples | 0 / 0 |
+| Combined retained display body slots | 904 |
+
+At 25k/50k/75k/100k arrivals, Unread retained 942/1,080/817/955 records and presented sets held 300/340/300/300 seqs; Topic/Reply ranges were 400/400 at every point. Arrival dispatch p50/p95/max: 0.09400/0.10579/1.53954 ms. Baseline traffic is a cost of the bound: the complete probe used one main read, 819 Topic-summary reads and 313 Channel-list reads, including initial reads and the final validation. It also made one Reply read and 996 Topic-history reads; 995 of those history reads are the final refetch back to the first Message, outside the timed arrival block.
+
+After all arrivals the visit still had boundary 0, entry Unread 1 and first-Unread seq 1, with zero mark-read requests; the refreshed T count was exactly 50,001. Refetching the evicted prefix and presenting seq 1 then made one mark-read request, persisted position 1 and recovered count 50,000 without changing the visit marker. CI regressions also hold a refresh indefinitely while 10,000 arrivals retain at most 1,100 records, limit 500 one-off Topics to 400 scope/evidence identities, and cap 1,000 disjoint sync ranges at 400 before refetching the forgotten final seq. Against the original production code, the new reproductions fail with 10,000 Unread records and 2,400 range objects for 2,400 alternating arrivals.
+
+The four affected Playwright specs (`message-window`, `topics`, `replies`, `unread`) passed all 11 tests against the rebuilt Rust 1.99.0 debug server and a fresh, migrated, disposable PostgreSQL 18.6 instance, using only the app role. The windowing probe sampled 13/18/12 mounted main/Topic/Reply rows, 139/188/129 descendant elements, and 652 application elements with Topic and Reply open. Reply assertions explicitly scroll to early rows and fetch newer pages before checking the latest keyboard target.
+
+### #308 same-chain anchor navigation request counts (2026-11-14 JST)
+
+Source: `codex/message-window-308`, 2a21764 plus this working tree. macOS 27.0.1 / arm64; pinned Node 26.13.0, Vitest 5.1.0, Playwright 1.65.0 / Chromium, 1440×900 viewport. Controller and browser probes ran sequentially. The production controller uses a fake counting API with a root at seq 1 and 10,000 Replies at seq 2–10,001, default 50-record pages, exclusive `after_seq` and accurate `has_more`. Counts below exclude the initial root open and explicit paging.
+
+| Navigation | Chain reads | First `after_seq` |
+| --- | ---: | ---: |
+| Cached same-chain descendant, current anchor or root | 0 | none |
+| Uncached same-chain descendant at seq 9,000 | 1 | 8,975 |
+| Fresh descendant open at seq 9,000 | 1 | 8,975 |
+
+The jump returns exactly seq 8,976–9,025, including the target and context, and exposes older history. Subsequent forward pages remain contiguous with at most 200 retained history records; older navigation restarts at 0 and forward pages from there retain seq 1–200 without a cached recent suffix replacing them. Separate assertions preserve unsettled, unknown and refused Reply intents across both cached and uncached moves, retry with the original parent/key, and discard after the outcome is known or unknown. A cached move also preserves live availability evidence and continuation, including duplicate-arrival handling.
+
+Reproduce with the pinned Node version:
+
+```bash
+npm --prefix web test -- src/replies-navigation.test.ts
+npm --prefix web run build
+cargo build --locked -p fukulow-server --bins
+DATABASE_URL=<disposable-app-role-url> E2E_PORT=<free-port> npm --prefix web run e2e -- replies.spec.ts message-window.spec.ts
+```
+
+Browser setup: throwaway Docker PostgreSQL 18.6 using the compose-pinned digest, a free loopback port, and `fukulow-server migrate roles` / `migrate` as in `.github/workflows/e2e.yml`; tests connect only as `fukulow_app`. The new replies navigation test uses the embedded production app with mocked timeline/chain responses and a matching subscription watermark for the same 10,001-record dataset. After loading 150 Replies it navigates to a fully visible cached target: scroll displacement stays below 3px, no intermediate scroll to the top occurs, both list and row DOM nodes survive, and there are zero chain/hint reads. A cached unmounted target is revealed with zero additional reads even while a previous page is stalled. An uncached target and a fresh descendant open each take one contextual read and end with the target in view. The root also remains revealable without a read outside the retained history. Existing replies and message-window workloads use real server endpoints.
+
+Negative checks temporarily substituted the original `replies.ts` from 2a21764, restoring the working source afterwards. All six navigation/retention controller regressions failed; the uncached seq-9,000 jump made 180 sequential reads (181 including the initial root open). The browser regression failed with a 109px cached-navigation scroll displacement against its <3px assertion. Limits: synthetic immutable records, one desktop browser and no request latency or server throughput measurement; these are request-count and scroll regressions. Older traversal and explicit latest navigation still use existing forward pages and can require many reads. No API or server change, body-budget increase or overscan adjustment is involved.
+
+Limits: one final controller run; these are retained-store cardinalities, not a process heap/RSS bound or a controlled latency comparison. The full fixture history, timing samples, caller-held snapshots, transient HTTP/fixture allocations and microtask-only peaks are excluded. Weak baseline-identity sets do not strongly retain old baselines. Pending sends and authored drafts remain exempt; Channel cardinality is not capped by this probe. Cursor-gap recovery, stale/denied responses, P4 merge and parent-eviction retry/discard have separate CI tests. The browser recheck proves the exercised viewport/navigation behavior, not low-end-device or production capacity.
+
 ## Organization activity periodic REST reconciliation (#307 item 5, 2026-11-14 JST)
 
 Conditions: Apple M5, 10 CPUs, 32 GiB, macOS 27.0.1; Docker 29.9.3, VM 10 CPUs / 7.748 GiB. Pinned PostgreSQL 18.6; application Docker release build, Rust 1.99.0 and Node 26.13.0, image `sha256:f64d067475f426aec033d8aba546cf7b196d931cef27ca6aa5adcd33089d0b43`; default image allocator settings, 20-connection restricted `fukulow_app` pool. Direct Docker bridge HTTP, no proxy or TLS. Four k6 1.8.2 generators, one VU each, 2,500 sockets each, disjoint socket ranges, one Account/Session per 32 sockets (313 total); production socket caps unchanged. Generators use nofile 65,536 and source-port range 1024–65535. Each opens batches of 100 every 500 ms. No build/test from this worktree ran during the measurement; unrelated host activity was uncontrolled.

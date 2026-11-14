@@ -1,6 +1,9 @@
 import { createActivityTarget } from './activity'
 import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
+import { createAuthors } from './authors'
+import type { lookupAuthors } from './api'
+
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
 export const roles = Object.keys(roleNames) as Role[]
 export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
@@ -17,31 +20,69 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   return '入力内容と権限を確認してください。'
 }
 
-type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; baseUrl(): string }
+type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; lookupAuthors?: typeof lookupAuthors; baseUrl(): string }
 const defaults: MembersDeps = { listMembers, changeRole, deactivateMember, createInvite, baseUrl: () => `${location.origin}${location.pathname}` }
 export function createMembers(organizationId: string, onEnded: () => void, onUnavailable: () => void, deps: MembersDeps = defaults) {
   let state = { members: [] as Member[], loading: true, busy: false, error: '', inviteLink: '' }
   let closed = false
+  let loadSequence = 0
+  // Standalone loads keep sequence fencing; held UI loads share the reconciliation queue.
+  let activityManaged = false
   const listeners = new Set<() => void>()
+  const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
+  function unavailable() { closed = true; loadSequence++; activityTarget.close(); authors.unavailable() }
+  function membershipLost() {
+    if (closed) return
+    unavailable()
+    onUnavailable()
+  }
   function failed(r: Exclude<Result<unknown>, { ok: true }>) {
     if (r.kind === 'http' && r.status === 401) onEnded()
-    else if (!closed && isOrganizationUnavailable(r)) onUnavailable()
+    else if (isOrganizationUnavailable(r)) membershipLost()
     set({ error: memberError(r) })
   }
   const activityTarget = createActivityTarget({
-    load: () => deps.listMembers(organizationId).then(r => { if (!r.ok && r.kind === 'http' && r.status === 401) onEnded(); return r }),
-    accept: data => set({ members: data.members, loading: false, error: '' }),
-    hide: () => set({ members: [], loading: true }),
-    error: r => { failed(r); set({ loading: false }) },
+    async load() {
+      const sequence = ++loadSequence
+      const r = await deps.listMembers(organizationId)
+      // Account rejection and current-selection Membership loss outlive freshness fences.
+      if (!r.ok && (r.kind === 'http' && r.status === 401 || !closed && isOrganizationUnavailable(r))) failed(r)
+      return r.ok ? { ok: true as const, data: { members: r.data.members, sequence } } : r
+    },
+    accept: data => {
+      if (closed || data.sequence !== loadSequence) return
+      authors.replaceMembers(data.members)
+      set({ members: data.members, loading: false, error: '' })
+    },
+    hide: () => { loadSequence++; set({ members: [], loading: true }) },
+    error: r => {
+      if (!(r.kind === 'http' && r.status === 401) && !isOrganizationUnavailable(r)) failed(r)
+      set({ loading: false })
+    },
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r)),
   })
   return {
-    activityTarget,
+    activityTarget: { ...activityTarget, held() { activityManaged = true } },
+    authors,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
-    close() { closed = true; activityTarget.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
-    async load() { await activityTarget.refresh() },
+    unavailable,
+    close() { closed = true; activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
+    async load() {
+      if (closed) return
+      if (activityManaged) { await activityTarget.refresh(); return }
+      const sequence = ++loadSequence
+      const r = await deps.listMembers(organizationId)
+      if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
+      if (closed) return
+      // Freshness changes cannot invalidate Membership loss within this selection.
+      if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
+      if (sequence !== loadSequence) return
+      if (!r.ok) failed(r)
+      else if (!closed) { authors.replaceMembers(r.data.members); set({ members: r.data.members }) }
+      set({ loading: false })
+    },
     async invite(email: string, role: Role) {
       if (closed || state.busy) return
       set({ busy: true, error: '', inviteLink: '' })
@@ -59,7 +100,13 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
         if (r.kind === 'http' && r.error === 'last_owner') set({ error: '最後のオーナーは無効化できません。別のオーナーを追加してください。' })
         if (r.kind === 'http' && r.error === 'last_channel_manager') set({ error: 'チャンネル管理者がいなくなるため、無効化できません。先に別のチャンネル管理者を追加してください。' })
         if (r.kind === 'http' && r.error === 'member_not_found') set({ error: 'このメンバーは利用できません。メンバー一覧を開き直してください。' })
-      } else set({ members: state.members.filter(m => m.id !== id) })
+      } else if (!closed) {
+        loadSequence++
+        if (activityManaged) activityTarget.invalidate()
+        const members = state.members.filter(m => m.id !== id)
+        authors.replaceMembers(members)
+        set({ members })
+      }
       set({ busy: false })
       return r.ok && !closed
     },
@@ -68,7 +115,13 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       set({ busy: true, error: '' })
       const r = await deps.changeRole(organizationId, id, role)
       if (!r.ok) failed(r)
-      else set({ members: state.members.map(m => m.id === id ? r.data : m) })
+      else if (!closed) {
+        loadSequence++
+        if (activityManaged) activityTarget.invalidate()
+        const members = state.members.map(m => m.id === id ? r.data : m)
+        authors.replaceMembers(members)
+        set({ members })
+      }
       set({ busy: false })
       return r.ok && !closed
     },

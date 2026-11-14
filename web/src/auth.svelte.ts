@@ -72,6 +72,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
+  let stopMemberAvailability: (() => void) | undefined
   let members = $state<ReturnType<typeof membersAdapter> | null>(null)
   let security = $state<ReturnType<typeof accountSecurityAdapter> | null>(null)
   let changes = $state(0)
@@ -80,6 +81,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   let selectionGeneration = 0
 
   function closeOrganization() {
+    stopMemberAvailability?.(); stopMemberAvailability = undefined
     session?.close(); session = null
     members?.close(); members = null
     organization = null
@@ -115,10 +117,11 @@ export function createAuth(deps: AuthDeps = defaults) {
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
-      closeOrganization()
-      organizationStatus = 'unavailable'
+      void session?.sync.markUnavailable()
     }) ?? null
     if (members) session.holdActivity?.('members', members.activityTarget)
+    stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
+    if (session.sync.unavailable) members?.unavailable()
     void members?.load()
     changes++
   }

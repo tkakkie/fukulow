@@ -3,6 +3,12 @@
 Web client. Writing rules and the other parts: [index](../decisions.md).
 
 ## Web client
+- #308 bounds Topic/Reply/cursor evidence at 400 ranges and Unread at 1,100 records/presented seqs, 400 Topic scopes and one visit marker. Checkpoints refetch existing baselines; insufficient counts stay unresolved and forgotten gaps refill, avoiding per-arrival memory growth.
+- #308 uses 400 main/300 Topic/200 Reply records, five inactive Channel slots of 50, and a shared sync budget of 600: at most 1,500 display records, reserving room for simultaneous main and panel histories. Pending sends are exempt.
+- #308 writes variable-height row windowing without a dependency. ResizeObserver measures attached rows, one IntersectionObserver reports presentation, and ID-based focus mounts offscreen destinations. Measured spacer geometry is a CSS custom property.
+- #308 refetches older main pages at fixed W, newer history with a fresh first page, and older Reply pages from the root. Evidence checkpoints and evicted Topic excerpts use existing summary reads. No API extension is needed.
+- #308 auxiliary Topic-list positions never prove main-page coverage. Requested Reply history takes priority over cached recent bodies; pending intents carry their root through settlement/discard. This prevents skipped history and hidden unresolved sends.
+- #301 rebuilds the identity Map on Member list fetch; no push/polling. Unknown authors batch at 100; omissions/failures retry only on list fetch, Channel selection or reconnect. Deactivated names keep the accessible `（無効）` hint. `members.load()` is #315's refetch hook.
 - #300 Sign-in, sign-out and Invite acceptance share a cookie-mutation guard with setup and atomic Account transitions. Reads use generation fences, allowing sign-out and retry while stalled. Reason: ignored Set-Cookie still mutates cookies; reads must not retain busy.
 - #300 Invite session 401 offers explicit sign-out, keeping the Invite in memory. Only 204/401 restores the form; the user resubmits. Network/5xx keeps an error and never accepts. Reason: recover stale cookies without silent anonymous downgrade; existing Accounts keep sign-in.
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec/realtime.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
@@ -26,6 +32,12 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
+
+- [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
+- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`
+- [messages](messages.md): `#204 sections belong`, `#204 access loss hides`
+- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
 
 - [process](process.md): `Web boundary check (#48, #60): Workers/SharedWorkers`, `Web storage is forbidden everywhere. A`, `Hand-written API types are review-enforced, not`
 - [auth](auth.md): `#197 app-wide CSP allows external same-origin`, `#197 Vite manifest outputs alone get`

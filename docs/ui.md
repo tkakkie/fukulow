@@ -79,6 +79,7 @@ CSS custom properties in `web/src/app.css` on `:root`, overridden for dark under
 Shared components (one each, in `web/src/ui/`): Button (primary, secondary, quiet, icon), Input/Textarea, Chip, Badge (Unread count, @), ListRow (チャンネル, トピック), MessageRow, ReadMarker, TopicSummaryLine, Panel (header with back/close, tabs), Dialog, StatusBanner, EmptyState, Skeleton. A screen composes these; a one-off style needs a reason in the PR.
 - Focus and keyboard contracts: `Button` accepts optional `tabindex` (`0 | -1`) and `buttonRef` so composite widgets can omit secondary pointer buttons from the `Tab` sequence while keeping a programmatic return-focus target. `MessageRow` takes `focusable`, `rovingTabindex` (`0 | -1`), `onrowfocus`, `onrowkeydown` and `onopenreplies(opener)`; each timeline assigns `rovingTabindex={0}` to exactly one confirmed row (the active row, or the latest row by default, §9) so `Tab` enters the timeline without clearing a Composer draft, `Enter`/`R` on the row passes `rowRef` as `opener`, and clicking the inline reply `Button` (`tabindex={-1}`) passes `buttonRef` as `opener`.
 - Shared timeline scroll (`web/src/timeline-scroll.ts`): `Timeline`, `TopicView` and `ReplyPanel` share `createTimelineScrollController`, `measureTimelineItems`, `handleTimelineContainerScroll` and `applyTimelineScrollAction` for pinned tracking, anchor preservation, own-send scroll-to-bottom and `新着 n件 ↓` (§8).
+- Deactivated Message authors keep their name followed by the visible text `（無効）`. The whole `名前（無効）` is ordinary accessible text in the sender label, so screen readers convey both name and state; colour alone never carries the hint. Unknown authors show `メンバー`.
 
 States look the same everywhere (board A2-2):
 | State | Shows | Rules |
@@ -105,7 +106,7 @@ States look the same everywhere (board A2-2):
 ## 6. Accessibility baseline
 - WCAG 2.2 AA. Landmarks: rail and チャンネル column are `nav` with labels, main is `main`, the panel is `aside` with a label; one `h1` per view; a skip link `メッセージへ移動` first in the page.
 - Timeline semantics: the timeline is a labelled list of `article` Messages without live-region roles; it is not `role="log"`, because older pages, gap fills, reordering and トピック summary moves change it outside the end, where ARIA `log` expects additions only.
-- Announcements: one polite `role="status"` region per page, the only live region for these events (banners such as StatusBanner have no live role). It announces each Message received live from someone else in the current view once (`田中 美咲: 本文の先頭 80 文字`; several within 2 s become `新着メッセージ n件`). Each announcement waits for its 2 s window to close, so a single Message is announced up to 2 s late; this delay is accepted to avoid duplicate announcements, view changes (§2) and connection changes (after the 2 s delay). It never announces initial history, older pages, gap fills, replay after reconnect, reordering, summary-line moves, Unread badge or read-marker changes, own sends or their confirmations. Errors that need action use `role="alert"` once.
+- Announcements: one polite `role="status"` region per page, the only live region for these events (banners such as StatusBanner have no live role). It announces each Message received live from someone else in the current view once (`田中 美咲: 本文の先頭 80 文字`; several within 2 s become `新着メッセージ n件`). Each announcement waits for its 2 s window to close, so a single Message is announced up to 2 s late; this delay is accepted to avoid duplicate announcements. If a sender lookup is pending, hold that Message and later Messages in the view until the ready prefix can enter the 2 s window; a settled omission or failure uses `メンバー`. View changes and teardown drop deferred Messages. It also announces view changes (§2) and connection changes (after the 2 s delay). It never announces initial history, older pages, gap fills, replay after reconnect, reordering, summary-line moves, Unread badge or read-marker changes, own sends or their confirmations. Errors that need action use `role="alert"` once.
 - Full keyboard use (§9); visible focus (§4); focus after actions as in §2 and §5; after send, focus stays in the Composer.
 - IME: Enter never sends while composing (`isComposing` or `keyCode 229`).
 - Icon-only buttons have an `aria-label` that includes the shortcut, for example `パネルを閉じる(Esc)`.
@@ -117,9 +118,12 @@ States look the same everywhere (board A2-2):
 - Applied in `main.ts` before mounting, never by an inline script (CSP, #197).
 
 ## 8. Timeline scroll
+- Main, Topic and Reply timelines mount viewport rows with 560px overscan. Attached rows use ResizeObserver; one persistent IntersectionObserver attaches/detaches rows for presentation. Spacer heights use measured geometry via `--row-space`; native scroll anchoring is disabled because the shared controller preserves the anchor.
+- Arrow/Home/End navigate retained Message IDs and mount their destination before focus; Tab enters one mounted confirmed row. Evicted focus falls back to the Composer. A visit's Unread marker returns when its row is mounted again.
 - Pinned = scrolled to within 64px of the bottom. When pinned, new Messages keep the view at the bottom; when not pinned, the position does not move and `新着 n件 ↓` appears.
 - Your own send scrolls to the bottom: it is your action, not an automatic follow.
 - Older pages, gap fills and reordering above the viewport keep the first visible Message at the same offset (measured anchor, not only `overflow-anchor`); focus does not move.
+- Selecting another Message in the same Reply chain reveals that row. A cached target already fully in view keeps the scroll position and virtual list; an offscreen target is mounted before revealing it. The active navigation anchor remains available separately from bounded history.
 - On entering the main timeline or a トピック view, the entry boundary is that scope's read position at entry. If an other-sender Message exists above the boundary, older projection pages load until that first Unread Message is in the window, the view opens positioned at it, and `ReadMarker` (`未読`) is shown above it for the whole visit while the read position advances. With no Unread, the view opens pinned at the bottom with no marker.
 - A confirmed Message of the active scope is marked presented when its row is inside the timeline viewport while that view is selected and `document.visibilityState === 'visible'`. Hidden tabs, main-timeline `TopicSummaryLine` rows and `ReplyPanel` never advance read positions.
 
@@ -144,8 +148,10 @@ Keyboard first: every action has a keyboard path; frequent ones have shortcuts a
 - Individual commands beyond moving, panel and shortcut list come in follow-up Issues.
 
 ## 10. Japanese copy
+- Deactivated author: `名前（無効）` (full-width parentheses, no space); retain the name and hint together in every Message view and announcement.
 - Polite plain tone (です・ます), short; no exclamation marks; no blame.
 - Errors: what happened + what to do, for example `メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。` Never show raw codes, HTTP status or English error values.
 - Buttons are verbs: `送信`, `再試行`, `再送する`, `破棄`, `チャンネル一覧へ`.
 - Unread badges use `未読 n件` as their accessible label (`Badge`); the timeline read marker uses `未読` (`ReadMarker`).
 - Terms only from `docs/spec.md`; no synonyms (not スレッド for 返信のつながり, not ワークスペース for 組織).
+- Channel creation: `公開範囲` groups the native radio choices `公開` (default) / `非公開`. The form uses `can_create_channels`; Guests see neither the form nor the choices. Successful creation resets the choices to `公開`; a refusal preserves the selection.

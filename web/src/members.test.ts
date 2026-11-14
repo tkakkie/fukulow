@@ -51,6 +51,49 @@ describe('Members controller', () => {
     expect(ended).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled()
     expect(c.get().inviteLink).toBe('')
   })
+  it('reports Membership loss from an overlapping load and stops Member and author requests', async () => {
+    const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []
+    const listMembers = vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finishes.push(resolve) }))
+    const lookupAuthors = vi.fn(async () => ok({ identities: [] }))
+    const ended = vi.fn(), unavailable = vi.fn()
+    const c = createMembers(org, ended, unavailable, {
+      listMembers, lookupAuthors, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    const older = c.load(), newer = c.load()
+    finishes[1](ok({ members: [member] })); await newer
+    const late = c.load()
+    finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' }); await older
+    expect(unavailable).toHaveBeenCalledOnce()
+    await c.load()
+    c.authors.watch(['unknown']); c.authors.retry(); c.authors.replaceMembers([])
+    await Promise.resolve()
+    expect(listMembers).toHaveBeenCalledTimes(3)
+    expect(lookupAuthors).not.toHaveBeenCalled()
+    expect(c.get().members).toEqual([member])
+    expect(c.authors.get().get(member.id)?.name).toBe(member.name)
+    finishes[2]({ ok: false, kind: 'http', status: 401 }); await late
+    expect(ended).toHaveBeenCalledOnce()
+  })
+
+  it('ignores Member-list Membership loss from a previous Organization selection', async () => {
+    let finish!: (result: Result<{ members: Member[] }>) => void
+    const unavailable = vi.fn()
+    const deps = {
+      listMembers: vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finish = resolve })),
+      changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    }
+    const previous = createMembers(org, vi.fn(), unavailable, deps)
+    const pending = previous.load()
+    const old = finish
+    previous.close()
+    const current = createMembers(org, vi.fn(), unavailable, deps)
+    old({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' }); await pending
+    expect(unavailable).not.toHaveBeenCalled()
+    const fresh = current.load()
+    finish(ok({ members: [member] })); await fresh
+    expect(current.get().members).toEqual([member])
+    current.close()
+  })
   it('explains last-Channel-manager Role denial in Japanese and preserves the Member', async () => {
     const c = createMembers(org, vi.fn(), vi.fn(), {
       listMembers: async () => ok({ members: [member] }),
@@ -211,4 +254,66 @@ it('deactivates through the API, preserves denied targets, and fences late resul
   finish({ ok: false, kind: 'http', status: 401 })
   expect(await late).toBe(false); expect(ended).toHaveBeenCalledOnce()
   expect(unavailable).not.toHaveBeenCalled()
+})
+
+it('held Member loads coalesce with reconciliation, replace author Maps and reject pre-invalidation responses', async () => {
+  const { createActivity } = await import('./activity')
+  vi.useFakeTimers()
+  const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []
+  const listMembers = vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finishes.push(resolve) }))
+  const c = createMembers(org, vi.fn(), vi.fn(), {
+    listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const activity = createActivity({ watched: () => false })
+  activity.hold('members', c.activityTarget)
+  try {
+    const first = c.load()
+    finishes[0](ok({ members: [member] })); await first
+    const initial = c.authors.get()
+    expect(initial.get(member.id)?.name).toBe(member.name)
+    const pending = c.load()
+    activity.notice({ type: 'members_changed' })
+    void c.load(); void c.load()
+    expect(listMembers).toHaveBeenCalledTimes(2)
+    expect(c.get().members).toEqual([])
+    finishes[1](ok({ members: [{ ...member, name: 'stale' }] })); await pending
+    expect(c.get().members).toEqual([])
+    expect(c.authors.get()).toBe(initial)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(listMembers).toHaveBeenCalledTimes(3)
+    finishes[2](ok({ members: [] }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(c.authors.get()).not.toBe(initial)
+    expect(c.authors.get().has(member.id)).toBe(false)
+  } finally { activity.close(); c.close(); vi.useRealTimers() }
+})
+
+it('held Member loads retain Membership loss and late 401 authority across invalidation and shutdown', async () => {
+  const { createActivity } = await import('./activity')
+  const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []
+  const ended = vi.fn(), unavailable = vi.fn(), lookupAuthors = vi.fn()
+  const listMembers = vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finishes.push(resolve) }))
+  const c = createMembers(org, ended, unavailable, {
+    listMembers, lookupAuthors, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const activity = createActivity({ watched: () => false })
+  activity.hold('members', c.activityTarget)
+  const pending = c.load()
+  activity.notice({ type: 'members_changed' })
+  finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+  await pending
+  expect(unavailable).toHaveBeenCalledOnce()
+  await c.load(); c.authors.watch(['unknown']); c.authors.retry()
+  await Promise.resolve()
+  expect(listMembers).toHaveBeenCalledOnce(); expect(lookupAuthors).not.toHaveBeenCalled()
+  activity.close(); c.close()
+
+  const next = createMembers(org, ended, unavailable, {
+    listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const late = next.activityTarget.refresh()
+  next.close()
+  finishes[1]({ ok: false, kind: 'http', status: 401 }); await late
+  await Promise.resolve()
+  expect(ended).toHaveBeenCalledOnce()
 })

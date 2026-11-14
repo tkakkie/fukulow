@@ -3,6 +3,7 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
+- #301 author lookup takes at most 100 input ids, collapses duplicates and omits unreadable authors. Channel access, Message authorship and retained identities share history's non-locking snapshot, preventing directory expansion or authorization/data races.
 - #149 usable managers (Owner/Admin with access or usable Channel manager right, #311) add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
 - #231/#305 reject Role demotion or deactivation with 409 last_channel_manager if a private Channel loses its last usable manager; atomic, no Channel details. Reuse #149 locks/check via auth's injected guard for module direction. Unmanaged Channels stay allowed.
 - #292/#311: a private Channel's creator gets a Channel manager right on their grant, independent of Role; usable manager = usable grant with Owner/Admin Role or the right. Reason: a Member's private Channel must be able to add people without giving Owner/Admin implicit access.
@@ -33,6 +34,13 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Sends re-check Member/revision/private grant after BEGIN and hold a shared Member row lock through COMMIT, so deactivation cannot commit between authorization and persistence. Channel creation keeps the same lock (#146 review).
 - History reads authorization and its page in one read-only REPEATABLE READ transaction without row locks: loss committed before the snapshot denies; an authorized page sees no later Messages (#146).
 
+## Personal sections (#204, specified)
+
+- #204 sections belong to one Member in one Organization, including Guest; Owner/Admin have no override. Reason: personal grouping must neither grant Channel access nor affect another Member's view.
+- #204 access loss hides but retains placement/order; regain restores it. Section/Channel deletion removes placements atomically; hidden Channel cleanup changes no exposed generation or notice. Reason: retain grouping without dangling placements or disclosing deletion after loss.
+- #204 composite Organization/Member/section keys enforce placement ownership; unique Organization/Member/Channel enforces cardinality. Reason: application checks alone cannot prevent cross-owner or cross-Organization data.
+- #204 moves, reorders and deletes serialize per Member; complete reorders use last-committing-writer-wins. Keep Organization -> sorted Channels -> Members -> grants lock order. Reason: atomic orders and delete races must not introduce a deadlock.
+
 ## Topics, Replies and Unread (planned, spec P1-P8)
 - A Topic is created by its first Message (or a Move to a new Topic); empty Topics do not exist. The main-timeline Topic line is a derived display that moves with the Topic's latest activity (maintainer, 2026-11-10, #148).
 - Main-timeline paging correctness (`position_W`, W as page anchor) is fixed in the spec; its cost is a measured feasibility gate in #137 that stops and asks on a miss, not a guarantee (maintainer, 2026-11-11, #148).
@@ -47,7 +55,11 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #142 access changes serialize per Organization: public Channel inserts are set-based O(active Members + their Topics); Member activation is O(visible Channels + Topics), retaining shared #135 locks until COMMIT. Accept at current scale; remeasure larger Organizations.
 - #142 backfill blocks sends, Member and grant writes under SHARE ROW EXCLUSIVE; work scales with visible Member×Channel pairs plus their Topics. Startup lock acquisition times out at 5 s; once acquired, a large backfill can extend the write outage.
 - Move, Edit, Delete (principles only, #148): clients apply entries idempotently; a later change takes a Channel log position. Open: replay of a changed Message (current or as it was), of a deleted one, read positions after a Move. `channel_events` vs `channel_log`: Sprint 3 (#160).
-- DM will be a Channel kind, so it reuses `seq`, the sync contract and Unread. Mention gets its own counter, separate from Unread (#148).
+- #151 DM is a Channel kind for one immutable, Organization-scoped Member pair; no name, visibility, Topics or manager right. Reason: reuse seq, Replies, sync and Unread without making private-Channel management apply to DMs. Contract: docs/spec/dms.md.
+- #151 POST /dms opens or renews one pair; GET /dms lists only accessible DMs with peer identity and Unread/Mention hooks. Ordinary Channel lists/sections exclude DMs. Reason: a DM has no Channel name or Topic navigation.
+- #151 new sends hold peer eligibility through COMMIT: inactive peer gives 409 dm_peer_deactivated, active lapsed grant gives 409 dm_peer_access_lapsed (2026-11-14). Authorized committed retries resolve first. Reason: sending never renews access or undoes an accepted send.
+- #151 DMs reject Topic intent and member/grant APIs; all management Capabilities deny. Exclude DMs from RoleChangeGuard and last-manager/grant counts. Reason: fixed two-person participation must neither confer management nor block Role changes.
+- Mention gets its own counter, separate from Unread (#148).
 
 ## Topics (#137, #138)
 - Messages owns Topics, nullable messages.topic_id and their atomic send updates; composite FKs bind a Message's Topic to its Organization and Channel. #139 appends its own migration, preserving #137's migration.
@@ -81,5 +93,12 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 
 ## Entries in other parts
 
+- [load](load.md): `#151 adopts DM performance acceptance`
+- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
+- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
+
 - [auth](auth.md): `#314 single-statement hot reads use`
 - [auth](auth.md): `#299 shared raw-text validation`
+
+- [web](web.md): `#308 bounds Topic/Reply/cursor evidence`, `#308 uses 400 main/300 Topic/200 Reply`, `#308 refetches older main pages`

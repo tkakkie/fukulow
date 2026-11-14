@@ -288,3 +288,115 @@ it('Session routing never borrows a fresh Topic position to cover the Channel ag
   expect(session.unread.get('A').unreadCount).toBe(2)
   session.close()
 })
+
+it('held summaries preserve the stale-success retry budget after Topic evidence is checkpointed', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockResolvedValue(ok({ as_of_seq: 10, topic: summary('T', 10, 3) }))
+    for (let seq = 11; seq <= 1010; seq++) c.event(seq, seq % 2 ? 'T' : 'U')
+    await flush()
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'T')?.messageCount).toBeNull()
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    for (const delay of [500, 1000, 2000, 4000]) await vi.advanceTimersByTimeAsync(delay)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(5)
+    expect(c.topics.get('A').topic('T').summaryError).toBe('retryable')
+    for (let i = 0; i < 5; i++) await c.topics.ensureSummary('A', 'T')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(5)
+    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 1010, has_more: false, topics: [summary('T', 1009, 503)] }))
+    await c.topics.loadList('A')
+    expect(c.topics.get('A').topic('T').summaryError).toBeNull()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('evicted Topic baselines release held summary work and late responses cannot restore the window', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const heldKeys = new Set<string>(), hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((key, target) => {
+    heldKeys.add(key)
+    const release = hold(key, target)
+    return () => { heldKeys.delete(key); release() }
+  })
+  const c = topicClient(activity), late = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    expect(heldKeys.has('topic:A:T')).toBe(true)
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(late.promise)
+    const pending = c.topics.loadSummary('A', 'T')
+    for (let seq = 11; seq <= 1000; seq++) c.event(seq)
+    expect(c.topics.get('A').lines.some(l => l.kind === 'topic')).toBe(false)
+    expect(heldKeys.has('topic:A:T')).toBe(false)
+    late.resolve(ok({ as_of_seq: 1000, topic: summary('T', 10, 3) }))
+    await pending; await flush()
+    expect(c.topics.get('A').lines.some(l => l.kind === 'topic')).toBe(false)
+    activity.notice({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 1 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    await c.sync.unwatch('A')
+    expect(heldKeys.size).toBe(0)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('summary activity targets refresh old Unread evidence and settle canonical own sends without moving cursors', async () => {
+  const { topicClient, summary, msg } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    c.event(11, 'T')
+    const refreshed = await c.topics.activitySummary('A', 'T')
+    expect(refreshed.ok && refreshed.data.as_of_seq).toBe(12)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    expect(c.sync.get().channels.A.cursor).toBe(11)
+
+    c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
+    await c.sync.getTimeline('A').send('unknown', { topic_name: 'Topic T' })
+    const pending = c.sync.get().channels.A.pending[0]!
+    expect(pending.state).toBe('unknown')
+    const canonical = { ...msg(12, 'T'), sender: 'me', client_message_id: pending.clientMessageId, body: pending.body }
+    c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 12, topic: { ...summary('T', 12, 4), latest_message: canonical } }))
+    await c.topics.loadSummary('A', 'T')
+    expect(c.sync.get().channels.A.pending).toEqual([])
+    expect(c.sync.get().channels.A.cursor).toBe(11)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('a successful held active-Topic summary evicted by newer main history cannot cause an automatic fetch loop', async () => {
+  const { windowClient } = await import('./message-window-test-helpers')
+  const { msg, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const c = windowClient(1000, activity)
+  try {
+    await c.boot()
+    for (let i = 0; i < 7; i++) await c.topics.loadMain('A')
+    const before = c.topics.get('A').lines
+    expect(before).toHaveLength(400)
+    c.options.listTopicMessages = async () => ok({ messages: [msg(1, 'T')], has_more: false })
+    const getSummary = vi.fn(async () => ok({ as_of_seq: 1000, topic: summary('T', 1, 1) }))
+    c.options.getTopicSummary = getSummary
+    await c.topics.loadTopic('A', 'T')
+    await c.topics.ensureSummary('A', 'T')
+    expect(c.topics.get('A').lines).toEqual(before)
+    for (let i = 0; i < 8; i++) {
+      await c.topics.ensureSummary('A', 'T')
+      await vi.advanceTimersByTimeAsync(10_000)
+    }
+    expect(getSummary).toHaveBeenCalledOnce()
+    expect(c.topics.get('A').topic('T').messages).toEqual([msg(1, 'T')])
+    expect(c.sync.get().channels.A.cursor).toBe(1000)
+    c.topics.releaseTopic('A', 'T')
+    await c.topics.loadMainLatest('A')
+    await c.topics.loadTopic('A', 'T')
+    await c.topics.ensureSummary('A', 'T')
+    expect(getSummary).toHaveBeenCalledTimes(2)
+    expect(c.topics.get('A').topic('T').summaryError).toBeNull()
+    for (let seq = 1001; seq <= 1500; seq++) c.event(msg(seq))
+    const refreshed = await c.topics.activitySummary('A', 'T')
+    expect(refreshed.ok && refreshed.data.as_of_seq).toBe(1000)
+    expect(c.topics.get('A').lines.some(l => l.kind === 'topic')).toBe(false)
+  } finally { activity.close(); await c.close() }
+})
