@@ -96,6 +96,14 @@ An abandoned partial upload freezes pruning even after a successful retry. To cl
 
 No alert can arrive if the checker platform or notification channel is down, or a message is missed. Daily alive delivery plus weekly manual inspection of newest capture during early dogfooding mitigate this limit. At 70% capacity inspect growth; at 90% act promptly: reduce unused image originals/variants first, consider stronger backup compression or regenerable data exclusions, then seek separate paid-usage approval or a provider move. Never sacrifice retention or refuse backups for cost. R2 has no spending cap; alerts cannot enforce a billing ceiling. Use Standard storage only; no billable setting is enabled by this mock implementation.
 
+### Mock stage and production gates (#316)
+
+This PR stage is a mock implementation, not a completed production backup. #316 stays open until all gates pass and the first full restore from R2 on the VPS is verified; #285 real-data operation stays blocked until then.
+
+Production adapter (required for #316 Done when): complete R2 list pagination (continuation tokens, no silent truncation); account-level Class A/B operation usage from the provider API; persisted checker state (alive day, alerts) across runs; serialized checker and backup runs (no concurrent pruning or uploads).
+
+Real-R2 verification (required before production use, on approved buckets only): curl SigV4 authentication; PUT/HEAD/full GET with hex payload and base64 SHA-256 checksum verification, including a rejected bad checksum; Bucket Lock refusing overwrite and delete inside 35/40 days.
+
 ### Disposable restore drill
 
 ```sh

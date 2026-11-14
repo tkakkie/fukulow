@@ -225,6 +225,8 @@ test('checker or notification failure is observable and alive state advances onl
 
 test('age throwaway key roundtrip rejects wrong key and tampering', async t => {
   if (spawnSync('age', ['--version'], { stdio: 'ignore' }).status !== 0 || spawnSync('age-keygen', ['--version'], { stdio: 'ignore' }).status !== 0) {
+    // CI installs age and sets FUKULOW_REQUIRE_AGE so this integration never silently skips there.
+    if (process.env.FUKULOW_REQUIRE_AGE === '1') assert.fail('age and age-keygen are required (FUKULOW_REQUIRE_AGE=1) but unavailable')
     t.skip('age and age-keygen are unavailable; encryption integration requires the approved host binaries'); return
   }
   const root = mkdtempSync(join(tmpdir(), 'backup-age-')); t.after(() => rmSync(root, { recursive: true, force: true }))
