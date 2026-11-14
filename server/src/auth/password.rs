@@ -61,6 +61,7 @@ impl PasswordWorkers {
 }
 
 fn unavailable() -> ApiError {
+    crate::observability::admission(crate::observability::Admission::Password);
     ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
         "password admission unavailable",

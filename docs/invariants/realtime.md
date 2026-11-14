@@ -4,6 +4,7 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 | Rule | Test |
 |---|---|
+| Connection DB failures emit one allowlisted database_failure with a fixed operation before 1011; subscription authorization, refresh and replay omit raw details | `server/src/realtime/tests/observability.rs::connection_database_failures_emit_once_with_fixed_operation_and_no_details` |
 | SIGTERM/SIGINT stop acceptance, close sockets with 1001 and drain HTTP, detached sends and notifications before pool close; normal fallback exit is not fatal | `server/src/realtime/tests/shutdown.rs::sigterm_drains_http_persistence_and_detached_notification_then_replays_without_duplicates`, `server/src/realtime/tests/shutdown.rs::sigint_drains_and_closes_idle_sockets_normally` |
 | A shutdown deadline expires without waiting for unfinished persistence/notification or closing their pool first | `server/src/realtime/tests/shutdown.rs::sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work` |
 | Shutdown send retries keep the canonical Message; replay recovers every committed seq without duplicates or gaps | `server/src/realtime/tests/shutdown.rs::sigterm_drains_http_persistence_and_detached_notification_then_replays_without_duplicates` |
@@ -69,9 +70,11 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 ## Rows in other parts
 
-- [deployment](deployment.md): `pool_configuration_defaults_bounds_and_overrides`, `both_barriers_set_transaction_local_timeouts`
+- [deployment](deployment.md): `socket_admission_and_close_counters_follow_production_paths`, `task_panics_never_echo_payloads_or_secrets`, `pool_configuration_defaults_bounds_and_overrides`, `both_barriers_set_transaction_local_timeouts`
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
+
+- [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`, `active_socket_guard_releases_on_cancellation_and_normal_exit`
 
 - [auth](auth.md): `deactivation_http_cancellation_still_commits_and_signals_every_session`, `deactivation_self_denials_preserve_all_session_sockets`
 

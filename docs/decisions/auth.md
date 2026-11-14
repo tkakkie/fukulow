@@ -88,6 +88,9 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [messages](messages.md): `#152 proposes exact`, `#152 accepts only`, `#152 Message and message_mentions`, `#152 locks sorted`, `#152 proposes message_mentions`
 - [realtime](realtime.md): `#196 B headroom is shared`, `#196 B leaves RLS`, `#152 Mention counts inherit`
 
+- [process](process.md): `#198 B: pinned tracing/subscriber`
+- [realtime](realtime.md): `#198 B: admission sites only increment`
+
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`

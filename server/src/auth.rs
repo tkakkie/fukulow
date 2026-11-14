@@ -96,7 +96,7 @@ impl IntoResponse for ApiError {
 }
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
-        eprintln!("database operation failed: {error}");
+        crate::observability::database_failure(&error);
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
     }
 }

@@ -104,6 +104,9 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 
 - [realtime](realtime.md): `#152 Mention counts inherit`
 
+- [process](process.md): `#198 B: pinned tracing/subscriber`, `#198 B: a domain-independent observability`
+- [realtime](realtime.md): `#198 B: admission sites only increment`
+
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
