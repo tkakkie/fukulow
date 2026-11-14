@@ -24,12 +24,19 @@ async fn blocked_migration(pool: &PgPool) -> (PgPool, Transaction<'static, Postg
 
 async fn incoming_timeouts(startup: &PgPool, statement: &str, transaction: &str) {
     let mut connection = startup.acquire().await.unwrap();
+    // Session-level on purpose: the migration connection must reset them.
+    for (name, value) in [
+        ("statement_timeout", statement),
+        ("transaction_timeout", transaction),
+    ] {
+        sqlx::query(&format!("SET {name} = '{value}'"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
     let settings: (String, String) = sqlx::query_as(
-        "SELECT set_config('statement_timeout', $1, false), \
-         set_config('transaction_timeout', $2, false)",
+        "SELECT current_setting('statement_timeout'), current_setting('transaction_timeout')",
     )
-    .bind(statement)
-    .bind(transaction)
     .fetch_one(&mut *connection)
     .await
     .unwrap();
