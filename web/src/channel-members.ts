@@ -22,16 +22,17 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
   let generation = 0, closed = false
   const listeners = new Set<() => void>()
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
-  async function request<T>(run: () => Promise<api.Result<T>>): Promise<api.Result<T>> {
+  async function request<T>(run: () => Promise<api.Result<T>>, withTimeout = true): Promise<api.Result<T>> {
     let timer: ReturnType<typeof setTimeout> | undefined
     // Keep same-session late 401 handling even after the display timeout or close.
     const pending = run().catch((): api.Result<T> => ({ ok: false, kind: 'network' })).then(r => { onResult(r); return r })
+    if (!withTimeout) return pending
     try { return await Promise.race([pending, new Promise<api.Result<T>>(resolve => {
       timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), 10_000)
     })]) } finally { clearTimeout(timer) }
   }
   const activityTarget = createActivityTarget({
-    load: signal => request(() => deps.listChannelMembers(org, channel, undefined, signal)),
+    load: signal => request(() => deps.listChannelMembers(org, channel, undefined, signal), false),
     accept: data => { if (!state.unavailable) set({ members: data.members, loading: false, error: '' }) },
     hide: () => set({ members: [], loading: true }),
     error: r => {

@@ -18,6 +18,25 @@ function fixture() {
   const controller = createChannelMembers('org', 'channel', observed, deps, left, refresh)
   return { deps, observed, left, refresh, controller }
 }
+it('aborts a timed-out Channel member list before retrying', async () => {
+  vi.useFakeTimers()
+  const c = fixture()
+  const signals: AbortSignal[] = []
+  c.deps.listChannelMembers.mockImplementation((_org, _channel, _cursor, signal) => {
+    if (signals.length) expect(signals[0].aborted).toBe(true)
+    signals.push(signal)
+    return new Promise(() => {})
+  })
+  try {
+    void c.controller.load()
+    expect(signals).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(signals[0].aborted).toBe(true)
+    expect(signals).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(signals).toHaveLength(2)
+  } finally { c.controller.close() }
+})
 it('loads generated Member records, refreshes after add/remove, and forwards leave without restoring a list', async () => {
   const c = fixture(); await c.controller.load()
   expect(c.controller.get().members[0]).toEqual({ id: 'self', name: '本人', role: 'admin', manager: true })

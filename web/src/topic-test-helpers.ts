@@ -20,7 +20,7 @@ export const summary = (id: string, last: number, count: number): TopicSummary =
 export const page = (w = 10): TimelinePage => ({ as_of_seq: w, has_more: true,
   items: [{ kind: 'message', message: msg(8) }, { kind: 'topic', topic: summary('T', w, 3) }] })
 
-export function topicClient(activity?: Activity) {
+export function topicClient(activity?: Activity, requestTimeoutMs?: number) {
   const handlers: RealtimeHandlers[] = []
   const controls: unknown[] = []
   const listMessages = vi.fn(async () => ok({ messages: [msg(11), msg(12, 'T')], has_more: false }))
@@ -33,7 +33,7 @@ export function topicClient(activity?: Activity) {
     listTopicMessages: vi.fn(async () => ok({ messages: [msg(5, 'T'), msg(10, 'T')], has_more: true })),
   }
   const onSessionEnded = vi.fn()
-  const client = createTopicSync({ selfId: 'me', activity, api: { listMessages, sendMessage }, topicsApi, onSessionEnded,
+  const client = createTopicSync({ selfId: 'me', activity, requestTimeoutMs, api: { listMessages, sendMessage }, topicsApi, onSessionEnded,
     connect(h) { handlers.push(h); return { send: m => { controls.push(m) }, close: vi.fn() } },
   })
   return { ...client, topicsApi, listMessages, sendMessage, handlers, controls, onSessionEnded,

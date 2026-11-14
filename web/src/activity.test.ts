@@ -7,6 +7,41 @@ const held = <T>() => { let resolve!: (value: T) => void; const promise = new Pr
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 const keys = ['channels', 'main:c', 'topic:c:t', 'members', 'channel-members:c', 'capabilities']
+it.each([
+  { key: 'main:A', method: 'listTopics' },
+  { key: 'topic:A:T', method: 'getTopicSummary' },
+] as const)('aborts a timed-out $key request before retrying with a shorter configured timeout', async ({ key, method }) => {
+  const { topicClient } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const targets = new Map<string, { invalidate(reason: 'access', delay: number): void }>()
+  const hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((name, target) => {
+    targets.set(name, target)
+    return hold(name, target)
+  })
+  const c = topicClient(activity, 1_000)
+  try {
+    await c.boot()
+    const signals: AbortSignal[] = []
+    const pending = (...args: unknown[]): Promise<never> => {
+      const signal = args.at(-1) as AbortSignal
+      if (signals.length) expect(signals[0].aborted).toBe(true)
+      signals.push(signal)
+      return new Promise<never>((_resolve, reject) => {
+        if (method === 'listTopics') signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+    }
+    c.topicsApi[method].mockImplementation(pending)
+    targets.get(key)!.invalidate('access', 0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(signals).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(signals[0].aborted).toBe(true)
+    expect(signals).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(signals).toHaveLength(2)
+  } finally { activity.close(); await c.sync.close() }
+})
 it('a superseded list page cannot clear a replacement access-generation page loading state', async () => {
   const { topicClient, summary } = await import('./topic-test-helpers')
   const activity = createActivity({ watched: () => true }), c = topicClient(activity)
