@@ -28,6 +28,20 @@ const HTTP_METHODS: [&str; 8] = [
 const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 246;
 
 #[test]
+fn list_invites_cursor_is_an_optional_query_parameter() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [generated, committed] {
+        let parameters = document["paths"]["/api/v1/orgs/{org}/invites"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        let cursor = parameters.iter().find(|p| p["name"] == "cursor").unwrap();
+        assert_eq!(cursor["in"], "query");
+        assert_eq!(cursor["required"], false);
+    }
+}
+
+#[test]
 fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();

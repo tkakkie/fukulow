@@ -21,6 +21,7 @@ pub struct InvitePage {
 }
 
 #[derive(Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct ListInvitesQuery {
     /// Opaque continuation from the preceding page. Invalid/foreign cursors return 400.

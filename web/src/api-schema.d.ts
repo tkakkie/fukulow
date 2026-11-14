@@ -2872,13 +2872,14 @@ export interface operations {
     };
     list_invites: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Opaque continuation from the preceding page. Invalid/foreign cursors return 400. */
+                cursor?: string;
+            };
             header?: never;
             path: {
                 /** @description Organization id */
                 org: string;
-                /** @description Opaque continuation from the preceding page. Invalid/foreign cursors return 400. */
-                cursor: string | null;
             };
             cookie?: never;
         };

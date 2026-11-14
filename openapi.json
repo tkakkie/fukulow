@@ -2728,14 +2728,11 @@
           },
           {
             "name": "cursor",
-            "in": "path",
+            "in": "query",
             "description": "Opaque continuation from the preceding page. Invalid/foreign cursors return 400.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],

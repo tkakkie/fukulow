@@ -55,6 +55,37 @@ describe('Invite management', () => {
     await stalledRevoke({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
   })
 
+  it('ends the Account Session on a stalled revocation late 401 without changing Invite state', async () => {
+    vi.useFakeTimers()
+    try {
+      let finish!: (r: Result<undefined>) => void
+      const revoke = vi.fn(() => new Promise<Result<undefined>>(resolve => { finish = resolve }))
+      const ended = vi.fn(), unavailable = vi.fn()
+      const c = createInvites('org', ended, unavailable, {
+        listInvites: async () => ok({ invites: [row(1)], next_cursor: 'opaque' }), revokeInvite: revoke,
+      })
+      await c.load()
+      const pending = c.revoke('1')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await pending).toBe(false)
+      expect(c.get().busy).toBe(false)
+      expect(c.get().invites).toEqual([row(1)])
+      expect(ended).not.toHaveBeenCalled()
+      const before = c.get()
+      const changed = vi.fn()
+      const unsubscribe = c.subscribe(changed)
+      finish({ ok: false, kind: 'http', status: 401 })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(ended).toHaveBeenCalledOnce()
+      expect(unavailable).not.toHaveBeenCalled()
+      expect(c.get()).toEqual(before)
+      expect(changed).not.toHaveBeenCalled()
+      expect(revoke).toHaveBeenCalledOnce()
+      unsubscribe()
+      c.close()
+    } finally { vi.useRealTimers() }
+  })
+
   it('loads all 250 Invites across pages and revokes an Invite on the last page', async () => {
     const list = vi.fn(async (_org: string, cursor?: string): Promise<Result<InvitePage>> => {
       const start = Number(cursor ?? 0), end = Math.min(250, start + 100)
