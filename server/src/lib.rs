@@ -155,7 +155,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
         .route(
             "/api/v1/orgs/{org}/members",
-            get(auth::members::list_members),
+            get(auth::members::list_members::<channels::members::MemberListVisibility>),
         )
         .route(
             "/api/v1/orgs/{org}/message-authors",

@@ -68,3 +68,6 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [auth](auth.md): `handlers_and_fanout_require_authenticated_context`
 - [sync](sync.md): `429 waits without resending early, re-arms with a new delay and preserves the entire request`, `throttled sends cancel waits on canonical settlement, discard, access loss and lifecycle changes`
 - [web](web.md): `shows accessible Japanese throttled status, automatic retry and discard without manual resend or edit`
+
+- [channels](channels.md): `guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_keeps_past_authors`
+- [web](web.md): `Guest Workspace resolves Member list then author lookup then fallback in timeline and announcements`

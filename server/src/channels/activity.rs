@@ -1,7 +1,7 @@
 //! Organization notices are invalidations, never Message delivery or authorization grants.
 use super::*;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
@@ -137,6 +137,7 @@ pub struct Activity {
     epochs: Option<Arc<HashMap<Uuid, u64>>>,
     exclude_guests: bool,
     directory_member: Option<Uuid>,
+    directory_channels: Vec<Uuid>,
     capacity: Arc<Semaphore>,
     batches: Arc<Mutex<HashMap<(Uuid, Uuid), Senders>>>,
     #[cfg(test)]
@@ -151,6 +152,7 @@ impl Default for Activity {
             epochs: None,
             exclude_guests: false,
             directory_member: None,
+            directory_channels: Vec::new(),
             capacity: Arc::new(Semaphore::new(40)),
             batches: Default::default(),
             #[cfg(test)]
@@ -350,6 +352,12 @@ impl Activity {
         self.queries
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let proofs = authorize_notices(pool, &entries, notice.channel()).await?;
+        let shared_guests =
+            if matches!(notice, Notice::MembersChanged) && !self.directory_channels.is_empty() {
+                directory_guests(pool, organization, &entries, &self.directory_channels).await?
+            } else {
+                HashSet::new()
+            };
         for (authorization, proof) in authorizations.iter().zip(&proofs) {
             authorization.proved(proof);
         }
@@ -372,6 +380,7 @@ impl Activity {
                 && proof.role == Role::Guest
                 && target != Some(entry.member.0)
                 && self.directory_member != Some(entry.member.0)
+                && !shared_guests.contains(&entry.member.0)
             {
                 continue;
             }
@@ -560,6 +569,33 @@ async fn authorize_notices(
         .collect();
     authorize_batch(pool, &selected).await
 }
+async fn directory_guests(
+    pool: &sqlx::PgPool,
+    organization: Uuid,
+    entries: &[Arc<Entry>],
+    channels: &[Uuid],
+) -> Result<HashSet<Uuid>, sqlx::Error> {
+    let guests: Vec<_> = entries.iter().map(|entry| entry.member.0).collect();
+    let rows: Vec<Uuid> = crate::database::organization_statement(
+        pool,
+        "SELECT DISTINCT cm.member_id FROM channel_members cm \
+         JOIN users u ON u.organization_id=cm.organization_id AND u.id=cm.member_id \
+         AND u.membership_revision=cm.membership_revision \
+         JOIN channels c ON c.organization_id=cm.organization_id AND c.id=cm.channel_id \
+         WHERE cm.organization_id=$1 AND cm.channel_id=ANY($2) AND cm.member_id=ANY($3) \
+         AND u.deactivated_at IS NULL AND u.role='guest'",
+        async |tx: &mut sqlx::PgConnection, sql: &str| {
+            sqlx::query_scalar(sql)
+                .bind(organization)
+                .bind(channels)
+                .bind(guests)
+                .fetch_all(tx)
+                .await
+        },
+    )
+    .await?;
+    Ok(rows.into_iter().collect())
+}
 async fn authorize_batch(
     pool: &sqlx::PgPool,
     selected: &[(Arc<Entry>, Option<Uuid>)],
@@ -732,6 +768,20 @@ impl auth::activity::ActivityChange for TargetChange {
                     },
                 )
                 .await?;
+                let before_grants: HashSet<_> = self
+                    .before
+                    .visible
+                    .iter()
+                    .filter(|(_, (grant, _))| grant.is_some())
+                    .map(|(channel, _)| *channel)
+                    .collect();
+                let after_grants: HashSet<_> = after
+                    .visible
+                    .iter()
+                    .filter(|(_, (grant, _))| grant.is_some())
+                    .map(|(channel, _)| *channel)
+                    .collect();
+                let grants_changed = before_grants != after_grants;
                 let live_same_revision = after.identity.is_some_and(|(_, revision)| {
                     self.before
                         .identity
@@ -792,10 +842,16 @@ impl auth::activity::ActivityChange for TargetChange {
                             .await?;
                     }
                 }
-                if self.before.identity != after.identity {
-                    self.activity
+                if self.before.identity != after.identity || grants_changed {
+                    let mut directory = self.activity.clone();
+                    directory.directory_member = Some(self.target);
+                    directory.directory_channels =
+                        before_grants.union(&after_grants).copied().collect();
+                    directory
                         .publish(&pool, self.organization, Notice::MembersChanged, None, None)
                         .await?;
+                }
+                if self.before.identity != after.identity {
                     for channel in self
                         .before
                         .visible

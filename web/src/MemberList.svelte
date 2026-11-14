@@ -11,10 +11,12 @@
     model,
     identity,
     onchanged,
+    onopen,
   }: {
     model: ReturnType<typeof membersAdapter>
     identity: Identity
     onchanged(id: string): void
+    onopen?(): void
   } = $props()
 
   let email = $state('')
@@ -25,7 +27,7 @@
   const capabilities = $derived(identity.organization.capabilities)
 </script>
 
-<details class="member-list">
+<details class="member-list" ontoggle={event => { if (event.currentTarget.open) onopen?.() }}>
   <summary bind:this={summary} class="member-list__summary">メンバー</summary>
   <div class="member-list__body">
     {#if s.loading}

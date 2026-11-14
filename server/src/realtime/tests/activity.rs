@@ -907,11 +907,15 @@ async fn grant_notifies_target_gain_and_channel_viewers_members_changed(pool: Pg
         "{events:?}"
     );
     assert!(events.contains(&json!({"type":"channel_members_changed","channel_id":private})));
-    assert_eq!(
-        notices(&f, &mut control).await,
-        vec![json!({"type":"channel_members_changed","channel_id":private})]
+    let control_events = notices(&f, &mut control).await;
+    assert!(
+        control_events.contains(&json!({"type":"channel_members_changed","channel_id":private}))
     );
-    assert!(notices(&f, &mut denied).await.is_empty());
+    assert!(control_events.contains(&json!({"type":"members_changed"})));
+    assert_eq!(
+        notices(&f, &mut denied).await,
+        vec![json!({"type":"members_changed"})]
+    );
 }
 #[fukulow_test::test]
 async fn manager_right_change_notifies_target_list_and_channel_viewers(pool: PgPool) {
@@ -1075,19 +1079,19 @@ async fn revocation_reaches_only_the_current_target_of_removed_access(pool: PgPo
             "{changed:?}"
         );
         raw_closed(&mut own, 4003).await;
-        assert_eq!(
-            notices(&f, &mut allowed).await,
-            vec![json!({"type":"channel_members_changed","channel_id":channel})]
+        let allowed_events = notices(&f, &mut allowed).await;
+        assert!(
+            allowed_events
+                .contains(&json!({"type":"channel_members_changed","channel_id":channel}))
         );
+        assert!(allowed_events.contains(&json!({"type":"members_changed"})));
         let other = notices(&f, &mut outside).await;
         assert!(
             !other
                 .iter()
                 .any(|event| event["type"] == "channel_access_revoked")
         );
-        if !public {
-            assert!(other.is_empty());
-        }
+        assert!(other.contains(&json!({"type":"members_changed"})));
         assert!(notices(&f, &mut ungranted).await.is_empty());
     }
     let f = fixture(&pool).await;
@@ -1115,10 +1119,11 @@ async fn revocation_reaches_only_the_current_target_of_removed_access(pool: PgPo
             .iter()
             .any(|event| event["type"] == "channel_access_revoked")
     );
-    assert_eq!(
-        notices(&f, &mut control).await,
-        vec![json!({"type":"channel_members_changed","channel_id":f.channel})]
+    let control_events = notices(&f, &mut control).await;
+    assert!(
+        control_events.contains(&json!({"type":"channel_members_changed","channel_id":f.channel}))
     );
+    assert!(control_events.contains(&json!({"type":"members_changed"})));
 }
 
 #[fukulow_test::test]
@@ -1371,8 +1376,54 @@ async fn role_change_and_deactivation_notify_members_changed_per_directory_rule(
                 .await
                 .contains(&json!({"type":"members_changed"}))
         );
-        // Until #294, only self-change directory notices are permitted for Guests.
+        // This Guest shares no granted Channel with the changed Member.
         assert!(notices(&f, &mut invisible).await.is_empty());
+    }
+}
+
+#[fukulow_test::test]
+async fn guest_directory_notices_follow_shared_grants_and_deny_unrelated_guests(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, _) = member(&pool, f.organization).await;
+    let (shared, shared_token) = member(&pool, f.organization).await;
+    let (unrelated, unrelated_token) = member(&pool, f.organization).await;
+    role(&pool, &f, shared, "guest").await;
+    role(&pool, &f, unrelated, "guest").await;
+    let channel = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, channel, shared).await;
+    let mut shared_socket = connect(&f, &shared_token).await;
+    let mut unrelated_socket = connect(&f, &unrelated_token).await;
+
+    for (method, path, body) in [
+        (
+            "POST",
+            format!("/api/v1/channels/{channel}/members"),
+            json!({"member_id":target}),
+        ),
+        (
+            "PATCH",
+            format!("/api/v1/orgs/{}/members/{target}/role", f.organization),
+            json!({"role":"admin"}),
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/channels/{channel}/members/{target}"),
+            Value::Null,
+        ),
+    ] {
+        let response = request(&f.app, method, &path, &f.token, body).await;
+        assert!(
+            response.status().is_success(),
+            "{method} {path}: {}",
+            response.status()
+        );
+        assert!(
+            notices(&f, &mut shared_socket)
+                .await
+                .contains(&json!({"type":"members_changed"}))
+        );
+        assert!(notices(&f, &mut unrelated_socket).await.is_empty());
     }
 }
 

@@ -248,6 +248,8 @@ export function createSync(options: SyncOptions) {
     const previous = state
     if (input.type === 'stop') {
       for (const [id, draft] of submitted) {
+        // A repeated stop sees no pending state; it must not undo an earlier detachment (C10).
+        if (draft.detached) continue
         draft.detached = previous.channels[draft.channel]?.pending.some(p => {
           const request = previous.requests[p.request]
           return p.clientMessageId === id && p.state !== 'unknown' && request !== undefined && !request.stale
@@ -270,6 +272,9 @@ export function createSync(options: SyncOptions) {
       topicExtras.clear()
       replyExtras.clear()
       pendingTopics.clear()
+      for (const [id, draft] of submitted) {
+        if (!draft.detached) submitted.delete(id)
+      }
       if (input.type === 'stop') {
         unsubscribeDrafts?.()
         unsubscribeDrafts = undefined
@@ -312,7 +317,10 @@ export function createSync(options: SyncOptions) {
       for (const channel of result.changedChannels) {
         const activeIds = new Set(state.channels[channel]?.pending.map(p => p.clientMessageId) ?? [])
         for (const p of previous.channels[channel]?.pending ?? []) {
-          if (!activeIds.has(p.clientMessageId)) pendingTopics.delete(p.clientMessageId)
+          if (!activeIds.has(p.clientMessageId)) {
+            pendingTopics.delete(p.clientMessageId)
+            submitted.delete(p.clientMessageId)
+          }
         }
         if (clearOlderError(channel, previous.channels[channel], state.channels[channel])) {
           extraChanged.add(channel)
@@ -340,12 +348,12 @@ export function createSync(options: SyncOptions) {
 
   // A transport that never answers is an unknown outcome, rather than a permanently sending entry.
   // Deadlines/cancellation fence results but do not abort HTTP; a retry may overlap the underlying request.
-  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T> & { cancelled?: true }> {
+  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T> & { cancelled?: true; timedOut?: true }> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      const cancelled = new Promise<Result<T> & { cancelled?: true }>(resolve => {
+      const cancelled = new Promise<Result<T> & { cancelled?: true; timedOut?: true }>(resolve => {
         requests.set(id, () => resolve({ ok: false, kind: 'network', cancelled: true }))
-        timeout = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
+        timeout = setTimeout(() => resolve({ ok: false, kind: 'network', timedOut: true }), options.requestTimeoutMs ?? 30_000)
       })
       return await Promise.race([run(), cancelled])
     } catch { return { ok: false, kind: 'network' } }
@@ -451,13 +459,16 @@ export function createSync(options: SyncOptions) {
             ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
             ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
           const draft = submitted.get(effect.client_message_id)
-          submitted.delete(effect.client_message_id)
+          // Network includes admission 503; keep the restore while a same-key retry is possible.
+          if (draft?.detached || result.ok || (result.kind === 'http' && result.status !== 429)) {
+            submitted.delete(effect.client_message_id)
+          }
           // A closed Organization has no failed Message UI; retain a definite refusal's unedited text.
           if (draft?.detached && !result.ok && result.kind === 'http' && [400, 403, 404, 409, 413, 415].includes(result.status)) draft.restore()
           return result
         }))
         // Close cancels the wait while detached sends still observe definite refusals.
-        if (!result.ok && result.kind === 'network' && !result.cancelled) submitted.delete(effect.client_message_id)
+        if (result.timedOut) submitted.delete(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
           : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network',
             retryAfterMs: result.retryAfterMs })

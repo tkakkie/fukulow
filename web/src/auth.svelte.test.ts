@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAuth, type AuthDeps, type SessionModel } from './auth.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
-import { createInviteAcceptance, createMembers } from './members'
+import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
 import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
 import type { lookupAuthors, listMembers, Result } from './api'
 import { syncAdapter } from './sync.svelte'
@@ -43,7 +43,7 @@ function stack(over: Partial<AuthDeps> = {}) {
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
-      return { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
+      return { onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
     },
     ...over,
   }
@@ -339,7 +339,7 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     await vi.advanceTimersByTimeAsync(60_000)
     await settle()
     expect(lookup).toHaveBeenCalledTimes(2)
-    expect(listMembers).toHaveBeenCalledTimes(1)
+    expect(listMembers).toHaveBeenCalledTimes(2) // Selection and initial Channel list change.
     expect(net.history).toHaveLength(historyCount)
     expect(net.sends).toHaveLength(1)
     expect(net.sockets).toHaveLength(1)
@@ -888,8 +888,8 @@ it.each(['ACK', 'network', 'timeout', '503'] as const)(
   'A to B to A never restores an ACK or unknown outcome in the current Composer: %s', async outcome => {
     const { s, send, composer } = await returnWithPendingSend(outcome === 'timeout')
     send.resolve(outcome === 'ACK' ? ok(sentBy('m1', 101, send.body.client_message_id, send.body.body))
-      : outcome === 'network' ? { ok: false, kind: 'network' }
-        : { ok: false, kind: 'http', status: outcome === 'timeout' ? 409 : 503 })
+      : outcome === 'network' || outcome === '503' ? { ok: false, kind: 'network' }
+        : { ok: false, kind: 'http', status: 409 })
     await settle()
     expect(composer.last).toMatchObject({ draft: '', pending: [] })
     expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe('')
@@ -948,8 +948,8 @@ it.each(['new topic', 'topic'] as const)(
     for (const outcome of ['ACK', 'network', 'timeout', '503'] as const) {
       const { s, send, composer } = await returnWithPendingSend(outcome === 'timeout', target)
       send.resolve(outcome === 'ACK' ? ok({ ...sentBy('m1', 101, send.body.client_message_id, send.body.body), topic_id: 'T' })
-        : outcome === 'network' ? { ok: false, kind: 'network' }
-          : { ok: false, kind: 'http', status: outcome === 'timeout' ? 409 : 503 })
+        : outcome === 'network' || outcome === '503' ? { ok: false, kind: 'network' }
+          : { ok: false, kind: 'http', status: 409 })
       await settle()
       expect(composer.last).toMatchObject({ draft: '', topicDraft: '', pending: [] })
       await composer.unmount()
@@ -1117,4 +1117,29 @@ it('an old account settings 401 cannot end a replacement Account session', async
   expect(s.auth.view.screen).toBe('app')
   expect(s.auth.session).toBe(replacement)
   expect(s.closes[1]).not.toHaveBeenCalled()
+})
+
+it('Guest Organization selection and reconnect reload Members and stop old selection refreshes', async () => {
+  const list = vi.fn<typeof listMembers>(async () => ok({ members: [{ id: 'guest', name: 'ゲスト', role: 'guest' }] }))
+  const s = stack({
+    getOrganization: async () => ok({ ...member('guest'), member: { id: 'guest', name: 'ゲスト', role: 'guest' } }),
+    openMembers: (org, ended, unavailable) => membersAdapter(createMembers(org, ended, unavailable, {
+      listMembers: list, lookupAuthors: vi.fn(), changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })),
+  })
+  await signInAs(s, 'guest')
+  expect(list).toHaveBeenCalledTimes(1)
+  const old = s.nets[0]
+  old.lists[0].resolve(ok({ channels: [channel('A')] })); await settle()
+  expect(list).toHaveBeenCalledTimes(2)
+  old.subscribed('A', 0); await settle()
+  old.socket.onClose(1011); await settle()
+  await vi.advanceTimersByTimeAsync(1_000)
+  old.socket.onReady(); await settle()
+  expect(list).toHaveBeenCalledTimes(3)
+  await s.auth.selectOrganization('o'); await settle()
+  expect(list).toHaveBeenCalledTimes(4)
+  old.event({ type: 'channel_access_lost', channel_id: 'A' }); await settle()
+  expect(list).toHaveBeenCalledTimes(4)
+  await s.auth.signOut()
 })

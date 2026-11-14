@@ -5,6 +5,12 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
+/// Channel-owned sharing query, injected by the composition root. The query
+/// correlates the current caller `u` and active candidate `m` in one snapshot.
+pub trait MemberListVisibility {
+    fn shared_channel_sql() -> String;
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct DisplayIdentity {
     pub id: Uuid,
@@ -99,12 +105,17 @@ pub(crate) async fn current_actor(
     (status=401, description="Account Session ended", body=ErrorBody),
     (status=404, description="organization_unavailable", body=ErrorBody),
     (status=500, description="Database failure", body=ErrorBody)))]
-pub async fn list_members(State(state): State<AppState>, auth: Auth) -> Result<Response, ApiError> {
+pub async fn list_members<V: MemberListVisibility>(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Response, ApiError> {
     auth.require(Action::ReadOrganization)?;
     // One statement keeps authorization and results in one non-locking snapshot.
     let sql = format!(
-        "SELECT m.id,m.name,m.role,u.role FROM ({}) u JOIN users m ON m.organization_id=$1 AND m.deactivated_at IS NULL ORDER BY m.name,m.id",
-        current_member_sql(false)
+        "SELECT m.id,m.name,m.role,u.role FROM ({}) u JOIN users m ON m.organization_id=$1 AND m.deactivated_at IS NULL \
+         WHERE u.role<>'guest' OR m.id=u.id OR EXISTS ({}) ORDER BY m.name,m.id",
+        current_member_sql(false),
+        V::shared_channel_sql()
     );
     let rows = crate::database::organization_read_only(
         &state.pool,

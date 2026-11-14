@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createMembers, createInviteAcceptance, takeInvite } from './members'
-import type { Identity, Member, Result } from './api'
+import type { Identity, Member, MemberList, Result } from './api'
 import { signOut } from './auth'
 
 const member: Member = { id: 'm', name: 'メンバー', role: 'member' }
@@ -316,4 +316,19 @@ it('held Member loads retain Membership loss and late 401 authority across inval
   finishes[1]({ ok: false, kind: 'http', status: 401 }); await late
   await Promise.resolve()
   expect(ended).toHaveBeenCalledOnce()
+})
+
+it('ignores an older unscoped response after a newer Guest directory load completes', async () => {
+  const finishes: ((result: Result<MemberList>) => void)[] = []
+  const c = createMembers(org, vi.fn(), vi.fn(), {
+    listMembers: () => new Promise(resolve => finishes.push(resolve)),
+    lookupAuthors: vi.fn(), changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const self: Member = { id: 'self', name: 'ゲスト', role: 'guest' }
+  const older = c.load(), newer = c.load()
+  finishes[1](ok({ members: [self] })); await newer
+  finishes[0](ok({ members: [self, member] })); await older
+  expect(c.get().members).toEqual([self])
+  expect([...c.authors.get().keys()]).toEqual(['self'])
+  c.close()
 })

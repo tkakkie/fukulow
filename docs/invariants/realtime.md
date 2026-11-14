@@ -64,7 +64,8 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 | Ready precedes every other frame; notices need no subscriptions or Message bodies even with over 256 visible Channels | `server/src/realtime/tests/activity.rs::activity_ready_is_the_first_event_after_registration`, `server/src/realtime/tests/activity.rs::more_than_256_visible_channels_receive_unwatched_activity_without_message_bodies` |
 | Two sender maxima retain every recipient's other-sender seq; batches freeze before recipient authorization | `server/src/channels/activity.rs::two_sender_maxima_keep_each_recipients_other_sender_seq_in_both_orders`, `server/src/realtime/tests/activity.rs::two_senders_coalesce_without_losing_each_others_activity` |
 | A Guest's own last shared Channel removal invalidates their directory and reaches no unrelated Guest | `server/src/realtime/tests/activity.rs::guest_last_shared_channel_removal_invalidates_own_directory` |
-| Role/deactivation directory notices reach non-Guests; unrelated Guests receive no notice until the #294 predicate exists | `server/src/realtime/tests/activity.rs::role_change_and_deactivation_notify_members_changed_per_directory_rule` |
+| Role/deactivation directory notices reach non-Guests; unrelated Guests receive no notice | `server/src/realtime/tests/activity.rs::role_change_and_deactivation_notify_members_changed_per_directory_rule` |
+| Guest directory notices follow shared usable grants on Member changes and grant additions/removals; an unrelated Guest receives none | `server/src/realtime/tests/activity.rs::guest_directory_notices_follow_shared_grants_and_deny_unrelated_guests` |
 
 ## Rows in other parts
 

@@ -1,6 +1,20 @@
 use super::*;
 use axum::extract::Path;
 
+pub struct MemberListVisibility;
+
+impl auth::members::MemberListVisibility for MemberListVisibility {
+    fn shared_channel_sql() -> String {
+        let visible = visible_channel_sql();
+        format!(
+            "SELECT 1 FROM channels c JOIN channel_members shared ON \
+             shared.organization_id=c.organization_id AND shared.channel_id=c.id \
+             AND shared.member_id=m.id AND shared.membership_revision=m.membership_revision \
+             WHERE c.organization_id=$1 AND ({visible})"
+        )
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddChannelMemberRequest {

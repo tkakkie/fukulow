@@ -189,7 +189,10 @@
   const channelMemberController = $derived.by(() => {
     if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId) return undefined
     const open = session.channelMembers
-    return untrack(() => open?.(selectedChannelId))
+    return untrack(() => {
+      void members?.load()
+      return open?.(selectedChannelId)
+    })
   })
   const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
   $effect(() => {
@@ -201,6 +204,7 @@
   let openedReplyTarget = ''
 
   const authorIdentities = $derived(members?.authors.identities)
+  const memberNames = $derived(new Map((members?.state.members ?? []).map(member => [member.id, member.name])))
   $effect(() => {
     const ids: string[] = []
     for (const line of currentTopicsState?.lines ?? []) {
@@ -219,10 +223,13 @@
 
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
+    const listed = memberNames.get(senderId)
+    if (listed !== undefined) return listed
     const identity = authorIdentities?.get(senderId)
     if (identity) return senderName(identity)
+    // A pending or failed directory load must not hide the caller's own name.
     if (organization?.member.id === senderId) return organization.member.name
-    return 'メンバー'
+    return senderName(undefined)
   }
 
   $effect(() => () => announcementController.destroy())
@@ -662,6 +669,7 @@
         <Members
           model={members}
           identity={organization}
+          onopen={() => { void members?.load() }}
           onchanged={(id) => {
             if (id === organization.member.id && currentOrganizationId) {
               onselectorganization?.(currentOrganizationId)

@@ -3,6 +3,34 @@ import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, 
 
 import { createAuthors } from './authors'
 import type { lookupAuthors } from './api'
+import type { createChannels } from './channels'
+import type { createSync } from './sync'
+
+/** Follow access changes for this Organization selection; panel opens call load directly. */
+export function watchMemberAccess(
+  channels: Pick<ReturnType<typeof createChannels>, 'get' | 'subscribe'>,
+  sync: Pick<ReturnType<typeof createSync>, 'get' | 'subscribe'>,
+  refresh: () => void,
+) {
+  let channelIds = JSON.stringify(channels.get().channels.map(c => c.id).sort())
+  let connection = sync.get().connected ? sync.get().connection : null
+  let lost = new Set<string>()
+  const stopChannels = channels.subscribe(() => {
+    const ids = JSON.stringify(channels.get().channels.map(c => c.id).sort())
+    if (ids !== channelIds) { channelIds = ids; refresh() }
+  })
+  const stopSync = sync.subscribe(() => {
+    const state = sync.get()
+    if (state.organization === 'unavailable') return
+    const next = new Set(Object.keys(state.channels).filter(id => state.channels[id].state === 'unavailable'))
+    const accessLost = [...next].some(id => !lost.has(id))
+    lost = next
+    const reconnected = state.connected && state.connection !== connection
+    if (state.connected) connection = state.connection
+    if (accessLost || reconnected) refresh()
+  })
+  return () => { stopChannels(); stopSync() }
+}
 
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
 export const roles = Object.keys(roleNames) as Role[]
@@ -78,6 +106,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       if (closed) return
       // Freshness changes cannot invalidate Membership loss within this selection.
       if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
+      // Only the latest started load can replace the scoped directory and names.
       if (sequence !== loadSequence) return
       if (!r.ok) failed(r)
       else if (!closed) { authors.replaceMembers(r.data.members); set({ members: r.data.members }) }
