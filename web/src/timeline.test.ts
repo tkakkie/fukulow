@@ -86,6 +86,100 @@ it.each([400, 403, 404, 409, 413, 415, 200, 'network', 503] as const)(
   },
 )
 
+it.each([429, 503])('close during a same-key retry after HTTP %s retains the unedited draft restore', async status => {
+  vi.useFakeTimers()
+  for (const refusal of [400, 403, 404, 409, 413, 415]) {
+    for (const edit of ['untouched', 'typed then cleared', 'new text'] as const) {
+      const drafts = createDraftStore()
+      const net = fakeNetwork()
+      const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+      await sync.start()
+      await sync.watch('A')
+      const a = sync.getTimeline('A')
+      a.setDraft('送信する本文')
+      a.setTopicDraft('Release')
+      const sending = a.submit()
+      const original = net.sends[0].body
+      net.sends[0].resolve({ ok: false, kind: 'http', status, retryAfterMs: 1000 })
+      expect(await sending).toBe(true)
+      // Repeated responses must keep the restore for the entire same-key retry sequence.
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        if (status === 429) await vi.advanceTimersByTimeAsync(1000)
+        else void a.retry(original.client_message_id)
+        await settle()
+        expect(net.sends).toHaveLength(attempt + 1)
+        expect(net.sends[attempt].body).toEqual(original)
+        if (attempt === 1) {
+          net.sends[attempt].resolve({ ok: false, kind: 'http', status, retryAfterMs: 1000 })
+          await settle()
+        }
+      }
+      if (edit !== 'untouched') a.setDraft('送信後の新しい下書き')
+      if (edit === 'typed then cleared') a.setDraft('')
+      await sync.close()
+      expect(vi.getTimerCount()).toBe(0)
+      net.sends[2].resolve({ ok: false, kind: 'http', status: refusal })
+      await settle()
+      const target = { organizationId: 'o', channelId: 'A' }
+      expect(drafts.get(target)).toBe(edit === 'untouched' ? original.body : edit === 'new text' ? '送信後の新しい下書き' : '')
+      expect(drafts.getTopicDraft(target)).toBe(edit === 'untouched' ? 'Release' : '')
+      expect(a.get().pending).toEqual([])
+      expect(a.get().messages).toEqual([])
+      expect(net.sends).toHaveLength(3)
+    }
+  }
+})
+
+it.each(['ACK', 'echo', 'history', 'discard', 'refusal', 'close', 'session replacement'] as const)(
+  'releases the submitted draft restore after a retryable response and %s', async end => {
+    vi.useFakeTimers()
+    for (const status of [429, 503]) {
+      const drafts = createDraftStore()
+      const net = fakeNetwork()
+      const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+      await sync.start()
+      net.socket.onReady()
+      await sync.watch('A')
+      net.subscribed('A', 0)
+      const a = sync.getTimeline('A')
+      a.setDraft('送信する本文')
+      const sending = a.submit()
+      const original = net.sends[0].body
+      const id = original.client_message_id
+      net.sends[0].resolve({ ok: false, kind: 'http', status, retryAfterMs: 1000 })
+      expect(await sending).toBe(true)
+      if (end === 'ACK' || end === 'refusal') {
+        if (status === 429) await vi.advanceTimersByTimeAsync(1000)
+        else void a.retry(id)
+        await settle()
+        expect(net.sends).toHaveLength(2)
+      }
+      const message = sentBy('me', 1, id, original.body)
+      // Only a successful deletion proves release; no HTTP response follows discard/echo/history.
+      const deletion = vi.spyOn(Map.prototype, 'delete')
+      let removed: boolean
+      try {
+        if (end === 'ACK') net.sends[1].resolve(ok(message))
+        else if (end === 'refusal') net.sends[1].resolve({ ok: false, kind: 'http', status: 409 })
+        else if (end === 'echo') net.event({ type: 'message', message })
+        else if (end === 'history') await sync.settleHistory('A', [message])
+        else if (end === 'discard') a.discard(id)
+        else if (end === 'close') await sync.close()
+        else await sync.replaceSession('other')
+        await settle()
+        removed = deletion.mock.calls.some(([key], index) => key === id && deletion.mock.results[index]?.value === true)
+      } finally {
+        deletion.mockRestore()
+      }
+      expect(removed).toBe(true)
+      expect(a.get().pending).toHaveLength(end === 'refusal' ? 1 : 0)
+      expect(drafts.hasDrafts()).toBe(false)
+      await sync.close()
+      expect(vi.getTimerCount()).toBe(0)
+    }
+  },
+)
+
 it('a send ACK, refusal and late refusal after settlement preserve text typed after submit in the Account Session store', async () => {
   for (const edit of ['untouched', 'typed then cleared', 'new text'] as const) {
     for (const outcome of ['ACK', 'refusal', 'late refusal'] as const) {

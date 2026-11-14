@@ -268,6 +268,9 @@ export function createSync(options: SyncOptions) {
       topicExtras.clear()
       replyExtras.clear()
       pendingTopics.clear()
+      for (const [id, draft] of submitted) {
+        if (!draft.detached) submitted.delete(id)
+      }
       if (input.type === 'stop') {
         unsubscribeDrafts?.()
         unsubscribeDrafts = undefined
@@ -310,7 +313,10 @@ export function createSync(options: SyncOptions) {
       for (const channel of result.changedChannels) {
         const activeIds = new Set(state.channels[channel]?.pending.map(p => p.clientMessageId) ?? [])
         for (const p of previous.channels[channel]?.pending ?? []) {
-          if (!activeIds.has(p.clientMessageId)) pendingTopics.delete(p.clientMessageId)
+          if (!activeIds.has(p.clientMessageId)) {
+            pendingTopics.delete(p.clientMessageId)
+            submitted.delete(p.clientMessageId)
+          }
         }
         if (clearOlderError(channel, previous.channels[channel], state.channels[channel])) {
           extraChanged.add(channel)
@@ -445,7 +451,9 @@ export function createSync(options: SyncOptions) {
             ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
             ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
           const draft = submitted.get(effect.client_message_id)
-          submitted.delete(effect.client_message_id)
+          if (draft?.detached || result.ok || result.kind !== 'http' || ![429, 503].includes(result.status)) {
+            submitted.delete(effect.client_message_id)
+          }
           // A closed Organization has no failed Message UI; retain a definite refusal's unedited text.
           if (draft?.detached && !result.ok && result.kind === 'http' && [400, 403, 404, 409, 413, 415].includes(result.status)) draft.restore()
           return result
