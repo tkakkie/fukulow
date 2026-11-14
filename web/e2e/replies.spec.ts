@@ -241,19 +241,22 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     const rootRow = page.locator(`#main-content [data-message-id="${rootMsg.id}"]`)
     await expect(rootRow).toContainText('親メッセージ本文')
     const openReplyButton = rootRow.getByRole('button', { name: /返信/ })
-    await openReplyButton.click()
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/messages/' + rootMsg.id + '/chain') && r.ok()),
+      openReplyButton.click(),
+    ])
 
     const panel = page.locator('#panel-content')
     await expect(panel).toBeVisible()
     await expect(page).toHaveURL(new RegExp(`/o/${orgId}/c/${channelId}\\?panel=reply:${rootMsg.id}$`))
     await expect(panel.getByRole('heading', { level: 2, name: '返信のつながり', exact: true })).toBeVisible()
     await expect(replyComposer(page)).toBeFocused()
-    await expect(panel.locator(`[data-message-id="${rootMsg.id}"]`)).toContainText('親メッセージ本文')
+    const loadMoreButton = panel.getByRole('button', { name: 'さらに返信を読み込む', exact: true })
+    await expect(loadMoreButton).toBeVisible()
+    await expect(panel).toContainText('既存の返信-49')
     expect(await panel.locator('[data-message-id]').count()).toBeLessThan(40)
 
     // 2. Paging with "さらに返信を読み込む" loads the remaining replies
-    const loadMoreButton = panel.getByRole('button', { name: 'さらに返信を読み込む', exact: true })
-    await expect(loadMoreButton).toBeVisible()
     await loadMoreButton.click()
     expect(await panel.locator('[data-message-id]').count()).toBeLessThan(40)
     await expect(panel).toContainText('既存の返信-51')
@@ -288,6 +291,7 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
       el.dispatchEvent(new Event('scroll'))
     })
     await expect(panel.locator(`[data-message-id="${rootMsg.id}"]`)).toBeInViewport()
+    await expect(panel.locator(`[data-message-id="${rootMsg.id}"]`)).toContainText('親メッセージ本文')
     const unpinnedPeerMsg = await sendApiMessage(peerContext.request, {
       body: 'Bobからの未ピン中ライブ返信',
       reply_to: rootMsg.id,
