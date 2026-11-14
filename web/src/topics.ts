@@ -450,12 +450,17 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       for (const m of sync.get().channels[channel]?.messages ?? []) w.messages.set(m.seq, m)
       trimMain(w, 'newer')
     }
-    const w = getWindow(channel), p = w.main
+    const w = getWindow(channel), p = w.main, generation = w.generation
     if (!current(channel, w) || p.loading || !p.hasMore) return { ok: false, kind: 'network' }
     p.loading = true; p.error = false; notify(channel)
     const query: ListTimelineQuery = p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }
     const { result, isCurrent } = await read(channel, w, 'main', () => options.api.listTimeline(channel, query), bootstrap)
-    if (isCurrent() && w.main === p) {
+    // An empty log has no Message identities or Unread baselines to invalidate.
+    // Its zero bootstrap cursor replays every Message, including post-snapshot arrivals.
+    const accepted = () => isCurrent() || (bootstrap && w.generation !== generation &&
+      current(channel, w) && w.main === p && !w.reads.has('main') &&
+      result.ok && result.data.as_of_seq === 0 && result.data.items.length === 0 && !result.data.has_more)
+    if (accepted() && w.main === p) {
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         if (latest) {
@@ -477,7 +482,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       }
       notify(channel)
     }
-    return isCurrent() ? result : { ok: false, kind: 'network' }
+    return accepted() ? result : { ok: false, kind: 'network' }
   }
   async function reanchorMain(channel: string, w: Window) {
     if (!current(channel, w)) return false
@@ -756,8 +761,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         const w = getWindow(channel), generation = w.generation
         result = await loadMainPage(channel, true)
         if (sync.get().channels[channel]?.latest !== request) return { ok: false, kind: 'network' }
-        // Access reconciliation fences the old snapshot, but the same bootstrap still needs a fresh baseline.
-        if (current(channel, w) && w.generation !== generation) continue
+        // An invalidated nonempty snapshot still needs a fresh bootstrap.
+        if (!result.ok && current(channel, w) && w.generation !== generation) continue
         break
       }
       if (!result.ok) return result
