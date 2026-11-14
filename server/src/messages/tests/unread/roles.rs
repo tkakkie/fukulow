@@ -49,7 +49,7 @@ pub(super) async fn topic_positions(
         .bind(org).bind(channel).bind(member).fetch_all(pool).await.unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_guest_public_grant_starts_at_committed_seq_and_revoke_deletes_positions(
     pool: PgPool,
 ) {
@@ -81,7 +81,7 @@ async fn unread_guest_public_grant_starts_at_committed_seq_and_revoke_deletes_po
     assert_positions_match_visibility(&pool).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_role_changes_preserve_continuous_positions_and_initialize_new_access(pool: PgPool) {
     let (app, org, owner_id, public, owner) = fixture(&pool).await;
     role(&pool, org, owner_id, "owner").await;
@@ -139,7 +139,7 @@ async fn unread_role_changes_preserve_continuous_positions_and_initialize_new_ac
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_guest_creation_activation_and_public_channel_creation_require_grants(pool: PgPool) {
     let (_, org, owner, public, _) = fixture(&pool).await;
     let account = Uuid::new_v4();
@@ -177,7 +177,7 @@ async fn unread_guest_creation_activation_and_public_channel_creation_require_gr
     assert_positions_match_visibility(&pool).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_all_roles_visibility_grants_and_access_changes_match_positions(pool: PgPool) {
     let (app, org, owner, _, owner_token) = fixture(&pool).await;
     role(&pool, org, owner, "owner").await;
@@ -321,7 +321,7 @@ async fn unread_all_roles_visibility_grants_and_access_changes_match_positions(p
     }
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn unread_access_migration_repairs_guest_rows_and_backfills_without_resetting(pool: PgPool) {
     let mut paths =
         std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
@@ -390,7 +390,7 @@ async fn unread_access_migration_repairs_guest_rows_and_backfills_without_resett
     assert_positions_match_visibility(&pool).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_guest_grant_and_promotion_wait_for_committed_baseline_and_hold_it(pool: PgPool) {
     for promote in [false, true] {
         for commit_send in [false, true] {
@@ -453,7 +453,7 @@ async fn unread_guest_grant_and_promotion_wait_for_committed_baseline_and_hold_i
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_role_channel_and_grant_races_reconcile_after_organization_lock(pool: PgPool) {
     let (_, org, owner, _, _) = fixture(&pool).await;
     let viewer = Uuid::new_v4();

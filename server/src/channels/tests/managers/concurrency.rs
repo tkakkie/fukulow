@@ -12,7 +12,7 @@ async fn wait_for_organization(pool: &PgPool, count: i64) {
     }).await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_concurrent_revoke_leave_role_and_removal_preserve_manager(pool: PgPool) {
     // Queue both orders behind the real Organization lock; no timing assumption
     // decides which operation wins, and every task has a deadlock deadline.
@@ -115,7 +115,7 @@ async fn channel_manager_concurrent_revoke_leave_role_and_removal_preserve_manag
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_mutation_locks_members_before_grants(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (target, _) = f.user("member").await;
@@ -152,7 +152,7 @@ async fn channel_manager_mutation_locks_members_before_grants(pool: PgPool) {
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_guest_change_and_send_never_invert_member_grant_locks(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (backup, ot) = f.user("owner").await;
@@ -221,7 +221,7 @@ async fn channel_manager_guest_change_and_send_never_invert_member_grant_locks(p
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_right_only_changes_skip_unread_locks_and_preserve_positions(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (target, _) = f.user("member").await;

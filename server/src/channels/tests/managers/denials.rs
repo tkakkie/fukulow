@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_denial_matrix_preserves_grants_unread_and_notifications(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (target, _) = f.user("member").await;
@@ -177,7 +177,7 @@ async fn channel_manager_denial_matrix_preserves_grants_unread_and_notifications
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_rechecks_right_grant_role_and_revision_after_auth(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (actor, token) = f.user("member").await;

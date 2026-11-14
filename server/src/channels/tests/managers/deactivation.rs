@@ -144,7 +144,7 @@ async fn denial(pool: PgPool, case: &str) {
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_authentication_precedes_membership_and_target(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let before = all_state(&f.pools.admin).await;
@@ -167,7 +167,7 @@ async fn deactivation_authentication_precedes_membership_and_target(pool: PgPool
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_role_matrix_and_repeat_requests_use_member_ids(pool: PgPool) {
     for actor_role in ["owner", "admin"] {
         let f = Fixture::new(pool.clone()).await;
@@ -228,7 +228,7 @@ async fn deactivation_role_matrix_and_repeat_requests_use_member_ids(pool: PgPoo
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_manager_controls_and_public_unmanaged_exceptions(pool: PgPool) {
     for backup_role in ["owner", "admin", "member"] {
         for actor_role in ["owner", "admin"] {
@@ -270,72 +270,72 @@ async fn deactivation_manager_controls_and_public_unmanaged_exceptions(pool: PgP
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_self_owner_unchanged(pool: PgPool) {
     denial(pool, "self_owner").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_self_admin_unchanged(pool: PgPool) {
     denial(pool, "self_admin").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_self_last_owner_unchanged(pool: PgPool) {
     denial(pool, "self_last_owner").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_member_unchanged(pool: PgPool) {
     denial(pool, "member").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_guest_unchanged(pool: PgPool) {
     denial(pool, "guest").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_admin_owner_unchanged(pool: PgPool) {
     denial(pool, "admin_owner").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_unavailable_unchanged(pool: PgPool) {
     denial(pool, "unavailable").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_other_org_unchanged(pool: PgPool) {
     denial(pool, "other_org").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_foreign_target_unchanged(pool: PgPool) {
     denial(pool, "foreign_target").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_unknown_unchanged(pool: PgPool) {
     denial(pool, "unknown").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_inactive_unchanged(pool: PgPool) {
     denial(pool, "inactive").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_last_role_manager_unchanged(pool: PgPool) {
     denial(pool, "last_role_manager").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_denies_last_right_manager_unchanged(pool: PgPool) {
     denial(pool, "last_right_manager").await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_is_atomic_across_private_channels(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (owner, ot) = f.user("owner").await;
@@ -352,7 +352,7 @@ async fn deactivation_is_atomic_across_private_channels(pool: PgPool) {
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_base_denial_precedes_target_lookup(pool: PgPool) {
     let f = Fixture::new(pool).await;
     for token in [f.token.clone(), f.user("guest").await.1] {

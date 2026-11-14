@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_admission_and_commit_rollback_preserve_seq_topic_count_and_publication(
     pool: PgPool,
 ) {
@@ -64,7 +64,7 @@ async fn reply_admission_and_commit_rollback_preserve_seq_topic_count_and_public
     assert!(queue.events.try_recv().is_err());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_parent_commit_and_rollback_races_require_a_committed_parent(pool: PgPool) {
     for commit_parent in [true, false] {
         let (app, org, sender, channel, token) = fixture(&pool).await;
@@ -118,7 +118,7 @@ async fn reply_parent_commit_and_rollback_races_require_a_committed_parent(pool:
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_chain_ambiguous_commit_waits_and_same_key_recovers_without_later_send(pool: PgPool) {
     for committed in [true, false] {
         let (app, org, _, channel, token) = fixture(&pool).await;
@@ -172,7 +172,7 @@ async fn reply_chain_ambiguous_commit_waits_and_same_key_recovers_without_later_
     }
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn reply_migration_preserves_existing_rows_and_scopes_both_foreign_keys(pool: PgPool) {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut paths = std::fs::read_dir(directory)
@@ -253,7 +253,7 @@ async fn reply_migration_preserves_existing_rows_and_scopes_both_foreign_keys(po
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_chain_reauthorizes_member_revision_and_grant_after_barrier_wait(pool: PgPool) {
     for loss in ["member", "revision", "grant"] {
         let (_, org, owner, channel, owner_token) = fixture(&pool).await;

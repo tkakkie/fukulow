@@ -15,7 +15,7 @@ fn report(kind: &str, boundary: Option<i64>, samples: &mut [f64]) -> f64 {
 
 // Preselected gate: p95 <=100 ms, four readers, 50 items, recent/deep, while
 // sending. Scale controls a second point for extrapolation, never query limits.
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release paging feasibility gate; run without other tests/builds"]
 async fn measure_topic_projection_pages(pool: PgPool) {
     let topics: i64 = std::env::var("MEASURE_TOPICS")

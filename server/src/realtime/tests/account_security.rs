@@ -162,19 +162,19 @@ async fn account_sockets(pool: PgPool, operation: usize, cancel: bool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn password_change_closes_other_cookie_bearer_idle_and_replaying_sockets_only(pool: PgPool) {
     account_sockets(pool, 0, false).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revoke_others_closes_other_cookie_bearer_idle_and_replaying_sockets_only(pool: PgPool) {
     account_sockets(pool, 1, false).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn password_change_http_cancellation_finishes_commit_and_all_signals(pool: PgPool) {
     account_sockets(pool, 0, true).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revoke_others_http_cancellation_finishes_commit_and_all_signals(pool: PgPool) {
     account_sockets(pool, 1, true).await;
 }

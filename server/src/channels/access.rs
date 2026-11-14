@@ -398,7 +398,7 @@ mod tests {
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    #[sqlx::test]
+    #[fukulow_test::test]
     async fn mixed_organization_access_rows_keep_input_order(pool: sqlx::PgPool) {
         let pools = crate::test_support::TestPools::new(pool).await;
         let mut organizations = [Uuid::new_v4(), Uuid::new_v4()];

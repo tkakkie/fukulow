@@ -150,7 +150,7 @@ async fn channels_require_authentication_without_database_access() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_list_database_failure_returns_generic_500(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -208,7 +208,7 @@ async fn channel_json_rejections_use_error_body() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn private_channel_is_listed_only_for_its_creator(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
@@ -247,7 +247,7 @@ async fn private_channel_is_listed_only_for_its_creator(pool: PgPool) {
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
     let app = router(&pool).await;
     let first = organization(&pool).await;
@@ -338,7 +338,7 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
     assert_eq!(foreign_count, 2);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn foreign_membership_does_not_grant_private_channel_visibility(pool: PgPool) {
     let app = router(&pool).await;
     let first = organization(&pool).await;
@@ -379,7 +379,7 @@ async fn foreign_membership_does_not_grant_private_channel_visibility(pool: PgPo
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_body_limit_and_content_type_rejections_do_not_write(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -418,7 +418,7 @@ async fn channel_body_limit_and_content_type_rejections_do_not_write(pool: PgPoo
     assert_eq!(list(&app, &token).await, json!({"channels": []}));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_memberships_reject_cross_organization_references(pool: PgPool) {
     let app = router(&pool).await;
     let first = organization(&pool).await;
@@ -449,7 +449,7 @@ async fn channel_memberships_reject_cross_organization_references(pool: PgPool) 
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn private_channel_creation_rolls_back_if_membership_insert_fails(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -522,7 +522,7 @@ pub(crate) async fn extract_auth(state: AppState, token: &str) -> Auth {
     receiver.await.unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reactivation_keeps_member_identity_without_restoring_private_channel_permissions(
     pool: PgPool,
 ) {

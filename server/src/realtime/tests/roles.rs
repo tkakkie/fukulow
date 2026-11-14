@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guest_rest_subscribe_replay_and_live_denials_have_explicit_grant_positive_controls(
     pool: PgPool,
 ) {
@@ -75,7 +75,7 @@ async fn guest_rest_subscribe_replay_and_live_denials_have_explicit_grant_positi
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delivery_reads_role_after_subscription_and_after_http_response(pool: PgPool) {
     let f = fixture(&pool).await;
     let (reader, token) = member(&pool, f.organization).await;
