@@ -445,8 +445,20 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn separate_budgets_preserve_pool_headroom_without_queueing_for_a_connection() {
-        for (connections, limit) in [(1, 0), (2, 1), (3, 2), (20, 16), (100, 16)] {
+        for (connections, limit) in [
+            (1, 0),
+            (2, 1),
+            (3, 2),
+            (4, 3),
+            (5, 4),
+            (19, 15),
+            (20, 16),
+            (21, 16),
+            (100, 16),
+            (u32::MAX, 16),
+        ] {
             let admission = Admission::new(connections);
+            assert!(connections - limit as u32 >= connections.div_ceil(5));
             if connections >= 3 {
                 assert!(admission.watermark.available_permits() >= 1);
             }

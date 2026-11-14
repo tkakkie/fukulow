@@ -166,9 +166,15 @@ mod tests {
 
     #[fukulow_test::test]
     async fn both_barriers_set_transaction_local_timeouts(pool: sqlx::PgPool) {
+        let pool = crate::database::PoolConfig::configured(Some("3"), None)
+            .unwrap()
+            .options()
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .unwrap();
         let mut connection = pool.acquire().await.unwrap();
-        let original: (String, String) = sqlx::query_as(
-            "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+        let original: (String, String, String) = sqlx::query_as(
+            "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout'), current_setting('statement_timeout')",
         )
         .fetch_one(&mut *connection)
         .await
@@ -178,26 +184,28 @@ mod tests {
             lock(&mut tx, Uuid::new_v4(), Uuid::new_v4(), shared)
                 .await
                 .unwrap();
-            let timeouts: (String, String) = sqlx::query_as(
-                "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+            let timeouts: (String, String, String) = sqlx::query_as(
+                "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout'), current_setting('statement_timeout')",
             )
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-            assert_eq!(timeouts, ("10s".into(), "8s".into()));
+            assert_eq!(timeouts, ("10s".into(), "8s".into(), "10s".into()));
             if shared {
                 tx.commit().await.unwrap();
             } else {
                 tx.rollback().await.unwrap();
             }
-            let restored: (String, String) = sqlx::query_as(
-                "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+            let restored: (String, String, String) = sqlx::query_as(
+                "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout'), current_setting('statement_timeout')",
             )
             .fetch_one(&mut *connection)
             .await
             .unwrap();
             assert_eq!(restored, original);
         }
+        drop(connection);
+        pool.close().await;
     }
 
     #[test]

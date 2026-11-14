@@ -61,8 +61,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             .ok()
             .as_deref(),
     )?;
-    let pool = PgPoolOptions::new()
-        .max_connections(20)
+    let pool = fukulow_server::database::PoolConfig::from_env()?
+        .options()
         .connect(&database_url)
         .await?;
     fukulow_server::database::validate_migrations(&pool).await?;

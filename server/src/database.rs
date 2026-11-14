@@ -1,10 +1,12 @@
 use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConnection};
 
 mod context;
+mod pool;
 pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
 pub use context::{account, account_read_only, organization, organization_read_only};
 pub(crate) use context::{organization_statement, organization_statement_sql};
+pub use pool::PoolConfig;
 
 pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
@@ -143,11 +145,14 @@ pub async fn migrate_and_grant(pool: &PgPool) -> Result<(), Box<dyn std::error::
 
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     let mut connection = pool.acquire().await?;
-    // Discard the migration-only timeout and advisory lock on every exit.
+    // Migrations may run longer than ordinary queries; discard their session
+    // settings and advisory lock on every exit, including failure/cancellation.
     connection.close_on_drop();
-    sqlx::query("SET lock_timeout = '5s'")
-        .execute(&mut *connection)
-        .await?;
+    sqlx::raw_sql(
+        "SET statement_timeout = 0; SET transaction_timeout = 0; SET lock_timeout = '5s'",
+    )
+    .execute(&mut *connection)
+    .await?;
     sqlx::migrate!().run(&mut *connection).await
 }
 
