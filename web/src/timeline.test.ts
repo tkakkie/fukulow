@@ -3,6 +3,7 @@ import { createSync } from './sync'
 import { createDraftStore } from './drafts'
 import { fakeNetwork, ok, sentBy, settle } from './adapter-test-helpers.svelte'
 import type { Message, MessagePage, Result } from './api'
+import { sendMessage } from './api'
 import { record } from './protocol-test-helpers'
 
 afterEach(() => vi.useRealTimers())
@@ -60,7 +61,7 @@ it('a stalled transport drops its submitted draft entry at the deadline and cann
   expect(vi.getTimerCount()).toBe(0)
 })
 
-it.each([400, 403, 404, 409, 413, 415, 200, 'network', 503] as const)(
+it.each([400, 403, 404, 409, 413, 415, 200, 'network', 429, 503] as const)(
   'Organization close cancels submit and restores only a late definite refusal: %s', async status => {
     vi.useFakeTimers()
     const drafts = createDraftStore()
@@ -76,9 +77,17 @@ it.each([400, 403, 404, 409, 413, 415, 200, 'network', 503] as const)(
     expect(vi.getTimerCount()).toBe(0)
     expect(drafts.hasDrafts()).toBe(false)
     const send = net.sends[0]
-    send.resolve(status === 200 ? ok(sentBy('me', 1, send.body.client_message_id, send.body.body))
-      : status === 'network' ? { ok: false, kind: 'network' } : { ok: false, kind: 'http', status })
-    await settle()
+    const deletion = vi.spyOn(Map.prototype, 'delete')
+    let removed: boolean
+    try {
+      send.resolve(status === 200 ? ok(sentBy('me', 1, send.body.client_message_id, send.body.body))
+        : status === 'network' || status === 503 ? { ok: false, kind: 'network' } : { ok: false, kind: 'http', status })
+      await settle()
+      removed = deletion.mock.calls.some(([key], index) => key === send.body.client_message_id && deletion.mock.results[index]?.value === true)
+    } finally {
+      deletion.mockRestore()
+    }
+    expect(removed).toBe(true)
     const expected = typeof status === 'number' && [400, 403, 404, 409, 413, 415].includes(status) ? '送信する本文' : ''
     expect(drafts.get({ organizationId: 'o', channelId: 'A' })).toBe(expected)
     expect(a.get().messages).toEqual([])
@@ -100,7 +109,10 @@ it.each([429, 503])('close during a same-key retry after HTTP %s retains the une
       a.setTopicDraft('Release')
       const sending = a.submit()
       const original = net.sends[0].body
-      net.sends[0].resolve({ ok: false, kind: 'http', status, retryAfterMs: 1000 })
+      const retryable: Result<Message> = status === 429
+        ? { ok: false, kind: 'http', status, retryAfterMs: 1000 }
+        : { ok: false, kind: 'network', retryAfterMs: 1000 }
+      net.sends[0].resolve(retryable)
       expect(await sending).toBe(true)
       // Repeated responses must keep the restore for the entire same-key retry sequence.
       for (let attempt = 1; attempt <= 2; attempt++) {
@@ -110,7 +122,7 @@ it.each([429, 503])('close during a same-key retry after HTTP %s retains the une
         expect(net.sends).toHaveLength(attempt + 1)
         expect(net.sends[attempt].body).toEqual(original)
         if (attempt === 1) {
-          net.sends[attempt].resolve({ ok: false, kind: 'http', status, retryAfterMs: 1000 })
+          net.sends[attempt].resolve(retryable)
           await settle()
         }
       }
@@ -130,10 +142,54 @@ it.each([429, 503])('close during a same-key retry after HTTP %s retains the une
   }
 })
 
-it.each(['ACK', 'echo', 'history', 'discard', 'refusal', 'close', 'session replacement'] as const)(
+it('real API admission 503 preserves the draft through close during a same-key retry and a late refusal', async () => {
+  vi.useFakeTimers()
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  let refuse!: (response: Response) => void
+  const retryResponse = new Promise<Response>(resolve => { refuse = resolve })
+  const fetchMock = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response('{"error":"send_admission_unavailable"}', {
+      status: 503, headers: { 'Retry-After': '3' },
+    }))
+    .mockReturnValueOnce(retryResponse)
+  const options = net.options().sync!
+  const send = vi.fn((channel: string, body: Parameters<typeof sendMessage>[2]) => sendMessage('o', channel, body, fetchMock))
+  const sync = createSync({ selfId: 'me', ...options, organizationId: 'o', drafts,
+    api: { ...options.api!, sendMessage: send },
+  })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  expect(await a.submit()).toBe(true)
+  expect(await send.mock.results[0].value).toEqual({ ok: false, kind: 'network', retryAfterMs: 3000 })
+  const original = send.mock.calls[0][1]
+  const retrying = a.retry(original.client_message_id)
+  expect(send.mock.calls[1][1]).toEqual(original)
+  expect(fetchMock.mock.calls[1]).toEqual(fetchMock.mock.calls[0])
+  await sync.close()
+  await retrying
+  const deletion = vi.spyOn(Map.prototype, 'delete')
+  let removed: boolean
+  try {
+    refuse(new Response('{"error":"conflict"}', { status: 409 }))
+    await settle()
+    removed = deletion.mock.calls.some(([key], index) => key === original.client_message_id && deletion.mock.results[index]?.value === true)
+  } finally {
+    deletion.mockRestore()
+  }
+  expect(drafts.get({ organizationId: 'o', channelId: 'A' })).toBe(original.body)
+  expect(removed).toBe(true)
+  expect(a.get().pending).toEqual([])
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each(['ACK', 'echo', 'history', 'discard', 'refusal', 'close', 'session start', 'session replacement'] as const)(
   'releases the submitted draft restore after a retryable response and %s', async end => {
     vi.useFakeTimers()
-    for (const status of [429, 503]) {
+    for (const status of [429, 503, 'fetch error'] as const) {
       const drafts = createDraftStore()
       const net = fakeNetwork()
       const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
@@ -146,7 +202,9 @@ it.each(['ACK', 'echo', 'history', 'discard', 'refusal', 'close', 'session repla
       const sending = a.submit()
       const original = net.sends[0].body
       const id = original.client_message_id
-      net.sends[0].resolve({ ok: false, kind: 'http', status, retryAfterMs: 1000 })
+      net.sends[0].resolve(status === 429 ? { ok: false, kind: 'http', status, retryAfterMs: 1000 }
+        : status === 503 ? { ok: false, kind: 'network', retryAfterMs: 1000 }
+          : await sendMessage('o', 'A', original, async () => { throw new TypeError('fetch failed') }))
       expect(await sending).toBe(true)
       if (end === 'ACK' || end === 'refusal') {
         if (status === 429) await vi.advanceTimersByTimeAsync(1000)
@@ -165,6 +223,7 @@ it.each(['ACK', 'echo', 'history', 'discard', 'refusal', 'close', 'session repla
         else if (end === 'history') await sync.settleHistory('A', [message])
         else if (end === 'discard') a.discard(id)
         else if (end === 'close') await sync.close()
+        else if (end === 'session start') await sync.start()
         else await sync.replaceSession('other')
         await settle()
         removed = deletion.mock.calls.some(([key], index) => key === id && deletion.mock.results[index]?.value === true)

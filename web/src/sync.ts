@@ -344,12 +344,12 @@ export function createSync(options: SyncOptions) {
 
   // A transport that never answers is an unknown outcome, rather than a permanently sending entry.
   // Deadlines/cancellation fence results but do not abort HTTP; a retry may overlap the underlying request.
-  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T> & { cancelled?: true }> {
+  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T> & { cancelled?: true; timedOut?: true }> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      const cancelled = new Promise<Result<T> & { cancelled?: true }>(resolve => {
+      const cancelled = new Promise<Result<T> & { cancelled?: true; timedOut?: true }>(resolve => {
         requests.set(id, () => resolve({ ok: false, kind: 'network', cancelled: true }))
-        timeout = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
+        timeout = setTimeout(() => resolve({ ok: false, kind: 'network', timedOut: true }), options.requestTimeoutMs ?? 30_000)
       })
       return await Promise.race([run(), cancelled])
     } catch { return { ok: false, kind: 'network' } }
@@ -451,7 +451,8 @@ export function createSync(options: SyncOptions) {
             ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
             ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
           const draft = submitted.get(effect.client_message_id)
-          if (draft?.detached || result.ok || result.kind !== 'http' || ![429, 503].includes(result.status)) {
+          // Network includes admission 503; keep the restore while a same-key retry is possible.
+          if (draft?.detached || result.ok || (result.kind === 'http' && result.status !== 429)) {
             submitted.delete(effect.client_message_id)
           }
           // A closed Organization has no failed Message UI; retain a definite refusal's unedited text.
@@ -459,7 +460,7 @@ export function createSync(options: SyncOptions) {
           return result
         }))
         // Close cancels the wait while detached sends still observe definite refusals.
-        if (!result.ok && result.kind === 'network' && !result.cancelled) submitted.delete(effect.client_message_id)
+        if (result.timedOut) submitted.delete(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
           : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network',
             retryAfterMs: result.retryAfterMs })

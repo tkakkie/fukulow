@@ -888,8 +888,8 @@ it.each(['ACK', 'network', 'timeout', '503'] as const)(
   'A to B to A never restores an ACK or unknown outcome in the current Composer: %s', async outcome => {
     const { s, send, composer } = await returnWithPendingSend(outcome === 'timeout')
     send.resolve(outcome === 'ACK' ? ok(sentBy('m1', 101, send.body.client_message_id, send.body.body))
-      : outcome === 'network' ? { ok: false, kind: 'network' }
-        : { ok: false, kind: 'http', status: outcome === 'timeout' ? 409 : 503 })
+      : outcome === 'network' || outcome === '503' ? { ok: false, kind: 'network' }
+        : { ok: false, kind: 'http', status: 409 })
     await settle()
     expect(composer.last).toMatchObject({ draft: '', pending: [] })
     expect(s.stores.at(-1)!.get({ organizationId: 'o', channelId: 'A' })).toBe('')
@@ -948,8 +948,8 @@ it.each(['new topic', 'topic'] as const)(
     for (const outcome of ['ACK', 'network', 'timeout', '503'] as const) {
       const { s, send, composer } = await returnWithPendingSend(outcome === 'timeout', target)
       send.resolve(outcome === 'ACK' ? ok({ ...sentBy('m1', 101, send.body.client_message_id, send.body.body), topic_id: 'T' })
-        : outcome === 'network' ? { ok: false, kind: 'network' }
-          : { ok: false, kind: 'http', status: outcome === 'timeout' ? 409 : 503 })
+        : outcome === 'network' || outcome === '503' ? { ok: false, kind: 'network' }
+          : { ok: false, kind: 'http', status: 409 })
       await settle()
       expect(composer.last).toMatchObject({ draft: '', topicDraft: '', pending: [] })
       await composer.unmount()
