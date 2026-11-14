@@ -404,6 +404,17 @@ This proves only the controlled single-Organization reservation scenario. Simult
 
 #80 cost evaluation (Rust 1.99.0, local macOS ARM64, Node 26.13.0): the exact `node scripts/check-module-direction.ts` step, with dependencies cached and `cargo clean -p fukulow-server` before each of three runs, had medians 1.74 s before / 1.68 s after (no measurable regression at this scale). The negative/positive fixture suite grew from 54 to 71 tests, 6.07 s / 7.48 s in single runs. New unstable surface: HIR binding visitation, `pat_ty`, `expr_ty_opt`, `Ty::walk`, `GenericArg::as_type` and `AdtDef::did`; existing typeck queries are reused, with no new rustc crate or application dependency. This is a small accepted maintenance increment: each toolchain bump must rebuild the driver, verify these APIs and run all fixtures plus production/test targets, including type-level array constants without body expression types. The root nominal-wrapper limit stays Tier 2.
 
+### #318 explicit edge-table cost (2026-11-14)
+
+Before: `c30f79d8177fc0645159a11b98fc5d5abf97f3a5` (`origin/main`, the clean starting checkout; local `main` was older, but its checker files were identical). After: the same checkout with #318 checker changes. Rust 1.99.0 (b940084d7), Node 26.13.0, macOS 27.0.1 ARM64, Apple M5, 32 GiB RAM. Same method as #80: prebuilt web assets, cached dependencies, an untimed warm-up per version, then the exact `node scripts/check-module-direction.ts` step timed with `/usr/bin/time -p`, with `cargo clean -p fukulow-server` before each of three runs. The fixture command is `node --test scripts/check-module-direction.test.ts`, timed once per version, including driver builds.
+
+| Version | Check runs (s) | Check median (s) | Fixture suite (s) | Tests passed |
+| --- | --- | --- | --- | --- |
+| Before | 10.22, 9.58, 9.12 | 9.58 | 8.25 | 71 |
+| After | 9.05, 8.96, 9.15 | 9.05 | 12.06 | 84 |
+
+No observed production-check regression; the fixture suite now builds both production and fixture-only drivers and covers table validation, injection isolation, siblings and direct-edge enforcement. Limits: other AI workers may be running on this host; runs were sequential before/after, with no CPU isolation, and the difference is within run variability. #80's historical 1.74 s / 1.68 s medians used the same method, but a different source snapshot and host conditions, so absolute times are not directly comparable. No new rustc API or dependency was added.
+
 ## Topic projection paging feasibility (#137, 2026-11-11)
 
 Target chosen before measurement: full in-process HTTP timeline-page p95 <=100 ms at concurrency 4, 50 items, both recent and deep W-relative boundaries. Query: aggregate immutable Messages <=W by Topic (min/max/count), union plain Messages, apply the exclusive boundary and descending LIMIT 51, then join only selected latest payloads/names; return ascending. Index: `messages (organization_id, channel_id, topic_id, seq)` plus the existing unique Channel/seq index. It does not establish page-size-bounded query work.
