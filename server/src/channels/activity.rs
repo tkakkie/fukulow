@@ -643,6 +643,7 @@ struct TargetChange {
     organization: Uuid,
     target: Uuid,
     before: TargetState,
+    registrations: HashMap<Uuid, u64>,
 }
 impl auth::activity::ActivityChanges for Activity {
     fn channel(
@@ -685,11 +686,18 @@ impl auth::activity::ActivityChanges for Activity {
         target: Uuid,
     ) -> auth::activity::Capture<'a> {
         Box::pin(async move {
+            let registrations = self
+                .snapshot(organization)
+                .into_iter()
+                .filter(|(entry, _)| entry.member.0 == target)
+                .map(|(entry, epoch)| (entry.id, epoch))
+                .collect();
             Ok(Box::new(TargetChange {
                 activity: self.clone(),
                 organization,
                 target,
                 before: target_state(tx, organization, target).await?,
+                registrations,
             }) as Box<dyn auth::activity::ActivityChange>)
         })
     }
@@ -737,7 +745,13 @@ impl auth::activity::ActivityChange for TargetChange {
                         .filter(|id| !after.visible.contains_key(id))
                     {
                         self.activity
-                            .revoked(&pool, self.organization, self.target, *channel)
+                            .revoked(
+                                &pool,
+                                self.organization,
+                                self.target,
+                                *channel,
+                                &self.registrations,
+                            )
                             .await?;
                     }
                     for channel in after
@@ -815,11 +829,17 @@ impl Activity {
         organization: Uuid,
         target: Uuid,
         channel: Uuid,
+        registrations: &HashMap<Uuid, u64>,
     ) -> Result<(), sqlx::Error> {
         let captured: Vec<_> = self
             .snapshot(organization)
             .into_iter()
-            .filter(|(e, _)| e.member.0 == target)
+            .filter(|(e, epoch)| {
+                e.member.0 == target
+                    && registrations
+                        .get(&e.id)
+                        .is_some_and(|before| *epoch == before.wrapping_add(1))
+            })
             .collect();
         #[cfg(test)]
         test_pause(organization, channel, "snapshot", Some(target)).await;

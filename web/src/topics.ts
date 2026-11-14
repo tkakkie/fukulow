@@ -11,14 +11,14 @@ import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
 type Sync = ReturnType<typeof createSync>
 export type TopicsApi = {
   listTimeline(channel: string, query?: ListTimelineQuery): Promise<Result<TimelinePage>>
-  listTopics(channel: string, query?: ListTopicsQuery): Promise<Result<TopicPage>>
-  getTopicSummary(channel: string, topic: string): Promise<Result<TopicSummaryResponse>>
+  listTopics(channel: string, query?: ListTopicsQuery, signal?: AbortSignal): Promise<Result<TopicPage>>
+  getTopicSummary(channel: string, topic: string, signal?: AbortSignal): Promise<Result<TopicSummaryResponse>>
   listTopicMessages(channel: string, topic: string, query?: TopicHistoryQuery): Promise<Result<MessagePage>>
 }
 export const topicsApi = (organizationId: string): TopicsApi => ({
   listTimeline: (c, q) => api.listTimeline(organizationId, c, q),
-  listTopics: (c, q) => api.listTopics(organizationId, c, q),
-  getTopicSummary: (c, t) => api.getTopicSummary(organizationId, c, t),
+  listTopics: (c, q, signal) => api.listTopics(organizationId, c, q, undefined, signal),
+  getTopicSummary: (c, t, signal) => api.getTopicSummary(organizationId, c, t, undefined, signal),
   listTopicMessages: (c, t, q) => api.listTopicMessages(organizationId, c, t, q),
 })
 const MAX_SUMMARY_RETRIES = 4
@@ -243,10 +243,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     let through = 0
     const observers = new Set<(response: TopicSummaryResponse) => void>()
     const target = createActivityTarget({
-      async load() {
+      async load(signal) {
         w.summaries.add(topic)
         through = w.evidence.sequences.get(topic)?.at(-1)?.end ?? 0
-        const pending = options.api.getTopicSummary(channel, topic)
+        const pending = options.api.getTopicSummary(channel, topic, signal)
         return (await read(channel, w, `summary:${topic}`, () => pending)).result
       },
       hide: () => { w.reads.delete(`summary:${topic}`); clearSummaryRetry(w, topic) },
@@ -312,7 +312,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const existing = activityTargets.get(key)
     if (existing) return existing.target
     const target = createActivityTarget({
-      load: async () => (await readList(channel, w, () => options.api.listTopics(channel))).result,
+      load: async signal => (await readList(channel, w, () => options.api.listTopics(channel, undefined, signal))).result,
       hide: () => { w.listVersion++; w.reads.delete('list') },
       accept: response => {
         if (!current(channel, w)) return

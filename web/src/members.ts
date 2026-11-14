@@ -43,9 +43,9 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     set({ error: memberError(r) })
   }
   const activityTarget = createActivityTarget({
-    async load() {
+    async load(signal) {
       const sequence = ++loadSequence
-      const r = await deps.listMembers(organizationId)
+      const r = await deps.listMembers(organizationId, undefined, signal)
       // Account rejection and current-selection Membership loss outlive freshness fences.
       if (!r.ok && (r.kind === 'http' && r.status === 401 || !closed && isOrganizationUnavailable(r))) failed(r)
       return r.ok ? { ok: true as const, data: { members: r.data.members, sequence } } : r

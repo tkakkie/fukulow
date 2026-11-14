@@ -98,6 +98,46 @@ for (const trigger of ['notice', 'periodic']) for (const key of keys) for (const
     activity.close(); expect(vi.getTimerCount()).toBe(0)
   })
 }
+it('aborts a timed out load before retrying while its promise remains pending', async () => {
+  const trace: string[] = []
+  let firstSignal: AbortSignal | undefined
+  const load = vi.fn((signal: AbortSignal): Promise<Result<string>> => {
+    if (!firstSignal) {
+      firstSignal = signal
+      signal.addEventListener('abort', () => trace.push('aborted'), { once: true })
+      return new Promise(() => {})
+    }
+    expect(firstSignal.aborted).toBe(true)
+    trace.push('retried')
+    return Promise.resolve(ok('current'))
+  })
+  const accept = vi.fn()
+  const target = createActivityTarget({ load, accept, random: () => 0, timeoutMs: 1000 })
+  target.refresh()
+  expect(firstSignal?.aborted).toBe(false)
+  await vi.advanceTimersByTimeAsync(999)
+  expect(load).toHaveBeenCalledOnce()
+  expect(firstSignal?.aborted).toBe(false)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(firstSignal?.aborted).toBe(true)
+  await vi.advanceTimersByTimeAsync(499)
+  expect(load).toHaveBeenCalledOnce()
+  await vi.advanceTimersByTimeAsync(1)
+  expect(load).toHaveBeenCalledTimes(2)
+  expect(trace).toEqual(['aborted', 'retried'])
+  expect(accept).toHaveBeenCalledWith('current')
+  target.close()
+})
+it.each(['suspend', 'close'] as const)('%s aborts a pending activity load', async action => {
+  let signal: AbortSignal | undefined
+  const target = createActivityTarget({ load: (next: AbortSignal) => { signal = next; return new Promise<Result<string>>(() => {}) }, accept() {} })
+  target.refresh()
+  expect(signal?.aborted).toBe(false)
+  target[action]()
+  expect(signal?.aborted).toBe(true)
+  await flush()
+  target.close()
+})
 it('periodic_reconciliation_spreads_first_runs_and_keeps_an_independent_schedule', async () => {
   const offsets = [0, 0.25, 0.5, 0.999]
   const times: number[] = []

@@ -6,7 +6,7 @@ export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, 
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
-  load(): Promise<Result<T>>
+  load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   hide?(): void
   error?(result: Exclude<Result<T>, { ok: true }>): void
@@ -21,6 +21,7 @@ export function createActivityTarget<T>(options: {
   let failure: Exclude<Result<T>, { ok: true }> | undefined
   let deadline: ReturnType<typeof setTimeout> | undefined
   let completion: (() => void) | undefined
+  let controller: AbortController | undefined
   function schedule(ms: number) {
     if (timer !== undefined || closed) return
     due = Date.now() + ms
@@ -33,15 +34,18 @@ export function createActivityTarget<T>(options: {
     if (retry) return
     inFlight = true; queued = false
     const own = generation
+    const request = new AbortController()
+    controller = request
     let cancelled = false
     let pending: Promise<Result<T>>
-    try { pending = options.load().catch((): Result<T> => ({ ok: false, kind: 'network' })) }
+    try { pending = options.load(request.signal).catch((): Result<T> => ({ ok: false, kind: 'network' })) }
     catch { pending = Promise.resolve({ ok: false, kind: 'network' }) }
     const result = await Promise.race([pending, new Promise<Result<T>>(resolve => {
-      completion = () => { cancelled = true; resolve({ ok: false, kind: 'network' }) }
-      deadline = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.timeoutMs ?? 10_000)
+      completion = () => { cancelled = true; request.abort(); resolve({ ok: false, kind: 'network' }) }
+      deadline = setTimeout(() => { request.abort(); resolve({ ok: false, kind: 'network' }) }, options.timeoutMs ?? 10_000)
     })])
     clearTimeout(deadline); deadline = undefined; completion = undefined
+    if (controller === request) controller = undefined
     inFlight = false
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
@@ -76,8 +80,8 @@ export function createActivityTarget<T>(options: {
     ensure() { if (!closed && !stopped && !dirty && !inFlight && timer === undefined && !retry) { dirty = true; return run() } },
     refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; dirty = true; return run() },
-    suspend() { generation++; dirty = false; queued = false; retry = false; clearTimeout(timer); timer = undefined; completion?.() },
-    close() { closed = true; generation++; clearTimeout(timer); clearTimeout(deadline); completion?.(); timer = undefined },
+    suspend() { generation++; dirty = false; queued = false; retry = false; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
+    close() { closed = true; generation++; clearTimeout(timer); clearTimeout(deadline); completion?.(); controller?.abort(); timer = undefined },
   }
 }
 

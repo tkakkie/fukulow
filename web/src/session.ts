@@ -53,7 +53,7 @@ export function createSession(options: SessionOptions) {
     random: options.sync?.random,
   })
   const source = options.channelsApi ?? {
-    listChannels: () => api.listChannels(organizationId),
+    listChannels: signal => api.listChannels(organizationId, undefined, signal),
     createChannel: body => api.createChannel(organizationId, body),
   }
   const timeline = options.sync?.api ?? {
@@ -68,8 +68,8 @@ export function createSession(options: SessionOptions) {
       sendMessage: (channel, body) => observe(timeline.sendMessage(channel, body)) },
     topicsApi: {
       listTimeline: (channel, query) => observe(topicSource.listTimeline(channel, query)),
-      listTopics: (channel, query) => observe(topicSource.listTopics(channel, query)),
-      getTopicSummary: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
+      listTopics: (channel, query, signal) => observe(signal ? topicSource.listTopics(channel, query, signal) : topicSource.listTopics(channel, query)),
+      getTopicSummary: (channel, topic, signal) => observe(signal ? topicSource.getTopicSummary(channel, topic, signal) : topicSource.getTopicSummary(channel, topic)),
       listTopicMessages: (channel, topic, query) => observe(topicSource.listTopicMessages(channel, topic, query)),
     },
     checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
@@ -112,7 +112,7 @@ export function createSession(options: SessionOptions) {
   let watched: string | null = null
   const channels = createChannels(
     {
-      listChannels: () => observe(options.channelsApi ? source.listChannels() : unreadSource.listChannels()),
+      listChannels: signal => observe(options.channelsApi ? source.listChannels(signal) : unreadSource.listChannels(signal)),
       createChannel: body => observe(source.createChannel(body)),
     },
     id => {
@@ -141,7 +141,7 @@ export function createSession(options: SessionOptions) {
     void sync.unavailable()
   }
   const capabilities = createActivityTarget({
-    load: () => observe(api.getOrganizationMe(organizationId)),
+    load: signal => observe(api.getOrganizationMe(organizationId, undefined, signal)),
     accept: identity => options.onIdentity?.(identity),
     hide: () => options.onIdentityInvalidated?.(),
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.error === 'organization_unavailable'),

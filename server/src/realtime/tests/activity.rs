@@ -1446,6 +1446,109 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
 }
 
 #[fukulow_test::test]
+async fn socket_registered_after_access_removal_receives_no_old_revocation(pool: PgPool) {
+    use crate::auth::activity::{ActivityChange, ActivityChanges, Capture, ChannelChange};
+    struct DelayedChanges {
+        activity: crate::channels::activity::Activity,
+        entered: std::sync::Arc<tokio::sync::Semaphore>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+    struct DelayedChange {
+        change: Box<dyn ActivityChange>,
+        entered: std::sync::Arc<tokio::sync::Semaphore>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+    impl ActivityChanges for DelayedChanges {
+        fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
+            self.activity.channel(pool, organization, change);
+        }
+        fn capture<'a>(
+            &'a self,
+            tx: &'a mut sqlx::PgConnection,
+            organization: Uuid,
+            target: Uuid,
+        ) -> Capture<'a> {
+            Box::pin(async move {
+                Ok(Box::new(DelayedChange {
+                    change: self.activity.capture(tx, organization, target).await?,
+                    entered: self.entered.clone(),
+                    release: self.release.clone(),
+                }) as Box<dyn ActivityChange>)
+            })
+        }
+        fn directory(&self, pool: PgPool, organization: Uuid, target: Uuid) {
+            self.activity.directory(pool, organization, target);
+        }
+    }
+    impl ActivityChange for DelayedChange {
+        fn committed(self: Box<Self>, pool: PgPool) {
+            tokio::spawn(async move {
+                self.entered.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+                self.change.committed(pool);
+            });
+        }
+    }
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, token) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, target).await;
+    let mut before = connect(&f, &token).await;
+    let mut control = connect(&f, &f.token).await;
+    let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    f.state
+        .session_changes
+        .set_activity(std::sync::Arc::new(DelayedChanges {
+            activity: f.state.message_delivery.channel_access.activity.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+    let response = request(
+        &f.app,
+        "DELETE",
+        &format!("/api/v1/channels/{private}/members/{target}"),
+        &f.token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let mut after = connect(&f, &token).await;
+    let gate =
+        crate::channels::activity::pause_member(f.organization, private, "snapshot", Some(target));
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    gate.release.add_permits(1);
+
+    assert!(
+        notices(&f, &mut before)
+            .await
+            .contains(&json!({"type":"channel_access_revoked","channel_id":private}))
+    );
+    assert!(
+        !notices(&f, &mut after)
+            .await
+            .iter()
+            .any(|event| event["type"] == "channel_access_revoked")
+    );
+    assert!(
+        notices(&f, &mut control)
+            .await
+            .contains(&json!({"type":"channel_members_changed","channel_id":private}))
+    );
+}
+
+#[fukulow_test::test]
 async fn failed_directory_publication_never_resets_invisible_guests(pool: PgPool) {
     use crate::auth::activity::ActivityChanges;
     use crate::channels::activity::{TestFault, fail, pause};

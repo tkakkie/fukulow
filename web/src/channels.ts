@@ -4,7 +4,7 @@ import type { Channel, ChannelVisibility, CreateChannelRequest, Result } from '.
 export type { Channel, ChannelVisibility }
 
 export type ChannelsApi = {
-  listChannels: () => Promise<Result<{ channels: Channel[] }>>
+  listChannels: (signal?: AbortSignal) => Promise<Result<{ channels: Channel[] }>>
   createChannel: (body: CreateChannelRequest) => Promise<Result<Channel>>
 }
 
@@ -38,7 +38,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   }
 
   const target = activity ? createActivityTarget({
-    load: () => api.listChannels(),
+    load: signal => api.listChannels(signal),
     accept(data) {
       set({ status: 'ready', channels: data.channels, selectedId: state.selectedId ?? data.channels[0]?.id ?? null })
       onSnapshot?.(data.channels)

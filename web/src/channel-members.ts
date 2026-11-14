@@ -31,7 +31,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     })]) } finally { clearTimeout(timer) }
   }
   const activityTarget = createActivityTarget({
-    load: () => request(() => deps.listChannelMembers(org, channel)),
+    load: signal => request(() => deps.listChannelMembers(org, channel, undefined, signal)),
     accept: data => { if (!state.unavailable) set({ members: data.members, loading: false, error: '' }) },
     hide: () => set({ members: [], loading: true }),
     error: r => {
