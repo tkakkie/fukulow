@@ -676,6 +676,34 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
     assert_variant_contract(
         "ServerEvent",
         &[
+            (ServerEvent::ActivityReady, "activity_ready"),
+            (ServerEvent::ActivityReset, "activity_reset"),
+            (
+                ServerEvent::ChannelActivity { channel_id, seq: 1 },
+                "channel_activity",
+            ),
+            (
+                ServerEvent::ReadPositionChanged {
+                    channel_id,
+                    topic_id: None,
+                    read_seq: 0,
+                },
+                "read_position_changed",
+            ),
+            (
+                ServerEvent::ChannelAccessGained { channel_id },
+                "channel_access_gained",
+            ),
+            (
+                ServerEvent::ChannelAccessRevoked { channel_id },
+                "channel_access_revoked",
+            ),
+            (ServerEvent::ChannelListChanged, "channel_list_changed"),
+            (
+                ServerEvent::ChannelMembersChanged { channel_id },
+                "channel_members_changed",
+            ),
+            (ServerEvent::MembersChanged, "members_changed"),
             (ServerEvent::Message { message }, "message"),
             (
                 ServerEvent::ChannelAccessLost { channel_id },

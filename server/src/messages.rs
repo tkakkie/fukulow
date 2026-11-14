@@ -695,6 +695,13 @@ async fn persist_admitted(
             }
             return Err(error.into());
         }
+        delivery.channel_access.activity.message(
+            pool.clone(),
+            organization_id,
+            channel_id,
+            sender,
+            message.seq,
+        );
         notification.spawn(pool.clone(), message.clone());
         return Ok(message);
     }

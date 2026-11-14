@@ -28,7 +28,7 @@ async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
         }
         let started = started.clone();
         clients.spawn(async move {
-            while let Some(frame) = socket.next().await {
+            while let Some(frame) = message_next(&mut socket).await {
                 match frame.unwrap() {
                     tungstenite::Message::Ping(_) => socket.flush().await.unwrap(),
                     tungstenite::Message::Close(Some(close)) => {

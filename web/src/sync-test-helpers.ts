@@ -1,3 +1,5 @@
+import { vi } from 'vitest'
+import { createActivity, createActivityTarget, type ActivityNotice } from './activity'
 import type { Result, TimelinePage, TopicSummary } from './api'
 import { createTopics, type TopicsApi } from './topics'
 import { createTopicSync } from './topic-sync'
@@ -68,6 +70,8 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
     listReplyChain: (channel, anchor, query) => request({ type: 'fetch_reply_chain', channel, anchor, ...query }),
   } }, composition?.sync) : undefined
   const sync = replyComposition?.sync ?? composition?.sync ?? createSync(options)
+  const activity = createActivity({ watched: channel => sync.get().channels[channel]?.subscription?.confirmed === true, random: () => 0.5 })
+  const stopActivity = sync.onActivity(notice => activity.notice(notice))
   const replies = replyComposition?.replies
   const topics = composition?.topics ?? createTopics(sync, { api: topicsApi })
   let unreadSubject: string | undefined
@@ -82,7 +86,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
   } }) : undefined
   const client = {
     sync: { ...sync,
-      async close() { unread?.close(); await sync.close() },
+      async close() { stopActivity(); activity.close(); unread?.close(); await sync.close() },
       replaceSession(selfId: string) { unread?.replaceSession(); return sync.replaceSession(selfId) },
     }, topics, replies, unread, sockets, allEffects,
     observe: () => {
@@ -118,6 +122,12 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
       const socket = sockets.at(-1)!
       const resolve = (r: Result<unknown>) => (e!.resolve as (r: Result<unknown>) => void)(r)
       switch (i.type) {
+        case 'hold_target': activity.hold(i.target as string, createActivityTarget({
+          load: () => request({ type: 'refetch', target: i.target }), accept() {}, random: () => 0,
+        })); break
+        case 'activity_notice': socket.onEvent(i.notice as ActivityNotice); break
+        case 'time_passed': await vi.advanceTimersByTimeAsync(i.ms as number); break
+        case 'refetch_result': resolve(i.status === 200 ? { ok: true, data: {} } : { ok: false, kind: 'http', status: i.status as number }); break
         case 'organization_refused': void sync.unavailable(); break
         case 'session_start': void sync.start(); break
         case 'session_replaced': void client.sync.replaceSession('me'); break

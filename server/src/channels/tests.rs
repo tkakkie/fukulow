@@ -623,6 +623,11 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
         format!("Bearer {token}").parse().unwrap(),
     );
     let (mut socket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    let ready = socket.next().await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(ready.to_text().unwrap()).unwrap()["type"],
+        "activity_ready"
+    );
     for (channel_id, expected) in [(private_id, "error"), (public_id, "subscribed")] {
         socket
             .send(Message::text(

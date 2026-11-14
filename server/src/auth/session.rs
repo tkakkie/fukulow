@@ -48,6 +48,7 @@ struct Sessions {
 /// Only connected sessions retain a signal; sign-out never wakes unrelated sessions.
 #[derive(Clone)]
 pub struct SessionChanges {
+    activity: Arc<Mutex<Option<super::activity::Hook>>>,
     sessions: Arc<Mutex<Sessions>>,
     worker: Arc<Once>,
     interval: Duration,
@@ -65,6 +66,7 @@ impl Default for SessionChanges {
         let default_fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         Self {
             subscriptions: Default::default(),
+            activity: Default::default(),
             sessions: Default::default(),
             worker: Arc::new(Once::new()),
             interval: RECHECK_INTERVAL,
@@ -87,6 +89,53 @@ impl Default for SessionChanges {
 }
 
 impl SessionChanges {
+    pub(crate) fn set_activity(&self, hook: super::activity::Hook) {
+        *self.activity.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+    pub(crate) async fn capture_activity(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        organization: Uuid,
+        target: Uuid,
+    ) -> Result<Option<Box<dyn super::activity::ActivityChange>>, sqlx::Error> {
+        let hook = self
+            .activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match hook {
+            Some(hook) => hook
+                .capture(connection, organization, target)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+    pub(crate) fn channel_changed(
+        &self,
+        pool: PgPool,
+        organization: Uuid,
+        change: super::activity::ChannelChange,
+    ) {
+        let hook = self
+            .activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook.channel(pool, organization, change);
+        }
+    }
+    pub(crate) fn directory_changed(&self, pool: PgPool, organization: Uuid, target: Uuid) {
+        let hook = self
+            .activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook.directory(pool, organization, target);
+        }
+    }
     /// Not started is normal; reuse the supervisor's latched exit state.
     pub(crate) fn fallback_available(&self) -> bool {
         !self

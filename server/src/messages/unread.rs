@@ -211,7 +211,9 @@ async fn mark_inner(
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
     let w = topics::watermark(state, organization, channel).await?;
-    let read_seq = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
+    let state = state.clone();
+    let read_seq = tokio::spawn(async move {
+    let (read_seq, changed) = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
         sqlx::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
             .await?;
@@ -227,6 +229,11 @@ async fn mark_inner(
         let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")
             .bind(organization).bind(channel).bind(member.0).bind(member.1).fetch_optional(&mut *tx).await?.ok_or(MessageError::NotFound)?;
         let requested = input.read_seq.min(w).max(initial);
+        let previous: i64 = if let Some(topic) = topic {
+            sqlx::query_scalar("SELECT read_seq FROM topic_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND topic_id=$4").bind(organization).bind(channel).bind(member.0).bind(topic).fetch_optional(&mut *tx).await?.unwrap_or(initial)
+        } else {
+            sqlx::query_scalar("SELECT read_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(organization).bind(channel).bind(member.0).fetch_one(&mut *tx).await?
+        };
         let read_seq = if let Some(topic) = topic {
             let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id=$1 AND channel_id=$2 AND id=$3)")
                 .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
@@ -240,8 +247,11 @@ async fn mark_inner(
             sqlx::query_scalar("UPDATE channel_read_positions SET read_seq=GREATEST(read_seq,$4) WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 RETURNING read_seq")
                 .bind(organization).bind(channel).bind(member.0).bind(requested).fetch_one(&mut *tx).await?
         };
-        Ok::<_, MessageError>(read_seq)
+        Ok::<_, MessageError>((read_seq, read_seq > previous))
     }).await?;
+    if changed { state.message_delivery.channel_access.activity.spawn(state.pool.clone(), organization, channels::activity::Notice::ReadPositionChanged { channel_id: channel, topic_id: topic, read_seq }, Some(member.0)); }
+    Ok::<_, MessageError>(read_seq)
+    }).await.map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(ReadPosition { read_seq }),
