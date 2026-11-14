@@ -55,6 +55,52 @@ async function postMessage(
   return (await secretSafe(() => res.json())) as components['schemas']['Message']
 }
 
+test('first Unread pages beyond the main cap and read reporting survives trimming and newer refetch', async ({ page, browser }) => {
+  test.setTimeout(60_000)
+  const org = await signInOwner(page.request)
+  const channel = await createChannel(page.request, org, `unread-window-${crypto.randomUUID().slice(0, 8)}`)
+  const peer = await createSecondMemberRequest(page.request, browser, org)
+  try {
+    const first = await postMessage(peer.request, org, channel.id, '窓より前の最初の未読')
+    for (let i = 1; i < 450; i += 8) await Promise.all(Array.from({ length: Math.min(8, 450 - i) }, (_, n) =>
+      postMessage(peer.request, org, channel.id, `長い未読履歴 ${i + n}`)))
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(`/o/${org}/c/${channel.id}`)
+    const main = page.locator('#main-content'), scroll = main.locator('.timeline-scroll')
+    await expect(main.locator(`[data-message-id="${first.id}"] [data-read-marker="true"]`)).toBeInViewport()
+    expect(await main.locator('[data-message-id]').count()).toBeLessThan(40)
+    await scroll.evaluate(async el => {
+      while (el.scrollTop + el.clientHeight < el.scrollHeight - 1) {
+        el.scrollTop += Math.floor(el.clientHeight * .7); el.dispatchEvent(new Event('scroll'))
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      }
+    })
+    await main.getByRole('button', { name: '最新のメッセージを読み込む', exact: true }).click()
+    await expect(main.getByRole('button', { name: '以前のメッセージを読み込む', exact: true })).toBeEnabled()
+    await scroll.evaluate(async el => {
+      el.scrollTop = 0; el.dispatchEvent(new Event('scroll'))
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      while (el.scrollTop + el.clientHeight < el.scrollHeight - 1) {
+        el.scrollTop += Math.floor(el.clientHeight * .7); el.dispatchEvent(new Event('scroll'))
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      }
+    })
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/v1/orgs/${org}/channels`)
+      const data = await response.json() as components['schemas']['ChannelList']
+      return data.channels.find(c => c.id === channel.id)?.read_seq
+    }).toBe(450)
+    for (let i = 0; i < 8; i++) await main.getByRole('button', { name: '以前のメッセージを読み込む', exact: true }).click()
+    const older = main.getByRole('button', { name: '以前のメッセージを読み込む', exact: true })
+    await expect(older).toHaveCount(0)
+    const composer = main.getByRole('textbox', { name: 'メッセージ', exact: true })
+    await composer.focus(); await composer.press('ArrowUp')
+    await expect(main.locator('.ui-message-row:focus')).toHaveCount(1)
+    await page.keyboard.press('Home')
+    await expect(main.locator(`[data-message-id="${first.id}"] [data-read-marker="true"]`)).toBeAttached()
+  } finally { await peer.close() }
+})
+
 test('desktop 1280px: second user posts in main and Topics; first user sees badges, opens at first Unread with 未読 marker, scrolls to mark main read, Topic view marks only its Topic, and badge stays 0 after reload', async ({
   page,
   browser,
@@ -159,8 +205,10 @@ test('desktop 1280px: second user posts in main and Topics; first user sees badg
     await expect(timelineTopicA.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 2件')
     await expect(timelineTopicB.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
 
-    // Read marker stays at firstUnreadItem for the entire visit even after main Unread count reaches 0
+    // A virtualized row restores the visit's marker when it re-enters the viewport.
+    await scrollContainer.evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')) })
     await expect(readMarker).toHaveText('未読')
+    await scrollContainer.evaluate(el => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')) })
 
     // 4. Open Topic A -> shows 未読 marker on Topic A's first Unread message and marks ONLY Topic A as read
     await timelineTopicA.click()
