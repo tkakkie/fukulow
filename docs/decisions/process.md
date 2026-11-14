@@ -57,9 +57,13 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #319 target DAG: nodes auth, channels, messages, realtime, database, shutdown; 10 allowed edges, all in use today. The domain modules keep their current relations (every ordered pair is used); database and shutdown are leaves. M1 extends the checker to these leaves and moves no module.
 - #319 kept on purpose: Channel policy in `auth` (one `authorize`); predicates in `channels` (table owner); Unread triggers in `messages` (equivalence test); DI traits, not an `auth -> channels` cycle; GET /channels in `messages` (one Unread snapshot); `AccessChanges` in `Delivery` (M2 declined).
 - #319 edges are allowed only when used: `auth -> database` comes with the #314 change that needs it. M1 adds the leaves after #318 (which keeps today's 4 nodes, 6 edges), re-checks main and includes `auth -> database` if #314 landed. #314 does not wait for #318 or M1.
-- #296 B: RPO is a 24 h target, not a guarantee, from the data capture time of the newest verified off-VPS backup (not copy/verify time). Backup, off-VPS copy and hash check to be automated (#316; manual until then), alerting on failure or capture 24 h old or older; retention, secrets, drill stay.
+- #296 B: RPO is a 24 h target, not a guarantee, from the data capture time of the newest verified off-VPS backup (not copy/verify time). Backup, off-VPS copy and hash check remain manual until #316 production approval, alerting on failure or capture 24 h old or older; retention, secrets, drill stay.
 - #296 WAL archiving and PITR are future requirements: the first deploy (#285) is dogfooding. Any new external service or paid storage needs maintainer approval of its setup and cost before implementation.
 - #297 A: toolchains (rust-toolchain.toml, .node-version/engines) and images stay exact; libraries are pinned by committed lockfiles, manifests may use ranges (not Playwright, exact for its image), and resolved versions change only in reviewed PRs. Reason: lockfiles give reproducibility without churn.
+
+- #316 round 5 uses age-encrypted R2 backups and curl SigV4 with PUT/HEAD/full GET verification; marker last excludes partial uploads. Dedicated backup/image buckets separate credentials. Mock implementation only; production, payment and notification setup remain on hold.
+- #316 keeps 30 verified backups plus latest drilled copy by guarded count pruning, no lifecycle. Locks: backups 35 days, drilled copies 40 days. Stale or insufficient inventory freezes deletion, preserving recovery through outages.
+- #316 checker runs independently of the VPS, reports daily alive/shared capacity and alerts on stale capture, malformed data, overdue drills and implausible size. Channel/platform failure still needs weekly manual inspection; #285 remains blocked.
 
 ## Entries in other parts
 

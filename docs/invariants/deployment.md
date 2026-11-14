@@ -44,6 +44,12 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 | App responses, including errors/fallbacks, carry strict CSP, nosniff and Referrer-Policy; CSP Host reflection cannot inject directives | `server/src/lib.rs::security_headers_cover_success_errors_and_fallbacks`, `server/src/lib.rs::csp_websocket_source_rejects_injected_or_ambiguous_hosts` |
 | Only Vite manifest assets get immutable caching; HTML/fallback/unhashed files revalidate; API remains no-store | `server/src/lib.rs::html_and_unhashed_files_revalidate_and_hashed_assets_are_immutable`, `server/src/lib.rs::security_headers_cover_success_errors_and_fallbacks` |
 | Membership/manager PATCH and Capabilities are generated; Channel members expose manager, no email/credentials; loss-event data is channel_id only | `server/tests/api_contract.rs::channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated` |
+| Only strict marked generations with matching capture and archive HEAD count for freshness, retention or restore selection | `scripts/backup-r2.test.ts::verified predicate rejects partial malformed unmarked and future generations` |
+| Lost upload responses require matching HEAD; uncertain generations retry fresh suffixes before any verification marker | `scripts/backup-r2.test.ts::upload verifies checksums readback and lost PUT response without overwriting`, `scripts/backup-r2.test.ts::mismatched HEAD or truncated GET abandons generation and retries new suffix` |
+| Stale or insufficient verified inventory freezes pruning, preserving at least thirty backups through an outage | `scripts/backup-r2.test.ts::long outage and insufficient or stale inventory freeze all pruning` |
+| Pruning keeps newest thirty, latest drilled copy/source and locked objects; each run deletes at most five generations | `scripts/backup-r2.test.ts::pruning keeps newest thirty latest drilled source locks and maximum five` |
+| Backup and image capabilities stay separate; the checker accesses images only by listing | `scripts/backup-r2.test.ts::backup and image capabilities cannot cross buckets and checker only lists images` |
+| Checker freshness uses capture time; capacity, operations, implausible sizes, overdue drill and daily alive are reported | `scripts/backup-r2.test.ts::capture time drives exact staleness boundary and independent checker alerts`, `scripts/backup-r2.test.ts::capacity operations plausibility overdue drill and daily alive alerts` |
 
 ## Rows in other parts
 
@@ -63,3 +69,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [auth](auth.md): `handlers_and_fanout_require_authenticated_context`, `deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled`
 
 - [auth](auth.md): `account_security_contract_records_paths_errors_and_account_lock_order`
+- [auth](auth.md): `invite_revocation_upgrade_backfills_existing_rows_and_pages_tied_expiries`

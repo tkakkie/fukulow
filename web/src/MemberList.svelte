@@ -2,6 +2,7 @@
   import type { Identity, Member, Role } from './api'
   import { roles, roleNames } from './members'
   import type { membersAdapter } from './members.svelte'
+  import OutstandingInvites from './OutstandingInvites.svelte'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
   import Input from './ui/Input.svelte'
@@ -31,7 +32,7 @@
   const capabilities = $derived(identity.organization.capabilities)
 </script>
 
-<details class="member-list" ontoggle={event => { if (event.currentTarget.open) onopen?.() }}>
+<details class="member-list" ontoggle={event => { if (event.currentTarget.open) { onopen?.(); if (capabilities.can_invite.allowed) void model.invites.load() } }}>
   <summary bind:this={summary} class="member-list__summary">メンバー</summary>
   <div class="member-list__body">
     {#if s.loading}
@@ -74,6 +75,7 @@
       {/each}
     </ul>
     {#if capabilities.can_invite.allowed}
+      <OutstandingInvites model={model.invites} members={s.members} />
       <form
         class="member-list__invite-form"
         onsubmit={(e) => {

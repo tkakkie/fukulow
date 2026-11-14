@@ -51,3 +51,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [messages](messages.md): `#311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id}`, `#311 Manager PATCH uses`
 
 - [auth](auth.md): `#304 recheck current Session/password under locks`, `#304 wrong current password is 403`
+
+- [auth](auth.md): `#303 management follows`

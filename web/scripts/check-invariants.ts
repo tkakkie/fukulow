@@ -28,6 +28,8 @@
 //     NOT detected: runtime skips (test.skip(cond), skipIf/runIf, ctx.skip()), and .only: it silently
 //     disables other tests of its file, but vitest refuses .only when CI is set (allowOnly=false), so
 //     CI fails loudly; this check does not look for it.
+//   - scripts/*.test.ts: counts only with the explicit CI node --test glob; options are refused conservatively.
+//     Runtime skips inside callbacks cannot be detected, as with web tests.
 //   - web/e2e/** (Playwright) is not run in CI, so references to it are refused until E2E joins CI.
 // A test title that is defined twice in one file counts only if no definition of it is skipped.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
@@ -190,7 +192,7 @@ function calleeOf(e: ts.Expression): Callee {
 export type TsTest = { title: string; skipped: boolean }
 
 /** Titles of test(...) / it(...) calls (vitest, Playwright) in the AST; skipped if the call or a parent describe is skipped. */
-export function tsTests(src: string, fileName = 'x.ts'): TsTest[] {
+export function tsTests(src: string, fileName = 'x.ts', nodeTests = false): TsTest[] {
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true)
   const out: TsTest[] = []
   const visit = (node: ts.Node, parentSkipped: boolean) => {
@@ -198,7 +200,10 @@ export function tsTests(src: string, fileName = 'x.ts'): TsTest[] {
     if (ts.isCallExpression(node)) {
       const c = calleeOf(node.expression)
       if (c) {
-        const own = c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w))
+        const options = node.arguments[1]
+        // Fail closed on node:test options (skip/todo may be computed or spread).
+        const nodeOptions = nodeTests && options && !ts.isArrowFunction(options) && !ts.isFunctionExpression(options)
+        const own = nodeOptions || c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w))
         const isSuite = c.root === 'describe' || c.root === 'suite' || c.root === 'xdescribe' || c.words.includes('describe')
         const a = node.arguments[0]
         const literal = a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))
@@ -375,6 +380,16 @@ export function collectKnownTests(root: string): Known {
           ? { runs: false, reason: 'skipped (skip/fixme/todo, or inside a skipped describe)' }
           : { runs: true }
       record(known, `${rel(f)}::${t.title}`, status)
+    }
+  }
+  // Only top-level script tests covered by the explicit CI command count.
+  const scripts = join(root, 'scripts'), ci = join(root, '.github/workflows/ci.yml')
+  const scriptCI = existsSync(ci) && /^\s*run: node --test scripts\/\*\.test\.ts\s*$/m.test(readFileSync(ci, 'utf8'))
+  if (existsSync(scripts)) for (const file of readdirSync(scripts).filter(f => f.endsWith('.test.ts'))) {
+    for (const t of tsTests(readFileSync(join(scripts, file), 'utf8'), file, true)) {
+      record(known, `scripts/${file}::${t.title}`, !scriptCI
+        ? { runs: false, reason: 'script tests are not run by the CI glob' }
+        : t.skipped ? { runs: false, reason: 'skipped script test' } : { runs: true })
     }
   }
   return known

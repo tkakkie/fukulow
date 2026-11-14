@@ -172,7 +172,11 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/api/v1/orgs/{org}/invites",
-            axum::routing::post(auth::invites::create_invite),
+            get(auth::invites::management::list_invites).post(auth::invites::create_invite),
+        )
+        .route(
+            "/api/v1/orgs/{org}/invites/{id}",
+            axum::routing::delete(auth::invites::management::revoke_invite),
         )
         .route(
             "/api/v1/orgs/{org}/invites/accept",

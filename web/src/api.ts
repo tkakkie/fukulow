@@ -207,3 +207,10 @@ export const putPassword = (body: ChangePasswordRequest, f: typeof fetch = fetch
   call<undefined>(f, '/api/v1/me/password', { ...json(body), method: 'PUT' }, false)
 export const revokeOtherSessions = (body: RevokeOtherSessionsRequest, f: typeof fetch = fetch) =>
   call<undefined>(f, '/api/v1/me/sessions/revoke-others', json(body), false)
+
+export type OutstandingInvite = components['schemas']['OutstandingInvite']
+export type InvitePage = components['schemas']['InvitePage']
+export const listInvites = (org: string, cursor?: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<InvitePage>(f, `${orgPath(org)}/invites${querySuffix({ cursor })}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
+export const revokeInvite = (org: string, id: string, f: typeof fetch = fetch) =>
+  call<undefined>(f, `${orgPath(org)}/invites/${encodeURIComponent(id)}`, { method: 'DELETE' }, false, 204)

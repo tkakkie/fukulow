@@ -1,5 +1,7 @@
 use super::*;
 
+pub mod management;
+
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateInviteRequest {
@@ -109,7 +111,7 @@ async fn valid_invite(
     lock: bool,
 ) -> Result<(String, Role, Uuid), ApiError> {
     let sql = format!(
-        "SELECT email,role,created_by FROM invites WHERE organization_id=$1 AND token_hash=$2 AND accepted_at IS NULL AND expires_at > clock_timestamp(){}",
+        "SELECT email,role,created_by FROM invites WHERE organization_id=$1 AND token_hash=$2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > clock_timestamp(){}",
         if lock { " FOR UPDATE" } else { "" }
     );
     sqlx::query_as(&sql)
@@ -126,7 +128,7 @@ async fn valid_invite(
     (status=400, description="Invalid input or password supplied while signed in", body=ErrorBody),
     (status=401, description="Invalid supplied Account Session", body=ErrorBody),
     (status=403, description="invite_account_mismatch: signed-in Account does not match the invited Account; invite_issuer_unauthorized: issuer is inactive or their current Role cannot issue this Invite", body=ErrorBody),
-    (status=404, description="invite_unavailable: unknown, expired, used, foreign Organization or wrong email", body=ErrorBody),
+    (status=404, description="invite_unavailable: unknown, expired, used, revoked, foreign Organization or wrong email", body=ErrorBody),
     (status=409, description="invite_sign_in_required for an existing Account; member_already_active for an active Member", body=ErrorBody),
     (status=413, description="Request too large", body=ErrorBody),
     (status=415, description="Expected application/json", body=ErrorBody),
@@ -243,7 +245,7 @@ pub async fn accept_invite(
             .bind(org).bind(Uuid::new_v4()).bind(account_id).bind(name).bind(role).fetch_optional(&mut *tx).await.map_err(members::member_write_error)?
             .ok_or(ApiError(StatusCode::CONFLICT,"member_already_active",None))?;
         // The expiry check is repeated at consumption, so time spent hashing/waiting grants nothing.
-        let consumed = sqlx::query("UPDATE invites SET accepted_at=clock_timestamp() WHERE organization_id=$1 AND token_hash=$2 AND accepted_at IS NULL AND expires_at>clock_timestamp()")
+        let consumed = sqlx::query("UPDATE invites SET accepted_at=clock_timestamp() WHERE organization_id=$1 AND token_hash=$2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>clock_timestamp()")
             .bind(org).bind(hash).execute(&mut *tx).await?.rows_affected();
         if consumed != 1 {
             return Err(invalid_invite());
