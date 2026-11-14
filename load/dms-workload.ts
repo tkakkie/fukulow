@@ -8,6 +8,11 @@ export function senderIndex(iteration: number, shard: number, members: number): 
   return Math.floor(members / 4) * shard + senderFor(iteration, 500);
 }
 
+export function peerWatched(sender: number, offset: number, sockets: number): boolean {
+  const peer = sender ^ 1;
+  return peer % 2 === 1 && peer >= offset && peer < offset + sockets;
+}
+
 export function socketStop(start: number, ready: number, sendStartSeconds: number, seconds: number, rate: number): number {
   return rate ? Math.max(ready, start + (sendStartSeconds + seconds + 10) * 1000) : ready + seconds*1000;
 }

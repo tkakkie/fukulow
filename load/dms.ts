@@ -9,7 +9,7 @@ import type { Options } from 'k6/options';
 import type { DmChanges, DmList, Message, ServerEvent, SendMessageRequest } from '../web/src/api-schema.d.ts';
 import { createActivity, createActivityTarget } from '../web/src/activity.ts';
 import { dmListState, stepDmList } from '../web/src/dm-list.ts';
-import { senderFor, senderIndex, socketStop } from './dms-workload.ts';
+import { senderFor, senderIndex, socketStop, peerWatched } from './dms-workload.ts';
 
 // k6 lacks browser clone/cancellation globals. State is JSON-only; HTTP uses
 // k6's own 10-second timeout, so this signal only supports scheduler teardown.
@@ -165,7 +165,7 @@ export function send() {
   const body: SendMessageRequest = { client_message_id: 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const n = Math.floor(Math.random()*16); return (c === 'x' ? n : (n&3)|8).toString(16); }), body: JSON.stringify({ sent: started, phase: 'mixed', text: 'x'.repeat(976) }) };
   const response = http.post(`${org}/channels/${member.channel}/messages`, JSON.stringify(body), { headers: headers(member.token), timeout: '10s', tags: { name: 'send' } });
   calls.add(1, { shape: 'send' }); latency.add(Date.now()-started, { shape: 'send' });
-  if (response.status === 201) { accepted.add(1); if (i%2 === 0) expectedPeer.add(1); } else errors.add(1, { shape: 'send', status: String(response.status) });
+  if (response.status === 201) { accepted.add(1); if (peerWatched(i, offset, count)) expectedPeer.add(1); } else errors.add(1, { shape: 'send', status: String(response.status) });
   if (__ENV.DM_LEDGER === '1') {
     const message = response.status === 201 ? response.json() as unknown as Message : undefined;
     if (message && (message.client_message_id !== body.client_message_id || message.channel_id !== member.channel)) errors.add(1, { shape: 'response_contract' });

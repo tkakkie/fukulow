@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { senderFor, senderIndex, socketStop, regularPairs, percentile, outsideCheckout } from './dms-workload.ts';
+import { senderFor, senderIndex, socketStop, peerWatched, regularPairs, percentile, outsideCheckout } from './dms-workload.ts';
 
 test('2,000 consecutive sends use distinct senders and 1,000 reciprocal pairs', () => {
   const senders = Array.from({ length: 2000 }, (_, i) => senderFor(i));
@@ -37,4 +37,16 @@ test('raw artifacts cannot be written inside checkout', () => {
   assert.equal(outsideCheckout('/repo/out', '/repo'), false);
   assert.equal(outsideCheckout('/repo', '/repo'), false);
   assert.equal(outsideCheckout('/repo-other/out', '/repo'), true);
+});
+
+test('peer expectations include only watched sockets in this staged-load shard', () => {
+  assert.equal(peerWatched(0, 0, 250), true);
+  assert.equal(peerWatched(1, 0, 250), false);
+  assert.equal(peerWatched(250, 0, 250), false);
+  assert.equal(peerWatched(2500, 2500, 500), true);
+  assert.equal(peerWatched(2498, 2500, 500), false);
+  for (const sockets of [250,500,1250,2500]) {
+    const expected = Array.from({length:500}, (_,i)=>peerWatched(i,0,sockets)).filter(Boolean).length;
+    assert.equal(expected, Math.min(sockets,500)/2);
+  }
 });

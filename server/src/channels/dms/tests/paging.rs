@@ -465,3 +465,71 @@ async fn delayed_empty_creation_is_above_early_counter_and_later_allocation_wait
     assert_eq!(visible["dms"][0]["id"], c.to_string());
     f.pools.app.close().await;
 }
+
+#[fukulow_test::test]
+async fn discovery_lookahead_never_authorizes_more_than_fifty_rows(pool: PgPool) {
+    let f = Fixture::new(pool, "member").await;
+    large_fixture(&f, 1_000).await;
+    let actor = extract_auth(f.state.clone(), &f.at).await;
+    let mut tx = f.pools.app.begin().await.unwrap();
+    crate::database::set_organization(&mut tx, f.org)
+        .await
+        .unwrap();
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        sqlx::query(&format!("SET LOCAL plan_cache_mode={mode}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        for lane in ["delta", "coverage"] {
+            let page = discovery::page(
+                &mut tx,
+                &actor,
+                &f.state.setup_token,
+                lane,
+                Cursor::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(page.dms.len(), 50);
+            assert!(!page.caught_up);
+            let statement: String = sqlx::query_scalar("SELECT statement FROM pg_prepared_statements WHERE statement LIKE 'WITH candidates AS MATERIALIZED%' AND statement LIKE $1 ORDER BY prepare_time DESC LIMIT 1")
+                .bind(if lane == "delta" { "%latest_position AS position%" } else { "%birth_position AS position%" })
+                .fetch_one(&mut *tx).await.unwrap();
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {statement}"
+            ))
+            .bind(f.org)
+            .bind(f.a)
+            .bind(0_i64)
+            .bind(0_i64)
+            .bind(1_000_i64)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            fn check(node: &Value) {
+                let relation = node["Relation Name"].as_str().unwrap_or("");
+                if ["channels", "channel_members", "dm_discovery"].contains(&relation) {
+                    let examined = (node["Actual Rows"].as_f64().unwrap_or(0.0)
+                        + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                        * node["Actual Loops"].as_f64().unwrap_or(1.0);
+                    let bound = if relation == "dm_discovery" {
+                        51.0
+                    } else {
+                        50.0
+                    };
+                    assert!(
+                        examined <= bound,
+                        "lookahead performed identity work: {node}"
+                    );
+                    assert!(node["Index Name"].is_string(), "unindexed lookup: {node}");
+                }
+                for child in node["Plans"].as_array().into_iter().flatten() {
+                    check(child);
+                }
+            }
+            check(&plan[0]["Plan"]);
+        }
+    }
+    tx.rollback().await.unwrap();
+    f.pools.app.close().await;
+}

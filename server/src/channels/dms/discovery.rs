@@ -98,11 +98,12 @@ pub(crate) async fn page(
     } else {
         "latest_position"
     };
-    // LIMIT is applied to the per-recipient index before any identity work.
+    // Consume lookahead before authorization/identity work: only 50 selected
+    // rows may touch current grants/Channels. Bounds survive even an empty page.
     let sql = format!(
-        "SELECT d.channel_id, CASE WHEN c.lower_member_id=$2 THEN c.higher_member_id ELSE c.lower_member_id END, d.{column} FROM (SELECT * FROM dm_discovery WHERE organization_id=$1 AND member_id=$2 AND membership_revision=$3 AND {column}>$4 AND {column}<=$5 ORDER BY {column} LIMIT 51) d JOIN channel_members cm ON cm.organization_id=d.organization_id AND cm.channel_id=d.channel_id AND cm.member_id=d.member_id AND cm.membership_revision=d.membership_revision AND cm.grant_id=d.grant_id JOIN channels c ON c.organization_id=d.organization_id AND c.id=d.channel_id AND c.kind='dm' AND $2 IN(c.lower_member_id,c.higher_member_id) ORDER BY d.{column}"
+        "WITH candidates AS MATERIALIZED (SELECT organization_id,member_id,membership_revision,channel_id,grant_id,{column} AS position FROM dm_discovery WHERE organization_id=$1 AND member_id=$2 AND membership_revision=$3 AND {column}>$4 AND {column}<=$5 ORDER BY {column} LIMIT 51), selected AS MATERIALIZED (SELECT * FROM candidates ORDER BY position LIMIT 50) SELECT a.channel_id,a.peer,b.caught_up,COALESCE((SELECT max(position) FROM selected),$4) FROM (SELECT count(*)<=50 AS caught_up FROM candidates) b LEFT JOIN LATERAL (SELECT d.channel_id,CASE WHEN c.lower_member_id=$2 THEN c.higher_member_id ELSE c.lower_member_id END AS peer,d.position FROM selected d JOIN LATERAL (SELECT cm.channel_id FROM channel_members cm WHERE cm.organization_id=d.organization_id AND cm.channel_id=d.channel_id AND cm.member_id=d.member_id AND cm.membership_revision=d.membership_revision AND cm.grant_id=d.grant_id OFFSET 0) cm ON true JOIN LATERAL (SELECT c.kind,c.lower_member_id,c.higher_member_id FROM channels c WHERE c.organization_id=d.organization_id AND c.id=cm.channel_id OFFSET 0) c ON c.kind='dm' AND $2 IN(c.lower_member_id,c.higher_member_id)) a ON true ORDER BY a.position"
     );
-    let mut rows: Vec<(Uuid, Uuid, i64)> = sqlx::query_as(&sql)
+    let rows: Vec<(Option<Uuid>, Option<Uuid>, bool, i64)> = sqlx::query_as(&sql)
         .bind(org)
         .bind(auth.identity.member.id)
         .bind(auth.membership_revision)
@@ -110,19 +111,17 @@ pub(crate) async fn page(
         .bind(ceiling)
         .fetch_all(&mut *tx)
         .await?;
-    let caught_up = rows.len() <= 50;
-    rows.truncate(50);
-    cursor.at = if caught_up {
-        ceiling
-    } else {
-        rows.last().map(|r| r.2).unwrap_or(cursor.at)
-    };
+    let (caught_up, at) = rows
+        .first()
+        .map(|r| (r.2, r.3))
+        .unwrap_or((true, cursor.at));
+    cursor.at = if caught_up { ceiling } else { at };
     cursor.exhausted = caught_up;
     let dms = identities(
         tx,
         auth,
         rows.into_iter()
-            .map(|r| (r.0, r.1, String::new()))
+            .filter_map(|r| Some((r.0?, r.1?, String::new())))
             .collect(),
     )
     .await?
