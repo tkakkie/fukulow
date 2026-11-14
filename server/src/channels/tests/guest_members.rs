@@ -51,7 +51,7 @@ async fn channel_id(app: &Router, owner: &str, visibility: &str) -> Uuid {
         .unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guest_directory_denies_unrelated_ungranted_public_private_and_stale_grants(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let org = organization(&pools.admin).await;
@@ -122,7 +122,7 @@ async fn guest_directory_denies_unrelated_ungranted_public_private_and_stale_gra
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_keeps_past_authors(
     pool: PgPool,
 ) {
@@ -180,7 +180,7 @@ async fn guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_ke
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn directory_full_roles_keep_exact_bytes_name_id_order_and_organization_isolation(
     pool: PgPool,
 ) {
@@ -261,7 +261,7 @@ async fn directory_full_roles_keep_exact_bytes_name_id_order_and_organization_is
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn directory_reads_fresh_role_after_auth_and_keeps_inactive_stale_caller_denials(
     pool: PgPool,
 ) {
@@ -328,7 +328,7 @@ impl auth::members::MemberListVisibility for PausedVisibility {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guest_directory_role_grants_and_results_share_one_nonlocking_snapshot(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let org = organization(&pools.admin).await;
