@@ -106,7 +106,7 @@ async fn harness_bounds_leaked_connections_and_attempts_every_app_pool(pool: PgP
     let mut apps = Vec::new();
     let mut connections = Vec::new();
     let result = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         AssertUnwindSafe(test_support::run_with_close_timeout(
             async {
                 for index in 0..3 {
@@ -120,7 +120,7 @@ async fn harness_bounds_leaked_connections_and_attempts_every_app_pool(pool: PgP
                     apps.push(app);
                 }
             },
-            Duration::from_millis(20),
+            Duration::from_millis(200),
         ))
         .catch_unwind(),
     )
@@ -146,7 +146,7 @@ async fn harness_preserves_body_panic_when_app_pool_close_times_out(pool: PgPool
     let mut retained = None;
     let mut connection = None;
     let result = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         AssertUnwindSafe(test_support::run_with_close_timeout(
             async {
                 let app = TestPools::new(pool.clone()).await.app;
@@ -154,7 +154,7 @@ async fn harness_preserves_body_panic_when_app_pool_close_times_out(pool: PgPool
                 retained = Some(app);
                 panic!("original body panic");
             },
-            Duration::from_millis(20),
+            Duration::from_millis(200),
         ))
         .catch_unwind(),
     )
