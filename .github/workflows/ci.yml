@@ -90,15 +90,13 @@ jobs:
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
-      - name: Backup publication and disposable restore guards
-        run: node --test scripts/backup.test.ts
+      - run: rustup component add rustc-dev
+      - name: Script tests including backup publication and disposable restore guards
+        run: node --test scripts/*.test.ts
       - name: Context settings are transaction-local
         run: |
-          node --test scripts/check-local-context.test.ts
           node scripts/check-local-context.ts
-      - run: rustup component add rustc-dev
       - run: rustfmt --check --edition 2024 scripts/module-direction.rs
-      - run: node --test scripts/check-module-direction.test.ts
       - run: node scripts/check-module-direction.ts
       - run: make api && git diff --exit-code -- openapi.json web/src/api-schema.d.ts
   versions:
