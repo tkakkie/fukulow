@@ -15,9 +15,7 @@ Load testing and measurement rules. Writing rules and the other parts: [index](.
 
 ## Entries in other parts
 
-- [realtime](realtime.md): `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
-
 Entries that also govern this area, listed by the start of the entry in that part.
 
 - [process](process.md): `k6 bumps are manual (Dependabot does`
-- [realtime](realtime.md): `#212 follows up handshake admission, listen`
+- [realtime](realtime.md): `#212 follows up handshake admission, listen`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`

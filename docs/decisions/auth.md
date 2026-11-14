@@ -86,7 +86,6 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 Entries that also govern this area, listed by the start of the entry in that part.
 
 - [load](load.md): `#151 adopts DM performance acceptance`
-
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
 - [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
