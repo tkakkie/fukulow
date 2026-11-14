@@ -24,8 +24,43 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 32 operations document shutdown, including Account security actions.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 224;
+// All 33 operations document shutdown, including author lookup and Account security actions.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 232;
+
+#[test]
+fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        let schemas = &document["components"]["schemas"];
+        assert_eq!(
+            schemas["AuthorLookupRequest"]["properties"]["ids"]["maxItems"],
+            100
+        );
+        assert_eq!(schemas["AuthorLookupRequest"]["required"], json!(["ids"]));
+        assert_eq!(
+            schemas["AuthorLookupRequest"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            schemas["DisplayIdentity"]["required"],
+            json!(["id", "name", "deactivated"])
+        );
+        assert_eq!(
+            schemas["DisplayIdentity"]["properties"]["deactivated"]["type"],
+            "boolean"
+        );
+        let operation = &document["paths"]["/api/v1/orgs/{org}/message-authors"]["post"];
+        assert_eq!(
+            operation["responses"]["400"]["content"]["application/json"]["schema"],
+            json!({"$ref":"#/components/schemas/ErrorBody"})
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"],
+            json!({"$ref":"#/components/schemas/AuthorIdentities"})
+        );
+    }
+}
 
 #[test]
 fn setup_token_contract_is_required_and_non_nullable() {
@@ -105,7 +140,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 32);
+        assert_eq!(operations, 33);
     }
 }
 
@@ -144,7 +179,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 32);
+    assert_eq!(requests.len(), 33);
     requests.extend(
         [
             "/",

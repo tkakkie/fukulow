@@ -1823,9 +1823,13 @@ async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: 
         .get_all(header::SET_COOKIE)
         .iter()
         .collect();
-    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies.len(), 2);
     assert_eq!(
         cookies[0],
+        "__Host-fukulow_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure"
+    );
+    assert_eq!(
+        cookies[1],
         "fukulow_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure"
     );
     assert_eq!(

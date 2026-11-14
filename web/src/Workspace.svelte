@@ -4,6 +4,7 @@
   import { navigationAdapter } from './navigation.svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import { createAnnouncementController } from './announcements'
+  import { senderName } from './authors'
   import type { Channel, Identity, Message } from './api'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
@@ -194,10 +195,29 @@
   // A cold descendant URL can resolve to its root before its own body is paged in.
   let openedReplyTarget = ''
 
+  const authorIdentities = $derived(members?.authors.identities)
+  $effect(() => {
+    const ids: string[] = []
+    for (const line of currentTopicsState?.lines ?? []) {
+      ids.push(line.kind === 'message' ? line.message.sender : line.latestMessage.sender)
+    }
+    for (const message of currentTimeline?.messages ?? []) ids.push(message.sender)
+    if (route?.topicId && currentTopicsState) {
+      for (const message of currentTopicsState.topic(route.topicId).messages) ids.push(message.sender)
+    }
+    for (const message of currentRepliesState?.messages ?? []) ids.push(message.sender)
+    if (resolvedReplyAnchor) ids.push(resolvedReplyAnchor.sender)
+    members?.authors.watch(ids)
+  })
+  $effect(() => { void selectedChannelId; members?.authors.retry() })
+  $effect(() => { if (currentLive) members?.authors.retry() })
+
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
+    const identity = authorIdentities?.get(senderId)
+    if (identity) return senderName(identity)
     if (organization?.member.id === senderId) return organization.member.name
-    return members?.state.members.find((member) => member.id === senderId)?.name ?? 'メンバー'
+    return 'メンバー'
   }
 
   $effect(() => () => announcementController.destroy())
@@ -401,10 +421,12 @@
       replyChainIds,
       selfId: organization?.member.id ?? '',
       resolveSenderName: resolveSender,
+      isSenderPending: (id) => !resolveSenderName && id !== organization?.member.id && (members?.authors.isPending(id) ?? false),
     })
   })
 
   function handleSelectChannel(id: string) {
+    if (id === s.selectedId) members?.authors.retry()
     const navigated = nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
     if (id === s.selectedId || navigated === false) {
       channels.select(id)

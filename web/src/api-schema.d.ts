@@ -393,6 +393,26 @@ export interface paths {
         patch: operations["change_role"];
         trace?: never;
     };
+    "/api/v1/orgs/{org}/message-authors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve historical authors without widening the active Member directory.
+         *     Authorization, authorship and identities share a non-locking REPEATABLE READ snapshot.
+         */
+        post: operations["lookup_authors"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/ws": {
         parameters: {
             query?: never;
@@ -515,6 +535,14 @@ export interface components {
             /** Format: uuid */
             member_id: string;
         };
+        AuthorIdentities: {
+            /** @description Only authors of currently readable Messages; omitted ids remain unresolved. */
+            identities: components["schemas"]["DisplayIdentity"][];
+        };
+        AuthorLookupRequest: {
+            /** @description At most 100 input ids, including duplicates. Duplicates are collapsed. */
+            ids: string[];
+        };
         Capability: {
             allowed: boolean;
             reason?: string | null;
@@ -588,6 +616,12 @@ export interface components {
         CreateInviteRequest: {
             email: string;
             role: components["schemas"]["Role"];
+        };
+        DisplayIdentity: {
+            deactivated: boolean;
+            /** Format: uuid */
+            id: string;
+            name: string;
         };
         ErrorBody: {
             error: string;
@@ -948,6 +982,8 @@ export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
 export type Account = components['schemas']['Account'];
 export type AccountIdentity = components['schemas']['AccountIdentity'];
 export type AddChannelMemberRequest = components['schemas']['AddChannelMemberRequest'];
+export type AuthorIdentities = components['schemas']['AuthorIdentities'];
+export type AuthorLookupRequest = components['schemas']['AuthorLookupRequest'];
 export type Capability = components['schemas']['Capability'];
 export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelManagerRequest'];
 export type ChangePasswordRequest = components['schemas']['ChangePasswordRequest'];
@@ -962,6 +998,7 @@ export type ChannelVisibility = components['schemas']['ChannelVisibility'];
 export type ClientMessage = components['schemas']['ClientMessage'];
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest'];
 export type CreateInviteRequest = components['schemas']['CreateInviteRequest'];
+export type DisplayIdentity = components['schemas']['DisplayIdentity'];
 export type ErrorBody = components['schemas']['ErrorBody'];
 export type ErrorEvent = components['schemas']['ErrorEvent'];
 export type Identity = components['schemas']['Identity'];
@@ -3273,6 +3310,100 @@ export interface operations {
             };
         };
     };
+    lookup_authors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorLookupRequest"];
+            };
+        };
+        responses: {
+            /** @description Distinct display identities for authors of Messages the caller can currently read, including deactivated authors and authors who left; all other ids omitted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthorIdentities"];
+                };
+            };
+            /** @description Invalid input or more than 100 ids (before deduplication) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session ended */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     upgrade: {
         parameters: {
             query?: never;
@@ -3497,9 +3628,10 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            /** @description Missing, invalid, expired, or revoked Account Session credential; current and legacy cookies cleared without revocation */
             401: {
                 headers: {
+                    "Set-Cookie"?: string;
                     [name: string]: unknown;
                 };
                 content: {

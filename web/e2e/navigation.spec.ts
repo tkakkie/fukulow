@@ -17,31 +17,43 @@ test.beforeEach(async ({ page }) => {
 
 const composer = (page: import('@playwright/test').Page) => page.getByRole('textbox', { name: 'メッセージ', exact: true })
 
-test('creating a Channel opens it and pushes its URL while preserving the open tab', async ({ page }) => {
-  await page.goto(`/o/${org}/c/${first}?panel=overview`)
-  await expect(page.getByRole('heading', { name: firstName, exact: true })).toBeVisible()
-  const length = await page.evaluate(() => history.length)
-  const historyReads: string[] = []
-  page.on('request', request => {
-    const path = new URL(request.url()).pathname
-    if (request.method() === 'GET' && (path.endsWith('/messages') || path.endsWith('/timeline'))) historyReads.push(path)
+for (const visibility of ['public', 'private'] as const) {
+  test(`creating a ${visibility} Channel opens it and pushes its URL while preserving the open tab`, async ({ page }) => {
+    await page.goto(`/o/${org}/c/${first}?panel=overview`)
+    await expect(page.getByRole('heading', { name: firstName, exact: true })).toBeVisible()
+    const length = await page.evaluate(() => history.length)
+    const historyReads: string[] = []
+    page.on('request', request => {
+      const path = new URL(request.url()).pathname
+      if (request.method() === 'GET' && (path.endsWith('/messages') || path.endsWith('/timeline'))) historyReads.push(path)
+    })
+    const name = `Created navigation-${crypto.randomUUID()}`
+    await page.getByRole('textbox', { name: 'チャンネル名', exact: true }).fill(name)
+    const choices = page.getByRole('group', { name: '公開範囲', exact: true })
+    await expect(choices.getByRole('radio', { name: '公開', exact: true })).toBeChecked()
+    if (visibility === 'private') {
+      await choices.getByRole('radio', { name: '公開', exact: true }).focus()
+      await page.keyboard.press('ArrowDown')
+      await expect(choices.getByRole('radio', { name: '非公開', exact: true })).toBeFocused()
+      await expect(choices.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
+    }
+    const response = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/channels'))
+    await page.getByRole('button', { name: 'チャンネルを作成', exact: true }).click()
+    const created = await response
+    expect(created.ok()).toBe(true)
+    const channel = await secretSafe(() => created.json())
+    expect(created.request().postDataJSON()).toEqual({ name, visibility })
+    expect(channel.visibility).toBe(visibility)
+    await expect(page).toHaveURL(`/o/${org}/c/${channel.id}?panel=overview`)
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+    await expect(composer(page)).toBeFocused()
+    expect(historyReads.filter(path => path.includes(`/channels/${channel.id}/`))).toHaveLength(1)
+    expect(await page.evaluate(() => history.length)).toBe(length + 1)
+    await page.goBack()
+    await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=overview`)
+    await expect(page.getByRole('heading', { name: firstName, exact: true })).toBeVisible()
   })
-  const name = `Created navigation-${crypto.randomUUID()}`
-  await page.getByRole('textbox', { name: 'チャンネル名', exact: true }).fill(name)
-  const response = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/channels'))
-  await page.getByRole('button', { name: 'チャンネルを作成', exact: true }).click()
-  const created = await response
-  expect(created.ok()).toBe(true)
-  const channel = await secretSafe(() => created.json())
-  await expect(page).toHaveURL(`/o/${org}/c/${channel.id}?panel=overview`)
-  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
-  await expect(composer(page)).toBeFocused()
-  expect(historyReads.filter(path => path.includes(`/channels/${channel.id}/`))).toHaveLength(1)
-  expect(await page.evaluate(() => history.length)).toBe(length + 1)
-  await page.goBack()
-  await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=overview`)
-  await expect(page.getByRole('heading', { name: firstName, exact: true })).toBeVisible()
-})
+}
 
 test('Channel, panel, Back and Forward restore URL, focus and independent drafts', async ({ page }) => {
   await page.goto(`/o/${org}/c/${first}`)

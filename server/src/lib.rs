@@ -152,6 +152,10 @@ pub fn app(state: AppState) -> Router {
             get(auth::members::list_members),
         )
         .route(
+            "/api/v1/orgs/{org}/message-authors",
+            axum::routing::post(messages::authors::lookup_authors),
+        )
+        .route(
             "/api/v1/orgs/{org}/members/{id}/deactivate",
             axum::routing::post(auth::members::deactivate::<channels::members::RoleChangeGuard>),
         )

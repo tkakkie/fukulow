@@ -3,6 +3,7 @@
 Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and the other parts: [index](../decisions.md).
 
 ## Auth, Accounts and tenancy
+- #300 sign-out 401 expires current and legacy cookies without revocation. Invite acceptance still rejects stale credentials: explicit cookie removal repairs the browser without silently downgrading authentication or attaching an existing Account by email.
 - #299 shared raw-text validation rejects NUL in emails, setup names and Channel names before operation DB/Argon2 work; sign-in before throttle. Existing authentication/setup-token gates keep 401 precedence. Reason: PostgreSQL text cannot store NUL; avoid 500 and throttle bypass.
 - #146 splits global Accounts and Account Sessions from Organization Members. Authority is the Account plus the Organization URL on each request. Documented global operations: setup existence, credential/session lookup, active-Organization listing, Session cleanup.
 - Non-Member, unknown Organization and deactivated Member return the same 404 `organization_unavailable` so Membership is not disclosed (#146).
@@ -80,6 +81,11 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
+
+- [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
+- [realtime](realtime.md): `#204 sections_changed goes only`
+- [messages](messages.md): `#301 author lookup takes at most 100 input ids`
+- [web](web.md): `#300 Invite session 401 offers`, `#300 Sign-in, sign-out and Invite acceptance share`
 
 - [messages](messages.md): `#231/#305 reject Role demotion or deactivation with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
 - [messages](messages.md): `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`

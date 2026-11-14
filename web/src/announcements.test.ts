@@ -633,6 +633,60 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
     expect(gapped.announcement).toBeNull()
   })
 
+  it('releases only the ready prefix in arrival order, coalescing pending then known together once settled', () => {
+    let state = stepAnnouncements(initialAnnouncementState(), {
+      type: 'timeline_updated', viewId: 'c1', status: 'ready', live: true,
+      messages: [], selfId: 'me', nowMs: 0,
+    }).state
+    let pending = true
+    const update = (messages: AnnounceableMessage[], nowMs: number) => {
+      const result = stepAnnouncements(state, {
+        type: 'timeline_updated', viewId: 'c1', status: 'ready', live: true,
+        messages, selfId: 'me', nowMs,
+        isSenderPending: id => id === 'unknown' && pending,
+        resolveSenderName: id => names[id] ?? '新しい著者',
+      })
+      state = result.state
+      return result.announcement
+    }
+    const known = msg(1, 'tanaka', '既知')
+    const unknown = msg(2, 'unknown', '先着')
+    const later = msg(3, 'sato', '後着')
+    // A ready prefix is processed immediately, even with a pending sender behind it.
+    expect(update([known, unknown], 1_000)).toBe('田中 美咲: 既知')
+    expect(state.deferredMessages).toEqual([unknown])
+    // A later known sender cannot overtake the pending sender, even after 2 s.
+    expect(update([known, unknown, later], 4_000)).toBeNull()
+    expect(state.deferredMessages).toEqual([unknown, later])
+    pending = false
+    // Release the entire ready prefix into one normal coalescing window. No extra wait
+    // for the known sender, and no per-Message duplicate of the combined announcement.
+    expect(update([known, unknown, later], 5_000)).toBe('新着メッセージ 2件')
+    expect(state.deferredMessages).toEqual([])
+    expect(update([known, unknown, later], 8_000)).toBeNull()
+  })
+
+  it.each(['view change', 'timeline reset', 'destroy'])('drops deferred Messages on %s', action => {
+    const announced: string[] = []
+    const ctrl = createAnnouncementController({ onAnnounce: text => announced.push(text) })
+    const update = (viewId: string, messages: AnnounceableMessage[], pending: boolean) => ctrl.onTimelineUpdated({
+      viewId, status: 'ready', live: true, messages, selfId: 'me',
+      isSenderPending: () => pending, resolveSenderName: () => '田中 美咲',
+    })
+    update('c1', [], false)
+    const messages = [msg(1, 'tanaka', '古い表示')]
+    update('c1', messages, true)
+    expect(ctrl.getState().deferredMessages).toEqual(messages)
+    if (action === 'destroy') ctrl.destroy()
+    else if (action === 'view change') ctrl.onViewChanged({ viewId: 'c2', kind: 'channel', name: 'other' })
+    else update('c2', [], false)
+    expect(ctrl.getState().deferredMessages).toEqual([])
+    const before = [...announced]
+    if (action !== 'destroy') update('c2', [], false)
+    expect(announced).toEqual(before)
+    ctrl.destroy()
+  })
+
   it('createLiveAnnouncementQueue produces a distinct keyed item for consecutive identical announcement strings', () => {
     const queue = createLiveAnnouncementQueue()
     expect(queue.current).toEqual({ id: 0, text: '' })

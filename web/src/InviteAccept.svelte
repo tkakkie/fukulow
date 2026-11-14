@@ -8,20 +8,26 @@
   let {
     model,
     signedIn,
+    busy,
     accept,
+    signOut,
   }: {
     model: ReturnType<typeof inviteAcceptanceAdapter>
     signedIn: boolean
+    busy: boolean
     accept(input: Omit<AcceptInviteRequest, 'token'>): Promise<void>
+    signOut(): Promise<void>
   } = $props()
 
   let email = $state('')
   let name = $state('')
   let password = $state('')
   const s = $derived(model.state)
+  const needsSignOut = $derived(s.sessionRejected && !signedIn)
 
   async function submit(e: Event) {
     e.preventDefault()
+    if (busy || s.busy || needsSignOut) return
     await accept({ email, name, password: signedIn ? null : password })
     password = ''
   }
@@ -55,7 +61,10 @@
       {#if s.error}
         <StatusBanner tone="danger" role="alert" message={s.error} />
       {/if}
-      <Button variant="primary" type="submit" disabled={s.busy}>招待を受ける</Button>
+      {#if needsSignOut}
+        <Button disabled={busy || s.busy} onclick={signOut}>ログアウトして続ける</Button>
+      {/if}
+      <Button variant="primary" type="submit" disabled={busy || s.busy || needsSignOut}>招待を受ける</Button>
     </form>
   </section>
 {:else if s.accepted && !signedIn}

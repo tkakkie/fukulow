@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createMembers, createInviteAcceptance, takeInvite } from './members'
 import type { Identity, Member, Result } from './api'
+import { signOut } from './auth'
 
 const member: Member = { id: 'm', name: 'メンバー', role: 'member' }
 const identity: Identity = { member, organization: { organization_id: 'o', name: '組織', capabilities: { can_invite: { allowed: false }, can_deactivate_members: { allowed: false }, can_manage_roles: { allowed: false }, can_create_channels: { allowed: true } } } }
@@ -50,6 +51,49 @@ describe('Members controller', () => {
     expect(ended).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled()
     expect(c.get().inviteLink).toBe('')
   })
+  it('reports Membership loss from an overlapping load and stops Member and author requests', async () => {
+    const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []
+    const listMembers = vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finishes.push(resolve) }))
+    const lookupAuthors = vi.fn(async () => ok({ identities: [] }))
+    const ended = vi.fn(), unavailable = vi.fn()
+    const c = createMembers(org, ended, unavailable, {
+      listMembers, lookupAuthors, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    const older = c.load(), newer = c.load()
+    finishes[1](ok({ members: [member] })); await newer
+    const late = c.load()
+    finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' }); await older
+    expect(unavailable).toHaveBeenCalledOnce()
+    await c.load()
+    c.authors.watch(['unknown']); c.authors.retry(); c.authors.replaceMembers([])
+    await Promise.resolve()
+    expect(listMembers).toHaveBeenCalledTimes(3)
+    expect(lookupAuthors).not.toHaveBeenCalled()
+    expect(c.get().members).toEqual([member])
+    expect(c.authors.get().get(member.id)?.name).toBe(member.name)
+    finishes[2]({ ok: false, kind: 'http', status: 401 }); await late
+    expect(ended).toHaveBeenCalledOnce()
+  })
+
+  it('ignores Member-list Membership loss from a previous Organization selection', async () => {
+    let finish!: (result: Result<{ members: Member[] }>) => void
+    const unavailable = vi.fn()
+    const deps = {
+      listMembers: vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finish = resolve })),
+      changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    }
+    const previous = createMembers(org, vi.fn(), unavailable, deps)
+    const pending = previous.load()
+    const old = finish
+    previous.close()
+    const current = createMembers(org, vi.fn(), unavailable, deps)
+    old({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' }); await pending
+    expect(unavailable).not.toHaveBeenCalled()
+    const fresh = current.load()
+    finish(ok({ members: [member] })); await fresh
+    expect(current.get().members).toEqual([member])
+    current.close()
+  })
   it('explains last-Channel-manager Role denial in Japanese and preserves the Member', async () => {
     const c = createMembers(org, vi.fn(), vi.fn(), {
       listMembers: async () => ok({ members: [member] }),
@@ -82,6 +126,108 @@ it('acceptance uses the API, keeps failed invitations retryable, and consumes su
   expect(api).toHaveBeenLastCalledWith(org, { ...input, token })
   expect(c.get().accepted).toBe(true); expect(c.get().available).toBe(false)
   expect(await c.accept(input)).toBeNull(); expect(api).toHaveBeenCalledTimes(2)
+})
+
+it.each([204, 401])('Invite session recovery waits for explicit sign-out %i and a manual resubmit with the same Invite', async (status) => {
+  const api = vi.fn().mockResolvedValueOnce({ ok: false, kind: 'http', status: 401 }).mockResolvedValueOnce(ok(identity))
+  const c = createInviteAcceptance({ organizationId: org, token }, api)
+  const ended = vi.fn()
+  const input = { email: 'new@example.com', name: '名前', password: 'new account password' }
+  let finish!: (r: Response) => void
+  const transport = vi.fn(() => new Promise<Response>(resolve => { finish = resolve }))
+  const logout = () => signOut(transport)
+  await c.signOutAndContinue(logout)
+  expect(transport).not.toHaveBeenCalled()
+  await c.accept(input, ended)
+  expect(ended).toHaveBeenCalledOnce()
+  expect(c.get()).toMatchObject({ sessionRejected: true, available: true, accepted: false })
+  expect(transport).not.toHaveBeenCalled()
+  const pending = c.signOutAndContinue(logout)
+  expect(c.get().sessionRejected).toBe(true)
+  expect(c.get().busy).toBe(true)
+  await c.signOutAndContinue(logout)
+  await c.accept(input)
+  expect(transport).toHaveBeenCalledOnce()
+  expect(api).toHaveBeenCalledOnce()
+  finish(new Response(null, { status }))
+  await pending
+  expect(c.get()).toMatchObject({ sessionRejected: false, available: true, accepted: false, busy: false, error: '' })
+  expect(api).toHaveBeenCalledOnce()
+  await c.accept(input)
+  expect(api).toHaveBeenLastCalledWith(org, { ...input, token })
+  expect(c.get().accepted).toBe(true)
+})
+
+it('a rejected sign-out clears Invite busy, shows one actionable error, and permits recovery and manual acceptance', async () => {
+  const api = vi.fn().mockResolvedValueOnce({ ok: false, kind: 'http', status: 401 }).mockResolvedValueOnce(ok(identity))
+  const c = createInviteAcceptance({ organizationId: org, token }, api)
+  const input = { email: 'new@example.com', name: '名前', password: 'new account password' }
+  await c.accept(input)
+  const logout = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(true)
+  const pending = c.signOutAndContinue(logout)
+  expect(c.get().busy).toBe(true)
+  expect(await pending).toBe(false)
+  expect(c.get()).toEqual({
+    sessionRejected: true, available: true, accepted: false, busy: false,
+    error: 'ログアウトできませんでした。通信状況を確認して、もう一度お試しください。',
+  })
+  expect(api).toHaveBeenCalledOnce()
+  expect(await c.signOutAndContinue(logout)).toBe(true)
+  expect(logout).toHaveBeenCalledTimes(2)
+  expect(c.get()).toMatchObject({ busy: false, sessionRejected: false, available: true, error: '' })
+  expect(api).toHaveBeenCalledOnce()
+  expect(await c.accept(input)).toEqual(identity)
+  expect(api).toHaveBeenLastCalledWith(org, { ...input, token })
+  expect(c.get()).toMatchObject({ busy: false, available: false, accepted: true, error: '' })
+})
+
+it('a rejected acceptance clears Invite busy, shows the network error, and permits a later click with the same Invite', async () => {
+  const api = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(ok(identity))
+  const c = createInviteAcceptance({ organizationId: org, token }, api)
+  const ended = vi.fn()
+  const input = { email: 'new@example.com', name: '名前', password: 'new account password' }
+  const pending = c.accept(input, ended)
+  expect(c.get().busy).toBe(true)
+  expect(await pending).toBeNull()
+  expect(c.get()).toEqual({
+    sessionRejected: false, available: true, accepted: false, busy: false,
+    error: 'サーバーに接続できません。もう一度お試しください。',
+  })
+  expect(ended).not.toHaveBeenCalled()
+  expect(await c.accept(input, ended)).toEqual(identity)
+  expect(api).toHaveBeenCalledTimes(2)
+  expect(api).toHaveBeenLastCalledWith(org, { ...input, token })
+  expect(c.get()).toMatchObject({ busy: false, available: false, accepted: true, error: '' })
+})
+
+it.each(['network', 500, 503])('Invite session recovery keeps the Invite and an actionable error after sign-out %s', async (failure) => {
+  const api = vi.fn().mockResolvedValue({ ok: false, kind: 'http', status: 401 })
+  const c = createInviteAcceptance({ organizationId: org, token }, api)
+  await c.accept({ email: 'new@example.com', name: '名前', password: 'new account password' })
+  const transport = failure === 'network'
+    ? vi.fn().mockRejectedValue(new Error('offline'))
+    : vi.fn().mockResolvedValue(new Response(null, { status: failure as number }))
+  await c.signOutAndContinue(() => signOut(transport))
+  expect(c.get()).toMatchObject({ sessionRejected: true, available: true, accepted: false, busy: false })
+  expect(c.get().error).toContain('ログアウトできませんでした')
+  expect(api).toHaveBeenCalledOnce()
+  await c.signOutAndContinue(async () => true)
+  expect(c.get()).toMatchObject({ sessionRejected: false, available: true, error: '' })
+  expect(api).toHaveBeenCalledOnce()
+})
+
+it.each([
+  { ok: false as const, kind: 'network' as const },
+  ...[400, 403, 404, 409, 429].map(status => ({ ok: false as const, kind: 'http' as const, status, error: status === 409 ? 'invite_sign_in_required' : 'invite_unavailable' })),
+  ok(identity),
+])('unrelated Invite errors and valid acceptance never enable or trigger sign-out: %j', async result => {
+  const c = createInviteAcceptance({ organizationId: org, token }, vi.fn(async () => result))
+  const logout = vi.fn(async () => true), ended = vi.fn()
+  await c.accept({ email: 'a@example.com', name: '名前', password: null }, ended)
+  expect(c.get().sessionRejected).toBe(false)
+  expect(ended).not.toHaveBeenCalled()
+  await c.signOutAndContinue(logout)
+  expect(logout).not.toHaveBeenCalled()
 })
 
 it('deactivates through the API, preserves denied targets, and fences late results and duplicate submits', async () => {
