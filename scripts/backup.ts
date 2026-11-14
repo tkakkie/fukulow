@@ -16,7 +16,7 @@ export function docker(args: string[], input: number | 'ignore' = 'ignore', outp
   return typeof result.stdout === 'string' ? result.stdout.trim() : ''
 }
 
-export function backup(directory: string): string {
+export function backup(directory: string, capture?: () => void): string {
   const destination = resolve(directory)
   mkdirSync(destination, { mode: 0o700, recursive: true })
   const info = lstatSync(destination)
@@ -32,6 +32,7 @@ export function backup(directory: string): string {
     const archive = join(temporary, 'archive')
     const output = openSync(archive, 'wx', 0o600)
     try {
+      capture?.()
       docker([...compose, 'pg_dump', '-U', 'fukulow', '-d', 'fukulow', '--format=custom'], 'ignore', output)
       fsyncSync(output)
     } finally {
