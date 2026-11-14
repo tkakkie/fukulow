@@ -36,14 +36,16 @@ test('verified predicate rejects partial malformed unmarked and future generatio
     const b = new FakeBucket(() => epoch)
     await seed(b, epoch)
     if (mutation === 'marker') b.objects.delete(good + 'verified.json')
-    if (mutation === 'hash') b.objects.get(good + 'manifest.json')!.body = Buffer.from('{}')
+    if (mutation === 'hash') b.objects.get(good + 'manifest.json')!.body = Buffer.from(JSON.stringify({
+      ...manifest(epoch, Buffer.alloc(100, 1)), postgresMajor: 17,
+    }))
     if (mutation === 'schema') {
       const m = { ...manifest(epoch, Buffer.alloc(100, 1)), extra: true }, body = Buffer.from(JSON.stringify(m))
       b.objects.get(good + 'manifest.json')!.body = body
       b.objects.get(good + 'verified.json')!.body = Buffer.from(JSON.stringify({ manifestSha256: sha256(body), verifiedTime: new Date(epoch).toISOString() }))
     }
     if (mutation === 'future') { b.objects.clear(); await seed(b, epoch + 300_001) }
-    if (mutation === 'prefix') for (const [key, value] of [...b.objects]) { b.objects.delete(key); b.objects.set(key.replace('-test/', '-bad/name/'), value) }
+    if (mutation === 'prefix') for (const [key, value] of [...b.objects]) { b.objects.delete(key); b.objects.set(key.replace(new Date(epoch).toISOString(), new Date(epoch - day).toISOString()), value) }
     if (mutation === 'archive') b.objects.delete(good + 'archive.dump.age')
     if (mutation === 'size') b.objects.get(good + 'archive.dump.age')!.body = Buffer.from('short')
     if (mutation === 'checksum') b.objects.get(good + 'archive.dump.age')!.body = Buffer.alloc(100, 2)
@@ -93,6 +95,48 @@ test('long outage and insufficient or stale inventory freeze all pruning', async
     assert.ok(result.alerts.includes('pruning-refused'))
     assert.equal(result.deleted.length, 0)
     assert.equal((await inventory(bucket, epoch)).verified.length, count)
+  }
+})
+
+test('newest thirty exclusion alone retains thirty with old unlocked inventory', async () => {
+  const bucket = new FakeBucket(() => epoch)
+  await seed(bucket, epoch)
+  for (let i = 0; i < 39; i++) await seed(bucket, epoch - (40 + i) * day)
+  assert.equal((await checker(bucket).run()).deleted.length, 5)
+  assert.equal((await checker(bucket).run()).deleted.length, 5)
+  assert.deepEqual((await checker(bucket).run()).deleted, [])
+  const backups = (await inventory(bucket, epoch)).verified
+  assert.equal(backups.length, 30)
+  assert.deepEqual(backups.map(g => g.manifest.captureTime), [epoch, ...Array.from({ length: 29 }, (_, i) => epoch - (40 + i) * day)].map(t => new Date(t).toISOString()))
+})
+
+test('insufficient inventory freezes an otherwise deletable older restore copy', async () => {
+  const bucket = new FakeBucket(() => epoch)
+  for (let i = 0; i < 29; i++) await seed(bucket, epoch - i * day)
+  await seed(bucket, epoch - 60 * day, 100, true, epoch - 10 * day)
+  const older = await seed(bucket, epoch - 70 * day, 100, true, epoch - 41 * day)
+  const result = await checker(bucket).run()
+  assert.deepEqual(result.deleted, [])
+  assert.ok(result.alerts.includes('insufficient-generations'))
+  assert.ok(result.alerts.includes('pruning-refused'))
+  assert.ok(await bucket.head(older + 'verified.json'))
+})
+
+test('latest restore copy completion controls protection and overdue alert despite older capture', async () => {
+  for (const copyAge of [41, 34]) {
+    const bucket = new FakeBucket(() => epoch)
+    for (let i = 0; i < 30; i++) await seed(bucket, epoch - i * day)
+    const earlierSource = await seed(bucket, epoch - 60 * day)
+    const latestSource = await seed(bucket, epoch - 70 * day)
+    const earlier = await seed(bucket, epoch - 60 * day, 100, true, epoch - 50 * day)
+    const latest = await seed(bucket, epoch - 70 * day, 100, true, epoch - copyAge * day)
+    // Copy completion is the last object upload, even if the archive was copied earlier.
+    bucket.objects.get(latest + 'archive.dump.age')!.uploaded = epoch - 51 * day
+    const result = await checker(bucket).run()
+    assert.deepEqual(result.deleted, [earlierSource, earlier])
+    assert.ok(await bucket.head(latest + 'verified.json'))
+    assert.ok(await bucket.head(latestSource + 'verified.json'))
+    assert.equal(result.alerts.includes('drill-overdue'), copyAge >= 35)
   }
 })
 

@@ -10,13 +10,15 @@ export async function checkBackups(options: {
   try {
     const data = await inventory(options.backups, now)
     const backups = data.verified.filter(g => g.prefix.startsWith('backups/'))
+    const completionTime = (g: Generation) => Math.max(...g.objects.map(o => o.uploaded))
     const drills = data.verified.filter(g => g.prefix.startsWith('restore-verified/'))
+      .sort((a, b) => completionTime(b) - completionTime(a) || b.prefix.localeCompare(a.prefix))
     const latest = backups[0], drill = drills[0]
     if (data.malformed.length) alerts.push('malformed-generations')
     const stale = !latest || now - Date.parse(latest.manifest.captureTime) >= day
     if (stale) alerts.push('stale-backup')
     if (backups.length < 30) alerts.push('insufficient-generations')
-    if (!drill || now - Math.max(...drill.objects.map(o => o.uploaded)) >= 35 * day) alerts.push('drill-overdue')
+    if (!drill || now - completionTime(drill) >= 35 * day) alerts.push('drill-overdue')
     if (backups.length >= 8) {
       const sizes = backups.slice(1, 8).map(g => g.manifest.ciphertext.size).sort((a, b) => a - b)
       if (latest.manifest.ciphertext.size < sizes[3] / 2 || latest.manifest.ciphertext.size > sizes[3] * 2) alerts.push('implausible-size')
