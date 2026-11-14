@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 mod admission;
+pub(super) mod authors;
 mod text_input;
 pub(super) mod unread;
 
@@ -890,7 +891,10 @@ async fn send_route_accepts_the_largest_valid_body_and_still_caps_the_request(po
 }
 
 fn scoped_path(path: &str, token: &str) -> String {
-    if path.starts_with("/api/v1/channels") || path.starts_with("/api/v1/ws") {
+    if path.starts_with("/api/v1/channels")
+        || path.starts_with("/api/v1/ws")
+        || path == "/api/v1/message-authors"
+    {
         let organization = token
             .split_once('.')
             .map(|(id, _)| id)

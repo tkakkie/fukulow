@@ -3,6 +3,7 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
+- #301 author lookup takes at most 100 input ids, collapses duplicates and omits unreadable authors. Channel access, Message authorship and retained identities share history's non-locking snapshot, preventing directory expansion or authorization/data races.
 - #149 usable managers (Owner/Admin with access or usable Channel manager right, #311) add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
 - #231/#305 reject Role demotion or deactivation with 409 last_channel_manager if a private Channel loses its last usable manager; atomic, no Channel details. Reuse #149 locks/check via auth's injected guard for module direction. Unmanaged Channels stay allowed.
 - #292/#311: a private Channel's creator gets a Channel manager right on their grant, independent of Role; usable manager = usable grant with Owner/Admin Role or the right. Reason: a Member's private Channel must be able to add people without giving Owner/Admin implicit access.

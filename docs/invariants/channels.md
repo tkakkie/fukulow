@@ -48,6 +48,7 @@ Channels, membership, Capabilities (server and member UI). Writing rules and the
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [messages](messages.md): `author_lookup_every_role_private_and_guest_public_denials_have_positive_controls`, `author_lookup_authorization_and_identities_share_a_nonlocking_snapshot`
 - [auth](auth.md): `deactivation_rereads_actor_role_activity_and_revision_after_waiting`, `deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries`
 
 - [auth](auth.md): `duplicate_membership_is_rejected_and_member_identity_is_preserved`, `shared_role_list_contains_every_variant_exactly_once`, `reinvite_reuses_member_row_without_restoring_channel_grants_or_changing_active_roles`, `last_owner_precedes_last_channel_manager_without_side_effects`, `every_role_rest_channel_denials_and_grants_have_positive_controls`

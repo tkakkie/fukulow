@@ -3511,6 +3511,143 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/message-authors": {
+      "post": {
+        "tags": [
+          "crate::messages::authors"
+        ],
+        "summary": "Resolve historical authors without widening the active Member directory.\nAuthorization, authorship and identities share a non-locking REPEATABLE READ snapshot.",
+        "operationId": "lookup_authors",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorLookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Distinct display identities for authors of Messages the caller can currently read, including deactivated authors and authors who left; all other ids omitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorIdentities"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or more than 100 ids (before deduplication)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Expected application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/ws": {
       "get": {
         "tags": [
@@ -4145,6 +4282,39 @@
         },
         "additionalProperties": false
       },
+      "AuthorIdentities": {
+        "type": "object",
+        "required": [
+          "identities"
+        ],
+        "properties": {
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DisplayIdentity"
+            },
+            "description": "Only authors of currently readable Messages; omitted ids remain unresolved."
+          }
+        }
+      },
+      "AuthorLookupRequest": {
+        "type": "object",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "At most 100 input ids, including duplicates. Duplicates are collapsed.",
+            "maxItems": 100
+          }
+        },
+        "additionalProperties": false
+      },
       "Capability": {
         "type": "object",
         "required": [
@@ -4390,6 +4560,26 @@
           }
         },
         "additionalProperties": false
+      },
+      "DisplayIdentity": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "deactivated"
+        ],
+        "properties": {
+          "deactivated": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "ErrorBody": {
         "type": "object",
