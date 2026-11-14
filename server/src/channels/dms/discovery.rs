@@ -9,16 +9,20 @@ pub(crate) async fn bump(
 ) -> Result<(), sqlx::Error> {
     let mut grants = grants.to_vec();
     grants.sort_by_key(|g| g.0);
-    let mut positions = Vec::with_capacity(grants.len());
-    for (member, revision, grant) in grants {
-        let p:i64=sqlx::query_scalar("INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) VALUES($1,$2,$3,1) ON CONFLICT(organization_id,member_id,membership_revision) DO UPDATE SET position=dm_discovery_counters.position+1 RETURNING position")
-            .bind(org).bind(member).bind(revision).fetch_one(&mut *connection).await?;
-        positions.push((member, revision, grant, p));
+    if grants.is_empty() {
+        return Ok(());
     }
-    for (member, revision, grant, p) in positions {
-        sqlx::query("INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) VALUES($1,$2,$3,$4,$5,$6,$6) ON CONFLICT(organization_id,member_id,membership_revision,channel_id) DO UPDATE SET latest_position=EXCLUDED.latest_position,grant_id=EXCLUDED.grant_id")
-            .bind(org).bind(member).bind(revision).bind(channel).bind(grant).bind(p).execute(&mut *connection).await?;
-    }
+    let members = grants.iter().map(|g| g.0).collect::<Vec<_>>();
+    let revisions = grants.iter().map(|g| g.1).collect::<Vec<_>>();
+    let lifetimes = grants.iter().map(|g| g.2).collect::<Vec<_>>();
+    // ORDER BY preserves the Member counter lock order in one batched statement.
+    // Acquire every counter before any discovery row, as on the single-row path.
+    let mut positions: Vec<(i64, Uuid)> = sqlx::query_as("INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT $1,m,r,1 FROM unnest($2::uuid[],$3::bigint[]) v(m,r) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision) DO UPDATE SET position=dm_discovery_counters.position+1 RETURNING position,member_id")
+        .bind(org).bind(&members).bind(&revisions).fetch_all(&mut *connection).await?;
+    positions.sort_by_key(|p| p.1);
+    let positions = positions.into_iter().map(|p| p.0).collect::<Vec<_>>();
+    sqlx::query("INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) SELECT $1,m,r,$2,g,p,p FROM unnest($3::uuid[],$4::bigint[],$5::uuid[],$6::bigint[]) v(m,r,g,p) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision,channel_id) DO UPDATE SET latest_position=EXCLUDED.latest_position,grant_id=EXCLUDED.grant_id")
+        .bind(org).bind(channel).bind(&members).bind(&revisions).bind(&lifetimes).bind(&positions).execute(&mut *connection).await?;
     Ok(())
 }
 

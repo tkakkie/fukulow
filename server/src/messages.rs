@@ -635,12 +635,16 @@ async fn persist_admitted(
         channels::dms::send_locks(tx.connection()?, organization_id, sender, channel_id)
             .await
             .map_err(dm_error)?;
-    match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
-        .await?
-    {
-        Some(true) => {}
-        Some(false) => return Err(MessageError::NotFound),
-        None => return Err(MessageError::OrganizationUnavailable),
+    // DM locks already checked and retain the current sender and participant
+    // grant. The ordinary authorizer would repeat those three locked reads.
+    if dm_grants.is_none() {
+        match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
+            .await?
+        {
+            Some(true) => {}
+            Some(false) => return Err(MessageError::NotFound),
+            None => return Err(MessageError::OrganizationUnavailable),
+        }
     }
     #[cfg(test)]
     tests::removal::pause(input.client_message_id).await;

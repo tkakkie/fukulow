@@ -203,9 +203,28 @@ pub(crate) async fn select(
     ids: Option<&[Uuid]>,
 ) -> Result<Vec<SelectedDm>, ApiError> {
     auth::members::require_current(connection, auth).await?;
-    let rows:Vec<(Uuid,Uuid,String)>=sqlx::query_as("SELECT cm.channel_id, CASE WHEN c.lower_member_id=$2 THEN c.higher_member_id ELSE c.lower_member_id END, c.created_at::text FROM channel_members cm JOIN channels c ON c.organization_id=cm.organization_id AND c.id=cm.channel_id WHERE cm.organization_id=$1 AND cm.member_id=$2 AND cm.membership_revision=$3 AND cm.dm_created_at IS NOT NULL AND c.kind='dm' AND $2 IN(c.lower_member_id,c.higher_member_id) AND ($4::timestamptz IS NULL OR (cm.dm_created_at,cm.channel_id)<($4::timestamptz,$5::uuid)) AND ($6::uuid[] IS NULL OR cm.channel_id=ANY($6)) ORDER BY cm.dm_created_at DESC,cm.channel_id DESC LIMIT 51")
-        .bind(auth.identity.organization.organization_id).bind(auth.identity.member.id).bind(auth.membership_revision)
-        .bind(boundary.map(|b|b.0)).bind(boundary.map(|b|b.1)).bind(ids).fetch_all(&mut *connection).await?;
+    // Separate shapes keep generic prepared plans from filtering the entire
+    // grant order for optional predicates. Bound candidates before pair lookups.
+    let filter = if ids.is_some() {
+        "AND channel_id=ANY($4::uuid[])"
+    } else if boundary.is_some() {
+        "AND (dm_created_at,channel_id)<($4::timestamptz,$5::uuid)"
+    } else {
+        ""
+    };
+    let sql = "SELECT cm.channel_id, CASE WHEN c.lower_member_id=$2 THEN c.higher_member_id ELSE c.lower_member_id END, c.created_at::text FROM (SELECT organization_id,channel_id,dm_created_at FROM channel_members WHERE organization_id=$1 AND member_id=$2 AND membership_revision=$3 AND dm_created_at IS NOT NULL {filter} ORDER BY dm_created_at DESC,channel_id DESC LIMIT 51) cm JOIN channels c ON c.organization_id=cm.organization_id AND c.id=cm.channel_id WHERE c.kind='dm' AND $2 IN(c.lower_member_id,c.higher_member_id) ORDER BY cm.dm_created_at DESC,cm.channel_id DESC".replace("{filter}", filter);
+    let query = sqlx::query_as(&sql)
+        .bind(auth.identity.organization.organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision);
+    let query = if let Some(ids) = ids {
+        query.bind(ids)
+    } else if let Some((created_at, id)) = boundary {
+        query.bind(created_at).bind(id)
+    } else {
+        query
+    };
+    let rows: Vec<(Uuid, Uuid, String)> = query.fetch_all(&mut *connection).await?;
     identities(connection, auth, rows).await
 }
 

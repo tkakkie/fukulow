@@ -691,9 +691,11 @@ async fn authorize_batch(
     };
     let public_roles = auth::authorization::channel_roles_sql(false);
     let explicit_roles = auth::authorization::channel_roles_sql(true);
+    // Keep generic plans correlated to supplied Session keys rather than
+    // materializing unrelated Sessions before matching the notice recipients.
     let sql = format!("SELECT u.role, CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END AS grant_id, r.n
         FROM unnest($2::uuid[], $3::bigint[], $4::bytea[], $5::uuid[]) WITH ORDINALITY r(member_id,revision,hash,channel,n)
-        LEFT JOIN ({}) u ON u.organization_id=$1 AND u.id=r.member_id AND u.membership_revision=r.revision AND u.token_hash=r.hash
+        LEFT JOIN LATERAL (SELECT * FROM ({}) candidate WHERE candidate.organization_id=$1 AND candidate.id=r.member_id AND candidate.membership_revision=r.revision AND candidate.token_hash=r.hash OFFSET 0) u ON true
         LEFT JOIN channels c ON c.organization_id=$1 AND c.id=r.channel
         LEFT JOIN channel_members cm ON cm.organization_id=$1 AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision
         WHERE r.channel IS NULL OR ((c.kind='channel' AND c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL AND (c.kind='channel' OR u.id IN(c.lower_member_id,c.higher_member_id)))) ORDER BY r.n", auth::notice_members_sql());
@@ -1190,6 +1192,134 @@ async fn test_pause(organization: Uuid, channel: Uuid, phase: &'static str, memb
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[fukulow_test::test]
+    async fn notice_batch_matches_join_and_bounds_session_lookups(pool: sqlx::PgPool) {
+        let org = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let members = (0..1000).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
+        let hashes = members
+            .iter()
+            .map(|id| id.as_bytes().repeat(2))
+            .collect::<Vec<_>>();
+        sqlx::query("INSERT INTO organizations(organization_id,name) VALUES($1,'Notice plan')")
+            .bind(org)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO accounts(id,email,password_hash) SELECT id,id::text||'@example.invalid','unused' FROM unnest($1::uuid[]) id")
+            .bind(&members).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO users(organization_id,id,account_id,name,role) SELECT $1,id,id,'Member','member' FROM unnest($2::uuid[]) id")
+            .bind(org).bind(&members).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO account_sessions(account_id,token_hash) SELECT id,hash FROM unnest($1::uuid[],$2::bytea[]) r(id,hash)")
+            .bind(&members).bind(&hashes).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO channels(organization_id,id,name,visibility) VALUES($1,$2,'Public','public')")
+            .bind(org).bind(channel).execute(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE account_sessions SET expires_at=now()-interval '1 second' WHERE account_id=$1",
+        )
+        .bind(members[2])
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",
+        )
+        .bind(org)
+        .bind(members[3])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let selected = members
+            .iter()
+            .enumerate()
+            .map(|(n, id)| {
+                (
+                    Arc::new(Entry {
+                        id: Uuid::new_v4(),
+                        organization: org,
+                        member: (
+                            if n == 4 { Uuid::new_v4() } else { *id },
+                            if n == 1 { 1 } else { 0 },
+                        ),
+                        hash: if n == 0 {
+                            vec![0; 32]
+                        } else {
+                            hashes[n].clone()
+                        },
+                        buffer: Default::default(),
+                        wake: Notify::new(),
+                    }),
+                    Some(channel),
+                )
+            })
+            .collect::<Vec<_>>();
+        let restricted = crate::test_app_pool(pool).await;
+        let app = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(restricted.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        sqlx::query("SET jit=off").execute(&app).await.unwrap();
+        sqlx::query("SET plan_cache_mode=force_generic_plan")
+            .execute(&app)
+            .await
+            .unwrap();
+        let proofs = authorize_batch(&app, &selected).await.unwrap();
+        assert!(proofs[..5].iter().all(Option::is_none));
+        assert!(proofs[5..].iter().all(Option::is_some));
+        let sql: String = sqlx::query_scalar("SELECT statement FROM pg_prepared_statements WHERE statement LIKE 'WITH fukulow_context%' AND statement LIKE '%WITH ORDINALITY r(member_id,revision,hash,channel,n)%' ORDER BY prepare_time DESC LIMIT 1")
+            .fetch_one(&app).await.unwrap();
+        let old = sql.replace("LEFT JOIN LATERAL (SELECT * FROM (", "LEFT JOIN (")
+            .replace(") candidate WHERE candidate.organization_id=$1 AND candidate.id=r.member_id AND candidate.membership_revision=r.revision AND candidate.token_hash=r.hash OFFSET 0) u ON true", ") u ON u.organization_id=$1 AND u.id=r.member_id AND u.membership_revision=r.revision AND u.token_hash=r.hash");
+        assert_ne!(old, sql);
+        let ids = selected.iter().map(|(e, _)| e.member.0).collect::<Vec<_>>();
+        let revisions = selected.iter().map(|(e, _)| e.member.1).collect::<Vec<_>>();
+        let hashes = selected
+            .iter()
+            .map(|(e, _)| e.hash.clone())
+            .collect::<Vec<_>>();
+        let channels = vec![Some(channel); selected.len()];
+        let old_rows: Vec<(Option<Role>, Option<Uuid>, i64)> = sqlx::query_as(&old)
+            .bind(org)
+            .bind(&ids)
+            .bind(&revisions)
+            .bind(&hashes)
+            .bind(&channels)
+            .fetch_all(&app)
+            .await
+            .unwrap();
+        let expected = proofs
+            .iter()
+            .enumerate()
+            .filter_map(|(n, p)| p.as_ref().map(|p| (Some(p.role), p.grant, (n + 1) as i64)))
+            .collect::<Vec<_>>();
+        assert_eq!(old_rows, expected);
+        let plan: serde_json::Value =
+            sqlx::query_scalar(&format!("EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {sql}"))
+                .bind(org)
+                .bind(&ids)
+                .bind(&revisions)
+                .bind(&hashes)
+                .bind(&channels)
+                .fetch_one(&app)
+                .await
+                .unwrap();
+        fn check(node: &serde_json::Value) {
+            if node["Relation Name"] == "account_sessions" {
+                let examined = node["Actual Rows"].as_f64().unwrap_or(0.0)
+                    * node["Actual Loops"].as_f64().unwrap_or(0.0);
+                assert!(examined <= 1000.0, "unbounded Session work: {node}");
+            }
+            if let Some(children) = node["Plans"].as_array() {
+                for child in children {
+                    check(child);
+                }
+            }
+        }
+        check(&plan[0]["Plan"]);
+        app.close().await;
+        restricted.close().await;
+    }
     pub(super) fn entry() -> Arc<Entry> {
         Arc::new(Entry {
             id: Uuid::new_v4(),

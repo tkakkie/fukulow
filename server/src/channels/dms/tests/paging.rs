@@ -1,6 +1,87 @@
 use super::*;
 use std::collections::HashSet;
 
+#[fukulow_test::test]
+async fn batched_discovery_preserves_each_recipients_position_and_lifetime(pool: PgPool) {
+    let f = Fixture::new(pool, "member").await;
+    let channel = f.dm().await;
+    let before: Vec<(Uuid, i64, Uuid, i64)> = sqlx::query_as("SELECT member_id,membership_revision,grant_id,birth_position FROM dm_discovery WHERE organization_id=$1 AND channel_id=$2 ORDER BY member_id DESC")
+        .bind(f.org).bind(channel).fetch_all(&f.pools.admin).await.unwrap();
+    sqlx::query("UPDATE dm_discovery_counters SET position=CASE WHEN member_id=$2 THEN 10 ELSE 100 END WHERE organization_id=$1")
+        .bind(f.org).bind(f.a).execute(&f.pools.admin).await.unwrap();
+    let mut tx = f.pools.admin.begin().await.unwrap();
+    discovery::bump(
+        &mut tx,
+        f.org,
+        channel,
+        &before.iter().map(|r| (r.0, r.1, r.2)).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let after: Vec<(Uuid, i64, Uuid, i64, i64)> = sqlx::query_as("SELECT member_id,membership_revision,grant_id,birth_position,latest_position FROM dm_discovery WHERE organization_id=$1 AND channel_id=$2 ORDER BY member_id DESC")
+        .bind(f.org).bind(channel).fetch_all(&f.pools.admin).await.unwrap();
+    for (old, new) in before.iter().zip(after) {
+        assert_eq!(*old, (new.0, new.1, new.2, new.3));
+        assert_eq!(new.4, if new.0 == f.a { 11 } else { 101 });
+    }
+    f.pools.app.close().await;
+}
+
+#[fukulow_test::test]
+async fn generic_page_and_refresh_plans_bound_grant_candidates(pool: PgPool) {
+    let f = Fixture::new(pool, "member").await;
+    let mut channels = large_fixture(&f, 1_000).await;
+    channels.sort_by(|a, b| b.cmp(a));
+    let actor = extract_auth(f.state.clone(), &f.at).await;
+    let mut tx = f.pools.app.begin().await.unwrap();
+    sqlx::query("SELECT set_config('fukulow.organization_id',$1,true)")
+        .bind(f.org.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("SET LOCAL plan_cache_mode=force_generic_plan")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for shape in ["deep", "ids"] {
+        let boundary = (shape == "deep").then_some(("2026-01-01", channels[499]));
+        let ids = (shape == "ids").then_some(&channels[..50]);
+        let selected = select(&mut tx, &actor, boundary, ids).await.unwrap();
+        assert_eq!(selected.len(), if shape == "deep" { 51 } else { 50 });
+        // Explain the actual SQL prepared by select, not a parallel test query.
+        let statement: String = sqlx::query_scalar("SELECT statement FROM pg_prepared_statements WHERE statement LIKE 'SELECT cm.channel_id%' ORDER BY prepare_time DESC LIMIT 1")
+            .fetch_one(&mut *tx).await.unwrap();
+        let explain = format!("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {statement}");
+        let query = sqlx::query_scalar::<_, Value>(&explain)
+            .bind(f.org)
+            .bind(f.a)
+            .bind(0_i64);
+        let query = if let Some(ids) = ids {
+            query.bind(ids)
+        } else {
+            query.bind("2026-01-01").bind(channels[499])
+        };
+        let plan = query.fetch_one(&mut *tx).await.unwrap();
+        fn check(node: &Value, bound: u64) {
+            if node["Relation Name"] == "channel_members" {
+                let examined = (node["Actual Rows"].as_f64().unwrap_or(0.0)
+                    + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                    * node["Actual Loops"].as_f64().unwrap_or(1.0);
+                assert!(examined <= bound as f64, "unbounded grant work: {node}");
+            }
+            if let Some(children) = node["Plans"].as_array() {
+                for child in children {
+                    check(child, bound);
+                }
+            }
+        }
+        check(&plan[0]["Plan"], if shape == "deep" { 51 } else { 50 });
+    }
+    tx.rollback().await.unwrap();
+    f.pools.app.close().await;
+}
+
 async fn changes(f: &Fixture, token: &str, lane: &str, cursor: Option<&str>) -> Value {
     let suffix = format!(
         "/api/v1/dms/changes?lane={lane}{}",
@@ -371,7 +452,7 @@ async fn delayed_empty_creation_is_above_early_counter_and_later_allocation_wait
     };
     super::concurrency::wait_lock(
         &f.pools.admin,
-        "INSERT INTO dm_discovery_counters%RETURNING position",
+        "INSERT INTO dm_discovery_counters%RETURNING position%",
     )
     .await;
     assert!(!second.is_finished());
