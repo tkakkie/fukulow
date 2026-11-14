@@ -1,12 +1,35 @@
+use futures_util::FutureExt;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use std::{cell::RefCell, future::Future, panic::AssertUnwindSafe};
+
+tokio::task_local! {
+    static APP_POOLS: RefCell<Vec<PgPool>>;
+}
+
+pub async fn run<F: Future>(test: F) -> F::Output {
+    APP_POOLS
+        .scope(RefCell::new(Vec::new()), async {
+            let result = AssertUnwindSafe(test).catch_unwind().await;
+            let pools = APP_POOLS.with(|pools| pools.take());
+            for pool in pools {
+                pool.close().await;
+            }
+            match result {
+                Ok(output) => output,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
+        .await
+}
 
 const APP_ROLE: &str = "fukulow_sqlx_test_app";
 
-/// Opt in with `let pools = TestPools::new(pool).await` in a `#[sqlx::test]`.
+/// Use `let pools = TestPools::new(pool).await` in a `#[fukulow_test::test]`.
 /// Pass `pools.app` to application state/queries; keep fixtures, migrations, DDL
 /// and fault injection on `pools.admin`. Never use this against a shared cluster.
 /// The test-only role persists across runs; no real `fukulow_app` is changed.
-/// Close `pools.app` before returning so SQLx can drop the test database.
+/// The test harness closes every app pool before returning to SQLx, even when
+/// application state or background tasks retain pool handles.
 /// This conventional module path keeps the invariants check's module tree resolvable;
 /// integration tests share it through `tests/support/pools.rs`.
 pub struct TestPools {
@@ -16,6 +39,10 @@ pub struct TestPools {
 
 impl TestPools {
     pub async fn new(admin: PgPool) -> Self {
+        assert!(
+            APP_POOLS.try_with(|_| ()).is_ok(),
+            "TestPools requires #[fukulow_test::test] to close app pools before SQLx teardown"
+        );
         let mut transaction = admin.begin().await.unwrap();
         // Serialize grants when callers initialize the same test database together.
         // Advisory locks are database-local; role creation also handles cross-DB races.
@@ -77,6 +104,7 @@ impl TestPools {
             )
             .await
             .unwrap();
+        APP_POOLS.with(|pools| pools.borrow_mut().push(app.clone()));
         Self { admin, app }
     }
 }

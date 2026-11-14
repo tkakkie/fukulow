@@ -20,6 +20,8 @@ pub async fn c() {}
 #[sqlx::test(migrations = "./m")]
 #[cfg(test)]
 async fn d(pool: PgPool) {}
+#[fukulow_test::test(migrations = false)]
+async fn managed(pool: PgPool) {}
 #[test]
 #[cfg(feature = "slow")]
 fn e() {}
@@ -32,6 +34,7 @@ fn f() {}
       { name: 'b', ignored: true, conditional: false, inline: [] },
       { name: 'c', ignored: true, conditional: false, inline: [] },
       { name: 'd', ignored: false, conditional: false, inline: [] },
+      { name: 'managed', ignored: false, conditional: false, inline: [] },
       { name: 'e', ignored: false, conditional: true, inline: [] },
       { name: 'f', ignored: false, conditional: true, inline: [] },
     ])

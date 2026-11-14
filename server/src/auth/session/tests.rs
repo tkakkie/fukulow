@@ -183,7 +183,7 @@ pub(super) async fn fixture(pool: &PgPool) -> (AppState, Auth) {
     )
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
     let (state, auth) = fixture(&pool).await;
 
@@ -234,7 +234,7 @@ async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn fallback_database_timeout_is_bounded_and_does_not_claim_session_ended(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     let exhausted = sqlx::postgres::PgPoolOptions::new()
@@ -285,7 +285,7 @@ async fn old_registration_drop_cannot_remove_new_epoch_and_revoked_is_irreversib
     assert!(changes.sessions.lock().unwrap().entries.is_empty());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_epoch_closes_but_new_epoch_checks_current_database(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     state.session_changes =
@@ -318,7 +318,7 @@ async fn failed_epoch_closes_but_new_epoch_checks_current_database(pool: PgPool)
     new.ended().await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn worker_failure_during_initial_check_is_not_admitted(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     state.session_changes =
@@ -363,7 +363,7 @@ async fn membership_signals_scope_all_account_sessions_and_preserve_new_revision
     assert!(!second.changed.borrow().revoked);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn latched_membership_at_connect_yields_4003_and_session_end_wins(pool: PgPool) {
     for (session_ended, failed) in [(false, false), (false, true), (true, false), (true, true)] {
         let (state, auth) = fixture(&pool).await;
@@ -406,7 +406,7 @@ async fn latched_membership_at_connect_yields_4003_and_session_end_wins(pool: Pg
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn membership_connect_race_is_classified_independently_from_session_end(pool: PgPool) {
     let (state, auth) = fixture(&pool).await;
     let checked = state.session_changes.pause(Phase::Checked);

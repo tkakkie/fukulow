@@ -37,7 +37,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 - No new dependency, abstraction or doc without a reason in the PR.
 
 ## Boundaries
-- One crate; modules `realtime` -> `messages` -> `channels` -> `auth`, no reverse edges. Split crates only when build time, deps or parallel work hurt.
+- Modules `realtime` -> `messages` -> `channels` -> `auth`, no reverse edges. More crates are allowed with a PR reason (responsibility, dependency direction, build time, testability); crates keep this DAG, no cycles; release stays one binary, one image. Production domain split: #378.
 - Target DAG (#319): the four domain modules stay this chain; leaves `database` (used by channels, messages; by auth only once #314 needs it) and `shutdown` (used by messages, realtime) depend on nothing. CI checks the chain (#318), then the leaves (M1, #320). Kept on purpose: `docs/decisions/process.md` #319.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.

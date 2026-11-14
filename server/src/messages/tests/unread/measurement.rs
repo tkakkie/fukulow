@@ -16,7 +16,7 @@ SELECT p.channel_id, p.read_seq,
  GROUP BY p.channel_id, p.read_seq
 "#;
 
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual before/after release query measurement; run without other builds/tests"]
 async fn measure_unread_list_read_position_ranges(pool: PgPool) {
     let history: i64 = std::env::var("MEASURE_HISTORY")

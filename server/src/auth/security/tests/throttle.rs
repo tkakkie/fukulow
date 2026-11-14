@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_throttle_shares_failures_with_web_and_native_sign_in(pool: PgPool) {
     let f = fixture(&pool).await;
     let before = snapshot(&pool).await;
@@ -57,7 +57,7 @@ async fn security_throttle_shares_failures_with_web_and_native_sign_in(pool: PgP
     assert_eq!(snapshot(&pool).await, before);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_reserves_shared_ip_and_email_before_argon2_admission(pool: PgPool) {
     let f = fixture(&pool).await;
     let before = snapshot(&pool).await;
@@ -145,7 +145,7 @@ async fn security_reserves_shared_ip_and_email_before_argon2_admission(pool: PgP
     assert_eq!(snapshot(&pool).await, before);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_success_releases_reservations_without_resetting_failures(pool: PgPool) {
     let f = fixture(&pool).await;
     let path = OPERATIONS[1].1;
@@ -294,19 +294,19 @@ async fn cancelled_argon2(pool: PgPool, operation: usize, correct: bool) {
     assert!(denied.account("owner@example.com".into()).is_err());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn password_change_argon2_reservation_survives_http_cancellation(pool: PgPool) {
     cancelled_argon2(pool, 0, true).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revoke_others_argon2_reservation_survives_http_cancellation(pool: PgPool) {
     cancelled_argon2(pool, 1, true).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn password_change_cancelled_argon2_failure_counts_without_mutation(pool: PgPool) {
     cancelled_argon2(pool, 0, false).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revoke_others_cancelled_argon2_failure_counts_without_mutation(pool: PgPool) {
     cancelled_argon2(pool, 1, false).await;
 }

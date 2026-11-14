@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn surrounding_channel_name_whitespace_is_rejected_without_writes(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -53,7 +53,7 @@ async fn surrounding_channel_name_whitespace_is_rejected_without_writes(pool: Pg
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_name_whitespace_preserves_internal_whitespace(pool: PgPool) {
     let app = router(&pool).await;
     for visibility in ["public", "private"] {
@@ -65,7 +65,7 @@ async fn channel_name_whitespace_preserves_internal_whitespace(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn surrounding_channel_name_whitespace_is_rejected_before_opening_transaction(pool: PgPool) {
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;

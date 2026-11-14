@@ -16,7 +16,7 @@ async fn assert_invalid(response: Response, status: StatusCode) {
     assert_eq!(body(response).await, json!({"error": error}));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_nul_email_and_display_name_keep_auth_precedence_and_write_nothing(
     pool: sqlx::PgPool,
 ) {
@@ -90,7 +90,7 @@ async fn invite_nul_email_and_display_name_keep_auth_precedence_and_write_nothin
     assert_eq!(counts, (1, 0, 1, 1));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_nul_fields_skip_operation_database_and_password_work(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, _, _, token) = account(&pool, org, Role::Owner).await;

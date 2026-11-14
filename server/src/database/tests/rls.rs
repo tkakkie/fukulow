@@ -115,7 +115,7 @@ async fn insertable(admin: &PgPool, table: &str) -> String {
     .unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(pool: PgPool) {
     let pools = pools(pool).await;
     let (a, b) = (tenant(&pools.admin).await, tenant(&pools.admin).await);
@@ -183,7 +183,7 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn rls_without_context_reads_nothing_and_writes_nothing(pool: PgPool) {
     let pools = pools(pool).await;
     let a = tenant(&pools.admin).await;
@@ -228,7 +228,7 @@ async fn rls_without_context_reads_nothing_and_writes_nothing(pool: PgPool) {
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn rls_account_context_reads_only_own_members_and_writes_nothing(pool: PgPool) {
     let pools = pools(pool).await;
     let (a, b) = (tenant(&pools.admin).await, tenant(&pools.admin).await);
@@ -301,7 +301,7 @@ async fn rls_account_context_reads_only_own_members_and_writes_nothing(pool: PgP
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn rls_context_never_survives_commit_rollback_or_abort_on_a_reused_connection(pool: PgPool) {
     let pools = pools(pool).await;
     let a = tenant(&pools.admin).await;
@@ -347,7 +347,7 @@ async fn rls_context_never_survives_commit_rollback_or_abort_on_a_reused_connect
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn setup_required_is_boolean_only_and_executable_only_by_the_app_role(pool: PgPool) {
     let pools = pools(pool).await;
     let required: bool = sqlx::query_scalar("SELECT fukulow_setup_required()")
