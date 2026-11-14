@@ -13,7 +13,7 @@ pub(super) async fn topic_send(f: &Fixture, token: &str, channel: Uuid, key: Uui
     serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_ack_history_live_reconnect_and_shared_gap_payloads_are_identical(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut live = f.server.connect(&f.token).await;
@@ -54,7 +54,7 @@ async fn topic_ack_history_live_reconnect_and_shared_gap_payloads_are_identical(
     assert_eq!(event(&mut reconnect).await["message"], third);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_live_replay_cross_organization_and_private_nonmember_denials_have_positive_controls(
     pool: PgPool,
 ) {
@@ -87,7 +87,7 @@ async fn topic_live_replay_cross_organization_and_private_nonmember_denials_have
     ready(&mut replay, private, 1).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_live_replay_member_revision_and_removed_grant_denials_have_positive_controls(
     pool: PgPool,
 ) {
@@ -156,7 +156,7 @@ async fn topic_live_replay_member_revision_and_removed_grant_denials_have_positi
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn websocket_subscribe_succeeds_while_topic_projection_queries_are_in_flight(pool: PgPool) {
     let app_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)

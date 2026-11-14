@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_publish(
     pool: PgPool,
 ) {
@@ -164,7 +164,7 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn shared_gap_recovery_accepts_one_page_and_latches_above_the_bound(pool: PgPool) {
     for gap in [
         REPLAY_PAGE_SIZE,
@@ -217,7 +217,7 @@ async fn shared_gap_recovery_accepts_one_page_and_latches_above_the_bound(pool: 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn shared_gap_authorization_failure_sets_overflow_and_advances_cursor(pool: PgPool) {
     let (_, org, sender, channel, _) = fixture(&pool).await;
     let delivery = Delivery::default();
@@ -263,7 +263,7 @@ async fn shared_gap_authorization_failure_sets_overflow_and_advances_cursor(pool
     assert!(!recovered.notification_failed.is_failed());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn shared_gap_query_failure_latches_only_affected_channel_for_replay(pool: PgPool) {
     let (_, org, sender, channel, _) = fixture(&pool).await;
     let delivery = Delivery::default();

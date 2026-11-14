@@ -549,7 +549,7 @@ fn fixtures() -> (Vec<Scenario>, Vec<Value>) {
     (running, proposed)
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delivery_contract_scenarios(pool: PgPool) {
     let filter = std::env::var("REALTIME_CONTRACT_SCENARIO").ok();
     let (scenarios, proposed) = fixtures();

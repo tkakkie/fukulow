@@ -93,7 +93,7 @@ async fn assert_internal_error(response: Response) {
     assert_eq!(body(response).await, json!({"error": "internal error"}));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn auth_extractor_database_failures_return_generic_500_on_all_protected_endpoints(
     pool: PgPool,
 ) {
@@ -162,7 +162,7 @@ async fn auth_extractor_database_failures_return_generic_500_on_all_protected_en
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn public_endpoint_database_failures_return_generic_500(pool: PgPool) {
     let app = router(&pool);
     sqlx::raw_sql("ALTER TABLE accounts RENAME TO injected_unavailable_accounts; ALTER TABLE organizations RENAME TO injected_unavailable_organizations;")
@@ -187,7 +187,7 @@ async fn public_endpoint_database_failures_return_generic_500(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sign_out_database_failure_returns_generic_500_and_preserves_session(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -271,7 +271,7 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn setup_status_empty_database_is_public_and_reveals_only_boolean(pool: PgPool) {
     assert_setup_status(&pool, true).await;
     let counts: (i64, i64, i64) = sqlx::query_as(
@@ -283,7 +283,7 @@ async fn setup_status_empty_database_is_public_and_reveals_only_boolean(pool: Pg
     assert_eq!(counts, (0, 0, 0));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn setup_status_after_setup_is_public_and_reveals_only_boolean(pool: PgPool) {
     setup(&router(&pool)).await;
     assert_setup_status(&pool, false).await;
@@ -296,7 +296,7 @@ async fn setup_status_after_setup_is_public_and_reveals_only_boolean(pool: PgPoo
     assert_eq!(counts, (1, 1, 0));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn setup_works_once_and_is_atomic(pool: PgPool) {
     let pools = test_support::TestPools::new(pool).await;
     let app = router(&pools.app);
@@ -442,7 +442,7 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPool) {
     let setup_token = "setup-token-test-only";
     let app = app(AppState {
@@ -497,7 +497,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn setup_rejects_wrong_token_with_default_test_configuration(pool: PgPool) {
     let app = router(&pool);
     let mut input = setup_input();
@@ -545,7 +545,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -600,7 +600,7 @@ async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn one_account_has_independent_members_and_roles_in_multiple_organizations(pool: PgPool) {
     let app = router(&pool);
     let (first, second) = two_organizations(&pool, &app).await;
@@ -643,7 +643,7 @@ async fn one_account_has_independent_members_and_roles_in_multiple_organizations
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sign_in_without_organization_rejects_an_unconfigured_instance(pool: PgPool) {
     let response = request(
         &router(&pool),
@@ -656,7 +656,7 @@ async fn sign_in_without_organization_rejects_an_unconfigured_instance(pool: PgP
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -786,7 +786,7 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn offline_restore_ends_every_account_session_and_preserves_members(pool: PgPool) {
     let app = router(&pool);
     let (_, second) = two_organizations(&pool, &app).await;
@@ -882,7 +882,7 @@ async fn offline_restore_ends_every_account_session_and_preserves_members(pool: 
     assert_eq!(sign_in(&app, "", PASSWORD).await.status(), StatusCode::OK);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -949,7 +949,7 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn session_cannot_access_another_organization(pool: PgPool) {
     check_tenant_denials(pool).await;
 }
@@ -1037,7 +1037,7 @@ async fn check_tenant_denials(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invalid_setup_does_not_consume_bootstrap(pool: PgPool) {
     let app = router(&pool);
     for (field, value) in [
@@ -1109,7 +1109,7 @@ async fn assert_throttled(response: Response) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts(pool: PgPool) {
     let app = router(&pool);
     setup(&app).await;
@@ -1170,7 +1170,7 @@ async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts(pool
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_sign_ins_throttle_ip_and_ignore_spoofed_forwarded_header_by_default(pool: PgPool) {
     let app = router(&pool);
     let first = setup(&app).await;
@@ -1235,7 +1235,7 @@ async fn failed_sign_ins_throttle_ip_and_ignore_spoofed_forwarded_header_by_defa
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_account_budget(
     pool: PgPool,
 ) {
@@ -1342,7 +1342,7 @@ async fn advance_cleanup_interval_and_expire_throttle_window() {
     tokio::time::resume();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn multiple_organizations_do_not_make_account_sign_in_ambiguous(pool: PgPool) {
     let app = router(&pool);
     two_organizations(&pool, &app).await;
@@ -1367,7 +1367,7 @@ async fn multiple_organizations_do_not_make_account_sign_in_ambiguous(pool: PgPo
 // b"0123456789abcdef"; do not regenerate with the dependency under test.
 const ARGON2_053_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$gy5SuVm5Z7Vw7keB9se9p87QGcomaseB/S2U1OhTsM0";
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -1392,7 +1392,7 @@ async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn new_password_hash_preserves_explicit_parameters_and_salt_length(pool: PgPool) {
     let identity = setup(&router(&pool)).await;
     let hash: String =
@@ -1424,7 +1424,7 @@ async fn new_password_hash_preserves_explicit_parameters_and_salt_length(pool: P
 const FIXED_CREDENTIAL: &str = "11111111-2222-4333-8444-555555555555.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 const FIXED_DIGEST: &str = "da36cd522069db7890f63fe6e69904762a6868b9b26b8533b81792b4eda34db0";
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) {
     let organization: Uuid = "11111111-2222-4333-8444-555555555555".parse().unwrap();
     let account = Uuid::new_v4();
@@ -1470,7 +1470,7 @@ async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -1499,7 +1499,7 @@ async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: Pg
     assert_ne!(tokens[0], tokens[1]);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool: PgPool) {
     check_member_identity(pool).await;
 }
@@ -1574,7 +1574,7 @@ async fn check_member_identity(pool: PgPool) -> Value {
     identity
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn member_truncate_is_refused_and_preserves_history(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -1610,7 +1610,7 @@ async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &st
     assert!(preserved);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_on_http(
     pool: PgPool,
 ) {
@@ -1693,7 +1693,7 @@ async fn legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_
     assert_eq!(body(response).await, attacker_session["identity"]);
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool: PgPool) {
     let migrations = sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1777,7 +1777,7 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: PgPool) {
     let app = router(&pool);
     let identity = setup(&app).await;
@@ -1848,7 +1848,7 @@ async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: 
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn web_and_native_contracts_cookie_migration_and_revocation(pool: PgPool) {
     setup(&router(&pool)).await;
     for secure in [false, true] {
@@ -2032,7 +2032,7 @@ async fn web_and_native_contracts_cookie_migration_and_revocation(pool: PgPool) 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn web_and_native_share_account_and_ip_failure_budgets(pool: PgPool) {
     setup(&router(&pool)).await;
     for by_ip in [false, true] {
@@ -2083,7 +2083,7 @@ async fn web_and_native_share_account_and_ip_failure_budgets(pool: PgPool) {
 #[path = "support/database_roles.rs"]
 mod database_roles;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn app_role_denies_ddl_and_both_memberships_and_preserves_member_and_tenant_protection(
     pool: PgPool,
 ) {

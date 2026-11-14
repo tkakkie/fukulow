@@ -85,7 +85,7 @@ async fn setup_nul_fields_follow_token_gate_and_skip_database_and_hashing() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn setup_nul_fields_write_nothing(pool: sqlx::PgPool) {
     let app = crate::app(AppState::for_test(pool.clone()).await);
     for field in ["email", "name", "organization_name"] {
@@ -158,7 +158,7 @@ async fn web_and_native_nul_email_precedes_throttle_password_and_database() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn nul_password_remains_usable_for_setup_and_both_sign_in_endpoints(pool: sqlx::PgPool) {
     let app = crate::app(AppState::for_test(pool.clone()).await);
     let mut input = setup_input();

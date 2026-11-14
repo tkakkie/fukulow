@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_names_validate_scalars_whitespace_and_channel_scoped_ascii_identity(pool: PgPool) {
     let (app, org, sender, channel, token) = fixture(&pool).await;
     for name in [
@@ -103,7 +103,7 @@ async fn topic_names_validate_scalars_whitespace_and_channel_scoped_ascii_identi
     assert_eq!(name["maxLength"], 60);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once(pool: PgPool) {
     let (_, org, sender, channel, token) = fixture(&pool).await;
     let second = member(&pool, org, Uuid::new_v4()).await;
@@ -191,7 +191,7 @@ async fn topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once
     assert!(queue.events.try_recv().is_err(), "retries never publish");
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_retry_identity_rejects_added_removed_changed_and_cross_channel_intent(pool: PgPool) {
     let (app, org, sender, channel, token) = fixture(&pool).await;
     let key = Uuid::new_v4();
@@ -254,7 +254,7 @@ async fn topic_retry_identity_rejects_added_removed_changed_and_cross_channel_in
     assert_eq!(null["seq"], 3);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_first_creation_duplicates_lost_ack_and_cross_channel_race_leave_no_empty_topic(
     pool: PgPool,
 ) {

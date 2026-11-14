@@ -39,7 +39,7 @@ impl Runner {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_chain_contract_rejects_wrong_root_omissions_order_and_has_more(pool: PgPool) {
     for mutation in 0..4 {
         let mut scenario = super::scenarios()

@@ -121,7 +121,7 @@ async fn manager(app: &Router, token: &str, channel: Uuid, target: Uuid, value: 
     .await
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_creation_management_and_capabilities_match_authorize(pool: PgPool) {
     let f = Fixture::new(pool).await;
     assert!(f.right(f.creator).await.1);

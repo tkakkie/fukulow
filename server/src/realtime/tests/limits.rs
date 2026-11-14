@@ -79,7 +79,7 @@ async fn text(client: &mut Client, text: &str) {
     client.send(tungstenite::Message::text(text)).await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn the_account_cap_counts_every_organization_and_session_and_refuses_with_503(pool: PgPool) {
     let f = limited(&pool, limits(2, 100, 50, 50)).await;
     let other_organization = second_membership(&pool, f.member).await;
@@ -103,7 +103,7 @@ async fn the_account_cap_counts_every_organization_and_session_and_refuses_with_
     ready(&mut again, f.channel, 0).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn the_global_cap_refuses_every_account_until_a_socket_closes(pool: PgPool) {
     let f = limited(&pool, limits(5, 2, 50, 50)).await;
     let (_, other) = member(&pool, f.organization).await;
@@ -116,7 +116,7 @@ async fn the_global_cap_refuses_every_account_until_a_socket_closes(pool: PgPool
     let _third = f.server.connect(&other).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn slots_are_released_on_every_path(pool: PgPool) {
     let f = limited(&pool, limits(1, 100, 1, 50)).await;
     // Authentication failure takes no slot.
@@ -164,7 +164,7 @@ async fn slots_are_released_on_every_path(pool: PgPool) {
     open_sockets(&f, 0).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn over_budget_frames_close_4029_before_any_database_access(pool: PgPool) {
     let f = limited(&pool, limits(5, 100, 2, 50)).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -188,7 +188,7 @@ async fn over_budget_frames_close_4029_before_any_database_access(pool: PgPool) 
     drop(held);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unsubscribe_subscribe_cycling_cannot_bypass_the_budget(pool: PgPool) {
     let f = limited(&pool, limits(5, 100, 5, 50)).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -217,7 +217,7 @@ async fn unsubscribe_subscribe_cycling_cannot_bypass_the_budget(pool: PgPool) {
     closed(&mut socket, CLOSE_RATE_LIMITED).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn a_duplicate_subscribe_is_a_charged_no_op_whatever_its_after_seq(pool: PgPool) {
     let f = limited(&pool, limits(5, 100, 4, 50)).await;
     let first = post(&f, f.channel).await;
@@ -241,7 +241,7 @@ async fn a_duplicate_subscribe_is_a_charged_no_op_whatever_its_after_seq(pool: P
     closed(&mut socket, CLOSE_RATE_LIMITED).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reconnecting_after_4029_does_not_reset_the_account_budget(pool: PgPool) {
     // No Account refill, so the refusals below cannot race a refill; refill is
     // covered by the limiter unit tests.
@@ -300,7 +300,7 @@ fn unlimited(read_buffer: usize) -> SocketLimits {
 
 // RSS and CPU include the in-process loopback clients (each with tungstenite's
 // 128 KiB default read buffer), so compare server read-buffer variants by difference.
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release idle-socket RSS/CPU by server read buffer (#196 A)"]
 async fn measure_idle_socket_rss_by_read_buffer(pool: PgPool) {
     let env = |name: &str, default: usize| -> usize {
@@ -339,7 +339,7 @@ async fn measure_idle_socket_rss_by_read_buffer(pool: PgPool) {
 // possible; on 4029 each reconnects at once (ignoring backoff). Meanwhile another
 // Organization's Member re-subscribes every 500 ms (1 s deadline), and the app pool's
 // in-use connections are sampled every 5 ms. Runs for MEASURE_SECONDS.
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release 4029 reconnect-loop subscribe load (#196 A)"]
 async fn measure_reconnect_flood_subscribe_load(pool: PgPool) {
     let env = |name: &str, default: u64| -> u64 {

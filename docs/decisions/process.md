@@ -3,6 +3,7 @@
 Product, stack, delivery, project rules, CI and AI process. Writing rules and the other parts: [index](../decisions.md).
 
 ## Product, stack and delivery
+- #373 A test-only attribute delegates DB setup to SQLx and awaits registered app-pool closure before teardown, including on panic. TestPools rejects unmanaged callers. Async Drop would race DROP DATABASE; a held admin-connection barrier would starve single-connection tests.
 - #198 A: acquire/query/return each get 200 ms for local DB jitter and fast failure. Coalesced checks hold admission through bounded return; query errors/cancellation detach. One FIFO-pool slot, no send/watermark permits; this avoids unbounded SQLx Drop pings.
 - #198 A: reuse the binary for a one-second HTTP probe; no client exists in the image. A separate runtime skips blocking-resolver shutdown waits. Try resolved addresses, map wildcards to loopback; no dependency/port. Proxies hide /ready; unhealthy alone never restarts Compose.
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.

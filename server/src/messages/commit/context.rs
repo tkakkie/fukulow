@@ -19,7 +19,7 @@ async fn begin(pool: &PgPool, organization: Uuid) -> Transaction {
         .unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort(pool: PgPool) {
     let pools = pools(pool).await;
     let mut pid = clean(&pools.app).await;
@@ -62,7 +62,7 @@ async fn send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort(po
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_context_cancelled_begin_setting_work_and_cleanup_discard(pool: PgPool) {
     let pools = pools(pool).await;
     for statement in [
@@ -93,7 +93,7 @@ async fn send_context_cancelled_begin_setting_work_and_cleanup_discard(pool: PgP
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_context_failed_rollback_discards_connection(pool: PgPool) {
     let pools = pools(pool).await;
     interrupted::failed_rollback(&pools.app, async |single: &PgPool, pid| {

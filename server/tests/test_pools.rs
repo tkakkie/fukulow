@@ -1,12 +1,71 @@
 #![cfg(test)]
 
 #[path = "support/pools.rs"]
-mod support;
+mod test_support;
 
+use futures_util::FutureExt;
 use sqlx::PgPool;
-use support::TestPools;
+use std::panic::AssertUnwindSafe;
+use test_support::TestPools;
 
-#[sqlx::test]
+#[fukulow_test::test]
+async fn harness_closes_all_app_pools_with_retained_handles(pool: PgPool) {
+    let apps = test_support::run(async {
+        let first = TestPools::new(pool.clone()).await;
+        let second = TestPools::new(pool.clone()).await;
+        // Retained handles model application state/background tasks outliving the body.
+        (first.app, second.app)
+    })
+    .await;
+    assert!(apps.0.is_closed());
+    assert!(apps.1.is_closed());
+    assert_eq!(apps.0.size(), 0);
+    assert_eq!(apps.1.size(), 0);
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[fukulow_test::test]
+async fn harness_closes_app_pools_on_error_and_panic(pool: PgPool) {
+    let mut retained = None;
+    let result: Result<(), &str> = test_support::run(async {
+        retained = Some(TestPools::new(pool.clone()).await.app);
+        Err("early return")?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(result, Err("early return"));
+    assert_eq!(retained.as_ref().unwrap().size(), 0);
+    assert!(retained.as_ref().unwrap().is_closed());
+
+    let result = AssertUnwindSafe(test_support::run(async {
+        retained = Some(TestPools::new(pool.clone()).await.app);
+        panic!("test body failed");
+    }))
+    .catch_unwind()
+    .await;
+    assert!(result.is_err());
+    assert_eq!(retained.as_ref().unwrap().size(), 0);
+    assert!(retained.as_ref().unwrap().is_closed());
+}
+
+// Negative guard: a test without the wrapper fails before opening app connections.
+#[tokio::test]
+#[should_panic(expected = "TestPools requires #[fukulow_test::test]")]
+async fn unmanaged_app_pool_is_rejected() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://postgres:ci-test-only@127.0.0.1:5432/postgres")
+        .unwrap();
+    let _pools = TestPools::new(pool).await;
+}
+
+#[fukulow_test::test]
 async fn app_pool_is_restricted_and_admin_remains_separate(pool: PgPool) {
     let pools = TestPools::new(pool).await;
     let flags: (String, bool, bool, bool, bool) = sqlx::query_as(

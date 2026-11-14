@@ -927,7 +927,7 @@ mod tests {
         drop(queue);
     }
 
-    #[sqlx::test]
+    #[fukulow_test::test]
     async fn watermark_capacity_covers_pool_wait_and_releases_on_every_exit(pool: sqlx::PgPool) {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(3)
