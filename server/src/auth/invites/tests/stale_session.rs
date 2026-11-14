@@ -185,14 +185,14 @@ async fn stale_cookie_recovery(pool: sqlx::PgPool, existing: bool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn stale_cookie_sign_out_expires_configured_and_legacy_cookies_before_anonymous_acceptance(
     pool: sqlx::PgPool,
 ) {
     stale_cookie_recovery(pool, false).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn stale_cookie_recovery_keeps_existing_account_sign_in_required_until_matching_sign_in(
     pool: sqlx::PgPool,
 ) {

@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_inherits_root_and_topic_and_retry_compares_parent_before_lookup(pool: PgPool) {
     let (app, org, _, channel, token) = fixture(&pool).await;
     for topic in [None, Some("Release")] {
@@ -62,7 +62,7 @@ fn input_without_parent(key: Uuid) -> Value {
     input(key, "Reply payload")
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_concurrent_duplicates_and_cross_channel_conflict_consume_one_seq_and_count(
     pool: PgPool,
 ) {

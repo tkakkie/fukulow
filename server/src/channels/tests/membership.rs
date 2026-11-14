@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_list_denies_deactivation_after_auth_and_stale_reactivation(pool: PgPool) {
     for reactivate in [false, true] {
         let state = AppState::for_test(pool.clone()).await;
@@ -37,7 +37,7 @@ async fn channel_list_denies_deactivation_after_auth_and_stale_reactivation(pool
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_creation_denies_deactivation_after_auth_without_inserting(pool: PgPool) {
     for reactivate in [false, true] {
         for visibility in [ChannelVisibility::Public, ChannelVisibility::Private] {
@@ -95,7 +95,7 @@ async fn channel_creation_denies_deactivation_after_auth_without_inserting(pool:
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_creation_rechecks_guest_role_after_auth_with_positive_control(pool: PgPool) {
     let org = organization(&pool).await;
     let id = Uuid::new_v4();

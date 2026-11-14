@@ -28,7 +28,7 @@ pub(super) async fn another_session(pool: &PgPool, organization: Uuid, member: U
     token
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sign_out_burst_over_1024_keeps_unrelated_sessions_open(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, other_member) = member(&pool, f.organization).await;
@@ -67,7 +67,7 @@ async fn sign_out_burst_over_1024_keeps_unrelated_sessions_open(pool: PgPool) {
     assert_eq!(event(&mut foreign).await["message"], canonical);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(pool: PgPool) {
     let f = fixture(&pool).await;
     let changes = crate::auth::SessionChanges::with_recheck_timing(
@@ -129,7 +129,7 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
     assert_eq!(event(&mut other).await["message"], canonical);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
     let f = fixture(&pool).await;
     let isolated_pool = sqlx::postgres::PgPoolOptions::new()
@@ -156,7 +156,7 @@ async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
     ready(&mut reconnect, f.channel, 0).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn worker_panic_closes_existing_and_new_sockets_with_internal_error(pool: PgPool) {
     let f = fixture(&pool).await;
     let changes = crate::auth::SessionChanges::with_recheck_timing(
@@ -228,12 +228,12 @@ pub(super) async fn connect_organization(
     tokio_tungstenite::connect_async(request).await.unwrap().0
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn membership_loss_closes_all_account_sessions_only_in_its_organization(pool: PgPool) {
     endpoint_membership_loss(pool, false).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_http_cancellation_still_commits_and_signals_every_session(pool: PgPool) {
     endpoint_membership_loss(pool, true).await;
 }
@@ -345,7 +345,7 @@ async fn endpoint_membership_loss(pool: PgPool, cancel: bool) {
     rejected(f.server.handshake(Some(&f.token), None, None).await, 404);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn account_session_end_closes_every_organization_but_leaves_other_sessions_usable(
     pool: PgPool,
 ) {
@@ -402,7 +402,7 @@ async fn account_session_end_closes_every_organization_but_leaves_other_sessions
     assert_eq!(event(&mut b2).await["message"], canonical);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn lost_membership_signal_and_reactivation_still_close_stale_idle_and_replaying_sockets(
     pool: PgPool,
 ) {
@@ -459,7 +459,7 @@ async fn lost_membership_signal_and_reactivation_still_close_stale_idle_and_repl
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn websocket_organization_denials_are_identical_for_nonmember_unknown_and_inactive(
     pool: PgPool,
 ) {
@@ -497,7 +497,7 @@ async fn websocket_organization_denials_are_identical_for_nonmember_unknown_and_
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool: PgPool) {
     let f = fixture(&pool).await;
     post(&f, f.channel).await;
@@ -572,7 +572,7 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
     fallback.release();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_self_denials_preserve_all_session_sockets(pool: PgPool) {
     for role in ["owner", "admin"] {
         let f = fixture(&pool).await;

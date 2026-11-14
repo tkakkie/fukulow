@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn nul_message_body_and_topic_keep_401_precedence_and_write_nothing(pool: PgPool) {
     let (app, org, _, channel_id, token) = fixture(&pool).await;
     for field in ["body", "topic_name"] {
@@ -33,7 +33,7 @@ async fn nul_message_body_and_topic_keep_401_precedence_and_write_nothing(pool: 
     assert_eq!(counts, (0, 0, 0));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn nul_message_fields_skip_operation_database_after_authentication(pool: PgPool) {
     let (_, org, _, channel_id, token) = fixture(&pool).await;
     let state = AppState::for_test(pool.clone()).await;

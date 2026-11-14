@@ -3,7 +3,7 @@ use crate::auth::session::tests::{Phase, fixture};
 
 mod exit;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn readiness_rejects_abnormal_worker_until_process_replacement(pool: PgPool) {
     use axum::{
         body::{Body, to_bytes},
@@ -64,7 +64,7 @@ async fn wait_for_check(pool: &PgPool) {
     .unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn many_socket_monitors_share_one_non_overlapping_fallback_query(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     let (_, foreign) = fixture(&pool).await;
@@ -130,7 +130,7 @@ async fn many_socket_monitors_share_one_non_overlapping_fallback_query(pool: PgP
     assert!(unpolled.changed.borrow().revoked);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn chunked_pass_checks_exact_keys_and_excludes_expired_sessions(pool: PgPool) {
     let (_, auth) = fixture(&pool).await;
     let (_, foreign) = fixture(&pool).await;
@@ -161,7 +161,7 @@ async fn chunked_pass_checks_exact_keys_and_excludes_expired_sessions(pool: PgPo
     assert!(ended.values().all(|code| *code == 4001));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn multi_chunk_recheck_uses_one_transaction_per_organization(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, active) = fixture(&pools.admin).await;
@@ -205,7 +205,7 @@ async fn multi_chunk_recheck_uses_one_transaction_per_organization(pool: PgPool)
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn later_organization_failure_applies_no_partial_session_revocations(pool: PgPool) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let changes = SessionChanges::default();
@@ -254,7 +254,7 @@ async fn later_organization_failure_applies_no_partial_session_revocations(pool:
     single.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn timed_out_pass_latches_errors_and_releases_its_pool_connection(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     let isolated = sqlx::postgres::PgPoolOptions::new()
@@ -308,7 +308,7 @@ async fn timed_out_pass_latches_errors_and_releases_its_pool_connection(pool: Pg
     held.rollback().await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     for statement in [
@@ -335,7 +335,7 @@ async fn deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unconfirmed_cleanup_frees_fallback_pool_slot_synchronously(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     crate::database::tests::interrupted::failed_rollback(
@@ -358,7 +358,7 @@ async fn unconfirmed_cleanup_frees_fallback_pool_slot_synchronously(pool: PgPool
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reregistration_mid_check_cannot_receive_old_results(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     state.session_changes =
@@ -397,7 +397,7 @@ async fn reregistration_mid_check_cannot_receive_old_results(pool: PgPool) {
     next_snapshot.release();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn large_session_pass_fails_closed_by_production_deadline(pool: PgPool) {
     let isolated = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
@@ -449,7 +449,7 @@ async fn large_session_pass_fails_closed_by_production_deadline(pool: PgPool) {
     isolated.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual many-distinct-sessions measurement; run alone with --ignored --nocapture"]
 async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
     // Runs as the RLS-restricted app role (#314): one transaction per Organization.
@@ -513,7 +513,7 @@ async fn measure_distinct_session_pass_within_five_seconds(pool: PgPool) {
     app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_check_result_cannot_fail_reconnected_epoch(pool: PgPool) {
     let (mut state, auth) = fixture(&pool).await;
     state.session_changes =
@@ -544,7 +544,7 @@ async fn failed_check_result_cannot_fail_reconnected_epoch(pool: PgPool) {
     next_snapshot.release();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn batch_recheck_distinguishes_session_end_membership_loss_and_valid_sessions(pool: PgPool) {
     let (state, auth) = fixture(&pool).await;
     let (_, expired) = fixture(&pool).await;
@@ -596,7 +596,7 @@ async fn batch_recheck_distinguishes_session_end_membership_loss_and_valid_sessi
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn lost_signal_deactivate_reactivate_still_revokes_stale_membership_revision(pool: PgPool) {
     let (mut state, mut auth) = fixture(&pool).await;
     state.session_changes =
@@ -634,7 +634,7 @@ async fn lost_signal_deactivate_reactivate_still_revokes_stale_membership_revisi
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deadline_includes_query_result_application(pool: PgPool) {
     let (state, auth) = fixture(&pool).await;
     let mut socket = auth.watch_session(&state).await.unwrap().unwrap();
@@ -664,7 +664,7 @@ async fn deadline_includes_query_result_application(pool: PgPool) {
     tokio::time::resume();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn rechecks_scope_each_organization_and_preserve_revocation_causes(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, first) = fixture(&pools.admin).await;

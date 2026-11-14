@@ -10,7 +10,7 @@ async fn assert_conflict(response: Response) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_names_are_unique_across_case_and_visibility(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -66,7 +66,7 @@ async fn channel_names_are_unique_across_case_and_visibility(pool: PgPool) {
     assert_eq!(memberships, 2);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_name_uniqueness_is_scoped_to_organization(pool: PgPool) {
     let app = router(&pool).await;
     for visibility in ["public", "private"] {
@@ -80,7 +80,7 @@ async fn channel_name_uniqueness_is_scoped_to_organization(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_name_comparison_and_order_use_ascii_case_folding(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -116,7 +116,7 @@ async fn channel_name_comparison_and_order_use_ascii_case_folding(pool: PgPool) 
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn concurrent_duplicate_channel_creates_leave_one_channel(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -172,7 +172,7 @@ async fn concurrent_duplicate_channel_creates_leave_one_channel(pool: PgPool) {
     assert_eq!(counts, (1, 1));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_name_migration_rejects_existing_duplicates_without_changing_them(pool: PgPool) {
     let organization_id = organization(&pool).await;
     sqlx::query("DROP INDEX channels_organization_name_unique")

@@ -51,7 +51,7 @@ async fn get_projection(app: &Router, token: &str, channel: Uuid, suffix: &str) 
     body(response).await
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_main_timeline_and_topics_are_independent_monotonic_and_exclude_own_sends(
     pool: PgPool,
 ) {
@@ -122,7 +122,7 @@ async fn unread_main_timeline_and_topics_are_independent_monotonic_and_exclude_o
     assert_eq!(c["channels"][0]["unread_count"], 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_new_member_and_regrant_start_at_new_grants_committed_seq(pool: PgPool) {
     let (app, org, owner_id, channel, owner) = fixture(&pool).await;
     post(&app, &owner, channel, None).await;
@@ -226,7 +226,7 @@ async fn unread_new_member_and_regrant_start_at_new_grants_committed_seq(pool: P
     assert_eq!(channels(&app, &viewer).await["channels"][0]["read_seq"], 6);
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn unread_migration_initializes_existing_visible_members_and_each_topic(pool: PgPool) {
     let mut paths =
         std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
@@ -307,7 +307,7 @@ mod measurement;
 mod policy;
 mod roles;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_public_access_transitions_preserve_continuous_access_and_reset_new_access(
     pool: PgPool,
 ) {
@@ -368,7 +368,7 @@ async fn unread_public_access_transitions_preserve_continuous_access_and_reset_n
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_topic_counts_respect_w_and_current_persisted_positions(pool: PgPool) {
     let (app, org, _, channel, owner) = fixture(&pool).await;
     let viewer = member(&pool, org, Uuid::new_v4()).await;

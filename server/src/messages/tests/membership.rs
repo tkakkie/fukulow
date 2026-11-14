@@ -52,7 +52,7 @@ pub(super) async fn captured_auth(pool: &PgPool, token: &str) -> Auth {
     receiver.await.unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_after_auth_is_organization_unavailable_for_history_and_send(pool: PgPool) {
     for reactivate in [false, true] {
         let (_, organization, sender, channel, token) = fixture(&pool).await;
@@ -113,7 +113,7 @@ async fn deactivation_after_auth_is_organization_unavailable_for_history_and_sen
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn queued_send_rechecks_member_revision_and_private_grant_after_begin(pool: PgPool) {
     for denial in ["deactivate", "reactivate", "private_grant"] {
         let (_, organization, sender, channel, _) = fixture(&pool).await;
@@ -208,7 +208,7 @@ async fn queued_send_rechecks_member_revision_and_private_grant_after_begin(pool
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool) {
     for denial in [
         "deactivate",

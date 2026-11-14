@@ -85,24 +85,24 @@ async fn signal_process(pool: PgPool, expired: bool, signal: &str, send_load: us
     assert!(status.success(), "signal child failed: {output}");
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sigterm_drains_http_persistence_and_detached_notification_then_replays_without_duplicates(
     pool: PgPool,
 ) {
     signal_process(pool, false, "-TERM", 0).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work(pool: PgPool) {
     signal_process(pool, true, "-TERM", 0).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sigint_drains_and_closes_idle_sockets_normally(pool: PgPool) {
     signal_process(pool, false, "-INT", 0).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn disconnected_http_send_stays_in_drain_until_persistence_and_notification_finish(
     pool: PgPool,
 ) {
@@ -152,7 +152,7 @@ async fn disconnected_http_send_stays_in_drain_until_persistence_and_notificatio
     ready(&mut replay, f.channel, 1).await;
 }
 
-#[tokio::test]
+#[fukulow_test::test]
 #[ignore = "subprocess helper: parent sends a real signal after all three work kinds exist"]
 async fn signal_child() {
     let Ok(url) = std::env::var("SHUTDOWN_TEST_DATABASE") else {
@@ -286,7 +286,7 @@ async fn signal_child() {
     pool.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release measurement: saturated concurrent HTTP sends during real SIGTERM"]
 async fn measure_sigterm_under_concurrent_sends(pool: PgPool) {
     signal_process(pool, false, "-TERM", 2_048).await;
