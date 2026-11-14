@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) mod context;
 pub(crate) mod interrupted;
+mod migrations;
 mod read_only;
 mod rls;
 mod statement;
