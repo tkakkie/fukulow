@@ -142,6 +142,38 @@ it.each([429, 503])('close during a same-key retry after HTTP %s retains the une
   }
 })
 
+it.each([429, 503])('a repeated close keeps the detached restore for a same-key retry after HTTP %s', async status => {
+  vi.useFakeTimers()
+  const drafts = createDraftStore()
+  const net = fakeNetwork()
+  const sync = createSync({ selfId: 'me', ...net.options().sync, organizationId: 'o', drafts })
+  await sync.start()
+  await sync.watch('A')
+  const a = sync.getTimeline('A')
+  a.setDraft('送信する本文')
+  a.setTopicDraft('Release')
+  const sending = a.submit()
+  const original = net.sends[0].body
+  net.sends[0].resolve(status === 429
+    ? { ok: false, kind: 'http', status, retryAfterMs: 1000 }
+    : { ok: false, kind: 'network', retryAfterMs: 1000 })
+  expect(await sending).toBe(true)
+  if (status === 429) await vi.advanceTimersByTimeAsync(1000)
+  else void a.retry(original.client_message_id)
+  await settle()
+  expect(net.sends).toHaveLength(2)
+  expect(net.sends[1].body).toEqual(original)
+  await sync.close()
+  // A second close sees no pending state; it must not undo the first close's detachment.
+  await sync.close()
+  net.sends[1].resolve({ ok: false, kind: 'http', status: 409 })
+  await settle()
+  const target = { organizationId: 'o', channelId: 'A' }
+  expect(drafts.get(target)).toBe(original.body)
+  expect(drafts.getTopicDraft(target)).toBe('Release')
+  expect(net.sends).toHaveLength(2)
+})
+
 it('real API admission 503 preserves the draft through close during a same-key retry and a late refusal', async () => {
   vi.useFakeTimers()
   const drafts = createDraftStore()

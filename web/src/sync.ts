@@ -246,6 +246,8 @@ export function createSync(options: SyncOptions) {
     const previous = state
     if (input.type === 'stop') {
       for (const [id, draft] of submitted) {
+        // A repeated stop sees no pending state; it must not undo an earlier detachment (C10).
+        if (draft.detached) continue
         draft.detached = previous.channels[draft.channel]?.pending.some(p => {
           const request = previous.requests[p.request]
           return p.clientMessageId === id && p.state !== 'unknown' && request !== undefined && !request.stale
