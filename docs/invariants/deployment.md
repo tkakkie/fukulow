@@ -4,6 +4,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 | Rule | Test |
 |---|---|
+| Apps over one admin test pool share one restricted app pool, preserving its connection cap and idle lifetime | `server/tests/test_pools.rs::repeated_app_construction_keeps_one_database_connection_budget` |
 | Readiness accepts an unstarted worker; DB acquire/query faults return generic 503, bound pool use and recover when the fault clears | `server/src/tests/readiness.rs::readiness_accepts_not_started_worker`, `server/src/tests/readiness.rs::readiness_acquire_timeout_recovers_without_changing_liveness`, `server/src/tests/readiness.rs::readiness_query_timeout_releases_slot_limits_flood_and_recovers` |
 | Readiness holds single flight through bounded return; stalled return pings, query errors and query/return cancellation cannot retain pool slots | `server/src/tests/readiness.rs::readiness_bounds_return_ping_without_accumulating_connections`, `server/src/tests/readiness.rs::readiness_cancelled_query_detaches_connection`, `server/src/tests/readiness.rs::readiness_cancelled_return_releases_connection`, `server/src/tests/readiness.rs::readiness_query_error_detaches_connection` |
 | Overlapping healthy readiness callers share one DB check and all receive 200; caller cancellation preserves that check | `server/src/tests/readiness.rs::readiness_overlapping_healthy_callers_share_one_check`, `server/src/tests/readiness.rs::readiness_cancelled_caller_keeps_shared_check_until_cleanup` |

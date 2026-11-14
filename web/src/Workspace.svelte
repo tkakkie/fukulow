@@ -56,7 +56,7 @@
   }: {
     navigation: Navigation
     session: SessionModel
-    canCreateChannels?: boolean
+    canCreateChannels?: boolean | null
     members?: ReturnType<typeof membersAdapter> | null
     organization?: Identity | null
     organizations?: Organization[]
@@ -73,6 +73,10 @@
 
   const channels = $derived(session.channels)
   const channelCreation = $state({ name: '', visibility: 'public' as Channel['visibility'], error: '', busy: false })
+  let creationAllowed = $state(false)
+  $effect(() => {
+    if (canCreateChannels !== null) creationAllowed = canCreateChannels
+  })
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
   const channelListStatus = $derived(s.status)
@@ -651,8 +655,8 @@
         onselecttopic={handleSelectTopic}
         onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
       />
-      {#if !organizationUnavailable && canCreateChannels}
-        <CreateChannelForm oncreate={handleCreateChannel} draft={channelCreation} />
+      {#if !organizationUnavailable && (canCreateChannels ?? creationAllowed)}
+        <CreateChannelForm oncreate={handleCreateChannel} draft={channelCreation} disabled={canCreateChannels !== true} />
       {/if}
       {#if !organizationUnavailable && members && organization}
         <Members

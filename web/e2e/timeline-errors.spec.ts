@@ -94,21 +94,30 @@ async function reselectChannel(page: Page, viaName: string, targetName: string):
   await expect(page.getByRole('heading', { name: targetName })).toBeVisible()
 }
 
-test('capability reconciliation preserves the creation draft and notice-before-POST discovery keeps one Channel row', async ({ page }) => {
+test('capability reconciliation preserves creation focus between selection and text insertion and notice-before-POST discovery keeps one Channel row', async ({ page }) => {
   let socket: WebSocketRoute | undefined
   await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => { ws.connectToServer(); socket = ws })
   const org = await signIn(page)
   await createChannel(page, nextChannelName('creation-baseline'))
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
   const name = nextChannelName('creation-reconcile')
-  await page.getByLabel('チャンネル名').fill(name)
   await page.getByRole('radio', { name: '非公開', exact: true }).check()
+  const input = page.getByLabel('チャンネル名')
+  // fill() focuses/selects first, then inserts text in a separate browser command.
+  // Reconcile exactly between those commands, before there is any draft to retain.
+  await input.focus()
   let releaseIdentity!: () => void
   const identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
   await page.route(`**/api/v1/orgs/${org}/me`, async route => { await identityGate; await route.continue() })
   try {
+    const refreshing = page.waitForRequest(`**/api/v1/orgs/${org}/me`)
     socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
-    await expect(page.getByLabel('チャンネル名')).toHaveCount(0)
+    await refreshing
+    await expect(input).toBeFocused()
+    await page.keyboard.insertText(name)
+    await expect(input).toHaveValue(name)
+    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeDisabled()
+    await input.press('Enter')
   } finally { releaseIdentity() }
   await expect(page.getByLabel('チャンネル名')).toHaveValue(name)
   await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()

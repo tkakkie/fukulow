@@ -69,6 +69,7 @@ const sessionEndedNotice = 'セッションが終了しました。もう一度�
 export function createAuth(deps: AuthDeps = defaults) {
   let view = $state<AuthState>({ screen: 'loading' })
   let organization = $state<Identity | null>(null)
+  let capabilitiesPending = $state(false)
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
@@ -85,6 +86,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     session?.close(); session = null
     members?.close(); members = null
     organization = null
+    capabilitiesPending = false
     selectionGeneration++
     changes++
   }
@@ -110,6 +112,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     organization = result.data
     session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
+      capabilitiesPending = identity === null
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
@@ -162,6 +165,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     get error() { subscribe(); return operations.get().error },
     get busy() { subscribe(); return operations.get().busy },
     get organization() { return organization },
+    get capabilitiesPending() { return capabilitiesPending },
     get members() { return members },
     get security() { return security },
     get selectedOrganizationId() { return selectedOrganizationId },

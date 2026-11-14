@@ -8,13 +8,16 @@
   let {
     oncreate,
     draft = local,
+    disabled = false,
   }: {
     oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null>
     draft?: typeof local
+    disabled?: boolean
   } = $props()
 
   async function submit(e: Event) {
     e.preventDefault()
+    if (disabled || draft.busy) return
     const tooLong = channelNameTooLong(draft.name)
     if (tooLong) {
       draft.error = tooLong
@@ -47,7 +50,7 @@
   {#if draft.error}
     <StatusBanner tone="danger" role="alert" message={draft.error} />
   {/if}
-  <Button variant="primary" type="submit" disabled={draft.busy || draft.name === ''}>チャンネルを作成</Button>
+  <Button variant="primary" type="submit" disabled={disabled || draft.busy || draft.name === ''}>チャンネルを作成</Button>
 </form>
 
 <style>

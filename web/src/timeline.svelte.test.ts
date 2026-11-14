@@ -993,6 +993,33 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Channel creation visibility', () => {
+  it('blocks submit events while capabilities are pending, then permits the retained draft', async () => {
+    const props = $state({ disabled: false })
+    const oncreate = vi.fn(async () => null)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(CreateChannelForm, { target: host as unknown as Element, props: {
+      oncreate, get disabled() { return props.disabled },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      input.value = '下書き'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      props.disabled = true
+      await settle()
+      host.querySelector('form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      expect(oncreate).not.toHaveBeenCalled()
+      expect(input.value).toBe('下書き')
+      props.disabled = false
+      await settle()
+      buttonsByText(host, 'チャンネルを作成')[0]!.click()
+      await settle()
+      expect(oncreate).toHaveBeenCalledExactlyOnceWith('下書き', 'public')
+    } finally { await unmount(instance) }
+  })
+
   for (const visibility of ['public', 'private'] as const) {
     it(`submits ${visibility} from the form and resets to public after success`, async () => {
       const oncreate = vi.fn(async () => null)
@@ -1120,6 +1147,49 @@ describe('Channel creation visibility', () => {
       raw.close()
     })
   }
+
+  it('keeps the creation input attached during capability reconciliation and removes it on a confirmed denial', async () => {
+    const props = $state({ allowed: true as boolean | null })
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.lists[0]!.resolve(ok({ channels: [] }))
+    const navigation = createNavigation({
+      location: { href: 'http://localhost/' }, history: { state: null, pushState() {}, replaceState() {} },
+      innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, get canCreateChannels() { return props.allowed },
+      session: { channels: channelsAdapter(raw.channels), sync: syncAdapter(raw.sync),
+        topics: id => topicsAdapter(raw.topics, id), close: raw.close },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      for (let i = 0; i < 3; i++) {
+        props.allowed = null
+        await settle()
+        expect(host.querySelector('input[name="channel_name"]')).toBe(input)
+        input.value = '入力中'
+        input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+        await settle()
+        expect(buttonsByText(host, 'チャンネルを作成')[0]!.disabled).toBe(true)
+        props.allowed = true
+        await settle()
+        expect(buttonsByText(host, 'チャンネルを作成')[0]!.disabled).toBe(false)
+      }
+      props.allowed = false
+      await settle()
+      expect(host.querySelector('form.create-channel-form')).toBeNull()
+      props.allowed = null
+      await settle()
+      expect(host.querySelector('form.create-channel-form')).toBeNull()
+      props.allowed = true
+      await settle()
+      expect(host.querySelector('input[name="channel_name"]')!.value).toBe('入力中')
+    } finally { await unmount(instance); navigation.destroy(); raw.close() }
+  })
 })
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
