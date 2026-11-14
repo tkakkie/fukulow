@@ -1,7 +1,7 @@
 use super::*;
 use sqlx::postgres::PgPoolOptions;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn timeline_and_single_topic_never_cache_a_generic_plan(pool: PgPool) {
     let (app, _, _, channel, token) = fixture(&pool).await;
     let message = sent(&app, &token, channel, topic_input(Uuid::new_v4(), "Topic")).await;
