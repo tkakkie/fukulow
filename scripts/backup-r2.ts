@@ -51,7 +51,9 @@ export async function curlRunner(configFile: string, baseUrl: string, execute = 
     const directory = await mkdtemp(join(tmpdir(), 'backup-curl-'))
     try {
       const headersFile = join(directory, 'headers'), bodyFile = join(directory, 'body')
-      const args = ['--disable', '--config', path, '--aws-sigv4', 'aws:amz:auto:s3', '--silent', '--fail', '--retry', '3', '--retry-all-errors', '--max-time', '120', '--retry-max-time', '480', '--dump-header', headersFile, '--output', bodyFile, '--request', request.method]
+      // --retry handles transient HTTP statuses without --fail; other HTTP responses
+      // must reach objectTransport (notably missing objects and locked PUT retries).
+      const args = ['--disable', '--config', path, '--aws-sigv4', 'aws:amz:auto:s3', '--silent', '--retry', '3', '--retry-all-errors', '--max-time', '120', '--retry-max-time', '480', '--dump-header', headersFile, '--output', bodyFile, '--request', request.method]
       if (request.method === 'HEAD') args.push('--head')
       for (const [key, value] of Object.entries(request.headers)) args.push('--header', `${key}: ${value}`)
       // URL is supplied via stdin config, so private endpoints never enter argv.

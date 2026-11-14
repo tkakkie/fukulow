@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { createServer } from 'node:http'
+import { createServer, type RequestListener } from 'node:http'
+import { createServer as createSecureServer, type ServerOptions } from 'node:https'
 import { networkInterfaces } from 'node:os'
 import { day, checksum, sha256, type BackupBucket, type ObjectInfo } from './backup-r2-model.ts'
 import type { Request, Response, Runner } from './backup-r2.ts'
@@ -37,12 +38,12 @@ export class FakeBucket implements BackupBucket {
   }
 }
 
-// Local HTTP only; role labels are test capabilities, not stored credentials.
-export async function fakeS3(now: () => number) {
+// Local loopback only; role labels are test capabilities, not stored credentials.
+export async function fakeS3(now: () => number, tls?: ServerOptions) {
   const buckets = { backups: new FakeBucket(now), images: new FakeBucket(now) }
   const faults: { method: string; fault: Fault; remaining: number }[] = []
   const accesses: string[] = []
-  const server = createServer(async (req, res) => {
+  const handler: RequestListener = async (req, res) => {
     const [bucketName, ...parts] = decodeURIComponent(req.url!.slice(1)).split('/')
     const role = req.headers['x-test-role']
     accesses.push(`${role}:${bucketName}:${req.method}`)
@@ -74,18 +75,19 @@ export async function fakeS3(now: () => number) {
         if (req.method === 'HEAD') res.end()
         else {
           const body = await bucket.get(key)
-          if (injected?.fault === 'truncated') { res.write(body.subarray(0, 1)); res.destroy() }
+          if (injected?.fault === 'truncated') res.write(body.subarray(0, 1), () => res.destroy())
           else res.end(body)
         }
       }
     } catch { res.writeHead(409).end() }
-  })
+  }
+  const server = tls ? createSecureServer(tls, handler) : createServer(handler)
   const loopback = Object.values(networkInterfaces()).flat().find(info => info?.internal && info.family === 'IPv4')?.address
   if (!loopback) throw new Error('Local loopback unavailable')
   await new Promise<void>(accept => server.listen(0, loopback, accept))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('Local server unavailable')
-  const base = new URL(`http://${address.address}:${address.port}`)
+  const base = new URL(`${tls ? 'https' : 'http'}://${address.address}:${address.port}`)
   const runner = (role: keyof typeof buckets, bucketName: keyof typeof buckets = role): Runner => async (request: Request): Promise<Response> => {
     const url = new URL(`/${bucketName}/${request.key}`, base)
     const r = await fetch(url, { method: request.method, headers: { ...request.headers, 'x-test-role': role }, body: request.body ? new Uint8Array(request.body) : undefined })
@@ -103,5 +105,5 @@ export async function fakeS3(now: () => number) {
     }
     return { status: r.status, headers: Object.fromEntries(r.headers), body: Buffer.from(await r.arrayBuffer()) }
   }
-  return { buckets, faults, accesses, runner, close: () => new Promise<void>((accept, reject) => server.close(error => error ? reject(error) : accept())) }
+  return { buckets, faults, accesses, runner, base: base.origin, close: () => new Promise<void>((accept, reject) => server.close(error => error ? reject(error) : accept())) }
 }

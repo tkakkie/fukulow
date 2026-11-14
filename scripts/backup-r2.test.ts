@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test, type TestContext } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FakeBucket, fakeS3 } from './backup-r2-fake.ts'
 import { checksum, day, inventory, sha256, verifiedGeneration, type Manifest } from './backup-r2-model.ts'
-import { objectTransport, publish, recheckNewest, runBackup } from './backup-r2.ts'
+import { curlRunner, objectTransport, publish, recheckNewest, runBackup } from './backup-r2.ts'
 import { checkBackups } from './backup-r2-checker.ts'
 
 const epoch = Date.UTC(2026, 10, 14, 12)
@@ -279,6 +279,75 @@ test('normal mock flow preserves local dump and daily recheck hashes newest ciph
   assert.deepEqual(events, ['backup-failed'])
 })
 
+async function realCurlS3(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), 'backup-curl-real-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const key = join(root, 'key'), cert = join(root, 'cert'), config = join(root, 'config')
+  assert.equal(spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=localhost', '-keyout', key, '-out', cert], { stdio: 'ignore' }).status, 0)
+  const fake = await fakeS3(() => epoch, { key: readFileSync(key), cert: readFileSync(cert) })
+  let closed = false
+  const close = async () => { if (!closed) { await fake.close(); closed = true } }
+  t.after(close)
+  // Self-signed TLS and credentials are confined to this throwaway local fixture.
+  writeFileSync(config, 'insecure\nnoproxy = "*"\nuser = "test-access:test-secret"\nheader = "x-test-role: backups"\n', { mode: 0o600 })
+  const run = await curlRunner(config, fake.base + '/backups')
+  return { ...fake, close, run, bucket: objectTransport(run) }
+}
+
+test('real curl HEAD of a missing key returns null', async t => {
+  const { bucket, accesses } = await realCurlS3(t)
+  assert.equal(await bucket.head('missing'), null)
+  assert.deepEqual(accesses, ['backups:backups:HEAD'])
+})
+
+test('real curl returns locked PUT status and reconciles a lost response through HEAD', async t => {
+  const { bucket, run, faults, accesses, buckets } = await realCurlS3(t)
+  const body = Buffer.from('encrypted-test-data')
+  await bucket.put('locked', body)
+  assert.equal((await run({ method: 'PUT', key: 'locked', body,
+    headers: { 'x-amz-content-sha256': sha256(body), 'x-amz-checksum-sha256': checksum(sha256(body)) } })).status, 409)
+  await assert.rejects(bucket.put('locked', Buffer.from('overwrite')), { message: 'Upload failed' })
+  accesses.length = 0
+  faults.push({ method: 'PUT', fault: 'lost-response', remaining: 1 })
+  const prefix = await publish({ bucket, ciphertext: body, manifest: manifest(), now: () => epoch, attempt: () => 'first' })
+  assert.match(prefix, /-first\/$/)
+  // The first PUT commits but loses its response; curl retries into the lock.
+  assert.deepEqual(accesses.slice(0, 3), ['backups:backups:PUT', 'backups:backups:PUT', 'backups:backups:HEAD'])
+  assert.equal(accesses.filter(c => c.endsWith(':PUT')).length, 4)
+  assert.equal((await verifiedGeneration(buckets.backups, prefix, epoch)).manifest.captureTime, manifest().captureTime)
+})
+
+test('real curl retries a 5xx then success and surfaces an exhausted HTTP error', async t => {
+  const { bucket, run, faults, accesses } = await realCurlS3(t)
+  const body = Buffer.from('cipher')
+  faults.push({ method: 'PUT', fault: '5xx', remaining: 1 })
+  await bucket.put('retry', body)
+  assert.equal(accesses.length, 2)
+  assert.equal((await bucket.head('retry'))?.checksum, checksum(sha256(body)))
+  accesses.length = 0
+  faults.push({ method: 'GET', fault: '5xx', remaining: 4 })
+  assert.equal((await run({ method: 'GET', key: 'retry', headers: {} })).status, 503)
+  assert.equal(accesses.length, 4)
+  faults.push({ method: 'GET', fault: '5xx', remaining: 4 })
+  await assert.rejects(bucket.get('retry'), { message: 'Read-back failed' })
+})
+
+test('real curl rejects a truncated transfer even after receiving HTTP 200 headers', async t => {
+  const { bucket, faults, accesses } = await realCurlS3(t)
+  await bucket.put('truncated', Buffer.from('cipher'))
+  accesses.length = 0
+  faults.push({ method: 'GET', fault: 'truncated', remaining: 4 })
+  await assert.rejects(bucket.get('truncated'), { message: 'Transport failed' })
+  assert.equal(accesses.length, 4)
+})
+
+test('real curl rejects connection failure with sanitized diagnostics', async t => {
+  const { bucket, close } = await realCurlS3(t)
+  await close()
+  await assert.rejects(bucket.head('private-key'), { message: 'Transport failed' })
+})
+
 test('curl runner keeps configuration private signs checksums bounds retries and suppresses failures', async t => {
   const { curlRunner } = await import('./backup-r2.ts')
   const { chmodSync } = await import('node:fs')
@@ -295,6 +364,7 @@ test('curl runner keeps configuration private signs checksums bounds retries and
     assert.ok(args.includes('--aws-sigv4'))
     assert.equal(args[args.indexOf('--retry') + 1], '3')
     assert.ok(args.includes('--retry-all-errors'))
+    assert.ok(!args.includes('--fail')); assert.ok(!args.includes('--fail-with-body'))
     assert.ok(args.includes('--max-time')); assert.ok(args.includes('--retry-max-time'))
     assert.ok(args.includes('x-amz-content-sha256: ' + sha256('cipher')))
     assert.ok(args.includes('x-amz-checksum-sha256: ' + checksum(sha256('cipher'))))
