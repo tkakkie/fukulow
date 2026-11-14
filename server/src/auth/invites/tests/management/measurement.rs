@@ -100,7 +100,7 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
     )
     .await;
     let channel = channel["id"].as_str().unwrap();
-    let settings: Value = sqlx::query_scalar("SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN ('server_version','shared_buffers','work_mem','max_connections','effective_cache_size','random_page_cost','plan_cache_mode','jit','fsync','synchronous_commit')").fetch_one(&pool).await.unwrap();
+    let settings: Value = sqlx::query_scalar("SELECT jsonb_object_agg(n,current_setting(n)) FROM unnest(ARRAY['server_version','shared_buffers','work_mem','max_connections','effective_cache_size','random_page_cost','plan_cache_mode','jit','fsync','synchronous_commit']) n").fetch_one(&pool).await.unwrap();
     println!("INVITE_META {settings}");
     let samples: usize = std::env::var("INVITE_SAMPLES")
         .unwrap_or("100".into())
