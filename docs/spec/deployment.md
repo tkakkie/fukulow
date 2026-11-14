@@ -25,10 +25,49 @@ Related: [Setup token](accounts.md#setup).
 ## Deployment (#194 C)
 - The runtime image runs as UID/GID 10001, with a root-owned executable and no writable application data. Dockerfile base images and external deployment/load Compose images use a tag plus a registry-verified multi-platform sha256 digest. Dependabot checks Dockerfile and both Compose directories weekly; image updates still require review and deployment checks.
 - Every deployment and load service uses `json-file` logging with `max-size: 10m` and `max-file: 3`. These bounds apply to Docker's local logs per container; arrange separate retention if longer incident history is needed. Recreate existing containers to apply log options.
-- Caddy is the default production profile: use a public DNS name pointing at the VPS, reachable TCP ports 80/443, persistent `caddy_data` and valid HTTPS before setup or Sign in. The localhost certificate is for local checks; clients must trust it explicitly.
+- Caddy is the default production profile: use a public DNS name pointing at the VPS, reachable TCP ports 80/443 (or the restricted-access procedure below), persistent `caddy_data` and valid HTTPS before setup or Sign in. The localhost certificate is for local checks; clients must trust it explicitly.
 - The shipped nginx profile serves HTTP only and is **not production-safe alone**. Production requires an external TLS terminator with a valid certificate for the public domain, HTTP-to-HTTPS redirection, HSTS on HTTPS responses (including errors), and WebSocket upgrade support. Restrict nginx's HTTP ingress to that terminator using a firewall or a private/loopback port override; clients must never bypass TLS. Preserve the public Host and keep `FUKULOW_COOKIE_SECURE=true`. The stock nginx config derives HSTS from actual local TLS, so it cannot set HSTS for external TLS; the terminator must do so. Caddy handles the public HTTPS path directly.
 - An HTTP TLS terminator also becomes nginx's immediate client. To preserve per-client sign-in budgets, configure nginx real-IP handling to trust only that terminator's fixed IP and a client-IP header it overwrites; verify distinct client budgets. Never trust arbitrary forwarded headers. This deployment-specific configuration is outside the stock HTTP-only profile.
 - The binary remains PID 1 with Docker's default SIGTERM stop signal and the existing 75-second stop grace period; #195 handles shutdown. No init wrapper is needed because the server starts no child processes.
+
+### Restricted access through SSH (#392; preparation for #285)
+
+SSH tunnelling is the first candidate, pending maintainer deployment. Firewall public ingress to allow only SSH; close 80/443 on every public IPv4/IPv6 address, including Docker-published paths (host firewall rules alone may be bypassed by Docker). Keep app/DB unpublished. Caddy still terminates TLS for `FUKULOW_DOMAIN=<app-domain>` with a valid domain certificate and persistent `caddy_data`; the tunnel carries TLS unchanged to Caddy, never directly to app HTTP.
+
+The maintainer chooses certificate issuance/renewal:
+
+- DNS-01 keeps 80/443 closed, but needs a custom Caddy build with the DNS provider module (absent from the stock image), reviewed/pinned updates and a least-privilege DNS API token kept privately outside the checkout. DNS propagation and token custody add operational work; outbound DNS/ACME access is still needed.
+- HTTP-01 (80) or TLS-ALPN-01 (443) can use a short, deliberate public opening with correct public DNS. Close it immediately after issuance and rerun restriction checks. This temporarily weakens isolation; renewal needs another approved window before expiry or a switch to DNS-01. A one-time opening does not provide unattended renewal while closed.
+
+After approval, on the operator machine (replace placeholders privately):
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8443:127.0.0.1:443 '<ssh-user>@<vps-host>'
+```
+
+Map `<app-domain>` to `127.0.0.1` in the operator's hosts file, then browse `https://<app-domain>:8443`; keep `<vps-host>` resolving to the VPS for SSH. Local 8443 avoids privileged binding. Preserve domain TLS SNI and HTTP Host (including `:8443`) through Caddy: browsing by loopback name/IP or changing only Host breaks certificate/SNI checks. Do not disable certificate verification. Keep `FUKULOW_COOKIE_SECURE=true` for `Secure`/`__Host-fukulow_session` cookies. Cookie WebSockets require the HTTPS same-Host Origin, including port, or an exact `FUKULOW_WS_ALLOWED_ORIGINS` match; forwarded headers do not decide it ([auth decisions](../decisions/auth.md)). If configured, allow `https://<app-domain>:8443` explicitly. The browser uses `wss://<app-domain>:8443` automatically.
+
+Restriction check, in one run with the tunnel and app healthy: from a non-allowlisted source outside the VPS, test each public address, bypassing local name overrides. Both ports must refuse or time out; DNS failure is not evidence. Any successful TCP connection fails the restriction check.
+
+```sh
+nc -vz -w 5 '<vps-public-address>' 80
+nc -vz -w 5 '<vps-public-address>' 443
+```
+
+In that same run, on the operator machine, require HTTPS 200 (`ok`) and a TLS WebSocket upgrade (`101 Switching Protocols`) through the tunnel:
+
+```sh
+curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 --max-time 10 -sS -D - 'https://<app-domain>:8443/api/v1/health'
+curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 --max-time 10 --http1.1 -sS -D - -o /dev/null \
+  --cookie '<private-cookie-jar>' -H 'Origin: https://<app-domain>:8443' \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: <base64-16-byte-nonce>' \
+  'https://<app-domain>:8443/api/v1/orgs/<organization-id>/ws'
+```
+
+Use a valid signed-in Member's cookie jar (0600, outside checkout) and a base64-encoded 16-byte handshake nonce; never paste credentials into commands/logs. HTTPS with Upgrade headers performs the `wss` handshake. The curl stream may time out after 101; require the observed 101, not curl exit success. No credential with an allowed Origin returns 401 before upgrade; missing/disallowed cookie Origin returns 403 (`origin_not_allowed`), not 101 (`server/src/realtime.rs`, `server/src/realtime/origin.rs`).
+
+#285 manual checks stay behind Caddy: two signed-in browsers exchange Messages over verified `wss`; restart app with `docker compose -f compose.yml restart app` and verify reconnect/catch-up; interrupt then restore the tunnel/operator network and verify reconnect/catch-up again. A tunnel drop tests the client transport path, not loss of the VPS network; record that distinction privately. Inspect [application logs](#logs-and-aggregates-198-b) over SSH for startup, upgrade, disconnect and recovery; keep results private. R2 backup/alert/restore gates remain [#316](#operator-runbook-and-production-hold-316), without credentials, endpoints or account values here. Provisioning, contracts, DNS, certificates, credentials, deployment and lifting the restriction remain maintainer work ([workflow §12](../workflow.md#12-needs-the-maintainer)); #285 remains blocked.
 
 ## Send limit (#306)
 - `FUKULOW_SEND_BURST` (tokens, default 10) and `FUKULOW_SEND_REFILL_PER_SECOND` (tokens per second, default 1) size the per-(Organization, Member) send bucket (S6 in `docs/spec/realtime.md`). Each must be an integer from 1 to 1,000,000; unset uses the default; empty, zero or invalid values fail startup.
