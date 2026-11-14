@@ -53,9 +53,9 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #151 dm_list_changed targets only the affected Member's live/current-revision own sessions with DM access. DM activity/read changes reuse channel_activity/read_position_changed. Reason: empty/new DMs need discovery, and /dms is a separate REST target (B4).
 - #151 DM discovery reuses A5-A8's bounded buffer/provenance and A9-A14/O5's single reconciliation schedule; no DM poller. Reason: inactive badges, lost notices and delayed COMMITs converge without sending failure traffic to unproven recipients.
 - #151 DM list responses follow independent invalidation/access generations; renewal replaces only lapsed lifetimes, and unwatched recovery replaces baselines. Reason: stale responses/publishers must not revive old access or Unread, including after reactivation.
-- #151 DM list base limits: 50-row creation-ordered pages, 200 retained rows, five total attempts/O5 run including continuations/retries (2026-11-14). Reason: bounded client work with fair carried progress, independent browsing/recovery keys and a reserved discovery slot.
+- #151 DM list base limits: 50-row pages, 200 retained rows, five total attempts/O5 run incl. retries/continuations; two discovery slots, three fairly shared by held-id refresh/browsing/recovery (2026-11-14). Reason: bound work without starving any lane; preserve independent keys.
 - #151 B4 adopts Option A durable discovery, rejects Option B (2026-11-14). Reason: no still-accessible DM may be missed after lost notices/delayed COMMITs; first-page or descending mutable-key recovery cannot guarantee it. Protocol: spec/dms.md P-D1-P-D7.
-- #151 coalesces discovery by Organization/Member/revision/DM; latest positions only move forward, birth keys stay fixed. Reason: pending/storage O(DMs), not O(events); finite coverage prevents a hot DM moving beyond every delta window. Strict catch-up-budget conflict: spec/dms.md Open decisions.
+- #151 coalesces discovery by Organization/Member/revision/DM; independent rolling delta and frozen-birth coverage each get one O5 slot (2026-11-14). Reason: with no changes, ≤500 pending after saved delta cursor drain in ≤10 runs/≤332 s regardless of coverage; fixed keys prevent hot-row starvation.
 
 ## Personal section notices (#204, specified)
 
