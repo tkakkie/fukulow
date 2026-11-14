@@ -24,7 +24,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 
 ## Rules, CI and AI process
 - Rules have tiers: Absolute (CI only with a reliable check), Default (deviation needs a PR line), Free. Reason: hard rules without a good check push AIs into awkward code; boundaries and tenant isolation are worth enforcing (#29).
-- One crate with module boundaries, each module owning its tables. Reason: cross-crate refactors are costly for AI-driven work; revisit when build time, dependencies or conflicts hurt.
+- Module boundaries, each module owning its tables; more crates allowed when responsibility, dependency direction, build time or testability justify it (#373, maintainer). Crates keep the module DAG with no cycles; release stays one binary in one image. Production domain crates: decided in #378.
 - #194 B: `database` is composition-level deployment/startup plumbing and depends on no domain module; review enforces it until M1 (#320) checks it as a leaf (#319).
 - #248: shared read-only closures ROLLBACK on Ok/Err and reuse clean backends. A Drop guard discards cancellation and failed BEGIN/ROLLBACK; SQLx 0.8.6 records depth only after BEGIN responds, so its rollback-on-drop misses cancelled starts.
 - #200 adds `docs/ui.md` as a doc kind for web UI rules. Reason: several AIs build screens in parallel; one short rule set keeps look, states, focus and copy consistent without re-deciding per PR.
