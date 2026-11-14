@@ -5,6 +5,23 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+pub struct DisplayIdentity {
+    pub id: Uuid,
+    pub name: String,
+    pub deactivated: bool,
+}
+
+// Callers authorize the requested authors in the same read snapshot.
+pub(crate) async fn display_identities(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    authors: &[Uuid],
+) -> Result<Vec<DisplayIdentity>, sqlx::Error> {
+    sqlx::query_as("SELECT id,name,deactivated_at IS NOT NULL AS deactivated FROM users WHERE organization_id=$1 AND id=ANY($2) ORDER BY id")
+        .bind(organization).bind(authors).fetch_all(connection).await
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeRoleRequest {

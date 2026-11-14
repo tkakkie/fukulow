@@ -1,7 +1,7 @@
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ReadPosition, Result } from './api'
+import type { lookupAuthors, Member, ReadPosition, Result } from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
@@ -14,7 +14,11 @@ import TopicView from './TopicView.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter } from './unread.svelte'
 import MessageRow from './ui/MessageRow.svelte'
+import { senderName } from './authors'
+import { createMembers } from './members'
+import { membersAdapter } from './members.svelte'
 import Workspace from './Workspace.svelte'
+import CreateChannelForm from './CreateChannelForm.svelte'
 
 type ListenerEntry = {
   fn: (event: MiniDomEvent) => void
@@ -984,7 +988,151 @@ afterAll(() => {
 
 afterEach(() => vi.useRealTimers())
 
+describe('Channel creation visibility', () => {
+  for (const visibility of ['public', 'private'] as const) {
+    it(`submits ${visibility} from the form and resets to public after success`, async () => {
+      const oncreate = vi.fn(async () => null)
+      const host = testDoc.createElement('div')
+      testDoc.body.appendChild(host)
+      const instance = mount(CreateChannelForm, { target: host as unknown as Element, props: { oncreate } })
+      await settle()
+      expect(host.querySelector('legend')?.textContent).toBe('公開範囲')
+      const publicRadio = host.querySelector('input[value="public"]')!
+      const privateRadio = host.querySelector('input[value="private"]')!
+      expect(publicRadio.checked).toBe(true)
+      expect(privateRadio.checked).toBe(false)
+      expect(publicRadio.closest('label')?.textContent).toContain('公開')
+      expect(privateRadio.closest('label')?.textContent).toContain('非公開')
+      const name = host.querySelector('input[name="channel_name"]')!
+      name.value = '新しいチャンネル'
+      name.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      if (visibility === 'private') {
+        privateRadio.checked = true
+        privateRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+      }
+      await settle()
+      buttonsByText(host, 'チャンネルを作成')[0]!.click()
+      await settle()
+      expect(oncreate).toHaveBeenCalledExactlyOnceWith('新しいチャンネル', visibility)
+      expect(name.value).toBe('')
+      expect(publicRadio.checked).toBe(true)
+      expect(privateRadio.checked).toBe(false)
+      await unmount(instance)
+    })
+  }
+
+  for (const result of [null, '同じ名前のチャンネルがすでにあります。']) {
+    it(`disables visibility choices while creation is pending and enables them after ${result === null ? 'success' : 'refusal'}`, async () => {
+      let resolveCreate!: (result: string | null) => void
+      const pending = new Promise<string | null>((resolve) => { resolveCreate = resolve })
+      const oncreate = vi.fn(() => pending)
+      const host = testDoc.createElement('div')
+      testDoc.body.appendChild(host)
+      const instance = mount(CreateChannelForm, { target: host as unknown as Element, props: { oncreate } })
+      await settle()
+      const fieldset = host.querySelector('fieldset')!
+      const publicRadio = host.querySelector('input[value="public"]')!
+      const privateRadio = host.querySelector('input[value="private"]')!
+      expect(publicRadio.closest('fieldset')).toBe(fieldset)
+      expect(privateRadio.closest('fieldset')).toBe(fieldset)
+      // Mini DOM only models own disabled attributes; native radios also inherit from their fieldset.
+      const isDisabled = (radio: MiniElement) => radio.disabled || Boolean(radio.closest('fieldset')?.disabled)
+      expect(fieldset.disabled).toBe(false)
+      expect(isDisabled(publicRadio)).toBe(false)
+      expect(isDisabled(privateRadio)).toBe(false)
+      const name = host.querySelector('input[name="channel_name"]')!
+      name.value = '新しいチャンネル'
+      name.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      await settle()
+      buttonsByText(host, 'チャンネルを作成')[0]!.click()
+      await settle()
+      expect(oncreate).toHaveBeenCalledExactlyOnceWith('新しいチャンネル', 'public')
+      expect(fieldset.disabled).toBe(true)
+      expect(isDisabled(publicRadio)).toBe(true)
+      expect(isDisabled(privateRadio)).toBe(true)
+      resolveCreate(result)
+      await settle()
+      expect(fieldset.disabled).toBe(false)
+      expect(isDisabled(publicRadio)).toBe(false)
+      expect(isDisabled(privateRadio)).toBe(false)
+      await unmount(instance)
+    })
+  }
+
+  it('preserves the private selection and name after a refusal', async () => {
+    const oncreate = vi.fn(async () => '同じ名前のチャンネルがすでにあります。')
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(CreateChannelForm, { target: host as unknown as Element, props: { oncreate } })
+    await settle()
+    const name = host.querySelector('input[name="channel_name"]')!
+    name.value = '既存のチャンネル'
+    name.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    const privateRadio = host.querySelector('input[value="private"]')!
+    privateRadio.checked = true
+    privateRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    buttonsByText(host, 'チャンネルを作成')[0]!.click()
+    await settle()
+    expect(oncreate).toHaveBeenCalledExactlyOnceWith(name.value, 'private')
+    expect(name.value).toBe('既存のチャンネル')
+    expect(privateRadio.checked).toBe(true)
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('同じ名前のチャンネルがすでにあります。')
+    await unmount(instance)
+  })
+
+  for (const allowed of [true, false]) {
+    it(`shows the creation form and visibility choices only when can_create_channels is ${allowed}`, async () => {
+      const net = fakeNetwork()
+      const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+      net.lists[0]!.resolve(ok({ channels: [] }))
+      const navigation = createNavigation({
+        location: { href: 'http://localhost/' },
+        history: { state: null, pushState() {}, replaceState() {} },
+        innerWidth: 1280,
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as NavigationBrowser)
+      const host = testDoc.createElement('div')
+      testDoc.body.appendChild(host)
+      const instance = mount(Workspace, {
+        target: host as unknown as Element,
+        props: {
+          navigation,
+          canCreateChannels: allowed,
+          session: {
+            channels: channelsAdapter(raw.channels),
+            sync: syncAdapter(raw.sync),
+            topics: (id: string) => topicsAdapter(raw.topics, id),
+            close: raw.close,
+          },
+        },
+      })
+      await settle()
+      expect(host.querySelectorAll('.create-channel-form')).toHaveLength(allowed ? 1 : 0)
+      expect(host.querySelectorAll('input[type="radio"]')).toHaveLength(allowed ? 2 : 0)
+      await unmount(instance)
+      navigation.destroy()
+      raw.close()
+    })
+  }
+})
+
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it('renders the deactivated sender name and hint as accessible text in the shared Message row', async () => {
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(MessageRow, { target: host as unknown as Element, props: {
+      body: '本文', senderName: senderName({ id: 'author', name: '田中', deactivated: true }),
+    } })
+    flushSync()
+    const label = host.querySelector('.ui-message-row__sender')!
+    expect(label.textContent).toBe('田中（無効）')
+    expect(label.getAttribute('aria-hidden')).not.toBe('true')
+    expect(label.getAttribute('aria-label')).toBeNull()
+    await unmount(instance)
+  })
+
   it('shows accessible Japanese throttled status, automatic retry and discard without manual resend or edit', async () => {
     vi.useFakeTimers()
     const net = fakeNetwork()
@@ -1487,6 +1635,14 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
   it('renders Topic summary lines at latest activity, creates Topics from Composer, expands sidebar/panel Topic lists, and operates Topic view with isolated drafts and return focus', async () => {
     vi.useFakeTimers()
+    let directory: Member[] = []
+    let deactivated = false
+    const memberController = createMembers('org-1', vi.fn(), vi.fn(), {
+      listMembers: async () => ok({ members: directory }),
+      lookupAuthors: async () => ok({ identities: [{ id: 'other', name: '田中', deactivated }] }),
+      changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    await memberController.load()
     const net = fakeNetwork()
     const rawSession = createSession({
       selfId: 'me',
@@ -1601,7 +1757,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           },
         },
         selectedOrganizationId: 'org-1',
-        resolveSenderName: (id: string) => (id === 'other' ? '田中' : '自分'),
+        members: membersAdapter(memberController),
         onannounce: (msg: string) => announcements.push(msg),
       },
     })
@@ -1827,6 +1983,20 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     )!
     expect(restoredMainComposer.value).toBe('チャンネルに残す下書き')
 
+    // Main-timeline names absent from the directory refresh both cached states on list fetch.
+    deactivated = true
+    await memberController.load()
+    await settle()
+    flushSync()
+    expect(queryAll(host, '#main-content .ui-message-row__sender').some(el => el.textContent === '田中（無効）')).toBe(true)
+    directory = [{ id: 'other', name: '田中', role: 'member' }]
+    deactivated = false
+    await memberController.load()
+    await settle()
+    flushSync()
+    expect(queryAll(host, '#main-content .ui-message-row__sender').some(el => el.textContent === '田中')).toBe(true)
+    expect(host.textContent).not.toContain('田中（無効）')
+
     // 6. Unknown Topic (404 topic_not_found) shows unavailable EmptyState and disables Topic Composer while Channel stays usable
     navigation.navigate({ type: 'topic', topicId: 'missing-topic', phone: false })
     flushSync()
@@ -1841,6 +2011,194 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     navigation.destroy()
     await unmount(instance)
     sessionModel.close()
+    memberController.close()
+  })
+
+  it.each(['active', 'deactivated', 'omitted', 'failed', 'view changed'] as const)(
+    'handles live sender lookup settlement (%s) without early or duplicate announcements', async outcome => {
+      vi.useFakeTimers()
+      const net = fakeNetwork()
+      net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [
+        { kind: 'message', message: { ...record(1, 'c1'), sender: 'known' } },
+      ] })
+      net.timelines.c2 = ok({ as_of_seq: 0, has_more: false, items: [] })
+      const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...net.options('me') })
+      const sessionModel = {
+        channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
+        topics: (id: string) => topicsAdapter(rawSession.topics, id),
+        navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets), close: rawSession.close,
+      }
+      let finish!: (result: Awaited<ReturnType<typeof lookupAuthors>>) => void
+      const lookup = vi.fn<typeof lookupAuthors>(() => new Promise(resolve => { finish = resolve }))
+      const memberController = createMembers('org-1', vi.fn(), vi.fn(), {
+        listMembers: async () => ok({ members: [{ id: 'known', name: '既知の著者', role: 'member' }] }),
+        lookupAuthors: lookup, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+      })
+      await memberController.load()
+      net.socket.onReady()
+      net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'other')] }))
+      let href = '/o/org-1/c/c1'
+      const navigation = createNavigation({
+        location: { get href() { return href } },
+        history: { state: null,
+          pushState(_s: unknown, _t: string, url: string) { href = url },
+          replaceState(_s: unknown, _t: string, url: string) { href = url },
+        }, innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+      } as unknown as NavigationBrowser)
+      const announcements: string[] = []
+      const host = testDoc.createElement('div')
+      testDoc.body.appendChild(host)
+      const instance = mount(Workspace, { target: host as unknown as Element, props: {
+        navigation, session: sessionModel, selectedOrganizationId: 'org-1', members: membersAdapter(memberController),
+        organization: { member: { id: 'me', name: '自分', role: 'owner' }, organization: {
+          organization_id: 'org-1', name: 'Acme', capabilities: {
+            can_create_channels: { allowed: true }, can_invite: { allowed: true },
+            can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
+          },
+        } },
+        onannounce: text => announcements.push(text),
+      } })
+      await settle()
+      net.subscribed('c1', 1)
+      await settle()
+      announcements.length = 0
+      // Known authors keep the normal 2 s window; own sends remain silent even
+      // when the Member list does not include self.
+      net.event({ type: 'message', message: { ...record(2, 'c1'), sender: 'known', body: '既知の新着' } })
+      net.event({ type: 'message', message: { ...record(3, 'c1'), sender: 'me', body: '自分の送信' } })
+      await settle()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(announcements).toEqual(['既知の著者: 既知の新着'])
+      announcements.length = 0
+      net.event({ type: 'message', message: { ...record(4, 'c1'), sender: 'unknown', body: '新着本文' } })
+      await settle()
+      expect(lookup).toHaveBeenCalledWith('org-1', { ids: ['unknown'] })
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(announcements).toEqual([])
+      if (outcome === 'view changed') {
+        navigation.navigate({ type: 'channel', organizationId: 'org-1', channelId: 'c2' })
+        await settle()
+        expect(announcements).toEqual(['# other'])
+        announcements.length = 0
+      }
+      finish(outcome === 'failed' ? { ok: false, kind: 'network' } : ok({ identities:
+        outcome === 'omitted' ? [] : [{ id: 'unknown', name: '田中', deactivated: outcome === 'deactivated' }],
+      }))
+      await settle()
+      await vi.advanceTimersByTimeAsync(2_000)
+      const name = outcome === 'active' ? '田中' : outcome === 'deactivated' ? '田中（無効）' : 'メンバー'
+      const expected = outcome === 'view changed' ? [] : [name + ': 新着本文']
+      expect(announcements).toEqual(expected)
+      // A further cache notification and timer tick cannot announce the seq again.
+      memberController.authors.watch(['unknown'])
+      await settle()
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(announcements).toEqual(expected)
+      navigation.destroy()
+      await unmount(instance)
+      memberController.close()
+      sessionModel.close()
+    },
+  )
+
+  it('resolves isolated older Topic and Reply-chain page authors with accessible names and deactivation refresh in both views', async () => {
+    const net = fakeNetwork()
+    const root = { ...record(1, 'c1'), sender: 'known', body: '過去の返信ルート' }
+    const reply = { ...record(2, 'c1'), sender: 'reply-only', body: '返信ページだけの本文', reply_to: root.id, reply_root_id: root.id }
+    const older = { ...record(3, 'c1'), sender: 'topic-only', body: '古いトピックだけの本文', topic_id: 't-1' }
+    const latest = { ...record(9, 'c1'), sender: 'known', body: '最新トピック本文', topic_id: 't-1' }
+    const recent = { ...record(10, 'c1'), sender: 'known', body: '最新チャンネル本文' }
+    const summary = { id: 't-1', name: '相談', first_seq: 3, last_seq: 9, message_count: 2, latest_message: latest, read_seq: 9, unread_count: 0 }
+    net.timelines.c1 = ok({ as_of_seq: 10, has_more: true, items: [
+      { kind: 'topic', topic: summary }, { kind: 'message', message: recent },
+    ] })
+    net.topicSummaries['c1:t-1'] = ok({ as_of_seq: 10, topic: summary })
+    net.replyChains[`c1:${root.id}`] = ok({ root_id: root.id, messages: [root], has_more: true })
+    net.replyChains[`c1:${root.id}:1`] = ok({ root_id: root.id, messages: [reply], has_more: false })
+    const base = net.options('me')
+    const topicReads = vi.fn(async (_channel: string, _topic: string, query?: { before_seq?: number }) =>
+      query?.before_seq ? ok({ messages: [older], has_more: false }) : ok({ messages: [latest], has_more: true }))
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...base,
+      topicsApi: { ...base.topicsApi!, listTopicMessages: topicReads },
+    })
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets), close: rawSession.close,
+    }
+    let deactivated = false
+    const lookup = vi.fn(async (_org: string, { ids }: { ids: string[] }) => ok({ identities: ids.map(id => ({
+      id, name: id === 'topic-only' ? 'トピック著者' : '返信著者', deactivated,
+    })) }))
+    const memberController = createMembers('org-1', vi.fn(), vi.fn(), {
+      listMembers: async () => ok({ members: [{ id: 'known', name: '既知の著者', role: 'member' }] }),
+      lookupAuthors: lookup, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    await memberController.load()
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    let href = '/o/org-1/c/c1/t/t-1'
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: { state: null,
+        pushState(_s: unknown, _t: string, url: string) { href = url },
+        replaceState(_s: unknown, _t: string, url: string) { href = url },
+      }, innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, session: sessionModel, selectedOrganizationId: 'org-1', members: membersAdapter(memberController),
+      organization: { member: { id: 'me', name: '自分', role: 'owner' }, organization: {
+        organization_id: 'org-1', name: 'Acme', capabilities: {
+          can_create_channels: { allowed: true }, can_invite: { allowed: true },
+          can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
+        },
+      } },
+    } })
+    await settle()
+    net.subscribed('c1', 10)
+    await settle()
+    expect(lookup).not.toHaveBeenCalled()
+    buttonsByText(host, '以前のメッセージを読み込む')[0].click()
+    await settle()
+    expect(topicReads).toHaveBeenLastCalledWith('c1', 't-1', { before_seq: 9 })
+    navigation.navigate({ type: 'reply', messageId: root.id })
+    await settle()
+    await settle()
+    expect(host.querySelector('#panel-content')?.textContent).not.toContain(reply.body)
+    buttonsByText(host, 'さらに返信を読み込む')[0].click()
+    await settle()
+    expect(net.replyHistory.at(-1)?.query?.after_seq).toBe(1)
+    expect(lookup.mock.calls.flatMap(call => call[1].ids)).toEqual(['topic-only', 'reply-only'])
+    expect(rawSession.sync.getTimeline('c1').get().messages.map(m => m.sender)).not.toContain('topic-only')
+    expect(rawSession.sync.getTimeline('c1').get().messages.map(m => m.sender)).not.toContain('reply-only')
+    expect(memberController.get().members.map(m => m.id)).toEqual(['known'])
+
+    const expectAccessibleSender = (scope: string, id: string, text: string) => {
+      const label = host.querySelector(`${scope} [data-message-id="${id}"] .ui-message-row__sender`)!
+      expect(label.textContent).toBe(text)
+      expect(label.closest('[aria-hidden="true"], [hidden], [inert]')).toBeNull()
+      expect(label.getAttribute('aria-label')).toBeNull()
+    }
+    expectAccessibleSender('#main-content', older.id, 'トピック著者')
+    expectAccessibleSender('#panel-content', reply.id, '返信著者')
+    deactivated = true
+    await memberController.load()
+    await settle()
+    expectAccessibleSender('#main-content', older.id, 'トピック著者（無効）')
+    expectAccessibleSender('#panel-content', reply.id, '返信著者（無効）')
+    expect(lookup.mock.calls.flatMap(call => call[1].ids).sort()).toEqual(['reply-only', 'reply-only', 'topic-only', 'topic-only'])
+    deactivated = false
+    await memberController.load()
+    await settle()
+    expectAccessibleSender('#main-content', older.id, 'トピック著者')
+    expectAccessibleSender('#panel-content', reply.id, '返信著者')
+    navigation.destroy()
+    await unmount(instance)
+    rawSession.close()
+    memberController.close()
   })
 
   it('keeps TopicView, Topic draft, loaded Topic history and failed Topic send 破棄 visible across C9 and C10', async () => {

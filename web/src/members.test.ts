@@ -51,6 +51,49 @@ describe('Members controller', () => {
     expect(ended).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled()
     expect(c.get().inviteLink).toBe('')
   })
+  it('reports Membership loss from an overlapping load and stops Member and author requests', async () => {
+    const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []
+    const listMembers = vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finishes.push(resolve) }))
+    const lookupAuthors = vi.fn(async () => ok({ identities: [] }))
+    const ended = vi.fn(), unavailable = vi.fn()
+    const c = createMembers(org, ended, unavailable, {
+      listMembers, lookupAuthors, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    const older = c.load(), newer = c.load()
+    finishes[1](ok({ members: [member] })); await newer
+    const late = c.load()
+    finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' }); await older
+    expect(unavailable).toHaveBeenCalledOnce()
+    await c.load()
+    c.authors.watch(['unknown']); c.authors.retry(); c.authors.replaceMembers([])
+    await Promise.resolve()
+    expect(listMembers).toHaveBeenCalledTimes(3)
+    expect(lookupAuthors).not.toHaveBeenCalled()
+    expect(c.get().members).toEqual([member])
+    expect(c.authors.get().get(member.id)?.name).toBe(member.name)
+    finishes[2]({ ok: false, kind: 'http', status: 401 }); await late
+    expect(ended).toHaveBeenCalledOnce()
+  })
+
+  it('ignores Member-list Membership loss from a previous Organization selection', async () => {
+    let finish!: (result: Result<{ members: Member[] }>) => void
+    const unavailable = vi.fn()
+    const deps = {
+      listMembers: vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finish = resolve })),
+      changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    }
+    const previous = createMembers(org, vi.fn(), unavailable, deps)
+    const pending = previous.load()
+    const old = finish
+    previous.close()
+    const current = createMembers(org, vi.fn(), unavailable, deps)
+    old({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' }); await pending
+    expect(unavailable).not.toHaveBeenCalled()
+    const fresh = current.load()
+    finish(ok({ members: [member] })); await fresh
+    expect(current.get().members).toEqual([member])
+    current.close()
+  })
   it('explains last-Channel-manager Role denial in Japanese and preserves the Member', async () => {
     const c = createMembers(org, vi.fn(), vi.fn(), {
       listMembers: async () => ok({ members: [member] }),

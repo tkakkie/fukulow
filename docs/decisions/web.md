@@ -3,6 +3,7 @@
 Web client. Writing rules and the other parts: [index](../decisions.md).
 
 ## Web client
+- #301 rebuilds the identity Map on Member list fetch; no push/polling. Unknown authors batch at 100; omissions/failures retry only on list fetch, Channel selection or reconnect. Deactivated names keep the accessible `（無効）` hint. `members.load()` is #315's refetch hook.
 - #300 Sign-in, sign-out and Invite acceptance share a cookie-mutation guard with setup and atomic Account transitions. Reads use generation fences, allowing sign-out and retry while stalled. Reason: ignored Set-Cookie still mutates cookies; reads must not retain busy.
 - #300 Invite session 401 offers explicit sign-out, keeping the Invite in memory. Only 204/401 restores the form; the user resubmits. Network/5xx keeps an error and never accepts. Reason: recover stale cookies without silent anonymous downgrade; existing Accounts keep sign-in.
 - #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec/realtime.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
