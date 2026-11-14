@@ -201,12 +201,43 @@ it('later demand reopens a refused lane without clearing its error budget contin
   expect(c.state.status).toBe('ready'); expect(c.state.error).toBe(false)
 })
 
+function freeze(value: unknown) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return
+  Object.freeze(value)
+  for (const child of Object.values(value)) freeze(child)
+}
+
+it('a frozen recovery result retains the selected oldest row and evicts exactly the excess in LRU order', () => {
+  const c = client(); c.discovery()
+  for (let i = 0; i < 200; i++) c.feed({ type: 'opened', generation: c.state.generation, dm: dm(String(i)) })
+  c.feed({ type: 'select', id: '1' })
+  c.feed({ type: 'recover', peer: 'peer-0' })
+  const held = c.wake(); expect(held.lane).toBe('held')
+  c.result(held, { dms: held.ids!.map(id => dm(id)), next_cursor: null })
+  const request = c.wake(); expect(request.lane).toBe('recovery')
+  const prior = c.state
+  const input: DmInput = { type: 'result', request, data: {
+    dms: [dm('0'), dm('200'), dm('201'), dm('202')], next_cursor: null,
+  } }
+  const before = structuredClone({ prior, input })
+  freeze(prior); freeze(input)
+
+  const { state, effects } = stepDmList(prior, input)
+
+  expect({ prior, input }).toEqual(before)
+  expect(state.selected).toBe('0')
+  expect(state.recovered).toBe('0')
+  expect(state.rows).toHaveLength(200)
+  expect(state.rows.map(row => row.identity.id)).toEqual([
+    '0', '1', ...Array.from({ length: 198 }, (_, i) => String(i + 5)),
+  ])
+  expect(effects.filter(effect => effect.type === 'drop')).toEqual([
+    { type: 'drop', id: '2' }, { type: 'drop', id: '3' }, { type: 'drop', id: '4' },
+  ])
+  expect(effects.filter(effect => effect.type === 'recovered')).toEqual([{ type: 'recovered', id: '0' }])
+})
+
 it('transitions preserve frozen prior state and input across retained rows requests and eviction', () => {
-  function freeze(value: unknown) {
-    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return
-    Object.freeze(value)
-    for (const child of Object.values(value)) freeze(child)
-  }
   let state = dmListState()
   const feed = (input: DmInput) => {
     freeze(state); freeze(input)
