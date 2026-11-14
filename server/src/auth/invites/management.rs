@@ -2,6 +2,13 @@ use super::*;
 use axum::extract::Query;
 use utoipa::IntoParams;
 
+// The stable lower bound gives the expiry index a range; the clock check still
+// excludes Invites that expire while the statement runs. Anchors stay unfiltered.
+pub(super) const LIST_SQL: &str = "SELECT id,email,role,created_by,to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at FROM invites \
+             WHERE organization_id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>statement_timestamp() AND expires_at>clock_timestamp() \
+             AND ($2 OR role<>'owner') AND ($3::uuid IS NULL OR (created_at,id) > \
+             (SELECT created_at,id FROM invites WHERE organization_id=$1 AND id=$3)) ORDER BY created_at,id LIMIT 101";
+
 #[derive(Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct OutstandingInvite {
     pub id: Uuid,
@@ -58,12 +65,7 @@ pub async fn list_invites(
             Some(sqlx::query_scalar::<_, Uuid>(&sql).bind(org).bind(cursor).bind(owner)
                 .fetch_optional(&mut *tx).await?.ok_or_else(ApiError::bad_request)?)
         } else { None };
-        let sql =
-            "SELECT id,email,role,created_by,to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at FROM invites \
-             WHERE organization_id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>clock_timestamp() \
-             AND ($2 OR role<>'owner') AND ($3::uuid IS NULL OR (created_at,id) > \
-             (SELECT created_at,id FROM invites WHERE organization_id=$1 AND id=$3)) ORDER BY created_at,id LIMIT 101";
-        let mut invites: Vec<OutstandingInvite> = sqlx::query_as(sql).bind(org).bind(owner).bind(anchor).fetch_all(&mut *tx).await?;
+        let mut invites: Vec<OutstandingInvite> = sqlx::query_as(LIST_SQL).bind(org).bind(owner).bind(anchor).fetch_all(&mut *tx).await?;
         let next_cursor = if invites.len() > 100 {
             invites.truncate(100);
             let last = invites.last().ok_or_else(ApiError::bad_request)?;
