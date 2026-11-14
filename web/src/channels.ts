@@ -92,7 +92,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       if (!r.ok) return { error: channelError(r) }
       generation++
       target?.invalidate('access')
-      set({ channels: [...state.channels, r.data], selectedId: r.data.id })
+      set({ channels: [...state.channels.filter(c => c.id !== r.data.id), r.data], selectedId: r.data.id })
       return { channel: r.data }
     },
   }

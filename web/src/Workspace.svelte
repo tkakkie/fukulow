@@ -72,6 +72,7 @@
   } = $props()
 
   const channels = $derived(session.channels)
+  const channelCreation = $state({ name: '', visibility: 'public' as Channel['visibility'], error: '', busy: false })
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
   const channelListStatus = $derived(s.status)
@@ -651,7 +652,7 @@
         onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
       />
       {#if !organizationUnavailable && canCreateChannels}
-        <CreateChannelForm oncreate={handleCreateChannel} />
+        <CreateChannelForm oncreate={handleCreateChannel} draft={channelCreation} />
       {/if}
       {#if !organizationUnavailable && members && organization}
         <Members

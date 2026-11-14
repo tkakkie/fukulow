@@ -7,6 +7,71 @@ const held = <T>() => { let resolve!: (value: T) => void; const promise = new Pr
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 const keys = ['channels', 'main:c', 'topic:c:t', 'members', 'channel-members:c', 'capabilities']
+it('a superseded list page cannot clear a replacement access-generation page loading state', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const old = held<Result<import('./api').TopicPage>>(), fresh = held<Result<import('./api').TopicPage>>()
+  try {
+    await c.boot()
+    c.topicsApi.listTopics.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise)
+    const first = c.topics.loadList('A'); await flush()
+    c.topics.activityAccess('A')
+    const second = c.topics.loadList('A'); await flush()
+    expect(c.topicsApi.listTopics).toHaveBeenCalledOnce()
+    old.resolve(ok({ as_of_seq: 10, topics: [summary('old', 10, 1)], has_more: false }))
+    await first; await flush()
+    expect(c.topics.get('A').list.loading).toBe(true)
+    expect(c.topics.get('A').topics.some(t => t.topicId === 'old')).toBe(false)
+    fresh.resolve(ok({ as_of_seq: 20, topics: [summary('fresh', 20, 1)], has_more: false }))
+    await second
+    expect(c.topics.get('A').list).toMatchObject({ loading: false, asOfSeq: 20, hasMore: false })
+  } finally { activity.close(); await c.sync.close() }
+})
+it('access-gain reconciliation retries a superseded bootstrap without leaving a history error', async () => {
+  const { topicClient, page } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  const old = held<Result<import('./api').TimelinePage>>()
+  try {
+    c.topicsApi.listTimeline.mockReturnValueOnce(old.promise)
+    const boot = c.boot()
+    await flush()
+    c.topics.activityAccess('A')
+    old.resolve(ok(page()))
+    await boot
+    expect(c.topicsApi.listTimeline).toHaveBeenCalledTimes(2)
+    expect(c.sync.get().channels.A.state).toBe('ready')
+    expect(c.topics.get('A').main).toMatchObject({ loading: false, error: false })
+    expect(c.controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
+  } finally { activity.close(); await c.sync.close() }
+})
+it.each(['activity_reset', 'periodic'] as const)('coordinates %s reconciliation with Topic paging and preserves W-relative continuation', async trigger => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true, random: () => 0.5, periodMs: 2000 })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('T', 10, 3)], has_more: true }))
+    await c.topics.loadList('A')
+    const page = held<Result<import('./api').TopicPage>>()
+    c.topicsApi.listTopics.mockReturnValueOnce(page.promise)
+    const pending = c.topics.loadList('A')
+    await flush()
+    if (trigger === 'periodic') activity.notice({ type: 'activity_ready' })
+    else activity.notice({ type: 'activity_reset' })
+    await vi.advanceTimersByTimeAsync(1200)
+    // Reconciliation waits for the page, rather than starting a parallel list read.
+    expect(c.topicsApi.listTopics).toHaveBeenCalledTimes(2)
+    page.resolve(ok({ as_of_seq: 10, topics: [summary('U', 5, 1)], has_more: false }))
+    await pending; await flush()
+    expect(c.topics.get('A').list.loading).toBe(false)
+    expect(c.topics.get('A').list).toMatchObject({ asOfSeq: 10, before: 10, hasMore: true })
+    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('U', 5, 1)], has_more: false }))
+    await c.topics.loadList('A')
+    expect(c.topicsApi.listTopics.mock.calls.at(-1)).toEqual(['A', { as_of_seq: 10, before_position: 10 }])
+    expect(c.topics.get('A').list).toMatchObject({ loading: false, before: 5, hasMore: false })
+  } finally { activity.close(); await c.sync.close() }
+})
 for (const trigger of ['notice', 'periodic']) for (const key of keys) for (const kind of ['network', 'deadline', '429', '503'] as const) {
   it(`every_dirty_target_retries_failed_refetch_until_recovery_without_another_notice: ${key} ${kind} ${trigger}`, async () => {
     const late = held<Result<string>>()

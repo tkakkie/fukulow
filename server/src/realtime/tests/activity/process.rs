@@ -45,7 +45,7 @@ async fn start(database: &str, address: std::net::SocketAddr) -> Process {
     .unwrap();
     process
 }
-#[tokio::test]
+#[fukulow_test::test]
 #[ignore = "subprocess helper for an actual process restart with a surviving PostgreSQL COMMIT"]
 async fn activity_process_child() {
     use std::str::FromStr;
@@ -85,7 +85,7 @@ async fn list_count(address: std::net::SocketAddr, token: &str, channel: Uuid) -
         .as_i64()
         .unwrap()
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn process_restart_keeps_reconciling_a_commit_that_survives_the_old_process(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, reader_token) = member(&pool, f.organization).await;

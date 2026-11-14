@@ -90,7 +90,7 @@ fn activity(channel: Uuid, seq: i64) -> Value {
     json!({"type":"channel_activity","channel_id":channel,"seq":seq})
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn activity_ready_is_the_first_event_after_registration(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -101,7 +101,7 @@ async fn activity_ready_is_the_first_event_after_registration(pool: PgPool) {
     );
     assert_eq!(raw_event(&mut socket).await["type"], "subscribed");
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn own_sends_emit_no_channel_activity_to_the_sender_but_reach_other_members(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, other) = member(&pool, f.organization).await;
@@ -114,7 +114,7 @@ async fn own_sends_emit_no_channel_activity_to_the_sender_but_reach_other_member
     assert!(notices(&f, &mut sender).await.is_empty());
     assert!(notices(&f, &mut own_other).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn private_channel_activity_skips_non_members(pool: PgPool) {
     let f = fixture(&pool).await;
     let (reader, token) = member(&pool, f.organization).await;
@@ -127,7 +127,7 @@ async fn private_channel_activity_skips_non_members(pool: PgPool) {
     assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
     assert!(notices(&f, &mut denied).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guest_without_grant_receives_no_public_channel_activity_or_creation(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -166,7 +166,7 @@ async fn guest_without_grant_receives_no_public_channel_activity_or_creation(poo
         "channel_access_gained"
     );
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn other_organization_socket_of_same_account_receives_nothing(pool: PgPool) {
     let f = fixture(&pool).await;
     let foreign = organization(&pool).await;
@@ -191,7 +191,7 @@ async fn other_organization_socket_of_same_account_receives_nothing(pool: PgPool
     );
     assert!(notices(&f, &mut denied).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revoked_grant_receives_revocation_then_no_activity(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -221,7 +221,7 @@ async fn revoked_grant_receives_revocation_then_no_activity(pool: PgPool) {
     assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
     assert!(notices(&f, &mut denied).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn role_to_guest_revokes_public_channels_without_grant_and_keeps_granted_ones(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -252,7 +252,7 @@ async fn role_to_guest_revokes_public_channels_without_grant_and_keeps_granted_o
     assert_eq!(notices(&f, &mut denied).await, vec![activity(granted, 1)]);
     assert_eq!(notices(&f, &mut allowed).await.len(), 2);
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn stale_membership_revision_socket_matches_no_recipient(pool: PgPool) {
     let f = fixture(&pool).await;
     let (target, token) = member(&pool, f.organization).await;
@@ -280,7 +280,7 @@ async fn stale_membership_revision_socket_matches_no_recipient(pool: PgPool) {
     );
     assert!(notices(&f, &mut stale).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn ended_session_closes_4001_and_receives_no_notice(pool: PgPool) {
     let f = fixture(&pool).await;
     let (target, token) = member(&pool, f.organization).await;
@@ -296,7 +296,7 @@ async fn ended_session_closes_4001_and_receives_no_notice(pool: PgPool) {
         vec![activity(f.channel, 1)]
     );
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivated_member_closes_4003_and_receives_no_notice(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -324,7 +324,7 @@ async fn deactivated_member_closes_4003_and_receives_no_notice(pool: PgPool) {
         vec![activity(f.channel, 1)]
     );
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn two_senders_coalesce_without_losing_each_others_activity(pool: PgPool) {
     for reverse in [false, true] {
         let f = fixture(&pool).await;
@@ -375,7 +375,7 @@ async fn two_senders_coalesce_without_losing_each_others_activity(pool: PgPool) 
         assert!(notices(&f, &mut denied).await.is_empty());
     }
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn more_than_256_visible_channels_receive_unwatched_activity_without_message_bodies(
     pool: PgPool,
 ) {
@@ -391,7 +391,7 @@ async fn more_than_256_visible_channels_receive_unwatched_activity_without_messa
     post(&f, last).await;
     assert_eq!(notices(&f, &mut socket).await, vec![activity(last, 1)]);
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_mark_read_notifies_with_topic_id_and_channel_mark_read_with_null(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, sender) = member(&pool, f.organization).await;
@@ -449,9 +449,9 @@ async fn topic_mark_read_notifies_with_topic_id_and_channel_mark_read_with_null(
     assert!(notices(&f, &mut same).await.is_empty());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool: PgPool) {
-    for phase in ["query", "authorized", "handoff"] {
+    for phase in ["snapshot", "query", "authorized", "handoff"] {
         let f = fixture(&pool).await;
         owner(&pool, &f).await;
         let (target, token) = member(&pool, f.organization).await;
@@ -511,7 +511,7 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         );
     }
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn mutation_notice_is_not_observable_before_confirmed_commit(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, other) = member(&pool, f.organization).await;
@@ -539,7 +539,7 @@ async fn mutation_notice_is_not_observable_before_confirmed_commit(pool: PgPool)
     assert_eq!(task.await.unwrap().status(), StatusCode::CREATED);
     assert_eq!(notices(&f, &mut reader).await, vec![activity(f.channel, 1)]);
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn proven_rollback_and_refused_mutations_publish_no_mutation_notice(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, other) = member(&pool, f.organization).await;
@@ -568,7 +568,7 @@ async fn proven_rollback_and_refused_mutations_publish_no_mutation_notice(pool: 
     post(&f, f.channel).await;
     assert_eq!(notices(&f, &mut reader).await, vec![activity(f.channel, 1)]);
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn public_channel_creation_notifies_non_guests_and_private_creation_only_the_creator(
     pool: PgPool,
 ) {
@@ -600,7 +600,7 @@ async fn public_channel_creation_notifies_non_guests_and_private_creation_only_t
         );
     }
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guest_last_shared_channel_removal_invalidates_own_directory(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -629,7 +629,7 @@ async fn guest_last_shared_channel_removal_invalidates_own_directory(pool: PgPoo
     assert!(notices(&f, &mut invisible).await.is_empty());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_publication_never_resets_unproven_recipients(pool: PgPool) {
     use crate::channels::activity::{TestFault, fail, pause};
     for failure in ["capacity", "database", "timeout", "cancel", "panic"] {
@@ -709,7 +709,7 @@ async fn failed_publication_never_resets_unproven_recipients(pool: PgPool) {
         assert_eq!(row["unread_count"], 2, "failure={failure}");
     }
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delayed_commit_after_successful_recovery_fetch_converges_without_later_mutation(
     pool: PgPool,
 ) {
@@ -813,11 +813,11 @@ async fn batch_measurement(pool: &PgPool, readers: usize) -> Value {
     let at = |p: usize| micros[(micros.len() * p).div_ceil(100) - 1];
     json!({"reader_sockets":readers,"sender_sockets":4,"committed_sends":4,"recipient_queries":queries,"release_to_final_notice_us":{"p50":at(50),"p95":at(95),"p99":at(99),"max":micros.last()},"app_pool_max":f.state.pool.options().get_max_connections()})
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn messages_after_authorization_snapshot_get_a_fresh_batch(pool: PgPool) {
     batch_measurement(&pool, 1).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release multi-sender coalescing measurement, separate from periodic REST load"]
 async fn measure_multi_sender_activity_batching(pool: PgPool) {
     eprintln!(
@@ -843,7 +843,7 @@ async fn raw_closed(socket: &mut Client, code: u16) {
         }
     }
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn mark_read_on_one_session_notifies_every_session_of_that_member_only(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, sender) = member(&pool, f.organization).await;
@@ -874,7 +874,7 @@ async fn mark_read_on_one_session_notifies_every_session_of_that_member_only(poo
     }
     assert!(notices(&f, &mut denied).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn grant_notifies_target_gain_and_channel_viewers_members_changed(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -905,7 +905,7 @@ async fn grant_notifies_target_gain_and_channel_viewers_members_changed(pool: Pg
     );
     assert!(notices(&f, &mut denied).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn manager_right_change_notifies_target_list_and_channel_viewers(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -945,7 +945,7 @@ async fn manager_right_change_notifies_target_list_and_channel_viewers(pool: PgP
     assert!(notices(&f, &mut own).await.is_empty());
     assert!(notices(&f, &mut control).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn promotion_from_guest_notifies_gained_public_channels(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -977,7 +977,7 @@ async fn promotion_from_guest_notifies_gained_public_channels(pool: PgPool) {
     );
     assert!(notices(&f, &mut denied).await.is_empty());
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_notifies_members_changed_to_non_guests_only(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -1009,7 +1009,7 @@ async fn invite_acceptance_notifies_members_changed_to_non_guests_only(pool: PgP
 
 mod process;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revocation_reaches_only_the_current_target_of_removed_access(pool: PgPool) {
     for public in [false, true] {
         let f = fixture(&pool).await;
@@ -1113,7 +1113,107 @@ async fn revocation_reaches_only_the_current_target_of_removed_access(pool: PgPo
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
+async fn fallback_fences_first_in_flight_notice_without_buffered_provenance(pool: PgPool) {
+    use crate::auth::SubscriptionRecheck;
+    for watched in [false, true] {
+        for phase in ["query", "authorized"] {
+            let f = fixture(&pool).await;
+            let (target, token) = member(&pool, f.organization).await;
+            let (control, other) = member(&pool, f.organization).await;
+            let private = channel(&pool, f.organization, f.member, true).await;
+            grant(&pool, &f, private, target).await;
+            grant(&pool, &f, private, control).await;
+            let mut denied = connect(&f, &token).await;
+            let mut allowed = connect(&f, &other).await;
+            if watched {
+                subscribe(&mut denied, private, 0).await;
+                assert_eq!(raw_event(&mut denied).await["type"], "subscribed");
+            }
+            let gate = crate::channels::activity::pause(f.organization, private, phase);
+            post(&f, private).await;
+            tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+            if watched {
+                assert_eq!(raw_event(&mut denied).await["type"], "message");
+            }
+            // Bypass the mutation hook and fast signal, as when a loss signal is dropped.
+            sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+                .bind(f.organization).bind(private).bind(target).execute(&pool).await.unwrap();
+            f.state
+                .message_delivery
+                .channel_access
+                .check(&f.state.pool, crate::auth::SubscriptionScope::All)
+                .await
+                .unwrap();
+            if watched {
+                assert_eq!(raw_event(&mut denied).await["type"], "channel_access_lost");
+            }
+            // A new grant must not revive the paused first authorization.
+            grant(&pool, &f, private, target).await;
+            gate.release.add_permits(1);
+            assert!(
+                notices(&f, &mut denied).await.is_empty(),
+                "{phase}, watched={watched}"
+            );
+            assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
+            post(&f, private).await;
+            assert_eq!(notices(&f, &mut denied).await, vec![activity(private, 2)]);
+        }
+    }
+}
+
+#[fukulow_test::test]
+async fn subscription_refresh_loss_retires_a_first_notice_after_activity_check_succeeded(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let (target, token) = member(&pool, f.organization).await;
+    let (control, other) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, target).await;
+    grant(&pool, &f, private, control).await;
+    let access = &f.state.message_delivery.channel_access;
+    let watch = access
+        .subscribe(&f.state.pool, f.organization, (target, 0), private)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut denied = connect(&f, &token).await;
+    let mut allowed = connect(&f, &other).await;
+    let gate = crate::channels::activity::pause(f.organization, private, "authorized");
+    post(&f, private).await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    // The Activity part of fallback can precede the loss; the subsequent subscription read must fence it too.
+    access
+        .activity
+        .check(&f.state.pool, crate::auth::SubscriptionScope::All)
+        .await;
+    sqlx::query(
+        "DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3",
+    )
+    .bind(f.organization)
+    .bind(private)
+    .bind(target)
+    .execute(&pool)
+    .await
+    .unwrap();
+    watch.refresh(&f.state.pool).await.unwrap();
+    assert_eq!(watch.status(), 1);
+    grant(&pool, &f, private, target).await;
+    gate.release.add_permits(1);
+    assert!(notices(&f, &mut denied).await.is_empty());
+    assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
+}
+
+#[fukulow_test::test]
 async fn durable_grant_comparison_retires_buffered_activity_after_lost_fast_signals(pool: PgPool) {
     let f = fixture(&pool).await;
     let (target, token) = member(&pool, f.organization).await;
@@ -1161,7 +1261,7 @@ async fn durable_grant_comparison_retires_buffered_activity_after_lost_fast_sign
     assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 3)]);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn role_change_and_deactivation_notify_members_changed_per_directory_rule(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -1193,9 +1293,9 @@ async fn role_change_and_deactivation_notify_members_changed_per_directory_rule(
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool: PgPool) {
-    for phase in ["revoked", "handoff"] {
+    for phase in ["snapshot", "revoked", "handoff"] {
         let f = fixture(&pool).await;
         owner(&pool, &f).await;
         let (target, token) = member(&pool, f.organization).await;
@@ -1228,8 +1328,20 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let mut gained = Vec::new();
+        if phase == "snapshot" {
+            loop {
+                let event = raw_event(&mut own).await;
+                let ready = event["type"] == "channel_access_gained";
+                gained.push(event);
+                if ready {
+                    break;
+                }
+            }
+        }
         gate.release.add_permits(1);
-        let changed = notices(&f, &mut own).await;
+        let mut changed = gained;
+        changed.extend(notices(&f, &mut own).await);
         assert!(
             !changed
                 .iter()
@@ -1250,7 +1362,7 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_directory_publication_never_resets_invisible_guests(pool: PgPool) {
     use crate::auth::activity::ActivityChanges;
     use crate::channels::activity::{TestFault, fail, pause};

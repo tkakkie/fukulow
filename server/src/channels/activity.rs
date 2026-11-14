@@ -85,6 +85,42 @@ struct Buffer {
     pending: VecDeque<Pending>,
     reset: bool,
     proofs: HashMap<Option<Uuid>, Proof>,
+    in_flight: HashMap<Uuid, (Option<Uuid>, Option<Proof>)>,
+}
+struct Authorization {
+    entry: Arc<Entry>,
+    epoch: u64,
+    id: Uuid,
+}
+impl Authorization {
+    fn new(entry: Arc<Entry>, epoch: u64, channel: Option<Uuid>) -> Self {
+        let id = Uuid::new_v4();
+        {
+            let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if b.epoch == epoch {
+                b.in_flight.insert(id, (channel, None));
+            }
+        }
+        Self { entry, epoch, id }
+    }
+    fn proved(&self, proof: &Option<Proof>) {
+        let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        if b.epoch == self.epoch
+            && let Some((_, captured)) = b.in_flight.get_mut(&self.id)
+        {
+            *captured = proof.clone();
+        }
+    }
+}
+impl Drop for Authorization {
+    fn drop(&mut self) {
+        self.entry
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .in_flight
+            .remove(&self.id);
+    }
 }
 struct Entry {
     id: Uuid,
@@ -180,36 +216,38 @@ impl Activity {
             entry,
         }
     }
-    fn snapshot(&self, organization: Uuid) -> Vec<Arc<Entry>> {
+    fn snapshot(&self, organization: Uuid) -> Vec<(Arc<Entry>, u64)> {
         self.entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .filter(|e| {
-                e.organization == organization
-                    && self.epochs.as_ref().is_none_or(|epochs| {
-                        epochs.get(&e.id).copied()
-                            == Some(
-                                e.buffer
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner())
-                                    .epoch,
-                            )
-                    })
+            .filter_map(|e| {
+                if e.organization != organization {
+                    return None;
+                }
+                let epoch = e
+                    .buffer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .epoch;
+                self.epochs
+                    .as_ref()
+                    .is_none_or(|epochs| epochs.get(&e.id) == Some(&epoch))
+                    .then(|| (e.clone(), epoch))
             })
-            .cloned()
             .collect()
     }
     pub(crate) fn retire(&self, organization: Uuid, member: Uuid) {
-        for entry in self
+        for (entry, _) in self
             .snapshot(organization)
             .into_iter()
-            .filter(|e| e.member.0 == member)
+            .filter(|(e, _)| e.member.0 == member)
         {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             b.epoch = b.epoch.wrapping_add(1);
             b.pending.clear();
             b.proofs.clear();
+            b.in_flight.clear();
             b.reset = false;
         }
     }
@@ -280,15 +318,24 @@ impl Activity {
         target: Option<Uuid>,
         senders: Option<&Senders>,
     ) -> Result<(), sqlx::Error> {
-        let entries: Vec<_> = self
+        let captured: Vec<_> = self
             .snapshot(organization)
             .into_iter()
-            .filter(|e| target.is_none_or(|t| e.member.0 == t))
+            .filter(|(e, _)| target.is_none_or(|t| e.member.0 == t))
             .collect();
-        let epochs: Vec<_> = entries
+        #[cfg(test)]
+        test_pause(
+            organization,
+            notice.channel().unwrap_or(Uuid::nil()),
+            "snapshot",
+            target,
+        )
+        .await;
+        let authorizations: Vec<_> = captured
             .iter()
-            .map(|e| e.buffer.lock().unwrap_or_else(|e| e.into_inner()).epoch)
+            .map(|(e, epoch)| Authorization::new(e.clone(), *epoch, notice.channel()))
             .collect();
+        let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
         #[cfg(test)]
         test_pause(
             organization,
@@ -303,6 +350,9 @@ impl Activity {
         self.queries
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let proofs = authorize_notices(pool, &entries, notice.channel()).await?;
+        for (authorization, proof) in authorizations.iter().zip(&proofs) {
+            authorization.proved(proof);
+        }
         #[cfg(test)]
         test_pause(
             organization,
@@ -311,7 +361,7 @@ impl Activity {
             None,
         )
         .await;
-        for ((entry, epoch), proof) in entries.iter().zip(epochs).zip(proofs) {
+        for ((entry, epoch), proof) in captured.iter().zip(proofs) {
             let Some(proof) = proof else {
                 continue;
             };
@@ -339,7 +389,7 @@ impl Activity {
                 entry,
                 Pending {
                     notice: event,
-                    epoch,
+                    epoch: *epoch,
                     proof: Some(proof),
                 },
             );
@@ -390,6 +440,7 @@ fn enqueue(entry: &Entry, pending: Pending) {
             b.epoch = b.epoch.wrapping_add(1);
             b.pending.clear();
             b.proofs.clear();
+            b.in_flight.clear();
             b.reset = false;
             return;
         }
@@ -656,12 +707,7 @@ impl auth::activity::ActivityChange for TargetChange {
             self.activity
                 .snapshot(self.organization)
                 .iter()
-                .map(|entry| {
-                    (
-                        entry.id,
-                        entry.buffer.lock().unwrap_or_else(|e| e.into_inner()).epoch,
-                    )
-                })
+                .map(|(entry, epoch)| (entry.id, *epoch))
                 .collect(),
         ));
         let Ok(slot) = self.activity.capacity.clone().try_acquire_owned() else {
@@ -770,20 +816,26 @@ impl Activity {
         target: Uuid,
         channel: Uuid,
     ) -> Result<(), sqlx::Error> {
-        let entries: Vec<_> = self
+        let captured: Vec<_> = self
             .snapshot(organization)
             .into_iter()
-            .filter(|e| e.member.0 == target)
+            .filter(|(e, _)| e.member.0 == target)
             .collect();
-        let epochs: Vec<_> = entries
+        #[cfg(test)]
+        test_pause(organization, channel, "snapshot", Some(target)).await;
+        let authorizations: Vec<_> = captured
             .iter()
-            .map(|e| e.buffer.lock().unwrap_or_else(|e| e.into_inner()).epoch)
+            .map(|(e, epoch)| Authorization::new(e.clone(), *epoch, None))
             .collect();
+        let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
         // The transaction snapshot proved prior access. Current live identity authorizes only this transition.
         #[cfg(test)]
         test_pause(organization, channel, "revoked", Some(target)).await;
         let proofs = authorize_notices(pool, &entries, None).await?;
-        for ((entry, epoch), proof) in entries.iter().zip(epochs).zip(proofs) {
+        for (authorization, proof) in authorizations.iter().zip(&proofs) {
+            authorization.proved(proof);
+        }
+        for ((entry, epoch), proof) in captured.iter().zip(proofs) {
             if let Some(proof) = proof {
                 enqueue(
                     entry,
@@ -791,7 +843,7 @@ impl Activity {
                         notice: Notice::ChannelAccessRevoked {
                             channel_id: channel,
                         },
-                        epoch,
+                        epoch: *epoch,
                         proof: Some(proof),
                     },
                 );
@@ -820,11 +872,16 @@ impl Activity {
         let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
         for entry in entries {
             let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            for (channel, proof) in &b.proofs {
+            for (channel, proof) in b
+                .proofs
+                .iter()
+                .map(|(channel, proof)| (*channel, Some(proof.clone())))
+                .chain(b.in_flight.values().cloned())
+            {
                 organizations.entry(entry.organization).or_default().push((
-                    (entry.clone(), *channel),
+                    (entry.clone(), channel),
                     b.epoch,
-                    proof.clone(),
+                    proof,
                 ));
             }
         }
@@ -836,7 +893,10 @@ impl Activity {
                     .collect();
                 let result = authorize_batch(pool, &selected).await;
                 for (index, ((entry, _), epoch, proof)) in chunk.iter().enumerate() {
-                    if result.as_ref().ok().and_then(|rows| rows[index].as_ref()) == Some(proof) {
+                    let current = result.as_ref().ok().and_then(|rows| rows[index].as_ref());
+                    if current.is_some()
+                        && proof.as_ref().is_none_or(|proof| current == Some(proof))
+                    {
                         continue;
                     }
                     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -844,6 +904,7 @@ impl Activity {
                         b.epoch = b.epoch.wrapping_add(1);
                         b.pending.clear();
                         b.proofs.clear();
+                        b.in_flight.clear();
                         b.reset = false;
                     }
                 }

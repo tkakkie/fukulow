@@ -76,6 +76,7 @@ pub(crate) struct AccessWatch {
     id: Uuid,
     registry: Weak<Mutex<Entries>>,
     entry: Arc<Entry>,
+    activity: super::activity::Activity,
     pub changed: watch::Receiver<u8>,
 }
 impl Drop for AccessWatch {
@@ -111,7 +112,7 @@ impl AccessWatch {
         *self.entry.status.borrow()
     }
     pub async fn refresh(&self, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-        check_entries(pool, std::slice::from_ref(&self.entry)).await
+        check_entries(pool, std::slice::from_ref(&self.entry), &self.activity).await
     }
 }
 impl AccessChanges {
@@ -150,6 +151,7 @@ impl AccessChanges {
             id,
             registry: Arc::downgrade(&self.entries),
             entry,
+            activity: self.activity.clone(),
             changed,
         };
         // Register, then check the captured lifetime again: removal on either
@@ -198,7 +200,7 @@ impl auth::SubscriptionRecheck for AccessChanges {
             .collect();
         Box::pin(async move {
             self.activity.check(pool, scope).await;
-            check_entries(pool, &entries).await
+            check_entries(pool, &entries, &self.activity).await
         })
     }
     fn failed(&self, scope: auth::SubscriptionScope) {
@@ -220,13 +222,20 @@ impl auth::SubscriptionRecheck for AccessChanges {
     }
 }
 
-async fn check_entries(pool: &sqlx::PgPool, entries: &[Arc<Entry>]) -> Result<(), sqlx::Error> {
+async fn check_entries(
+    pool: &sqlx::PgPool,
+    entries: &[Arc<Entry>],
+    activity: &super::activity::Activity,
+) -> Result<(), sqlx::Error> {
     let rows = access_rows(pool, entries).await?;
     for (entry, (visible, grant, current)) in entries.iter().zip(rows) {
         // A public shortcut is continuous without its redundant grant. A
         // subscription originally dependent on a grant retains its lifetime.
         let mut captured = entry.grant.lock().unwrap_or_else(|e| e.into_inner());
         let lost = !visible || (captured.is_some() && grant.is_some() && *captured != grant);
+        if !current || lost {
+            activity.retire(entry.organization, entry.member.0);
+        }
         if !current {
             entry.status.send_if_modified(|status| {
                 if *status < 2 {
@@ -368,6 +377,7 @@ mod tests {
             registry: Weak::new(),
             changed: entry.status.subscribe(),
             entry: entry.clone(),
+            activity: Default::default(),
         });
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -463,7 +473,9 @@ mod tests {
         );
         use std::sync::atomic::Ordering;
         assert_eq!(transactions.swap(0, Ordering::SeqCst), organizations.len());
-        check_entries(&counted, &entries).await.unwrap();
+        check_entries(&counted, &entries, &Default::default())
+            .await
+            .unwrap();
         assert_eq!(transactions.load(Ordering::SeqCst), organizations.len());
         assert_eq!(
             entries

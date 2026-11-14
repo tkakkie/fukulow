@@ -4,52 +4,50 @@
   import Input from './ui/Input.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
+  const local = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '', busy: false })
   let {
     oncreate,
+    draft = local,
   }: {
     oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null>
+    draft?: typeof local
   } = $props()
-
-  let name = $state('')
-  let visibility = $state<ChannelVisibility>('public')
-  let error = $state('')
-  let busy = $state(false)
 
   async function submit(e: Event) {
     e.preventDefault()
-    const tooLong = channelNameTooLong(name)
+    const tooLong = channelNameTooLong(draft.name)
     if (tooLong) {
-      error = tooLong
+      draft.error = tooLong
       return
     }
-    busy = true
-    const err = await oncreate(name, visibility)
-    busy = false
-    error = err ?? ''
+    draft.busy = true
+    const err = await oncreate(draft.name, draft.visibility)
+    draft.busy = false
+    draft.error = err ?? ''
     if (!err) {
-      name = ''
-      visibility = 'public'
+      draft.name = ''
+      draft.visibility = 'public'
     }
   }
 </script>
 
 <form class="create-channel-form" onsubmit={submit}>
-  <Input label="チャンネル名" name="channel_name" required bind:value={name} />
-  <fieldset disabled={busy}>
+  <Input label="チャンネル名" name="channel_name" required bind:value={draft.name} />
+  <fieldset disabled={draft.busy}>
     <legend>公開範囲</legend>
     <label>
-      <input type="radio" name="channel_visibility" value="public" checked={visibility === 'public'} onchange={() => { visibility = 'public' }} />
+      <input type="radio" name="channel_visibility" value="public" checked={draft.visibility === 'public'} onchange={() => { draft.visibility = 'public' }} />
       公開
     </label>
     <label>
-      <input type="radio" name="channel_visibility" value="private" checked={visibility === 'private'} onchange={() => { visibility = 'private' }} />
+      <input type="radio" name="channel_visibility" value="private" checked={draft.visibility === 'private'} onchange={() => { draft.visibility = 'private' }} />
       非公開
     </label>
   </fieldset>
-  {#if error}
-    <StatusBanner tone="danger" role="alert" message={error} />
+  {#if draft.error}
+    <StatusBanner tone="danger" role="alert" message={draft.error} />
   {/if}
-  <Button variant="primary" type="submit" disabled={busy || name === ''}>チャンネルを作成</Button>
+  <Button variant="primary" type="submit" disabled={draft.busy || draft.name === ''}>チャンネルを作成</Button>
 </form>
 
 <style>

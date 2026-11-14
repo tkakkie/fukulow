@@ -30,6 +30,7 @@ const isRetryableSummaryFailure = <T>(r: Exclude<Result<T>, { ok: true }>) =>
 const paging = (): Paging => ({ hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false })
 const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false, notFound: false })
 const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
+  listRead: Promise.resolve(), listVersion: 0, listPage: undefined as symbol | undefined,
   mainTopics: new Set<string>(), mainPositions: new Map<string, number>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
   evidence: topicEvidence(), evidenceRefresh: new Set<string>(),
   summaryThrough: new Map<string, number>(),
@@ -66,6 +67,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const freezeWindow = (w: Window) => {
     clearWindowTimers(w)
     w.reads.clear()
+    w.listVersion++
+    w.listPage = undefined
     w.summaries.clear()
     w.main.loading = false
     w.list.loading = false
@@ -292,6 +295,16 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       observeSummary(listener) { observers.add(listener); return () => { observers.delete(listener) } } })
     return target
   }
+  async function readList(channel: string, w: Window, run: () => Promise<Result<TopicPage>>) {
+    const version = w.listVersion, previous = w.listRead
+    let release!: () => void
+    w.listRead = new Promise<void>(resolve => { release = resolve })
+    try {
+      await previous
+      if (!current(channel, w) || w.listVersion !== version) return { result: { ok: false, kind: 'network' } as Result<TopicPage>, isCurrent: () => false }
+      return await read(channel, w, 'list', run)
+    } finally { release() }
+  }
   function holdMain(w: Window) {
     const channel = [...windows].find(([, value]) => value === w)?.[0]
     if (!channel || !options.activity) return
@@ -299,8 +312,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const existing = activityTargets.get(key)
     if (existing) return existing.target
     const target = createActivityTarget({
-      load: async () => (await read(channel, w, 'list', () => options.api.listTopics(channel))).result,
-      hide: () => { w.reads.delete('list') },
+      load: async () => (await readList(channel, w, () => options.api.listTopics(channel))).result,
+      hide: () => { w.listVersion++; w.reads.delete('list') },
       accept: response => {
         if (!current(channel, w)) return
         mergeBaselines(w, response)
@@ -644,7 +657,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     activityAccess(channel: string) {
       const w = windows.get(channel)
       if (!w) return
-      w.generation = nextGeneration++; w.reads.clear(); w.baselines.clear(); clearWindowTimers(w)
+      freezeWindow(w)
+      w.generation = nextGeneration++; w.baselines.clear()
       for (const [key, entry] of activityTargets) if (key.startsWith(`topic:${channel}:`) || key === `main:${channel}`) entry.target.invalidate('access')
       notify(channel)
     },
@@ -713,7 +727,15 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     },
     async bootstrap(channel: string): Promise<Result<MessagePage>> {
       const request = sync.get().channels[channel]?.latest
-      const result = await loadMainPage(channel, true)
+      let result: Result<TimelinePage>
+      for (;;) {
+        const w = getWindow(channel), generation = w.generation
+        result = await loadMainPage(channel, true)
+        if (sync.get().channels[channel]?.latest !== request) return { ok: false, kind: 'network' }
+        // Access reconciliation fences the old snapshot, but the same bootstrap still needs a fresh baseline.
+        if (current(channel, w) && w.generation !== generation) continue
+        break
+      }
       if (!result.ok) return result
       // Every Channel position is currently a Message creation (S1). The final line contains the real
       // Message at W, including when it is a Topic summary. Only bootstrap passes this trusted base
@@ -727,11 +749,15 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     async loadList(channel: string) {
       const w = getWindow(channel), p = w.list
       if (!current(channel, w) || p.loading || !p.hasMore) return
+      const page = Symbol('list-page')
+      w.listPage = page
       p.loading = true; p.error = false; notify(channel)
-      const { result, isCurrent } = await read(channel, w, 'list', () => options.api.listTopics(channel,
+      const { result, isCurrent } = await readList(channel, w, () => options.api.listTopics(channel,
         p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }))
-      if (!isCurrent()) return
-      p.loading = false; p.error = !result.ok
+      if (w.listPage !== page || w.list !== p) return
+      w.listPage = undefined; p.loading = false
+      if (!isCurrent()) { notify(channel); return }
+      p.error = !result.ok
       if (result.ok) {
         mergeBaselines(w, result.data)
         trimMain(w, 'older')
