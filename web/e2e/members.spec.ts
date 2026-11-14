@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { secretSafe } from './helpers.ts'
+import type { Channel, Member } from '../src/api-schema.d.ts'
 
 // auth.spec.ts bootstraps the shared disposable database before this file.
 test('Owner creates an Invite link; new Guest accepts, signs in and sees no implicit public Channels', async ({ page, browser }) => {
@@ -42,7 +43,43 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
     await expect(guest.getByRole('group', { name: '公開範囲' })).toHaveCount(0)
     await guest.locator('summary').click()
     await expect(guest.getByText('招待ゲスト（ゲスト）')).toBeVisible()
+    const directory = guest.locator('.member-list')
+    await expect(directory.locator('li')).toHaveCount(1)
+    await expect(directory).not.toContainText('Alice')
     await expect(guest.getByRole('button', { name: '招待リンクを作成' })).toHaveCount(0)
     expect(requestPaths.every(path => !path.includes('invite=') && !path.includes(fragment)), 'Invite token never enters a request URL').toBe(true)
+
+    const me = await secretSafe(async () => (await page.request.get('/api/v1/me')).json())
+    const base = `/api/v1/orgs/${me.organizations[0].organization_id}`
+    const all = await secretSafe(async () => (await page.request.get(`${base}/members`)).json())
+    const ownerId = all.members.find((m: Member) => m.name === 'Alice').id
+    const guestId = all.members.find((m: Member) => m.name === '招待ゲスト').id
+    const channels = await secretSafe(async () => (await page.request.get(`${base}/channels`)).json())
+    const channel = channels.channels.find((c: Channel) => c.name === 'Members public control')
+    const grants = `${base}/channels/${channel.id}/members`
+    expect((await secretSafe(() => page.request.post(grants, { data: { member_id: guestId } }))).ok()).toBe(true)
+    expect((await secretSafe(() => page.request.post(`${base}/channels/${channel.id}/messages`, {
+      data: { client_message_id: crypto.randomUUID(), body: '共有前の過去の投稿315' },
+    }))).ok()).toBe(true)
+    await guest.reload()
+    await expect(guest.getByRole('heading', { name: 'Members public control', exact: true })).toBeVisible()
+    const message = guest.locator('article').filter({ hasText: '共有前の過去の投稿315' })
+    await expect(message.locator('.ui-message-row__sender')).toHaveText('Alice')
+    await guest.locator('summary').click()
+    // Public access without an explicit grant does not make Alice shared.
+    await expect(directory.locator('li')).toHaveCount(1)
+    expect((await secretSafe(() => page.request.post(grants, { data: { member_id: ownerId } }))).ok()).toBe(true)
+    await guest.locator('summary').click()
+    await guest.locator('summary').click()
+    await expect(directory).toContainText('Alice（オーナー）')
+    expect((await secretSafe(() => page.request.delete(`${grants}/${ownerId}`))).ok()).toBe(true)
+    await guest.locator('summary').click()
+    await guest.locator('summary').click()
+    await expect(directory.locator('li')).toHaveCount(1)
+    await expect(directory).not.toContainText('Alice')
+    await expect(message.locator('.ui-message-row__sender')).toHaveText('Alice')
+    await guest.getByRole('button', { name: 'パネルを開く(⌘.)' }).click()
+    await guest.getByRole('tab', { name: 'メンバー', exact: true }).click()
+    await expect(guest.getByRole('region', { name: 'チャンネルのメンバー' })).not.toContainText('を追加')
   } finally { await guestContext.close() }
 })

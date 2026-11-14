@@ -10,6 +10,13 @@ use tower::ServiceExt;
 mod stale_session;
 mod text_input;
 
+struct NoSharedChannels;
+impl members::MemberListVisibility for NoSharedChannels {
+    fn shared_channel_sql() -> String {
+        "SELECT 1 WHERE false".into()
+    }
+}
+
 async fn org(pool: &sqlx::PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Test')")
@@ -935,7 +942,7 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
                 .unwrap();
             }
         }
-        let listed = members::list_members(State(state.clone()), list_auth)
+        let listed = members::list_members::<NoSharedChannels>(State(state.clone()), list_auth)
             .await
             .unwrap_or_else(|error| error.into_response());
         assert_eq!(
@@ -946,6 +953,12 @@ async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_posit
                 StatusCode::NOT_FOUND
             }
         );
+        if loss == "role" {
+            assert_eq!(
+                body(listed).await,
+                json!({"members":[{"id":member,"name":"Test","role":"guest"}]})
+            );
+        }
         let status = if loss == "role" {
             StatusCode::FORBIDDEN
         } else {

@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+mod guest_members;
 mod managers;
 mod membership;
 mod name_length;
@@ -472,7 +473,11 @@ async fn private_channel_creation_rolls_back_if_membership_insert_fails(pool: Pg
 }
 
 fn scoped_path(path: &str, token: &str) -> String {
-    if path.starts_with("/api/v1/channels") || path.starts_with("/api/v1/ws") {
+    if path.starts_with("/api/v1/channels")
+        || path.starts_with("/api/v1/ws")
+        || path.starts_with("/api/v1/members")
+        || path.starts_with("/api/v1/message-authors")
+    {
         let organization = token
             .split_once('.')
             .map(|(id, _)| id)

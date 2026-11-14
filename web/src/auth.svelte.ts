@@ -10,7 +10,7 @@ import { getOrganizationMe, isOrganizationUnavailable, type Identity } from './a
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
-import { createMembers } from './members'
+import { createMembers, watchMemberAccess } from './members'
 import { membersAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
@@ -18,7 +18,7 @@ import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
+export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; onMemberListRefresh?(listener: () => void): () => void; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -39,6 +39,7 @@ const defaults: AuthDeps = {
     const unreadAdapters = new Map<string, UnreadAdapter>()
     return {
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
+      onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
       sync: syncAdapter(session.sync),
       topics(id: string) {
@@ -71,6 +72,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
   let stopMemberAvailability: (() => void) | undefined
+  let stopMemberRefresh: (() => void) | undefined
   let members = $state<ReturnType<typeof membersAdapter> | null>(null)
   let security = $state<ReturnType<typeof accountSecurityAdapter> | null>(null)
   let changes = $state(0)
@@ -80,6 +82,7 @@ export function createAuth(deps: AuthDeps = defaults) {
 
   function closeOrganization() {
     stopMemberAvailability?.(); stopMemberAvailability = undefined
+    stopMemberRefresh?.(); stopMemberRefresh = undefined
     session?.close(); session = null
     members?.close(); members = null
     organization = null
@@ -115,6 +118,8 @@ export function createAuth(deps: AuthDeps = defaults) {
     stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
     if (session.sync.unavailable) members?.unavailable()
     void members?.load()
+    const currentMembers = members
+    stopMemberRefresh = session.onMemberListRefresh?.(() => { void currentMembers?.load() })
     changes++
   }
   async function show(next: AuthState) {
