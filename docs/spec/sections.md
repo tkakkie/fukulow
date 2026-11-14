@@ -109,4 +109,4 @@ These are test requirements, not existing test names or invariant rows. Add exec
 - O1. REST routes/shapes as specified; section names up to 60 Unicode scalars; at most 50 live sections per Member; default group last; duplicate labels allowed; a moved Channel is appended; after a delete, unplaced Channels follow name order; collapse state is local and in memory only.
 - O2. A full visible-group reorder of at most 20,000 ids, with a 1 MiB request-body exception (default 16 KiB). Larger groups need a new decision; never truncate or add partial-order semantics.
 - O4. Generation is a decimal string; durable original-create and retired-id metadata keep canonical retries from resurrecting a section after rename/delete. The metadata is private, Organization-scoped and not an access generation.
-- Recovery from missed notices uses #307 O5 (client periodic REST reconciliation).
+- O3. Folded into #307 O5: recovery from missed notices uses its single client periodic REST reconciliation (provisional 30 s period, adjusted only by #307 item 5 measurements); sections add no separate timer.
