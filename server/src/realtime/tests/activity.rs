@@ -1428,6 +1428,71 @@ async fn guest_directory_notices_follow_shared_grants_and_deny_unrelated_guests(
 }
 
 #[fukulow_test::test]
+async fn guest_directory_loss_discards_older_authorized_notice_but_keeps_fresh_publication(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, _) = member(&pool, f.organization).await;
+    let (guest, guest_token) = member(&pool, f.organization).await;
+    role(&pool, &f, guest, "guest").await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, guest).await;
+    grant(&pool, &f, private, target).await;
+    let mut guest_socket = connect(&f, &guest_token).await;
+    let mut control = connect(&f, &f.token).await;
+    let gate =
+        crate::channels::activity::pause(f.organization, Uuid::nil(), "directory_authorized");
+    let response = request(
+        &f.app,
+        "PATCH",
+        &format!("/api/v1/orgs/{}/members/{target}/role", f.organization),
+        &f.token,
+        json!({"role":"admin"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+
+    let response = request(
+        &f.app,
+        "DELETE",
+        &format!("/api/v1/channels/{private}/members/{target}"),
+        &f.token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // The removal's fresh A4 notice still reaches the Guest, after the last shared grant is gone.
+    let mut fresh = false;
+    for _ in 0..3 {
+        if raw_event(&mut guest_socket).await == json!({"type":"members_changed"}) {
+            fresh = true;
+            break;
+        }
+    }
+    assert!(
+        fresh,
+        "the removal must publish a fresh directory invalidation"
+    );
+    gate.release.add_permits(1);
+    let later = notices(&f, &mut guest_socket).await;
+    assert!(
+        !later.contains(&json!({"type":"members_changed"})),
+        "{later:?}"
+    );
+    assert!(
+        notices(&f, &mut control)
+            .await
+            .contains(&json!({"type":"members_changed"}))
+    );
+}
+
+#[fukulow_test::test]
 async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool: PgPool) {
     for phase in ["snapshot", "revoked", "handoff"] {
         let f = fixture(&pool).await;

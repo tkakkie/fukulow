@@ -77,11 +77,13 @@ struct Proof {
 struct Pending {
     notice: Notice,
     epoch: u64,
+    directory_epoch: Option<u64>,
     proof: Option<Proof>,
 }
 #[derive(Default)]
 struct Buffer {
     epoch: u64,
+    directory_epoch: u64,
     pending: VecDeque<Pending>,
     reset: bool,
     proofs: HashMap<Option<Uuid>, Proof>,
@@ -90,22 +92,41 @@ struct Buffer {
 struct Authorization {
     entry: Arc<Entry>,
     epoch: u64,
+    directory_epoch: Option<u64>,
     id: Uuid,
 }
 impl Authorization {
-    fn new(entry: Arc<Entry>, epoch: u64, channel: Option<Uuid>) -> Self {
+    fn new(
+        entry: Arc<Entry>,
+        epoch: u64,
+        channel: Option<Uuid>,
+        directory: bool,
+        expected_directory_epoch: Option<u64>,
+    ) -> Self {
         let id = Uuid::new_v4();
-        {
+        let directory_epoch = {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let directory_epoch =
+                directory.then_some(expected_directory_epoch.unwrap_or(b.directory_epoch));
             if b.epoch == epoch {
                 b.in_flight.insert(id, (channel, None));
             }
+            directory_epoch
+        };
+        Self {
+            entry,
+            epoch,
+            directory_epoch,
+            id,
         }
-        Self { entry, epoch, id }
     }
     fn proved(&self, proof: &Option<Proof>) {
         let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
         if b.epoch == self.epoch
+            && (proof.as_ref().is_none_or(|proof| proof.role != Role::Guest)
+                || self
+                    .directory_epoch
+                    .is_none_or(|epoch| b.directory_epoch == epoch))
             && let Some((_, captured)) = b.in_flight.get_mut(&self.id)
         {
             *captured = proof.clone();
@@ -135,6 +156,7 @@ type Registry = Arc<Mutex<HashMap<Uuid, Arc<Entry>>>>;
 pub struct Activity {
     entries: Registry,
     epochs: Option<Arc<HashMap<Uuid, u64>>>,
+    directory_epochs: Option<Arc<HashMap<Uuid, u64>>>,
     exclude_guests: bool,
     directory_member: Option<Uuid>,
     directory_channels: Vec<Uuid>,
@@ -150,6 +172,7 @@ impl Default for Activity {
         Self {
             entries: Default::default(),
             epochs: None,
+            directory_epochs: None,
             exclude_guests: false,
             directory_member: None,
             directory_channels: Vec::new(),
@@ -227,11 +250,8 @@ impl Activity {
                 if e.organization != organization {
                     return None;
                 }
-                let epoch = e
-                    .buffer
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .epoch;
+                let b = e.buffer.lock().unwrap_or_else(|error| error.into_inner());
+                let epoch = b.epoch;
                 self.epochs
                     .as_ref()
                     .is_none_or(|epochs| epochs.get(&e.id) == Some(&epoch))
@@ -252,6 +272,24 @@ impl Activity {
             b.in_flight.clear();
             b.reset = false;
         }
+    }
+    fn advance_directory_epochs(&self, organization: Uuid) -> HashMap<Uuid, u64> {
+        let mut epochs = HashMap::new();
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in entries
+            .values()
+            .filter(|entry| entry.organization == organization)
+        {
+            let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            b.directory_epoch = b.directory_epoch.wrapping_add(1);
+            b.pending
+                .retain(|pending| pending.directory_epoch.is_none());
+            if b.pending.is_empty() {
+                b.reset = false;
+            }
+            epochs.insert(entry.id, b.directory_epoch);
+        }
+        epochs
     }
     pub(crate) fn message(
         &self,
@@ -323,7 +361,14 @@ impl Activity {
         let captured: Vec<_> = self
             .snapshot(organization)
             .into_iter()
-            .filter(|(e, _)| target.is_none_or(|t| e.member.0 == t))
+            .filter(|(e, _)| {
+                target.is_none_or(|t| e.member.0 == t)
+                    && (!matches!(notice, Notice::MembersChanged)
+                        || self
+                            .directory_epochs
+                            .as_ref()
+                            .is_none_or(|epochs| epochs.contains_key(&e.id)))
+            })
             .collect();
         #[cfg(test)]
         test_pause(
@@ -335,7 +380,17 @@ impl Activity {
         .await;
         let authorizations: Vec<_> = captured
             .iter()
-            .map(|(e, epoch)| Authorization::new(e.clone(), *epoch, notice.channel()))
+            .map(|(e, epoch)| {
+                Authorization::new(
+                    e.clone(),
+                    *epoch,
+                    notice.channel(),
+                    matches!(notice, Notice::MembersChanged),
+                    self.directory_epochs
+                        .as_ref()
+                        .and_then(|epochs| epochs.get(&e.id).copied()),
+                )
+            })
             .collect();
         let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
         #[cfg(test)]
@@ -369,7 +424,13 @@ impl Activity {
             None,
         )
         .await;
-        for ((entry, epoch), proof) in captured.iter().zip(proofs) {
+        #[cfg(test)]
+        if matches!(notice, Notice::MembersChanged) {
+            test_pause(organization, Uuid::nil(), "directory_authorized", None).await;
+        }
+        for (((entry, epoch), authorization), proof) in
+            captured.iter().zip(&authorizations).zip(proofs)
+        {
             let Some(proof) = proof else {
                 continue;
             };
@@ -399,6 +460,9 @@ impl Activity {
                 Pending {
                     notice: event,
                     epoch: *epoch,
+                    directory_epoch: (proof.role == Role::Guest)
+                        .then_some(authorization.directory_epoch)
+                        .flatten(),
                     proof: Some(proof),
                 },
             );
@@ -434,7 +498,11 @@ impl Activity {
 }
 fn enqueue(entry: &Entry, pending: Pending) {
     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-    if b.epoch != pending.epoch {
+    if b.epoch != pending.epoch
+        || pending
+            .directory_epoch
+            .is_some_and(|epoch| b.directory_epoch != epoch)
+    {
         return;
     }
     let channel = if matches!(pending.notice, Notice::ChannelAccessRevoked { .. }) {
@@ -515,7 +583,11 @@ impl Registration {
                 )
                 .await;
                 let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                if b.epoch != pending.epoch {
+                if b.epoch != pending.epoch
+                    || pending
+                        .directory_epoch
+                        .is_some_and(|epoch| b.directory_epoch != epoch)
+                {
                     continue;
                 }
                 let event = if b.reset {
@@ -528,6 +600,7 @@ impl Registration {
                 return Some(NoticeFrame {
                     entry: self.entry.clone(),
                     epoch: pending.epoch,
+                    directory_epoch: pending.directory_epoch,
                     event,
                 });
             }
@@ -538,6 +611,7 @@ impl Registration {
 pub(crate) struct NoticeFrame {
     entry: Arc<Entry>,
     epoch: u64,
+    directory_epoch: Option<u64>,
     pub event: Notice,
 }
 impl NoticeFrame {
@@ -545,11 +619,17 @@ impl NoticeFrame {
         let mut future = std::pin::pin!(future);
         let first = std::future::poll_fn(|cx| {
             let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            std::task::Poll::Ready(if b.epoch == self.epoch {
-                Some(std::future::Future::poll(future.as_mut(), cx))
-            } else {
-                None
-            })
+            std::task::Poll::Ready(
+                if b.epoch == self.epoch
+                    && self
+                        .directory_epoch
+                        .is_none_or(|epoch| b.directory_epoch == epoch)
+                {
+                    Some(std::future::Future::poll(future.as_mut(), cx))
+                } else {
+                    None
+                },
+            )
         })
         .await?;
         Some(match first {
@@ -747,6 +827,9 @@ impl auth::activity::ActivityChange for TargetChange {
     fn committed(mut self: Box<Self>, pool: sqlx::PgPool) {
         // Retire old work synchronously with observed transition, before starting another snapshot.
         self.activity.retire(self.organization, self.target);
+        self.activity.directory_epochs = Some(Arc::new(
+            self.activity.advance_directory_epochs(self.organization),
+        ));
         self.activity.epochs = Some(Arc::new(
             self.activity
                 .snapshot(self.organization)
@@ -901,7 +984,7 @@ impl Activity {
         test_pause(organization, channel, "snapshot", Some(target)).await;
         let authorizations: Vec<_> = captured
             .iter()
-            .map(|(e, epoch)| Authorization::new(e.clone(), *epoch, None))
+            .map(|(e, epoch)| Authorization::new(e.clone(), *epoch, None, false, None))
             .collect();
         let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
         // The transaction snapshot proved prior access. Current live identity authorizes only this transition.
@@ -920,6 +1003,7 @@ impl Activity {
                             channel_id: channel,
                         },
                         epoch: *epoch,
+                        directory_epoch: None,
                         proof: Some(proof),
                     },
                 );
@@ -1087,6 +1171,7 @@ mod tests {
                 read_seq: 10,
             },
             epoch: 0,
+            directory_epoch: None,
             proof: Some(Proof {
                 role: Role::Member,
                 grant: None,
@@ -1182,6 +1267,7 @@ mod tests {
         let frame = NoticeFrame {
             entry: entry.clone(),
             epoch: 0,
+            directory_epoch: None,
             event: Notice::MembersChanged,
         };
         entry.buffer.lock().unwrap().epoch = 2;

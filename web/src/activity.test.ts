@@ -42,6 +42,76 @@ it.each([
     expect(signals).toHaveLength(2)
   } finally { activity.close(); await c.sync.close() }
 })
+it.each(['close', 'evict'] as const)('settles an abort-ignoring held summary on %s and ignores its late response', async action => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const late = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(late.promise)
+    const pending = c.topics.loadSummary('A', 'T')
+    await flush()
+    const signal = (c.topicsApi.getTopicSummary.mock.calls as unknown[][])[0]![2] as AbortSignal
+    expect(signal.aborted).toBe(false)
+    const removed = vi.spyOn(signal, 'removeEventListener')
+    if (action === 'close') c.topics.close()
+    else {
+      for (let seq = 11; seq <= 1000; seq++) c.event(seq)
+      expect(c.topics.get('A').lines.some(line => line.kind === 'topic')).toBe(false)
+    }
+    expect(signal.aborted).toBe(true)
+    let settled = false
+    void pending.then(() => { settled = true })
+    await flush()
+    expect(settled).toBe(true)
+    expect(removed).toHaveBeenCalledWith('abort', expect.any(Function))
+    if (action === 'evict') {
+      c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+      await c.topics.ensureSummary('A', 'T')
+      expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+    }
+    late.resolve(ok({ as_of_seq: 1001, topic: summary('T', 10, 3) }))
+    await flush()
+    if (action === 'evict') expect(c.topics.get('A').lines.some(line => line.kind === 'topic')).toBe(false)
+  } finally { activity.close(); await c.sync.close() }
+})
+it.each(['close', 'evict'] as const)('settles an abort-ignoring held main list on %s and releases its list lock', async action => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  let main: ReturnType<typeof createActivityTarget> | undefined
+  const hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((key, target) => {
+    if (key === 'main:A') main = target as typeof main
+    return hold(key, target)
+  })
+  const late = held<Result<import('./api').TopicPage>>()
+  try {
+    await c.boot()
+    c.topicsApi.listTopics.mockReturnValueOnce(late.promise)
+    const pending = main!.refresh()!
+    await flush()
+    const signal = (c.topicsApi.listTopics.mock.calls as unknown[][])[0]![2] as AbortSignal
+    expect(signal.aborted).toBe(false)
+    const removed = vi.spyOn(signal, 'removeEventListener')
+    if (action === 'close') c.topics.close()
+    else hold('main:A', { invalidate() {}, close() {} })
+    expect(signal.aborted).toBe(true)
+    let settled = false
+    void pending.then(() => { settled = true })
+    await flush()
+    expect(settled).toBe(true)
+    expect(removed).toHaveBeenCalledWith('abort', expect.any(Function))
+    if (action === 'evict') {
+      c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 20, topics: [summary('fresh', 20, 1)], has_more: false }))
+      await c.topics.loadList('A')
+      expect(c.topicsApi.listTopics).toHaveBeenCalledTimes(2)
+      expect(c.topics.get('A').topics.some(topic => topic.topicId === 'fresh')).toBe(true)
+    }
+    late.resolve(ok({ as_of_seq: 100, topics: [summary('stale', 10, 1)], has_more: false }))
+    await flush()
+    if (action === 'evict') expect(c.topics.get('A').topics.some(topic => topic.topicId === 'stale')).toBe(false)
+  } finally { activity.close(); await c.sync.close() }
+})
 it('a superseded list page cannot clear a replacement access-generation page loading state', async () => {
   const { topicClient, summary } = await import('./topic-test-helpers')
   const activity = createActivity({ watched: () => true }), c = topicClient(activity)
