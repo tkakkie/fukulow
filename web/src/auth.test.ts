@@ -91,10 +91,13 @@ describe('setupAndSignIn', () => {
 })
 
 describe('signOut', () => {
-  it('true on 204 and 401, false on network error', async () => {
+  it('true only on 204 and 401, false on network, 5xx and unexpected success statuses', async () => {
     expect(await signOut(route({ 'DELETE /api/v1/session': () => new Response(null, { status: 204 }) }))).toBe(true)
     expect(await signOut(route({ 'DELETE /api/v1/session': () => j({}, 401) }))).toBe(true)
     expect(await signOut(vi.fn().mockRejectedValue(new Error('n')))).toBe(false)
+    for (const status of [200, 202, 403, 500, 503]) {
+      expect(await signOut(route({ 'DELETE /api/v1/session': () => j({}, status) }))).toBe(false)
+    }
   })
 })
 
