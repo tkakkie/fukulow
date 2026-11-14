@@ -8,6 +8,8 @@ use sqlx::PgPool;
 mod concurrency;
 mod integrity;
 mod paging;
+mod reclamation;
+mod reclamation_task;
 
 struct Fixture {
     pools: TestPools,

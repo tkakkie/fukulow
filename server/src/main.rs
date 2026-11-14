@@ -70,11 +70,16 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on {addr}");
     let signal = fukulow_server::signal()?;
+    let shutdown = fukulow_server::shutdown::Shutdown::default();
+    let reclamation = tokio::spawn(fukulow_server::channels::dms::reclamation::run(
+        pool.clone(),
+        shutdown.clone(),
+    ));
     let completed = fukulow_server::serve(
         listener,
         AppState {
             pool,
-            shutdown: Default::default(),
+            shutdown,
             cookie_secure,
             setup_token,
             sign_in_throttle,
@@ -88,6 +93,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         fukulow_server::DRAIN_TIMEOUT,
     )
     .await?;
+    reclamation.abort();
+    let _ = reclamation.await;
     if !completed {
         eprintln!("shutdown drain deadline expired; send outcomes may be unknown; exiting");
         // Runtime destruction can outlast the drain deadline while blocking tasks finish.

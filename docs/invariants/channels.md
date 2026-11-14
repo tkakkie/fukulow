@@ -58,11 +58,18 @@ Channels, membership, Capabilities (server and member UI). Writing rules and the
 | DM discovery coalesces per Member/revision/pair; frozen birth coverage cannot skip hot rows or advance the independent delta | `server/src/channels/dms/tests/paging.rs::discovery_coalesces_and_coverage_cannot_skip_hot_rows_or_acknowledge_delta` |
 | Delayed renewal cannot be acknowledged before COMMIT; discovery counters, rows, grants and positions roll back atomically | `server/src/channels/dms/tests/paging.rs::delayed_renewal_behind_both_cursors_remains_pending_and_rollback_is_atomic` |
 | Quiet discovery drains J pending DMs in ceil(J/50) accepted delta pages, independently of saved coverage progress | `server/src/channels/dms/tests/paging.rs::quiet_500_501_and_9999_pending_dms_drain_in_q_pages_with_independent_coverage` |
+| DM reclamation deletes only committed older revisions within its Organization; current/future revisions and peer feeds survive | `server/src/channels/dms/tests/reclamation.rs::reclaims_only_strictly_older_revisions_and_preserves_other_organizations` |
+| DM reclamation deletes at most 1,000 rows and one empty counter per transaction; failures roll back and reruns are idempotent | `server/src/channels/dms/tests/reclamation.rs::reclamation_bounds_rows_keeps_nonempty_counter_and_reruns_idempotently`, `server/src/channels/dms/tests/reclamation_task.rs::locked_old_counter_is_skipped_and_failed_delete_rolls_back_for_retry` |
+| Reclaimed-revision cursors reject stale authority/scope; already-authorized snapshots retain complete discovery pages | `server/src/channels/dms/tests/reclamation.rs::reclaimed_revision_cursors_fail_and_older_read_snapshots_stay_complete` |
+| DM reclamation and open/renew/send use compatible lock order and preserve current discovery rows | `server/src/channels/dms/tests/reclamation.rs::reclamation_and_open_renew_send_complete_in_both_lock_orders` |
+| Periodic DM reclamation runs one batch/tick without traffic, survives one Organization's errors and stops on shutdown | `server/src/channels/dms/tests/reclamation_task.rs::periodic_reclamation_needs_no_traffic_survives_errors_and_stops_on_shutdown`, `server/src/channels/dms/tests/reclamation_task.rs::periodic_reclamation_runs_only_one_bounded_batch_per_tick` |
 | DM migration preserves ordinary Channels, grants, Messages, Unread positions and case-insensitive name uniqueness | `server/tests/dms_migration.rs::existing_channels_grants_messages_and_unread_survive_dm_migration` |
 
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
+
+- [auth](auth.md): `maintenance_enumerator_is_bounded_restricted_and_does_not_bypass_tenant_rls`
 
 - [messages](messages.md): `author_lookup_every_role_private_and_guest_public_denials_have_positive_controls`, `author_lookup_authorization_and_identities_share_a_nonlocking_snapshot`
 - [auth](auth.md): `deactivation_rereads_actor_role_activity_and_revision_after_waiting`, `deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries`

@@ -3,6 +3,7 @@ use sqlx::PgConnection;
 
 mod cursor;
 pub(crate) mod discovery;
+pub mod reclamation;
 #[cfg(test)]
 mod tests;
 pub(crate) use cursor::Cursor;

@@ -254,7 +254,7 @@ async fn cursors_bind_to_the_issuing_account_session_for_the_same_member_revisio
 }
 
 // Bulk fixtures isolate traversal work from HTTP setup and historical events.
-async fn large_fixture(f: &Fixture, n: usize) -> Vec<Uuid> {
+pub(super) async fn large_fixture(f: &Fixture, n: usize) -> Vec<Uuid> {
     let peers = (0..n).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
     let channels = (0..n).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
     sqlx::query("INSERT INTO accounts(id,email,password_hash) SELECT id,id::text||'@example.com','unused' FROM unnest($1::uuid[]) p(id)").bind(&peers).execute(&f.pools.admin).await.unwrap();

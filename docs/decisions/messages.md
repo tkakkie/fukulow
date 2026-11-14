@@ -59,6 +59,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #151 POST /dms opens or renews one pair; GET /dms lists only accessible DMs with peer identity and Unread/Mention hooks. Ordinary Channel lists/sections exclude DMs. Reason: a DM has no Channel name or Topic navigation.
 - #151 new sends hold peer eligibility through COMMIT: inactive peer gives 409 dm_peer_deactivated, active lapsed grant gives 409 dm_peer_access_lapsed (2026-11-14). Authorized committed retries resolve first. Reason: sending never renews access or undoes an accepted send.
 - #151 DMs reject Topic intent and member/grant APIs; all management Capabilities deny. Exclude DMs from RoleChangeGuard and last-manager/grant counts. Reason: fixed two-person participation must neither confer management nor block Role changes.
+- #151 reclaim only discovery revisions below the Member's committed revision: revisions never reset. Lock one old counter (SKIP LOCKED), then delete at most 1,000 index rows and its empty counter; never lock Members/grants, so cleanup cannot reverse the writer order or truncate a usable feed.
 - Mention unread is a separate displayed count derived from existing Channel/Topic read positions, with no separate read state (#148, #152); repeated Mentions of one Member in a Message count once and own Messages never count.
 
 ## Mentions (#152, specification for approval)
@@ -106,6 +107,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [auth](auth.md): `#151 maintenance enumerates one Organization UUID`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
 - [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
 

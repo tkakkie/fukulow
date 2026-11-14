@@ -234,6 +234,27 @@ pub(crate) fn member_write_error(error: sqlx::Error) -> ApiError {
 // Batched Channel fallback composes this projection; auth retains table ownership.
 pub(crate) const ACTIVE_SCOPED_MEMBERS_SQL: &str = "SELECT organization_id,id,name,role,membership_revision FROM users WHERE deactivated_at IS NULL";
 
+// Revisions only increase; a strictly older revision can never regain authority.
+pub(crate) const MEMBER_REVISIONS_SQL: &str =
+    "SELECT organization_id,id,membership_revision FROM users";
+
+/// Global maintenance exception: one Organization id, with wraparound, no tenant data.
+pub(crate) async fn next_maintenance_organization(
+    pool: &sqlx::PgPool,
+    after: Option<Uuid>,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    crate::database::read_only(pool, async |tx: &mut sqlx::PgConnection| {
+        sqlx::query("SET LOCAL statement_timeout = '1s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query_scalar("SELECT public.fukulow_next_maintenance_organization($1)")
+            .bind(after)
+            .fetch_one(tx)
+            .await
+    })
+    .await
+}
+
 pub(crate) async fn active_target(
     connection: &mut sqlx::PgConnection,
     organization: Uuid,

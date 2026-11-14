@@ -60,6 +60,8 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [channels](channels.md): `reclamation_and_open_renew_send_complete_in_both_lock_orders`
+
 - [auth](auth.md): `deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries`
 
 - [channels](channels.md): `session_cannot_access_another_organization`
