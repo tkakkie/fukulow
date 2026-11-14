@@ -76,7 +76,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
     --app: #0A0F0E;
     --navbox: #121918;
     --surface: #161E1D;
@@ -102,6 +103,38 @@
     --info-bg: #10283A;
     --on-info: #B9DDF5;
   }
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --app: #0A0F0E;
+  --navbox: #121918;
+  --surface: #161E1D;
+  --bg: #0F1514;
+  --hover: #1A2423;
+  --text: #E5ECEA;
+  --text2: #A8B5B1;
+  --muted: #93A19D;
+  --border: #26312F;
+  --border-input: #66736F;
+  --primary: #3CC4B1;
+  --on-primary: #04211D;
+  --tint: #133430;
+  --on-tint: #9DE6D9;
+  --link: #6FD9C9;
+  --focus: #6FD9C9;
+  --amber: #F5A524;
+  --on-amber: #3B2300;
+  --mention: #36290C;
+  --on-mention: #FCE3A6;
+  --danger: #F97066;
+  --danger-bg: #3A1714;
+  --info-bg: #10283A;
+  --on-info: #B9DDF5;
 }
 
 @media (max-width: 599px) {
@@ -140,6 +173,18 @@ html {
   color: var(--text);
   background-color: var(--app);
   height: 100%;
+}
+
+html[data-text-size='s'] {
+  font-size: 87.5%;
+}
+
+html[data-text-size='l'] {
+  font-size: 106.25%;
+}
+
+html[data-text-size='xl'] {
+  font-size: 118.75%;
 }
 
 body {

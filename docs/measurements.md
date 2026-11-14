@@ -404,6 +404,17 @@ This proves only the controlled single-Organization reservation scenario. Simult
 
 #80 cost evaluation (Rust 1.99.0, local macOS ARM64, Node 26.13.0): the exact `node scripts/check-module-direction.ts` step, with dependencies cached and `cargo clean -p fukulow-server` before each of three runs, had medians 1.74 s before / 1.68 s after (no measurable regression at this scale). The negative/positive fixture suite grew from 54 to 71 tests, 6.07 s / 7.48 s in single runs. New unstable surface: HIR binding visitation, `pat_ty`, `expr_ty_opt`, `Ty::walk`, `GenericArg::as_type` and `AdtDef::did`; existing typeck queries are reused, with no new rustc crate or application dependency. This is a small accepted maintenance increment: each toolchain bump must rebuild the driver, verify these APIs and run all fixtures plus production/test targets, including type-level array constants without body expression types. The root nominal-wrapper limit stays Tier 2.
 
+### #318 explicit edge-table cost (2026-11-14)
+
+Before: `c30f79d8177fc0645159a11b98fc5d5abf97f3a5` (`origin/main`, the clean starting checkout; local `main` was older, but its checker files were identical). After: the same checkout with #318 checker changes. Rust 1.99.0 (b940084d7), Node 26.13.0, macOS 27.0.1 ARM64, Apple M5, 32 GiB RAM. Same method as #80: prebuilt web assets, cached dependencies, an untimed warm-up per version, then the exact `node scripts/check-module-direction.ts` step timed with `/usr/bin/time -p`, with `cargo clean -p fukulow-server` before each of three runs. The fixture command is `node --test scripts/check-module-direction.test.ts`, timed once per version, including driver builds.
+
+| Version | Check runs (s) | Check median (s) | Fixture suite (s) | Tests passed |
+| --- | --- | --- | --- | --- |
+| Before | 10.22, 9.58, 9.12 | 9.58 | 8.25 | 71 |
+| After | 9.05, 8.96, 9.15 | 9.05 | 12.06 | 84 |
+
+No observed production-check regression; the fixture suite now builds both production and fixture-only drivers and covers table validation, injection isolation, siblings and direct-edge enforcement. Limits: other AI workers may be running on this host; runs were sequential before/after, with no CPU isolation, and the difference is within run variability. #80's historical 1.74 s / 1.68 s medians used the same method, but a different source snapshot and host conditions, so absolute times are not directly comparable. No new rustc API or dependency was added.
+
 ## Topic projection paging feasibility (#137, 2026-11-11)
 
 Target chosen before measurement: full in-process HTTP timeline-page p95 <=100 ms at concurrency 4, 50 items, both recent and deep W-relative boundaries. Query: aggregate immutable Messages <=W by Topic (min/max/count), union plain Messages, apply the exclusive boundary and descending LIMIT 51, then join only selected latest payloads/names; return ascending. Index: `messages (organization_id, channel_id, topic_id, seq)` plus the existing unique Channel/seq index. It does not establish page-size-bounded query work.
@@ -820,6 +831,29 @@ The maintainer accepted the current RLS policies with this regression as a **one
 - This does **not** relax the performance criterion for later changes. Small, shared-host, synthetic measurements here are not a production performance guarantee.
 - Current policies stay; candidates a/b/c are not adopted; no optimisation may weaken the security guarantees.
 - Follow-ups: fan-out `access_rows`/`member_access` (#354), Unread list/counts (#355), Unread Topic-count `seq` index bound (#356), History re-measurement on a stable host with realistic API-path load and query-level improvements (#357). The timeline Generic-plan cost, increased by RLS, stays tracked in #326.
+
+## Timeline statement persistence (#326, 2026-11-14)
+
+Purpose: prevent the shared timeline/single-Topic projection from switching to its expensive generic plan. Source: 6a87a35 plus this fix; SQL, RLS, Unread counts, indexes and responses unchanged.
+
+Conditions: Apple M5 / 10 CPUs / 32 GiB, macOS 27.0.1 arm64; Docker 29.9.3 VM 10 CPUs / 7.748 GiB; PostgreSQL 18.6 (Debian aarch64), default shared_buffers 128MB / work_mem 4MB; Rust 1.99.0 release, SQLx 0.8.6, loopback TCP. Fresh throwaway database with current migrations/grants and unchanged `load/hot-plans/seed.sql` (#325 dataset): hot Channel 100,000 Messages, 70,000 in 2,000 Topics; Org A 10,000 Members / 50 Channels, Org B 1,000 Members / 10 Channels; 406,800 Channel positions and 2,000 measured-Member Topic positions. Current RLS enabled throughout; measured role is non-owner, NOBYPASSRLS `fukulow_app` with transaction-local Organization context.
+
+Reproduce: migrate/grant/seed a throwaway PostgreSQL 18.6 as owner, supply its app-role `DATABASE_URL`, then run `cargo test --release -p fukulow-server --lib measure_timeline_plan_cache -- --ignored --nocapture`. The ignored probe uses production `page_sql()` and the handler's nine bindings (latest limit 51; single Topic: Topics only / limit 2). Each run holds one pooled connection for before/custom/after, clearing its statement cache between modes to represent fresh deployment connections. Each mode/variant uses REPEATABLE READ READ ONLY and the production Organization-setting helper; ten warm-ups precede 30 timed fetches. Before switches naturally to generic (35 generic / 5 custom executions after latest sampling); reference forces custom only on this measurement connection; after uses auto/non-persistent. Nearest-rank wall p50/p95 include planning, preparation and fetching, excluding transaction/context round trips, HTTP and watermark work. Buffers are root execution shared hits from a subsequent warm EXPLAIN ANALYZE BUFFERS of the cached statement (before/reference) or non-persistent query (after); planning excluded, shared reads zero in every run.
+
+| Query / mode | p50 ms, runs 1 / 2 / 3 | p95 ms, runs 1 / 2 / 3 | Shared hits (all runs) |
+|---|---:|---:|---:|
+| Latest before, cached auto | 232.523 / 181.056 / 211.756 | 482.668 / 316.425 / 292.309 | 502617 |
+| Latest custom reference | 31.143 / 23.510 / 28.163 | 47.813 / 26.165 / 33.014 | 3478 |
+| Latest after, non-persistent auto | 24.219 / 22.628 / 29.941 | 29.557 / 24.077 / 47.700 | 3478 |
+| Single Topic before, cached auto | 13.062 / 13.680 / 10.628 | 48.023 / 25.686 / 15.851 | 12409 |
+| Single Topic custom reference | 1.185 / 0.784 / 1.251 | 1.581 / 1.203 / 3.557 | 267 |
+| Single Topic after, non-persistent auto | 1.587 / 1.092 / 1.356 | 2.010 / 1.399 / 2.043 | 267 |
+
+Chosen option: `.persistent(false)` on this query only, avoiding SET LOCAL's extra round trip while leaving Unread statement caching unchanged. The projection disappears from `pg_prepared_statements` in every after sample and retains custom-range buffer use. The non-ignored `timeline_and_single_topic_never_cache_a_generic_plan` guard runs both production handlers 12 times each through restricted-role RLS on one reused backend and checks no projection is retained. Temporarily removing `.persistent(false)` makes it fail with one cached projection; restoring it passes. Existing response/paging/denial/Unread tests are unchanged; full server fmt/clippy/tests passed (613 passed, 15 ignored).
+
+Acceptance (p95 against the same run's forced-custom p95; the earlier "single Topic below 1 ms" target came from EXPLAIN Execution Time and does not apply to wall time, which includes planning and fetching; the maintainer approved the 1.5x-of-custom target for both pages on 2026-11-14, #326): latest 0.62 / 0.92 / 1.44, single Topic 1.27 / 1.16 / 0.57, all within 1.5x. Before was 10x (latest) and 12x (single Topic) slower than custom.
+
+Limits: other AI workers ran builds and tests on this shared host during all three runs, so absolute numbers are noisy (run 3 latest p95 47.7 ms); the ratios hold in every run. Statement fetches only, not endpoint latency or capacity. The custom plan still aggregates the Channel's immutable prefix; Channel-size growth is a separate Backlog Issue because current `topics.last_seq` cannot enumerate Topics moved after W. Raw logs stay outside Git in `/private/tmp/fukulow-326/`.
 
 ## Sign-in admission under a credential flood (#196 C, 2026-11-13 JST)
 

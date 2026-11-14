@@ -28,8 +28,85 @@ use rustc_span::{
 use std::{collections::HashSet, process::ExitCode};
 
 const MODULES: [&str; 4] = ["auth", "channels", "messages", "realtime"];
+const ALLOWED_EDGES: [(&str, &str); 6] = [
+    ("realtime", "messages"),
+    ("realtime", "channels"),
+    ("realtime", "auth"),
+    ("messages", "channels"),
+    ("messages", "auth"),
+    ("channels", "auth"),
+];
 
-struct Check;
+fn configured_edges() -> Result<Vec<(String, String)>, String> {
+    if std::env::var_os("MODULE_DIRECTION_EDGES").is_some() {
+        // Only the fixture harness builds this variant. No runtime flag or
+        // environment variable can enable injection in the production driver.
+        #[cfg(module_direction_fixture)]
+        {
+            let value = std::env::var("MODULE_DIRECTION_EDGES")
+                .map_err(|_| "MODULE_DIRECTION_EDGES must be UTF-8")?;
+            if value.is_empty() {
+                return Ok(Vec::new());
+            }
+            return value
+                .split(',')
+                .map(|edge| {
+                    edge.split_once("->")
+                        .map(|(from, to)| (from.trim().to_owned(), to.trim().to_owned()))
+                        .ok_or_else(|| format!("invalid edge {edge:?}; expected from->to"))
+                })
+                .collect();
+        }
+        #[cfg(not(module_direction_fixture))]
+        return Err("MODULE_DIRECTION_EDGES is only supported by the fixture driver".to_owned());
+    }
+    Ok(ALLOWED_EDGES
+        .iter()
+        .map(|(from, to)| ((*from).to_owned(), (*to).to_owned()))
+        .collect())
+}
+
+fn edge_table() -> Result<HashSet<(usize, usize)>, String> {
+    let mut allowed = HashSet::new();
+    let mut incoming = [0; MODULES.len()];
+    for (from, to) in configured_edges()? {
+        let node = |name: &str| {
+            MODULES
+                .iter()
+                .position(|module| *module == name)
+                .ok_or_else(|| format!("unknown node {name:?} in edge {from}->{to}"))
+        };
+        let (source, target) = (node(&from)?, node(&to)?);
+        if source == target {
+            return Err(format!("self-edge {from}->{to}"));
+        }
+        if !allowed.insert((source, target)) {
+            return Err(format!("duplicate edge {from}->{to}"));
+        }
+        incoming[target] += 1;
+    }
+    let mut ready: Vec<_> = (0..MODULES.len()).filter(|&i| incoming[i] == 0).collect();
+    let mut visited = 0;
+    while let Some(source) = ready.pop() {
+        visited += 1;
+        for &(from, to) in &allowed {
+            if from == source {
+                incoming[to] -= 1;
+                if incoming[to] == 0 {
+                    ready.push(to);
+                }
+            }
+        }
+    }
+    if visited != MODULES.len() {
+        return Err("cycle in allowed-edge table".to_owned());
+    }
+    Ok(allowed)
+}
+
+struct Check {
+    allowed: HashSet<(usize, usize)>,
+}
 
 impl rustc_driver::Callbacks for Check {
     fn after_analysis<'tcx>(
@@ -39,6 +116,7 @@ impl rustc_driver::Callbacks for Check {
     ) -> rustc_driver::Compilation {
         let mut visitor = Direction {
             tcx,
+            allowed: self.allowed.clone(),
             modules: vec![(tcx.hir_root_module().spans.inner_span, CRATE_DEF_ID)],
             reported: HashSet::new(),
             imports: Vec::new(),
@@ -52,6 +130,7 @@ impl rustc_driver::Callbacks for Check {
 
 struct Direction<'tcx> {
     tcx: TyCtxt<'tcx>,
+    allowed: HashSet<(usize, usize)>,
     modules: Vec<(Span, LocalDefId)>,
     reported: HashSet<(Span, usize, usize)>,
     imports: Vec<(Span, String, DefId, bool)>,
@@ -59,7 +138,7 @@ struct Direction<'tcx> {
 }
 
 impl<'tcx> Direction<'tcx> {
-    fn rank(&self, mut id: DefId) -> Option<usize> {
+    fn module_index(&self, mut id: DefId) -> Option<usize> {
         if !id.is_local() {
             return None;
         }
@@ -101,8 +180,11 @@ impl<'tcx> Direction<'tcx> {
     }
 
     fn edge(&mut self, owner: LocalDefId, target: DefId, span: Span) {
-        if let (Some(from), Some(to)) = (self.rank(owner.to_def_id()), self.rank(target))
-            && to > from
+        if let (Some(from), Some(to)) = (
+            self.module_index(owner.to_def_id()),
+            self.module_index(target),
+        ) && from != to
+            && !self.allowed.contains(&(from, to))
             && self.reported.insert((span, from, to))
         {
             self.tcx.dcx().span_err(
@@ -118,7 +200,7 @@ impl<'tcx> Direction<'tcx> {
     }
 
     fn inferred_type(&mut self, owner: LocalDefId, ty: ty::Ty<'tcx>, span: Span) {
-        if self.rank(owner.to_def_id()).is_none() {
+        if self.module_index(owner.to_def_id()).is_none() {
             return;
         }
         // Walk type arguments and structural types, never nominal ADT fields.
@@ -434,10 +516,27 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
 }
 
 fn main() -> ExitCode {
+    let allowed = match edge_table() {
+        Ok(allowed) => allowed,
+        Err(error) => {
+            eprintln!("module direction: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Export the validated table for the exhaustive fixture matrices.
+    if std::env::args().nth(1).as_deref() == Some("--print-module-direction-table") {
+        println!("{}", MODULES.join(","));
+        let mut edges: Vec<_> = allowed.iter().copied().collect();
+        edges.sort_unstable();
+        for (from, to) in edges {
+            println!("{}->{}", MODULES[from], MODULES[to]);
+        }
+        return ExitCode::SUCCESS;
+    }
     // RUSTC_WORKSPACE_WRAPPER receives the real rustc executable as argv[1].
     let mut args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| !arg.starts_with('-')) {
         args.remove(0);
     }
-    rustc_driver::catch_with_exit_code(|| rustc_driver::run_compiler(&args, &mut Check))
+    rustc_driver::catch_with_exit_code(|| rustc_driver::run_compiler(&args, &mut Check { allowed }))
 }
