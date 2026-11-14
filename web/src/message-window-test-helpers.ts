@@ -1,5 +1,6 @@
 import type { Message, MessagePage, Result, TimelinePage } from './api'
 import type { TopicsApi } from './topics'
+import type { Activity } from './activity'
 import { createTopicSync } from './topic-sync'
 import { createReplies } from './replies'
 import type { RealtimeHandlers } from './realtime'
@@ -7,7 +8,7 @@ import { record } from './protocol-test-helpers'
 import { ok, summary } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 
-export function windowClient(size = 1000) {
+export function windowClient(size = 1000, activity?: Activity) {
   const records = Array.from({ length: size }, (_, i) => record(i + 1))
   let socket: RealtimeHandlers
   const mainQueries: Parameters<TopicsApi['listTimeline']>[1][] = []
@@ -28,7 +29,7 @@ export function windowClient(size = 1000) {
       return ok({ messages: rows.slice(-50), has_more: rows.length > 50 })
     },
   }
-  const { sync, topics } = createTopicSync({ selfId: 'me', topicsApi: options,
+  const { sync, topics } = createTopicSync({ selfId: 'me', activity, topicsApi: options,
     api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
     connect(h) { socket = h; return { send() {}, close() {} } },
   })

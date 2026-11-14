@@ -9,14 +9,59 @@ use std::panic::AssertUnwindSafe;
 use test_support::TestPools;
 
 #[fukulow_test::test]
+async fn repeated_app_construction_keeps_one_database_connection_budget(pool: PgPool) {
+    let mut retained = Vec::new();
+    let (first, second) = tokio::join!(TestPools::new(pool.clone()), TestPools::new(pool.clone()));
+    retained.extend([first.app, second.app]);
+    for _ in 0..24 {
+        let app = TestPools::new(pool.clone()).await.app;
+        sqlx::query("SELECT 1").execute(&app).await.unwrap();
+        retained.push(app);
+    }
+    let connections: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        connections <= i64::from(pool.options().get_max_connections()),
+        "repeated app construction retained {connections} connections"
+    );
+    assert_eq!(
+        retained[0].options().get_idle_timeout(),
+        pool.options().get_idle_timeout()
+    );
+}
+
+#[fukulow_test::test]
+async fn explicitly_closed_app_pools_can_be_replaced_with_retained_handles(pool: PgPool) {
+    let mut retained = Vec::new();
+    for _ in 0..24 {
+        let app = TestPools::new(pool.clone()).await.app;
+        sqlx::query("SELECT 1").execute(&app).await.unwrap();
+        app.close().await;
+        retained.push(app);
+    }
+    assert!(retained.iter().all(PgPool::is_closed));
+}
+
+#[fukulow_test::test]
 async fn harness_closes_all_app_pools_with_retained_handles(pool: PgPool) {
+    let other_admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(pool.options().get_max_connections())
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
     let apps = test_support::run(async {
         let first = TestPools::new(pool.clone()).await;
-        let second = TestPools::new(pool.clone()).await;
+        let second = TestPools::new(other_admin.clone()).await;
         // Retained handles model application state/background tasks outliving the body.
         (first.app, second.app)
     })
     .await;
+    other_admin.close().await;
     assert!(apps.0.is_closed());
     assert!(apps.1.is_closed());
     assert_eq!(apps.0.size(), 0);

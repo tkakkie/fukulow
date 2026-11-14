@@ -216,19 +216,32 @@ async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_r
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "maybe")).await })
     };
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Authentication and visibility checks precede limiter registration. A sleep
+    // can release the leader before this request actually becomes a waiter.
+    let limiter = &l.state.message_delivery.send_limiter;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while limiter.waiters((l.organization, l.member, key)) != 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the identical request waits on the leader");
     assert!(!waiter.is_finished());
     gate.release.add_permits(1);
+    // Transaction::drop closes the socket, rolling back any surviving transaction.
+    // This also works if PostgreSQL's 8 s lifetime expired while the gate was held.
+    // No assertion depends on keeping that transaction alive as a lock fence.
+    drop(pending.await.unwrap());
     // Both settle with the leader's unknown outcome; the waiter neither pays nor executes.
-    // Re-executing would block on the held row until the 8 s transaction timeout.
-    let waiter = tokio::time::timeout(Duration::from_secs(3), waiter)
+    // Re-execution after rollback would instead create the message and use the free retry.
+    let waiter = tokio::time::timeout(Duration::from_secs(5), waiter)
         .await
         .expect("waiter settles with the leader")
         .unwrap();
     for response in [leader.await.unwrap(), waiter] {
         assert_error(response, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
-    pending.await.unwrap().rollback().await.unwrap();
+    assert_eq!(l.sequence(&pool).await, i64::try_from(BURST - 2).unwrap());
     // The client's own retry still gets the free retry; one token is left.
     assert_eq!(
         sent(&l.app, &l.token, l.channel, input(key, "maybe")).await["body"],

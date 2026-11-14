@@ -63,6 +63,9 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #204 section notices share #307's post-COMMIT publication, buffer, proven-recipient resets and O5 periodic REST reconciliation of held targets. Reason: recovery must converge without another mutation or disclosing personal activity to other Members.
 - #204 section display intersects authorized layout and Channel-list snapshots under A11/A12 fences; loss hides immediately. Reason: a stale personal-layout response must never restore a Channel hidden by access loss.
 
+- #307 one conservative socket epoch plus at most 256 retained authorization lifetimes fences notice publication and handoff; the existing batched fallback checks them. Reason: bounded provenance without one subscription per visible Channel.
+- #307 auth exposes injected mutation hooks implemented by channels; all held REST targets share one refetch controller. Reason: preserve the module DAG and apply identical retry, debounce and generation fences without dependencies.
+
 ## Admission and timeouts
 - #196 B app pool: FUKULOW_DB_MAX_CONNECTIONS=20 (3..=100), FUKULOW_DB_ACQUIRE_TIMEOUT_MS=1000 (1..=5000); invalid values fail. Cap 100 matches PostgreSQL's usual default, bounding SQLx queue/per-connection memory; 10k sockets share DB slots. Budget DB capacity for operator connections.
 - #196 B keeps #156/#158's min(16, P-ceil(P/5)) budget: send ceil(B/2), watermark floor(B/2). P=3 gives 1+1 and 1 spare; P=20 gives 8+8 and 4 spare; above 20 budgets stay 8+8. Reject P=1/2: no watermark slot. Raising P above 20 does not raise admitted concurrency.

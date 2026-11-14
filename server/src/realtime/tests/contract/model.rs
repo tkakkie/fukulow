@@ -113,6 +113,10 @@ fn created() -> u16 {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Step {
+    ActivityExpect {
+        socket: String,
+        events: Vec<Value>,
+    },
     Connect {
         socket: String,
         #[serde(rename = "as")]
