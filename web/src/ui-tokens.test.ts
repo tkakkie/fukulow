@@ -223,6 +223,15 @@ describe('design tokens and WCAG 2.2 AA contrast pairs (docs/ui.md §4)', () => 
       '--info-bg': '#10283A',
       '--on-info': '#B9DDF5',
     })
+
+    const manualDarkMatch = appCss.match(/:root\[data-theme='dark'\]\s*\{([\s\S]*?)\n\}/)
+    expect(manualDarkMatch).not.toBeNull()
+    expect(extractColorTokens(manualDarkMatch![1])).toEqual(dark)
+    expect(appCss).toContain(":root:not([data-theme='light'])")
+    expect(appCss).toMatch(/html\s*\{[\s\S]*?font-size:\s*93\.75%;/)
+    expect(appCss).toMatch(/html\[data-text-size='s'\]\s*\{\s*font-size:\s*87\.5%;\s*\}/)
+    expect(appCss).toMatch(/html\[data-text-size='l'\]\s*\{\s*font-size:\s*106\.25%;\s*\}/)
+    expect(appCss).toMatch(/html\[data-text-size='xl'\]\s*\{\s*font-size:\s*118\.75%;\s*\}/)
   })
 
   it('satisfies WCAG 2.2 AA contrast (>= 4.5:1 text, >= 3:1 non-text) for all allowed pairs in light and dark', () => {

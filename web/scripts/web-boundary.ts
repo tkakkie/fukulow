@@ -5,8 +5,8 @@
 //   - network: fetch, XMLHttpRequest, WebSocket, WebTransport, EventSource, BroadcastChannel, Worker, SharedWorker,
 //     navigator.sendBeacon; allowed only in NETWORK_FILES. Workers are forbidden elsewhere because they can hold
 //     communication this scan cannot see; when a real need appears, allow it and scan the Worker script.
-//   - storage: localStorage, sessionStorage, indexedDB, caches, cookieStore, document.cookie; forbidden everywhere
-//     until a ui-settings helper exists (its exemption must land with a typed key/value allow-list guard).
+//   - storage: localStorage is allowed only in STORAGE_FILES (src/ui-settings.ts, with a typed key/value allow-list
+//     guard); sessionStorage, indexedDB, caches, cookieStore and document.cookie are forbidden everywhere.
 //   - forms: bare name (`const f = fetch`), member of window / globalThis / self (also chained, cast,
 //     `!`, parenthesised), string-literal or constant-concatenation keys (`window['local' + 'Storage']`),
 //     and aliases of those objects, document or navigator (`const w = window; w.fetch()`).
@@ -35,6 +35,8 @@ import ts from 'typescript'
 
 /** The only files that may open connections (the API layer). */
 export const NETWORK_FILES = ['src/api.ts', 'src/realtime.ts']
+/** The only file that may touch web storage (the UI-settings helper). */
+export const STORAGE_FILES = ['src/ui-settings.ts']
 
 const NETWORK = new Set([
   'fetch',
@@ -87,13 +89,15 @@ function workerImport(specifier: string | undefined): string | undefined {
 }
 
 function allowed(use: string, file: string): boolean {
-  return isNetworkUse(use) && NETWORK_FILES.includes(file)
+  if (isNetworkUse(use)) return NETWORK_FILES.includes(file)
+  if (use === 'localStorage') return STORAGE_FILES.includes(file)
+  return false
 }
 
 function message(use: string): string {
-  return isNetworkUse(use)
-    ? `\`${use}\` is only allowed in ${NETWORK_FILES.join(' / ')} (network layer)`
-    : `\`${use}\` is forbidden: web storage is not allowed until the ui-settings helper exists (never credentials)`
+  if (isNetworkUse(use)) return `\`${use}\` is only allowed in ${NETWORK_FILES.join(' / ')} (network layer)`
+  if (use === 'localStorage') return `\`${use}\` is only allowed in ${STORAGE_FILES.join(' / ')} (UI settings helper; never credentials)`
+  return `\`${use}\` is forbidden: web storage is only allowed in ${STORAGE_FILES.join(' / ')} via localStorage (never credentials)`
 }
 
 function lineAt(src: string, pos: number): number {
