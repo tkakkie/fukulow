@@ -12,7 +12,7 @@ export const TOTAL_MESSAGE_LIMIT = 1500
 export const SYNC_MESSAGE_LIMIT = TOTAL_MESSAGE_LIMIT - MAIN_MESSAGE_LIMIT - TOPIC_MESSAGE_LIMIT - REPLY_MESSAGE_LIMIT
 export type Failure = number | 'network' | 'timeout'
 export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff' | 'send_retry'
-export type Pending = SendTarget & { replyRootId?: string; clientMessageId: string; body: string; state: 'sending' | 'throttled' | 'unknown' | 'failed'; request: number; retryWait?: number }
+export type Pending = SendTarget & { replyRootId?: string; clientMessageId: string; body: string; state: 'sending' | 'throttled' | 'unknown' | 'failed'; request: number; retryWait?: number; failureCode?: string }
 export type ChannelState = {
   state: 'loading' | 'ready' | 'unavailable'
   watched: boolean
@@ -78,7 +78,7 @@ export type Input =
   | { type: 'history_result'; request: number; page: MessagePage }
   | { type: 'history_failed'; request: number; status: Failure }
   | { type: 'settle_history'; channel: string; messages: Message[] }
-  | { type: 'send_failed'; request: number; status: Failure; retryAfterMs?: number }
+  | { type: 'send_failed'; request: number; status: Failure; retryAfterMs?: number; error?: string }
   | { type: 'ack'; request: number; message: Message }
   | { type: 'timer_elapsed'; id: number }
 
@@ -505,7 +505,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
             break
           }
           const outcome = typeof input.status === 'number' && [400, 403, 404, 409, 413, 415].includes(input.status) ? 'failed' : 'unknown'
-          if (p.state !== outcome) c.pending = c.pending.map(entry => entry === p ? { ...p, state: outcome } : entry)
+          c.pending = c.pending.map(entry => entry === p ? { ...p, state: outcome, failureCode: input.error } : entry)
         }
       }
       break

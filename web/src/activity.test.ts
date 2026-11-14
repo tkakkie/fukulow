@@ -253,11 +253,11 @@ it('periodic_reconciliation_spreads_first_runs_and_keeps_an_independent_schedule
   })
   const start = Date.now(); times.length = 0
   await vi.advanceTimersByTimeAsync(30_000)
-  expect(times.map(t => t - start)).toEqual([0, 7500, 15000, 29970, 30000])
+  expect(times.map(t => t - start)).toEqual([0, 7500, 15000, 27000, 29970])
   const independent = activities[1]
   independent.notice({ type: 'channel_activity', channel_id: 'c', seq: 100 })
   await vi.advanceTimersByTimeAsync(8000)
-  expect(times).toContain(start + 38_000)
+  expect(times).toContain(start + 36_000)
   independent.disconnected()
   const oldCount = times.length
   await vi.advanceTimersByTimeAsync(31_000)
@@ -609,4 +609,25 @@ it('a successful held active-Topic summary evicted by newer main history cannot 
     expect(refreshed.ok && refreshed.data.as_of_seq).toBe(1000)
     expect(c.topics.get('A').lines.some(l => l.kind === 'topic')).toBe(false)
   } finally { activity.close(); await c.close() }
+})
+
+it('DM and ordinary Channel notices route independently while unknown kinds invalidate both even when watched or covered', () => {
+  const channels = { invalidate: vi.fn(), close() {} }, dms = { invalidate: vi.fn(), close() {} }
+  const members = { invalidate: vi.fn(), close() {} }
+  const activity = createActivity({ watched: id => id === 'unknown', covered: () => true,
+    kind: id => id === 'D' ? 'dm' : id === 'C' ? 'channel' : undefined })
+  activity.hold('channels', channels); activity.hold('dms', dms); activity.hold('members', members)
+  activity.notice({ type: 'dm_list_changed' })
+  expect(dms.invalidate).toHaveBeenCalledOnce(); expect(channels.invalidate).not.toHaveBeenCalled()
+  activity.notice({ type: 'channel_list_changed' })
+  expect(channels.invalidate).toHaveBeenCalledOnce()
+  activity.notice({ type: 'channel_activity', channel_id: 'D', seq: 1 })
+  expect(dms.invalidate).toHaveBeenCalledOnce() // same-target coverage only
+  activity.notice({ type: 'channel_activity', channel_id: 'unknown', seq: 1 })
+  activity.notice({ type: 'read_position_changed', channel_id: 'unknown', topic_id: null, read_seq: 1 })
+  expect(dms.invalidate).toHaveBeenCalledTimes(3); expect(channels.invalidate).toHaveBeenCalledTimes(3)
+  activity.notice({ type: 'channel_access_gained', channel_id: 'D' })
+  expect(dms.invalidate).toHaveBeenCalledTimes(4); expect(channels.invalidate).toHaveBeenCalledTimes(3)
+  expect(members.invalidate).toHaveBeenCalledOnce()
+  activity.close()
 })

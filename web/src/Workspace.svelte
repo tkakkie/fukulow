@@ -5,7 +5,9 @@
   import { createSubscriber } from 'svelte/reactivity'
   import { createAnnouncementController } from './announcements'
   import { senderName } from './authors'
-  import type { Channel, Identity, Message } from './api'
+  import type { Channel, DmDiscovery, Identity, Message } from './api'
+  import DmList from './DmList.svelte'
+  import DmSendStatus from './DmSendStatus.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
   import ChannelList from './ChannelList.svelte'
@@ -79,19 +81,23 @@
   })
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
+  const dmState = $derived(session.dms?.state)
   const channelListStatus = $derived(s.status)
   const currentOrganizationId = $derived(selectedOrganizationId || organization?.organization.organization_id || '')
   const nav = navigationAdapter(() => navigation)
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
-  const selected = $derived<Channel | undefined>(s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
+  const selected = $derived<Channel | DmDiscovery | undefined>(dmState?.rows.find(row => row.identity.id === routeChannelId)?.identity ?? s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
     id: routeChannelId, kind: 'channel', name: 'チャンネル', visibility: 'public',
     capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
   } : undefined))
+  const conversationName = $derived(selected?.kind === 'dm' ? selected.peer.name : selected?.name ?? '')
+  const dmLapsed = $derived(selected?.kind === 'dm' && dmState?.sendBlocks[selected.id] === 'dm_peer_access_lapsed')
+  const dmSendDisabled = $derived(selected?.kind === 'dm' && (!selected.peer.active || Boolean(dmState?.sendBlocks[selected.id])))
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
-  const currentTopics = $derived(selected ? session.topics(selected.id) : null)
+  const currentTopics = $derived(selected?.kind === 'channel' ? session.topics(selected.id) : null)
   const currentTopicsState = $derived(currentTopics ? currentTopics.state : null)
   const currentReplies = $derived(selected ? session.replies?.(selected.id) ?? null : null)
   const currentRepliesState = $derived(currentReplies ? currentReplies.state : null)
@@ -160,6 +166,9 @@
   let drawerOpen = $state(false)
   const panelOpen = $derived(!!route?.panel)
   const activePanelTab = $derived<PanelTabId>(route?.panel && !route.panel.startsWith('reply:') ? route.panel as PanelTabId : 'topics')
+  $effect(() => {
+    if (selected?.kind === 'dm' && route?.panel && !route.panel.startsWith('reply:')) nav.navigate({ type: 'close' })
+  })
   const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')
   const effectiveMobileLevel = $derived(mobileLevel)
   let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
@@ -187,7 +196,7 @@
 
   const selectedChannelId = $derived(selected?.id)
   const channelMemberController = $derived.by(() => {
-    if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId) return undefined
+    if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId || selected?.kind === 'dm') return undefined
     const open = session.channelMembers
     return untrack(() => {
       void members?.load()
@@ -408,8 +417,8 @@
     lastViewId = viewId
     announcementController.onViewChanged({
       viewId,
-      kind: route?.topicId ? 'topic' : 'channel',
-      name: route?.topicId ? (resolvedTopicName || 'トピック') : selected.name,
+      kind: route?.topicId ? 'topic' : selected.kind === 'dm' ? 'dm' : 'channel',
+      name: route?.topicId ? (resolvedTopicName || 'トピック') : conversationName,
     })
   })
 
@@ -441,7 +450,8 @@
     if (id === s.selectedId) members?.authors.retry()
     const navigated = nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
     if (id === s.selectedId || navigated === false) {
-      channels.select(id)
+      if (dmState?.rows.some(row => row.identity.id === id)) session.dms?.select(id)
+      else channels.select(id)
       if (
         navigated === false &&
         typeof currentUnread !== 'undefined' &&
@@ -453,6 +463,21 @@
     }
     drawerOpen = false
   }
+
+  async function handleOpenDm(member: string, renew = false) {
+    await session.dms?.open(member, renew)
+    const id = session.dms?.state.selected
+    if (id && channels.state.selectedId === id) handleSelectChannel(id)
+  }
+  let recoveredSelection = ''
+  $effect(() => {
+    const id = dmState?.recovered
+    if (!id) { recoveredSelection = ''; return }
+    if (id !== recoveredSelection && s.selectedId === id) {
+      recoveredSelection = id
+      untrack(() => handleSelectChannel(id))
+    }
+  })
 
   function handleSelectTopic(topicId: string) {
     if (!selected || !currentOrganizationId) return
@@ -509,7 +534,7 @@
     return null
   }
 
-  function openPanel() { nav.navigate({ type: 'tab', tab: 'topics' }, panelToggleBtn) }
+  function openPanel() { if (selected?.kind !== 'dm') nav.navigate({ type: 'tab', tab: 'topics' }, panelToggleBtn) }
   function closePanel() { nav.navigate({ type: 'close' }) }
   function togglePanel() { if (panelOpen) closePanel(); else openPanel() }
   function goToChannelList() {
@@ -665,11 +690,20 @@
       {#if !organizationUnavailable && (canCreateChannels ?? creationAllowed)}
         <CreateChannelForm oncreate={handleCreateChannel} draft={channelCreation} disabled={canCreateChannels !== true} />
       {/if}
+      {#if dmState && session.dms}
+        <DmList rows={dmState.rows} selectedId={s.selectedId} loading={dmState.status === 'loading'}
+          error={dmState.status === 'error'} message={dmState.message} busy={dmState.busy}
+          canOpen={Boolean(organization && organization.member.role !== 'guest')}
+          more={!dmState.lanes.browse.done} unread={channelUnreadCount} onselect={handleSelectChannel}
+          onmore={() => session.dms?.browse()} onretry={() => session.dms?.refresh()} />
+      {/if}
       {#if !organizationUnavailable && members && organization}
         <Members
           model={members}
           identity={organization}
           onopen={() => { void members?.load() }}
+          onopendm={session.dms ? (member) => { void handleOpenDm(member) } : undefined}
+          dmBusy={dmState?.busy ?? false}
           onchanged={(id) => {
             if (id === organization.member.id && currentOrganizationId) {
               onselectorganization?.(currentOrganizationId)
@@ -709,16 +743,17 @@
               <span aria-hidden="true">‹</span>
               <span>チャンネルへ戻る</span>
             </Button>
-            <span class="main-card__crumb"># {selected.name} ›</span>
+            <span class="main-card__crumb"># {conversationName} ›</span>
           {/if}
           <h1 class="main-card__title">
-            {route?.topicId ? (resolvedTopicName || 'トピック') : selected.name}
+            {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
           </h1>
         </div>
         <div class="main-card__header-actions">
           <small class="live-status" data-testid="live-status" data-live={currentLive}>
             {currentLive ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
           </small>
+          {#if selected.kind !== 'dm' || panelOpen}
           <Button
             bind:buttonRef={panelToggleBtn}
             variant="icon"
@@ -728,9 +763,14 @@
           >
             ☰
           </Button>
+          {/if}
         </div>
       </header>
       <div class="main-card__body">
+        {#if selected.kind === 'dm'}
+          <DmSendStatus peer={selected.peer} lapsed={dmLapsed} canRenew={organization?.member.role !== 'guest'} busy={dmState?.busy}
+            onrenew={() => { if (selected?.kind === 'dm') void handleOpenDm(selected.peer.id, true) }} />
+        {/if}
         {#if route?.topicId && currentTopics}
           {#key `${selected.id}:${route.topicId}`}
             <TopicView
@@ -765,6 +805,7 @@
             replies={currentReplies}
             unread={currentUnread}
             channelId={selected.id}
+            sendDisabled={dmSendDisabled}
             selfId={organization?.member.id ?? ''}
             viewSelected={mainViewSelected}
             {organizationUnavailable}
@@ -862,11 +903,11 @@
     <div class="right-panel-slot">
       <Panel
         id="panel-content"
-        title={selected ? `# ${selected.name}` : '詳細'}
+        title={selected ? `${selected.kind === 'dm' ? '' : '# '}${conversationName}` : '詳細'}
         activeTab={activePanelTab}
         mode={route?.panel?.startsWith('reply:') ? 'reply' : 'tabs'}
         showBack={!!nav.state.previousTab || viewportWidth < 600}
-        onback={() => nav.navigate({ type: nav.state.previousTab ? 'reply-back' : 'close' })}
+        onback={() => nav.navigate({ type: selected?.kind !== 'dm' && nav.state.previousTab ? 'reply-back' : 'close' })}
         bind:headingRef={panelHeadingRef}
         onselecttab={(tab) => {
           nav.navigate({ type: 'tab', tab })
@@ -884,6 +925,7 @@
               replyTargetStatus={replyTargetState.status}
               selfId={organization?.member.id ?? ''}
               {organizationUnavailable}
+              sendDisabled={dmSendDisabled}
               bind:composerRef={replyComposerRef}
               resolveSenderName={resolveSender}
               onopenreplies={handleOpenReplies}
@@ -918,10 +960,10 @@
         {:else if activePanelTab === 'overview'}
           <EmptyState
             title="チャンネル概要は準備中です。"
-            description={selected ? `# ${selected.name}（${selected.visibility === 'private' ? 'プライベート' : 'パブリック'}）` : undefined}
+            description={selected?.kind === 'channel' ? `# ${selected.name}（${selected.visibility === 'private' ? 'プライベート' : 'パブリック'}）` : undefined}
           />
         {:else}
-          {#if channelMemberModel && selected && organization}
+          {#if channelMemberModel && selected?.kind === 'channel' && organization}
             <ChannelMembers model={channelMemberModel} channel={selected} self={organization.member.id} candidates={members?.state.members ?? []} />
           {:else}
             <EmptyState title="チャンネルを選んでください。" />

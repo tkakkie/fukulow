@@ -304,9 +304,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["list_dms"];
         put?: never;
-        post: operations["open"];
+        post: operations["open_dm"];
         delete?: never;
         options?: never;
         head?: never;
@@ -320,7 +320,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["changes"];
+        get: operations["dm_changes"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2932,7 +2932,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    list_dms: {
         parameters: {
             query?: {
                 /** @description Creation-order continuation, exclusive */
@@ -3008,7 +3008,7 @@ export interface operations {
             };
         };
     };
-    open: {
+    open_dm: {
         parameters: {
             query?: never;
             header?: never;
@@ -3119,7 +3119,7 @@ export interface operations {
             };
         };
     };
-    changes: {
+    dm_changes: {
         parameters: {
             query: {
                 /** @description Required delta or coverage */

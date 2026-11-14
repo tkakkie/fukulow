@@ -36,6 +36,8 @@ Web UI shell: sign-in/session UI, navigation, tokens, timeline, a11y, setup. Wri
 | Throttled pending sends show readable Japanese status with tokens, no extra live role or manual retry/edit; discard cancels and restores Composer focus | `web/src/timeline.svelte.test.ts::shows accessible Japanese throttled status, automatic retry and discard without manual resend or edit`, `web/src/sync.svelte.test.ts::exposes throttled sends reactively through retry, repeated 429, canonical ACK and discard` |
 | Only ui-settings.ts may touch localStorage: allow-listed theme/text-size keys and values, validated reads, error fallback, pre-mount init, never credentials | `web/src/ui-settings.test.ts::stores only allow-listed keys and values and never stores credentials`, `web/src/ui-settings.test.ts::validates reads, removes unknown stored values, and uses defaults`, `web/src/ui-settings.test.ts::falls back to in-memory defaults and keeps the UI working when storage is blocked or throws`, `web/src/ui-settings.test.ts::applies settings in main.ts before mount without inline scripts and matches docs/ui.md §7 copy`, `web/scripts/web-boundary.test.ts::allows localStorage only in src/ui-settings.ts (positive)`, `web/scripts/web-boundary.test.ts::rejects web storage, IndexedDB, caches and document.cookie outside src/ui-settings.ts (negative)`, `web/scripts/web-boundary.test.ts::rejects non-localStorage storage and network use even in src/ui-settings.ts (negative)` |
 
+| DM navigation announces the peer name once without a Channel prefix; badge changes do not announce a view change | `web/src/announcements.test.ts::DM navigation announces the peer name once without a Channel prefix or badge announcement` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
@@ -50,3 +52,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
 
 - [replies](replies.md): `keeps an unknown descendant Reply visible with retry and discard after its parent body is evicted`
+
+- [sync](sync.md): `DM discovery neither watches nor marks read and selection bootstraps the first Message through common sync`, `peer refusal never automatically resends or renews and only explicit renewal clears its send block`

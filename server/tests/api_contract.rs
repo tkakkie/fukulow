@@ -27,6 +27,39 @@ const HTTP_METHODS: [&str; 8] = [
 // All 36 operations document shutdown, including author lookup and Account security actions.
 const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 254;
 
+fn unique_operation_ids(document: &Value) -> bool {
+    let mut ids = BTreeSet::new();
+    document["paths"].as_object().unwrap().values().all(|item| {
+        HTTP_METHODS.iter().all(|method| {
+            item.get(method).is_none_or(|operation| {
+                operation["operationId"]
+                    .as_str()
+                    .is_some_and(|id| ids.insert(id))
+            })
+        })
+    })
+}
+
+#[test]
+fn every_openapi_operation_id_is_unique() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        assert!(unique_operation_ids(&document));
+    }
+}
+
+#[test]
+fn duplicate_operation_id_is_rejected() {
+    let mut document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    assert!(unique_operation_ids(&document));
+    let existing =
+        document["paths"]["/api/v1/orgs/{org}/channels/{channel}/members"]["get"]["operationId"]
+            .clone();
+    document["paths"]["/api/v1/orgs/{org}/dms"]["get"]["operationId"] = existing;
+    assert!(!unique_operation_ids(&document));
+}
+
 #[test]
 fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();

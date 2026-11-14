@@ -2714,7 +2714,7 @@
         "tags": [
           "crate::messages::dms"
         ],
-        "operationId": "list",
+        "operationId": "list_dms",
         "parameters": [
           {
             "name": "org",
@@ -2839,7 +2839,7 @@
         "tags": [
           "crate::messages::dms"
         ],
-        "operationId": "open",
+        "operationId": "open_dm",
         "parameters": [
           {
             "name": "org",
@@ -2994,7 +2994,7 @@
         "tags": [
           "crate::channels::dms::discovery"
         ],
-        "operationId": "changes",
+        "operationId": "dm_changes",
         "parameters": [
           {
             "name": "org",

@@ -29,7 +29,7 @@ pub struct DmChanges {
     pub caught_up: bool,
 }
 
-#[utoipa::path(get,path="/api/v1/orgs/{org}/dms/changes",
+#[utoipa::path(get,path="/api/v1/orgs/{org}/dms/changes",operation_id="dm_changes",
     params(("org"=Uuid,Path),("lane"=String,Query,description="Required delta or coverage"),("cursor"=Option<String>,Query,description="Opaque lane-specific continuation")),
     security(("cookie"=[]),("bearer"=[])),
     responses((status=200,description="At most 50 authorized identities, no Unread or Message scans; independent rolling delta or frozen-birth coverage",body=DmChanges),

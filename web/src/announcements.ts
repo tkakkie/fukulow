@@ -41,7 +41,7 @@ export type AnnouncementInput =
   | {
       type: 'view_changed'
       viewId: string
-      kind: 'channel' | 'topic'
+      kind: 'channel' | 'topic' | 'dm'
       name: string
     }
   | {
@@ -127,7 +127,7 @@ export function formatLiveMessageAnnouncement(senderName: string, body: string):
 }
 
 /** Formats a view-change announcement (`# チャンネル名` or `トピック名`, `docs/ui.md` §2, §6). */
-export function formatViewAnnouncement(view: { kind: 'channel' | 'topic'; name: string }): string {
+export function formatViewAnnouncement(view: { kind: 'channel' | 'topic' | 'dm'; name: string }): string {
   return view.kind === 'channel' ? `# ${view.name}` : view.name
 }
 
@@ -508,7 +508,7 @@ export function createAnnouncementController(options: AnnouncementControllerOpti
         listeners.delete(listener)
       }
     },
-    onViewChanged(input: { viewId: string; kind: 'channel' | 'topic'; name: string }): void {
+    onViewChanged(input: { viewId: string; kind: 'channel' | 'topic' | 'dm'; name: string }): void {
       if (input.viewId !== state.viewId) clearMessageTimer()
       const res = stepAnnouncements(state, { type: 'view_changed', ...input })
       state = res.state

@@ -74,7 +74,7 @@ async fn baselines(
         .collect()
 }
 
-#[utoipa::path(post,path="/api/v1/orgs/{org}/dms",request_body=OpenDmRequest,params(("org"=Uuid,Path)),security(("cookie"=[]),("bearer"=[])),
+#[utoipa::path(post,path="/api/v1/orgs/{org}/dms",operation_id="open_dm",request_body=OpenDmRequest,params(("org"=Uuid,Path)),security(("cookie"=[]),("bearer"=[])),
     responses((status=201,description="Created immutable pair",body=Dm),(status=200,description="Resolved existing DM; explicit renew replaces only lapsed grants",body=Dm),
     (status=400,description="invalid input or dm_self_not_allowed",body=ErrorBody),(status=401,description="invalid credentials",body=ErrorBody),
     (status=403,description="forbidden: Guest cannot open even existing DMs",body=ErrorBody),(status=404,description="organization_unavailable or member_not_found",body=ErrorBody),
@@ -130,7 +130,7 @@ pub async fn open(
         .into_response())
 }
 
-#[utoipa::path(get,path="/api/v1/orgs/{org}/dms",params(("org"=Uuid,Path),("cursor"=Option<String>,Query,description="Creation-order continuation, exclusive"),("channel_id"=Option<Vec<Uuid>>,Query,description="Repeated distinct ids, 1..50; exclusive with cursor")),security(("cookie"=[]),("bearer"=[])),
+#[utoipa::path(get,path="/api/v1/orgs/{org}/dms",operation_id="list_dms",params(("org"=Uuid,Path),("cursor"=Option<String>,Query,description="Creation-order continuation, exclusive"),("channel_id"=Option<Vec<Uuid>>,Query,description="Repeated distinct ids, 1..50; exclusive with cursor")),security(("cookie"=[]),("bearer"=[])),
     responses((status=200,description="At most 50 current participant DMs in one snapshot; ordinary Channels excluded",body=DmList),
     (status=400,description="invalid input, including cursor scope, unknown fields or duplicate ids",body=ErrorBody),(status=401,description="invalid credentials",body=ErrorBody),
     (status=404,description="organization_unavailable",body=ErrorBody),(status=500,description="internal error",body=ErrorBody)))]

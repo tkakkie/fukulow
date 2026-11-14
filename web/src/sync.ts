@@ -36,6 +36,7 @@ export type PendingMessageState = {
   replyRootId?: string
   status: 'sending' | 'throttled' | 'failed'
   retryable: boolean
+  failureCode?: string
 }
 export type TopicComposerState = {
   draft: string
@@ -471,7 +472,7 @@ export function createSync(options: SyncOptions) {
         if (result.timedOut) submitted.delete(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
           : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network',
-            retryAfterMs: result.retryAfterMs })
+            retryAfterMs: result.retryAfterMs, error: result.kind === 'http' ? result.error : undefined })
         break
       }
       case 'wait': {
@@ -705,6 +706,7 @@ export function createSync(options: SyncOptions) {
             ...(p.reply_to ? { replyTo: p.reply_to, replyRootId: p.replyRootId } : {}),
             status: p.state === 'sending' || p.state === 'throttled' ? p.state : 'failed',
             retryable: p.state !== 'failed',
+            failureCode: p.failureCode,
           })),
           hasOlder: c?.hasOlder ?? false, loadingOlder: c?.older !== undefined,
           olderError,
