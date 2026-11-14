@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concurrent_appends(
     pool: PgPool,
 ) {
@@ -88,7 +88,7 @@ async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concu
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_chain_validates_before_channel_authorization_and_defaults_to_50_max_200(
     pool: PgPool,
 ) {
@@ -137,7 +137,7 @@ async fn reply_chain_validates_before_channel_authorization_and_defaults_to_50_m
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_chain_watermark_saturation_preserves_denial_precedence_and_retry_after(
     pool: PgPool,
 ) {

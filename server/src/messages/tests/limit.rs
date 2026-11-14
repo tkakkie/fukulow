@@ -67,7 +67,7 @@ impl Limited {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn one_member_is_throttled_while_another_sends_and_the_bucket_refills(pool: PgPool) {
     let l = limited(&pool).await;
     let other = Uuid::new_v4();
@@ -111,7 +111,7 @@ async fn one_member_is_throttled_while_another_sends_and_the_bucket_refills(pool
         .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn budgets_are_independent_per_organization(pool: PgPool) {
     let l = limited(&pool).await;
     // Same Member id in another Organization: a separate bucket.
@@ -123,7 +123,7 @@ async fn budgets_are_independent_per_organization(pool: PgPool) {
     sent(&l.app, &token, channel, input(Uuid::new_v4(), "elsewhere")).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn committed_retry_with_an_exhausted_bucket_returns_the_canonical_message_uncharged(
     pool: PgPool,
 ) {
@@ -153,7 +153,7 @@ async fn committed_retry_with_an_exhausted_bucket_returns_the_canonical_message_
         .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_retries_with_one_id_are_charged_and_then_throttled(pool: PgPool) {
     let l = limited(&pool).await;
     let key = Uuid::new_v4();
@@ -168,7 +168,7 @@ async fn failed_retries_with_one_id_are_charged_and_then_throttled(pool: PgPool)
     l.throttled(&l.token, l.channel, intent).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn concurrent_identical_requests_consume_one_token_and_share_one_message(pool: PgPool) {
     let l = limited(&pool).await;
     for _ in 1..BURST {
@@ -198,7 +198,7 @@ async fn concurrent_identical_requests_consume_one_token_and_share_one_message(p
         .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_retry(pool: PgPool) {
     let l = limited(&pool).await;
     for _ in 2..BURST {
@@ -239,7 +239,7 @@ async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_r
         .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn a_waiter_with_another_intent_executes_itself_and_pays_without_the_free_retry(
     pool: PgPool,
 ) {
@@ -281,7 +281,7 @@ async fn a_waiter_with_another_intent_executes_itself_and_pays_without_the_free_
         .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unknown_commit_retry_is_free_and_a_confirmed_failure_retry_is_charged(pool: PgPool) {
     let l = limited(&pool).await;
     let key = Uuid::new_v4();
@@ -319,7 +319,7 @@ async fn unknown_commit_retry_is_free_and_a_confirmed_failure_retry_is_charged(p
     l.throttled(&l.token, l.channel, failing).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn exhausted_bucket_keeps_denials_as_denials(pool: PgPool) {
     let l = limited(&pool).await;
     let key = Uuid::new_v4();
@@ -436,7 +436,7 @@ fn limiter_refusals_map_to_429_and_503_with_retry_after() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn a_charged_leader_refused_by_admission_charges_its_identical_waiters_nothing(pool: PgPool) {
     let l = limited(&pool).await;
     let other = Uuid::new_v4();

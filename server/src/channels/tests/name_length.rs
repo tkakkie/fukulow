@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_name_length_boundaries_count_unicode_scalars(pool: PgPool) {
     let app = router(&pool).await;
     for visibility in ["public", "private"] {
@@ -49,7 +49,7 @@ async fn channel_name_length_boundaries_count_unicode_scalars(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invalid_channel_name_is_rejected_before_opening_transaction(pool: PgPool) {
     let organization_id = organization(&pool).await;
     let token = member(&pool, organization_id, Uuid::new_v4(), "member").await;
@@ -80,7 +80,7 @@ async fn invalid_channel_name_is_rejected_before_opening_transaction(pool: PgPoo
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn empty_and_nul_channel_names_are_rejected_without_writes(pool: PgPool) {
     let app = router(&pool).await;
     let organization_id = organization(&pool).await;
@@ -105,7 +105,7 @@ async fn empty_and_nul_channel_names_are_rejected_without_writes(pool: PgPool) {
     assert_eq!(counts, (0, 0));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_name_length_check_rejects_direct_inserts_and_updates(pool: PgPool) {
     let organization_id = organization(&pool).await;
     for scalar in ["a", "界", "😀", ""] {
@@ -160,7 +160,7 @@ async fn channel_name_length_check_rejects_direct_inserts_and_updates(pool: PgPo
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_name_length_migration_rejects_existing_violators_without_changing_them(
     pool: PgPool,
 ) {

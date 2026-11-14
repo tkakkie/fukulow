@@ -50,7 +50,7 @@ async fn denied(
     assert_eq!(snapshot(pool).await, before);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn foreign_organization_channel_member_endpoints_deny_without_changes_with_owner_controls(
     pool: PgPool,
 ) {
@@ -107,7 +107,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: PgPool) {
     let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
@@ -282,7 +282,7 @@ async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: P
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn management_rechecks_demoted_deactivated_stale_and_removed_actors(pool: PgPool) {
     for loss in ["demoted", "deactivated", "stale", "removed"] {
         for add in [true, false] {
@@ -349,7 +349,7 @@ async fn management_rechecks_demoted_deactivated_stale_and_removed_actors(pool: 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn private_last_manager_last_grant_and_concurrent_removals_are_serialized(pool: PgPool) {
     for leave in [false, true] {
         let app = router(&pool).await;
@@ -416,7 +416,7 @@ async fn private_last_manager_last_grant_and_concurrent_removals_are_serialized(
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivated_and_stale_managers_never_count_as_usable(pool: PgPool) {
     for stale in [false, true] {
         let app = router(&pool).await;
@@ -472,7 +472,7 @@ async fn deactivated_and_stale_managers_never_count_as_usable(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unmanaged_guest_leave_succeeds_and_last_grant_is_protected(pool: PgPool) {
     let app = router(&pool).await;
     let org = organization(&pool).await;
@@ -513,7 +513,7 @@ async fn unmanaged_guest_leave_succeeds_and_last_grant_is_protected(pool: PgPool
     .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn self_leave_hides_inaccessible_existence_and_cleans_stale_grants(pool: PgPool) {
     let app = router(&pool).await;
     let org = organization(&pool).await;
@@ -559,7 +559,7 @@ async fn self_leave_hides_inaccessible_existence_and_cleans_stale_grants(pool: P
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn mutation_locks_channel_before_actor_member(pool: PgPool) {
     let app = router(&pool).await;
     let org = organization(&pool).await;
@@ -607,7 +607,7 @@ async fn mutation_locks_channel_before_actor_member(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn noop_grant_mutations_skip_subscription_rechecks(pool: PgPool) {
     use std::sync::{
         Arc,
@@ -649,7 +649,7 @@ async fn noop_grant_mutations_skip_subscription_rechecks(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
     let access = super::super::access::AccessChanges::default();
     let state = AppState::for_test(pool.clone()).await;

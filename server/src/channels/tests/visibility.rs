@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn public_authorization_skips_membership_sql_but_checks_organization_and_channel(
     pool: PgPool,
 ) {
@@ -59,7 +59,7 @@ async fn public_authorization_skips_membership_sql_but_checks_organization_and_c
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn authorization_reads_current_visibility_and_scopes_private_membership(pool: PgPool) {
     let app = router(&pool).await;
     let org = organization(&pool).await;
@@ -111,7 +111,7 @@ async fn authorization_reads_current_visibility_and_scopes_private_membership(po
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release visibility latency and candidate query plan"]
 async fn measure_visibility_reads_and_candidate_plan(pool: PgPool) {
     let org = organization(&pool).await;
@@ -190,7 +190,7 @@ async fn measure_visibility_reads_and_candidate_plan(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn visibility_reads_never_lock_members_and_writes_retain_the_lock(pool: PgPool) {
     let org = organization(&pool).await;
     let id = Uuid::new_v4();
@@ -301,7 +301,7 @@ async fn assert_visibility_modes(
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn visibility_modes_preserve_membership_revision_and_private_grant_denials(pool: PgPool) {
     let org = organization(&pool).await;
     let other = organization(&pool).await;
@@ -369,7 +369,7 @@ async fn visibility_modes_preserve_membership_revision_and_private_grant_denials
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guest_visibility_requires_explicit_current_grants_and_role_is_read_afresh(pool: PgPool) {
     let org = organization(&pool).await;
     let id = Uuid::new_v4();

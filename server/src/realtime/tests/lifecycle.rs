@@ -53,7 +53,7 @@ async fn advance(duration: Duration) {
     tokio::time::resume();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn frame_live_and_ping_traffic_does_not_repoll_failure_waits(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
@@ -94,7 +94,7 @@ async fn frame_live_and_ping_traffic_does_not_repoll_failure_waits(pool: PgPool)
     assert_eq!(polls(), initial, "socket traffic re-polled epoch waits");
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn missing_pong_disconnects_idle_websocket(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, finished) = lifecycle_socket(&f).await;
@@ -122,7 +122,7 @@ async fn missing_pong_disconnects_idle_websocket(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn answering_pings_keeps_websocket_and_live_delivery_healthy(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, mut finished) = lifecycle_socket(&f).await;
@@ -159,7 +159,7 @@ async fn post_replay_ping(f: &Fixture, socket: &mut Client) {
     assert!(matches!(frame(socket).await, tungstenite::Message::Ping(_)));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn answering_post_replay_ping_preserves_websocket_and_live_delivery(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, mut finished) = lifecycle_socket(&f).await;
@@ -188,7 +188,7 @@ async fn answering_post_replay_ping_preserves_websocket_and_live_delivery(pool: 
     assert_eq!(frame(&mut socket).await, tungstenite::Message::Close(None));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unanswered_post_replay_ping_closes_only_after_full_grace(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, mut finished) = lifecycle_socket(&f).await;
@@ -216,7 +216,7 @@ async fn unanswered_post_replay_ping_closes_only_after_full_grace(pool: PgPool) 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn pong_queued_during_replay_clears_outstanding_ping(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
@@ -250,7 +250,7 @@ async fn pong_queued_during_replay_clears_outstanding_ping(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn client_initiated_close_gets_close_frame_back(pool: PgPool) {
     let f = fixture(&pool).await;
     for close in [

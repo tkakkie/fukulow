@@ -114,7 +114,7 @@ async fn assert_issuer_denied(
     assert_eq!(consumed, 0);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_denies_demoted_issuer_for_invited_role(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
@@ -156,7 +156,7 @@ async fn invite_acceptance_denies_demoted_issuer_for_invited_role(pool: sqlx::Pg
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_denies_deactivated_issuer(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let other = org_fn(&pool).await;
@@ -178,7 +178,7 @@ async fn invite_acceptance_denies_deactivated_issuer(pool: sqlx::PgPool) {
     assert!(!exists);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_denies_deactivated_issuer_self_reactivation(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (issuer, member, email, token) = account(&pool, org, Role::Admin).await;
@@ -198,7 +198,7 @@ async fn invite_acceptance_denies_deactivated_issuer_self_reactivation(pool: sql
     assert!(inactive);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_allows_currently_authorized_issuer(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
@@ -219,7 +219,7 @@ async fn invite_acceptance_allows_currently_authorized_issuer(pool: sqlx::PgPool
     assert_eq!(body(r).await["member"]["role"], "admin");
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_rechecks_issuer_after_waiting_for_organization_lock(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let other = org_fn(&pool).await;
@@ -267,7 +267,7 @@ async fn invite_acceptance_rechecks_issuer_after_waiting_for_organization_lock(p
     assert_eq!(count, 0);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_allows_demoted_issuer_with_authority_for_invited_role(
     pool: sqlx::PgPool,
 ) {
@@ -299,7 +299,7 @@ async fn invite_acceptance_allows_demoted_issuer_with_authority_for_invited_role
     assert_eq!(body(r).await["member"]["role"], "admin");
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_controls(
     pool: sqlx::PgPool,
 ) {
@@ -462,7 +462,7 @@ async fn org_fn(pool: &sqlx::PgPool) -> Uuid {
     org(pool).await
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_existing_account_requires_signed_in_matching_account_and_is_single_use(
     pool: sqlx::PgPool,
 ) {
@@ -509,7 +509,7 @@ async fn invite_existing_account_requires_signed_in_matching_account_and_is_sing
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_unknown_expired_used_foreign_and_wrong_email_deny_without_consuming(
     pool: sqlx::PgPool,
 ) {
@@ -571,7 +571,7 @@ async fn invite_unknown_expired_used_foreign_and_wrong_email_deny_without_consum
     assert_eq!(consumed, 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn new_account_acceptance_is_atomic_and_concurrent_consumption_has_one_winner(
     pool: sqlx::PgPool,
 ) {
@@ -616,7 +616,7 @@ async fn new_account_acceptance_is_atomic_and_concurrent_consumption_has_one_win
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reinvite_reuses_member_row_without_restoring_channel_grants_or_changing_active_roles(
     pool: sqlx::PgPool,
 ) {
@@ -679,7 +679,7 @@ async fn reinvite_reuses_member_row_without_restoring_channel_grants_or_changing
     assert_eq!(revision, 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn last_owner_demotion_and_deactivation_are_rejected_with_concurrent_positive_control(
     pool: sqlx::PgPool,
 ) {
@@ -715,7 +715,7 @@ async fn last_owner_demotion_and_deactivation_are_rejected_with_concurrent_posit
     assert_eq!(owners, 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn every_role_rest_channel_denials_and_grants_have_positive_controls(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let foreign = org_fn(&pool).await;
@@ -815,7 +815,7 @@ async fn every_role_rest_channel_denials_and_grants_have_positive_controls(pool:
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn queued_invite_expiry_and_new_account_uniqueness_race_never_attach_by_email(
     pool: sqlx::PgPool,
 ) {
@@ -891,7 +891,7 @@ fn captured_auth(org: Uuid, id: Uuid, account: Uuid, token: &str, role: Role) ->
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn writes_reauthorize_role_deactivation_and_revision_after_auth_with_positive_controls(
     pool: sqlx::PgPool,
 ) {
@@ -1009,7 +1009,7 @@ impl members::RoleChangeGuard for ActorRecheckGuard {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn last_owner_guard_rejects_stale_repeatable_read_snapshots_and_direct_sql_transitions(
     pool: sqlx::PgPool,
 ) {
@@ -1071,7 +1071,7 @@ async fn last_owner_guard_rejects_stale_repeatable_read_snapshots_and_direct_sql
     assert_eq!(owners, 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invite_acceptance_uses_configured_web_cookie_and_never_downgrades_invalid_credentials(
     pool: sqlx::PgPool,
 ) {
@@ -1109,7 +1109,7 @@ async fn invite_acceptance_uses_configured_web_cookie_and_never_downgrades_inval
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn role_change_unknown_foreign_and_inactive_targets_deny_with_active_positive_control(
     pool: sqlx::PgPool,
 ) {

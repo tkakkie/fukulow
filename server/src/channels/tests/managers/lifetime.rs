@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_last_manager_denials_and_unmanaged_controls(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (_, ot) = f.user("owner").await;
@@ -57,7 +57,7 @@ async fn channel_manager_last_manager_denials_and_unmanaged_controls(pool: PgPoo
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_role_changes_are_atomic_and_preserve_grant_subscription_and_unread(
     pool: PgPool,
 ) {
@@ -143,7 +143,7 @@ async fn channel_manager_role_changes_are_atomic_and_preserve_grant_subscription
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_inactive_and_stale_rights_never_count_as_managers(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (guest, _) = f.user("guest").await;
@@ -211,7 +211,7 @@ async fn channel_manager_inactive_and_stale_rights_never_count_as_managers(pool:
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_new_lifetimes_never_revive_right_or_old_subscription(pool: PgPool) {
     use auth::{SubscriptionRecheck, SubscriptionScope};
     let f = Fixture::new(pool).await;
@@ -261,7 +261,7 @@ async fn channel_manager_new_lifetimes_never_revive_right_or_old_subscription(po
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_invite_reactivation_leaves_stale_right_unusable_and_renewal_clears_it(
     pool: PgPool,
 ) {
@@ -353,7 +353,7 @@ async fn channel_manager_invite_reactivation_leaves_stale_right_unusable_and_ren
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_migration_has_no_backfill_and_rejects_public_or_guest_rights(
     pool: PgPool,
 ) {
@@ -414,7 +414,7 @@ async fn channel_manager_migration_has_no_backfill_and_rejects_public_or_guest_r
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn channel_manager_public_visibility_race_cannot_commit_a_right_on_public(pool: PgPool) {
     for grant_first in [false, true] {
         let f = Fixture::new(pool.clone()).await;

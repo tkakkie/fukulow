@@ -87,7 +87,7 @@ async fn sign_in_request(app: axum::Router) -> Response {
     .unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn session_entropy_failure_returns_500_without_session_or_fallback(pool: sqlx::PgPool) {
     let state = fixture(pool.clone()).await;
     for partial in [false, true] {
@@ -117,7 +117,7 @@ async fn session_entropy_failure_returns_500_without_session_or_fallback(pool: s
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn session_entropy_success_encodes_every_byte_once(pool: sqlx::PgPool) {
     let state = fixture(pool.clone()).await;
     let calls = Arc::new(AtomicUsize::new(0));

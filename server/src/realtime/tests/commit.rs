@@ -41,7 +41,7 @@ async fn waiting_for_commit(pool: &PgPool, pid: i32) {
     .unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_send(pool: PgPool) {
     // Cover both the first allocation (no committed sequence row) and an existing counter.
     for initial_seq in [0, 1] {
@@ -135,7 +135,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn ambiguous_commit_rollback_allows_gap_free_same_key_retry(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut before = f.server.connect(&f.token).await;
@@ -181,7 +181,7 @@ async fn ambiguous_commit_rollback_allows_gap_free_same_key_retry(pool: PgPool) 
     silent(&mut between).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn definite_commit_failure_does_not_signal_or_consume_sequence(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -225,7 +225,7 @@ async fn definite_commit_failure_does_not_signal_or_consume_sequence(pool: PgPoo
     assert_eq!(event(&mut socket).await["message"], canonical);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unresolved_commit_subscription_timeout_closes_and_later_reconnect_recovers(pool: PgPool) {
     let f = fixture(&pool).await;
     let key = Uuid::new_v4();
@@ -252,7 +252,7 @@ async fn unresolved_commit_subscription_timeout_closes_and_later_reconnect_recov
     ready(&mut recovered, f.channel, 1).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn ambiguous_commit_recovery_preserves_organization_and_private_channel_denials(
     pool: PgPool,
 ) {
@@ -330,7 +330,7 @@ async fn ambiguous_commit_recovery_preserves_organization_and_private_channel_de
     silent(&mut recovery).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_deadline_during_commit_signals_and_reconnect_waits_for_final_message(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut before = f.server.connect(&f.token).await;
@@ -394,7 +394,7 @@ async fn send_deadline_during_commit_signals_and_reconnect_waits_for_final_messa
     silent(&mut recovered).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut before = f.server.connect(&f.token).await;

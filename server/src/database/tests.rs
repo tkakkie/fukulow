@@ -20,7 +20,7 @@ async fn startup_pool(pool: &PgPool) -> PgPool {
         .unwrap()
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn application_requires_migration_history_without_creating_it(pool: PgPool) {
     assert!(validate_migrations(&pool).await.is_err());
     let history: Option<String> =
@@ -31,7 +31,7 @@ async fn application_requires_migration_history_without_creating_it(pool: PgPool
     assert_eq!(history, None);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn application_rejects_migration_version_checksum_failed_missing_and_extra_rows(
     pool: PgPool,
 ) {
@@ -88,7 +88,7 @@ async fn lock_timeout(pool: &PgPool) -> String {
         .unwrap()
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn startup_migrations_succeed_and_keep_timeout_out_of_application_pool(pool: PgPool) {
     let pool = startup_pool(&pool).await;
     let original_timeout = lock_timeout(&pool).await;
@@ -104,7 +104,7 @@ async fn startup_migrations_succeed_and_keep_timeout_out_of_application_pool(poo
     pool.close().await;
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn startup_migrations_timeout_on_advisory_lock_and_can_retry(pool: PgPool) {
     let startup = startup_pool(&pool).await;
     let original_timeout = lock_timeout(&startup).await;
@@ -148,7 +148,7 @@ async fn startup_migrations_timeout_on_advisory_lock_and_can_retry(pool: PgPool)
     startup.close().await;
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn startup_migrations_timeout_on_ddl_lock_and_can_retry_without_partial_changes(
     pool: PgPool,
 ) {

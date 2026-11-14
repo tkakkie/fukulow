@@ -26,7 +26,7 @@ pub(super) async fn assert_positions_match_visibility(pool: &PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_positions_exist_exactly_for_visible_channels_across_access_transitions(
     pool: PgPool,
 ) {
@@ -154,7 +154,7 @@ async fn unread_positions_exist_exactly_for_visible_channels_across_access_trans
     assert_eq!(c["unread_count"], 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_missing_position_suppresses_only_affected_channel_at_committed_baseline(
     pool: PgPool,
 ) {

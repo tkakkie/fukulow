@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // Count frontend request/response boundaries (simple Query, extended Sync and
 // prepare Flush), not TCP packets. SSL is disabled only on this local test relay.
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual subscription wire round-trip comparison"]
 async fn measure_subscription_round_trips(pool: PgPool) {
     let options = pool.connect_options();

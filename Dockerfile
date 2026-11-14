@@ -9,9 +9,13 @@ FROM rust:1.99.0-slim@sha256:2752b332db73fdbb7dc576f06c82ed1f312005784ef913d7e04
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml server/Cargo.toml
+# Every workspace crate's manifest must be present to resolve the lockfile, even
+# dev-only ones (test-macros) that the release binary never builds; stub their sources.
+COPY server/test-macros/Cargo.toml server/test-macros/Cargo.toml
 # Dependency-only layer: cached until Cargo.toml/Cargo.lock change.
-RUN mkdir -p server/src && echo "" > server/src/lib.rs && echo "fn main() {}" > server/src/main.rs \
- && cargo build --locked --release -p fukulow-server && rm -rf server/src
+RUN mkdir -p server/src server/test-macros/src && echo "" > server/src/lib.rs && echo "fn main() {}" > server/src/main.rs \
+ && echo "" > server/test-macros/src/lib.rs \
+ && cargo build --locked --release -p fukulow-server && rm -rf server/src server/test-macros/src
 COPY server/ server/
 COPY deploy/db-*.sql deploy/
 RUN find server/src -name "*.rs" -exec touch {} +

@@ -12,7 +12,7 @@ fn assert_unavailable(response: &Response) {
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_queue_cap_returns_503_and_same_key_retry_is_idempotent(pool: PgPool) {
     let (_, organization, _, channel, token) = fixture(&pool).await;
     let state = AppState::for_test(pool.clone()).await;
@@ -56,7 +56,7 @@ async fn send_queue_cap_returns_503_and_same_key_retry_is_idempotent(pool: PgPoo
     assert_eq!(delivery.admission(&pool).queued_sends(), 0);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn saturated_send_queue_preserves_organization_and_private_channel_denials(pool: PgPool) {
     let organization_a = organization(&pool).await;
     let creator = Uuid::new_v4();
@@ -134,7 +134,7 @@ async fn saturated_send_queue_preserves_organization_and_private_channel_denials
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(pool: PgPool) {
     let (_, organization, sender, channel, _) = fixture(&pool).await;
     let delivery = Delivery::default();
@@ -178,7 +178,7 @@ async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(
     drop(held);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
     let (_, organization, sender, channel, _) = fixture(&pool).await;
     let delivery = Delivery::default();
@@ -221,7 +221,7 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
     assert_eq!(delivery.admission(&pool).queued_sends(), 0);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: PgPool) {
     let (_, organization, sender, channel, _) = fixture(&pool).await;
     let app_pool = sqlx::postgres::PgPoolOptions::new()

@@ -8,7 +8,7 @@
 //
 // A reference is `path::test_name` (path relative to the repository root).
 // What is detected (static analysis only):
-//   - Rust: #[test] / #[tokio::test] / #[sqlx::test] in server/**/*.rs. Not run: #[ignore] and
+//   - Rust: #[test] / #[tokio::test] / #[sqlx::test] / #[fukulow_test::test] in server/**/*.rs. Not run: #[ignore] and
 //     #[ignore = "..."]. Any #[cfg(...)] other than exactly cfg(test), and cfg_attr, on the test fn is
 //     treated as "cannot be verified" and refused, also when it sits on an enclosing inline `mod`.
 //     NOT detected: cfg on an enclosing file, runtime early returns, --features / env dependent behaviour.
@@ -95,7 +95,7 @@ export function blankRustCommentsAndStrings(src: string): string {
 
 const ATTR = /#\[(?:[^[\]]|\[[^\]]*\])*\]/g
 const ATTRS_THEN_FN = /((?:#\[(?:[^[\]]|\[[^\]]*\])*\]\s*)+)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_]\w*)/g
-const TEST_ATTR = /^#\[\s*(?:test|tokio::test|sqlx::test)\b/
+const TEST_ATTR = /^#\[\s*(?:test|tokio::test|sqlx::test|fukulow_test::test)\b/
 const IGNORE_ATTR = /^#\[\s*ignore\b/
 const PLAIN_CFG_TEST = /^#\[\s*cfg\s*\(\s*test\s*\)\s*\]$/
 
@@ -163,7 +163,7 @@ function analyzeRust(src: string): RustFile {
   return { tests, scan }
 }
 
-/** Rust functions carrying #[test], #[tokio::test] or #[sqlx::test], with their ignore/cfg state and inline module path. */
+/** Rust functions carrying a test attribute, with their ignore/cfg state and inline module path. */
 export function rustTests(src: string): RustTest[] {
   return analyzeRust(src).tests
 }

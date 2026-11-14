@@ -37,7 +37,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 - No new dependency, abstraction or doc without a reason in the PR.
 
 ## Boundaries
-- One crate; module direction uses the explicit acyclic edge table in `scripts/module-direction.rs`: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`. Cross-module references require a listed direct edge; reachability does not grant permission. Split crates only when build time, deps or parallel work hurt.
+- Module direction uses the explicit acyclic edge table in `scripts/module-direction.rs`: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`. Cross-module references require a listed direct edge; reachability does not grant permission. More crates are allowed with a PR reason (responsibility, dependency direction, build time, testability); crates keep this DAG, no cycles; release stays one binary, one image. Production domain split: #378.
 - Target DAG (#319): the four domain modules keep these edges; leaves `database` (used by channels, messages; by auth only once #314 needs it) and `shutdown` (used by messages, realtime) depend on nothing. Both leaves remain outside the checked module list in #318; checking them follows in M1 (#320). Kept on purpose: `docs/decisions/process.md` #319.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.

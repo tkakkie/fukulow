@@ -27,7 +27,7 @@ fn cpu_seconds() -> f64 {
 }
 
 // Focused release probe, not the item 6 offered-load/capacity scenario.
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release fan-out/reorder SQL, latency and combined server/client CPU measurement"]
 async fn measure_fanout_and_reorder(pool: PgPool) {
     sqlx::query("CREATE EXTENSION pg_stat_statements")

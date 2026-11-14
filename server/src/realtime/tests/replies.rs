@@ -13,7 +13,7 @@ async fn reply_send(f: &Fixture, token: &str, channel: Uuid, key: Uuid, parent: 
     serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_match(pool: PgPool) {
     let f = fixture(&pool).await;
     let root = topics::topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
@@ -72,7 +72,7 @@ async fn reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_m
     assert_eq!(payload["reply_root_id"], root["id"]);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_ambiguous_commit_reconnect_recovers_without_a_later_send(pool: PgPool) {
     let f = fixture(&pool).await;
     let root = topics::topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
@@ -104,7 +104,7 @@ async fn reply_ambiguous_commit_reconnect_recovers_without_a_later_send(pool: Pg
     silent(&mut reconnect).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_live_replay_cross_organization_and_private_nonmember_denials_have_positive_controls(
     pool: PgPool,
 ) {
@@ -139,7 +139,7 @@ async fn reply_live_replay_cross_organization_and_private_nonmember_denials_have
     ready(&mut replay, private, 2).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_live_replay_ungranted_guest_denials_have_explicit_grant_positive_controls(
     pool: PgPool,
 ) {
@@ -186,7 +186,7 @@ async fn reply_live_replay_ungranted_guest_denials_have_explicit_grant_positive_
     silent(&mut replay).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_live_replay_member_revision_and_removed_grant_denials_have_positive_controls(
     pool: PgPool,
 ) {

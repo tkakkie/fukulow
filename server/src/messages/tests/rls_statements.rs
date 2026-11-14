@@ -6,7 +6,7 @@ use super::*;
 use crate::{channels, messages};
 use sqlx::postgres::PgPoolOptions;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: PgPool) {
     // Identical Member/Channel ids in both Organizations: only the
     // Organization (predicate plus RLS context) tells their rows apart.

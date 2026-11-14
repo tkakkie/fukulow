@@ -19,7 +19,7 @@ pub(crate) async fn pause(key: Uuid) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_first(pool: PgPool) {
     for case in ["private", "guest", "role"] {
         let (_, org, sender, channel, token) = fixture(&pool).await;
@@ -151,7 +151,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(pool: PgPool) {
     for guest in [false, true] {
         let (_, org, sender, channel, token) = fixture(&pool).await;
@@ -264,7 +264,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries(
     pool: PgPool,
 ) {
