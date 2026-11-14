@@ -10,5 +10,5 @@ export function membersAdapter(controller: ReturnType<typeof createMembers>) {
 }
 export function inviteAcceptanceAdapter(controller: ReturnType<typeof createInviteAcceptance>) {
   const subscribe = createSubscriber(update => controller.subscribe(update))
-  return { get state() { subscribe(); return controller.get() }, accept: controller.accept }
+  return { get state() { subscribe(); return controller.get() }, accept: controller.accept, signOutAndContinue: controller.signOutAndContinue }
 }
