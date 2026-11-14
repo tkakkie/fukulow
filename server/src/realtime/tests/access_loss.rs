@@ -77,7 +77,7 @@ pub(super) async fn access_lost(socket: &mut Client, channel: Uuid) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn idle_all_sessions_and_effective_loss_preserve_other_channels_and_redundant_grants(
     pool: PgPool,
 ) {
@@ -144,7 +144,7 @@ async fn idle_all_sessions_and_effective_loss_preserve_other_channels_and_redund
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during_handoff(
     pool: PgPool,
 ) {
@@ -212,7 +212,7 @@ async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_closed(pool: PgPool) {
     for regrant in [false, true] {
         let organization = organization(&pool).await;
@@ -267,7 +267,7 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn ungranted_guest_cannot_join_existing_public_topic_but_explicit_grant_permits_it(
     pool: PgPool,
 ) {
@@ -316,7 +316,7 @@ async fn ungranted_guest_cannot_join_existing_public_topic_but_explicit_grant_pe
     silent(&mut observer).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn effective_loss_http_denial_matrix_including_guest_mark_read_has_positive_controls(
     pool: PgPool,
 ) {
@@ -505,7 +505,7 @@ async fn effective_loss_http_denial_matrix_including_guest_mark_read_has_positiv
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn subscribe_registration_racing_removal_never_hands_off_a_stale_subscription(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
@@ -529,7 +529,7 @@ async fn subscribe_registration_racing_removal_never_hands_off_a_stale_subscript
     denied(&mut socket, f.channel).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn denied_management_and_ungranted_guest_subscriptions_emit_no_protected_or_loss_events(
     pool: PgPool,
 ) {
@@ -602,7 +602,7 @@ async fn denied_management_and_ungranted_guest_subscriptions_emit_no_protected_o
     assert_eq!(event(&mut owner).await["message"], positive);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn continuous_public_role_changes_adopt_grant_lifetimes_and_membership_loss_keeps_4003(
     pool: PgPool,
 ) {
@@ -675,7 +675,7 @@ async fn continuous_public_role_changes_adopt_grant_lifetimes_and_membership_los
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn replay_snapshot_after_removal_commit_denies_even_without_a_fast_signal(pool: PgPool) {
     for guest in [false, true] {
         let f = fixture(&pool).await;

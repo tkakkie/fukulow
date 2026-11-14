@@ -38,7 +38,7 @@ async fn surface(
     .await
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_rest_denial_matrix_has_positive_controls_and_authorization_before_admission(
     pool: PgPool,
 ) {
@@ -176,7 +176,7 @@ async fn topic_rest_denial_matrix_has_positive_controls_and_authorization_before
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: PgPool) {
     for reactivate in [false, true] {
         let (app, org, owner, channel, token) = fixture(&pool).await;
@@ -279,7 +279,7 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_unknown_foreign_channel_and_foreign_organization_are_indistinguishable(
     pool: PgPool,
 ) {

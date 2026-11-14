@@ -83,7 +83,7 @@ async fn deactivate(pool: &PgPool, org: Uuid, member: Uuid, reactivate: bool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn author_lookup_every_role_private_and_guest_public_denials_have_positive_controls(
     pool: PgPool,
 ) {
@@ -141,7 +141,7 @@ async fn author_lookup_every_role_private_and_guest_public_denials_have_positive
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bounds_batches(
     pool: PgPool,
 ) {
@@ -212,7 +212,7 @@ async fn author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bo
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn author_lookup_rechecks_inactive_stale_callers_and_stale_grants_after_auth(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     for denial in [
@@ -283,7 +283,7 @@ async fn author_lookup_rechecks_inactive_stale_callers_and_stale_grants_after_au
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn author_lookup_authorization_and_identities_share_a_nonlocking_snapshot(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, org, author, channel_id, author_token) = fixture(&pools.admin).await;

@@ -63,7 +63,7 @@ async fn http_status(
 /// The unresolved Message plus 81 new sends (96 storm sends, 15 same-key retries).
 const STORM_SEQS: i64 = 82;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organizations_and_channels(
     pool: PgPool,
 ) {
@@ -279,7 +279,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     ready(&mut recovered, f.channel, STORM_SEQS).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: PgPool) {
     let app_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
@@ -339,7 +339,7 @@ async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: P
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_organization_progress(
     pool: PgPool,
 ) {
@@ -575,7 +575,7 @@ async fn sleeping_commits(pool: &PgPool) -> Vec<i32> {
     .unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sixteen_concurrent_sends_leave_reserved_capacity_for_new_subscription(pool: PgPool) {
     let app_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)

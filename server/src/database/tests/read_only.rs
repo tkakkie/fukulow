@@ -8,7 +8,7 @@ use tokio::{
     task::JoinSet,
 };
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn cancelled_read_only_begin_discards_connection_before_next_write(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(15), async {
         let options = pool.connect_options();
@@ -121,7 +121,7 @@ async fn cancelled_read_only_begin_discards_connection_before_next_write(pool: P
     .expect("cancelled BEGIN recovery must not hang");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn read_only_begin_preserves_snapshot_settings(pool: PgPool) {
     read_only(&pool, async |tx: &mut sqlx::PgConnection| {
         let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
@@ -170,7 +170,7 @@ async fn assert_clean_reuse(pool: &PgPool, single: &PgPool, expected_pid: i32) {
     assert!(idle, "the reused backend must have no open transaction");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn successful_read_only_reuses_clean_connection(pool: PgPool) {
     let single = single_connection_pool(&pool).await;
     let pid: i32 = read_only(&single, async |tx: &mut sqlx::PgConnection| {
@@ -184,7 +184,7 @@ async fn successful_read_only_reuses_clean_connection(pool: PgPool) {
     single.close().await;
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn read_only_body_error_reuses_clean_connection(pool: PgPool) {
     let single = single_connection_pool(&pool).await;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -204,7 +204,7 @@ async fn read_only_body_error_reuses_clean_connection(pool: PgPool) {
     single.close().await;
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn failed_rollback_keeps_body_error_and_discards_connection(pool: PgPool) {
     let single = single_connection_pool(&pool).await;
     let mut lost_pid = 0;
@@ -234,7 +234,7 @@ async fn failed_rollback_keeps_body_error_and_discards_connection(pool: PgPool) 
     single.close().await;
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn cancelled_read_only_body_discards_connection_before_next_write(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(15), async {
         let single = single_connection_pool(&pool).await;

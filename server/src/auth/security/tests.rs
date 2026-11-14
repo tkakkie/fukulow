@@ -167,7 +167,7 @@ fn app_with_workers(state: AppState, workers: &'static PasswordWorkers) -> Route
     auth::tests::app_with_workers(state, workers).merge(routes)
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_wrong_password_is_403_preserves_all_accounts_and_sessions(pool: PgPool) {
     let f = fixture(&pool).await;
     let before = snapshot(&pool).await;
@@ -215,7 +215,7 @@ async fn security_wrong_password_is_403_preserves_all_accounts_and_sessions(pool
     assert!(refused.account("owner@example.com".into()).is_err());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_requires_valid_unexpired_session_before_password_or_body(pool: PgPool) {
     let f = fixture(&pool).await;
     sqlx::query(
@@ -250,7 +250,7 @@ async fn security_requires_valid_unexpired_session_before_password_or_body(pool:
     assert_eq!(f.state.sign_in_throttle.pending_counts(), (0, 0));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_invalid_password_and_malformed_requests_do_not_mutate(pool: PgPool) {
     let f = fixture(&pool).await;
     let before = snapshot(&pool).await;
@@ -318,7 +318,7 @@ async fn security_invalid_password_and_malformed_requests_do_not_mutate(pool: Pg
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_success_revokes_cookie_and_bearer_preserving_current_and_other_account(
     pool: PgPool,
 ) {
@@ -409,7 +409,7 @@ async fn security_success_revokes_cookie_and_bearer_preserving_current_and_other
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_database_error_rolls_back_password_and_every_session(pool: PgPool) {
     let f = fixture(&pool).await;
     sqlx::raw_sql("CREATE FUNCTION refuse_session_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected deletion failure'; END $$; CREATE TRIGGER refuse_session_delete BEFORE DELETE ON account_sessions FOR EACH ROW EXECUTE FUNCTION refuse_session_delete()")
@@ -437,7 +437,7 @@ async fn security_database_error_rolls_back_password_and_every_session(pool: PgP
 mod concurrency;
 mod throttle;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn password_change_accepts_setup_character_and_utf8_byte_boundaries(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut current = PASSWORD.to_owned();
@@ -461,7 +461,7 @@ async fn password_change_accepts_setup_character_and_utf8_byte_boundaries(pool: 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_body_content_type_and_size_denials_preserve_state(pool: PgPool) {
     let f = fixture(&pool).await;
     let before = snapshot(&pool).await;

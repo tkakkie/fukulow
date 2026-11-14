@@ -112,7 +112,7 @@ async fn inside(tx: &mut PgConnection, id: Uuid, organization: bool) {
     assert_eq!(settings(tx).await, expected);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn context_helpers_scope_settings_and_preserve_transaction_modes(pool: PgPool) {
     let pools = pools(pool).await;
     sqlx::query("CREATE TABLE context_probe (organization_id uuid NOT NULL)")
@@ -166,7 +166,7 @@ async fn context_helpers_scope_settings_and_preserve_transaction_modes(pool: PgP
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn context_helpers_cancelled_begin_setting_work_and_cleanup_discard(pool: PgPool) {
     let pools = pools(pool).await;
     for variant in VARIANTS {
@@ -205,7 +205,7 @@ async fn context_helpers_cancelled_begin_setting_work_and_cleanup_discard(pool: 
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn context_helpers_failed_rollback_preserves_body_error_and_discards(pool: PgPool) {
     let pools = pools(pool).await;
     for variant in VARIANTS {
@@ -246,7 +246,7 @@ async fn deferred_violation(tx: &mut PgConnection) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn context_helpers_failed_commit_discards_live_connection(pool: PgPool) {
     let pools = pools(pool).await;
     assert_eq!(pools.admin.options().get_max_connections(), 1);
@@ -301,7 +301,7 @@ async fn context_helpers_failed_commit_discards_live_connection(pool: PgPool) {
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn context_values_are_bound_before_work(pool: PgPool) {
     let pools = pools(pool).await;
     let pid = clean(&pools.app).await;

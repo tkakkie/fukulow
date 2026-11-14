@@ -28,7 +28,7 @@ async fn all_closed(clients: &mut tokio::task::JoinSet<()>) {
 
 // A controlled slow recovery holds the real publication cursor, not a DB row or
 // the send path. All backlog Messages below are committed by concurrent sends.
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release cross-Channel starvation and two-cycle burst/replay measurement"]
 async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     let count: usize = std::env::var("MEASURE_SOCKETS")
@@ -410,7 +410,7 @@ async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize
     pool.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release per-Organization reservation comparison"]
 async fn measure_organization_notification_reservations(pool: PgPool) {
     let offered = std::env::var("MEASURE_RESERVATIONS")
@@ -424,7 +424,7 @@ async fn measure_organization_notification_reservations(pool: PgPool) {
     organization_reservation_probe(pool, offered, cap).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn organization_cap_preserves_other_organization_live_delivery_and_replays_affected_channel(
     pool: PgPool,
 ) {

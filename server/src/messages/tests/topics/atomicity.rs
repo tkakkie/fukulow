@@ -8,7 +8,7 @@ async fn counts(pool: &PgPool, org: Uuid, channel: Uuid) -> (i64, i64, i64) {
         .bind(org).bind(channel).fetch_one(pool).await.unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_publication(
     pool: PgPool,
 ) {
@@ -131,7 +131,7 @@ pub(crate) async fn waiting(pool: &PgPool, pid: i32) {
     .unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_projection_ambiguous_commit_waits_before_snapshot_and_recovers_without_later_send(
     pool: PgPool,
 ) {
@@ -200,7 +200,7 @@ async fn topic_projection_ambiguous_commit_waits_before_snapshot_and_recovers_wi
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_projection_reauthorizes_after_waiting_for_barrier(pool: PgPool) {
     for route in ["timeline", "topics", "summary", "history"] {
         for denial in ["member", "revision", "grant"] {
@@ -302,7 +302,7 @@ async fn topic_projection_reauthorizes_after_waiting_for_barrier(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_database_constraints_bind_organization_channel_and_preserve_null_messages(
     pool: PgPool,
 ) {
@@ -342,7 +342,7 @@ async fn topic_database_constraints_bind_organization_channel_and_preserve_null_
     assert_eq!(list(&app, &token, channel, "").await["messages"][0], plain);
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn topic_migration_preserves_existing_messages_as_null(pool: PgPool) {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut paths = std::fs::read_dir(directory)

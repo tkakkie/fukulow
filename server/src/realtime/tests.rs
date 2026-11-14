@@ -413,7 +413,7 @@ async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_token
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie(pool: PgPool) {
     let organization = organization(&pool).await;
     let (_, token) = member(&pool, organization).await;
@@ -440,7 +440,7 @@ async fn secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie(pool: Pg
     client.close(None).await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_returns_400(
     pool: PgPool,
 ) {
@@ -483,7 +483,7 @@ async fn invalid_websocket_upgrade_with_authenticated_cookie_and_allowed_origin_
         .unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(pool: PgPool) {
     let f = fixture(&pool).await;
     rejected(f.server.handshake(None, None, None).await, 403);
@@ -537,7 +537,7 @@ async fn websocket_handshake_enforces_cookie_origin_and_accepts_native_bearer(po
     rejected(f.server.handshake(Some(&f.token), None, None).await, 401);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn live_delivery_denies_other_organization_and_private_nonmember_with_positive_controls(
     pool: PgPool,
 ) {
@@ -598,7 +598,7 @@ async fn live_delivery_denies_other_organization_and_private_nonmember_with_posi
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn replay_denies_other_organization_and_private_nonmember_with_positive_controls(
     pool: PgPool,
 ) {
@@ -637,7 +637,7 @@ async fn replay_denies_other_organization_and_private_nonmember_with_positive_co
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps(
     pool: PgPool,
 ) {
@@ -684,7 +684,7 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
     silent(&mut reconnect).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn rollback_and_idempotent_retry_emit_no_notification_and_publish_sees_committed_rows(
     pool: PgPool,
 ) {
@@ -724,7 +724,7 @@ async fn rollback_and_idempotent_retry_emit_no_notification_and_publish_sees_com
     silent(&mut socket).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(pool: PgPool) {
     let f = fixture(&pool).await;
     post(&f, f.channel).await;
@@ -744,7 +744,7 @@ async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(po
     ready(&mut reconnect, f.channel, 258).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_usable(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, other_token) = member(&pool, f.organization).await;
@@ -808,7 +808,7 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
     rejected(f.server.handshake(Some(&f.token), None, None).await, 401);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
     let f = fixture(&pool).await;
     sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() + interval '2 seconds' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)").bind(f.organization).execute(&pool).await.unwrap();
@@ -823,7 +823,7 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
     closed(&mut replay, CLOSE_SESSION_ENDED).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn session_check_database_timeout_at_connect_closes_with_internal_error(pool: PgPool) {
     let f = fixture(&pool).await;
     let exhausted = sqlx::postgres::PgPoolOptions::new()
@@ -832,14 +832,15 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
         .connect_with(pool.connect_options().as_ref().clone())
         .await
         .unwrap();
-    let _held = exhausted.acquire().await.unwrap();
+    let held = exhausted.acquire().await.unwrap();
+    let exhausted_for_handler = exhausted.clone();
     // Authenticate normally, then exhaust only the pool used by the post-upgrade session check.
     let router = Router::new()
         .route(
             "/api/v1/orgs/{org}/ws",
             axum::routing::get(
                 move |State(mut state): State<AppState>, auth: Auth, ws: WebSocketUpgrade| {
-                    let exhausted = exhausted.clone();
+                    let exhausted = exhausted_for_handler.clone();
                     async move {
                         state.pool = exhausted;
                         {
@@ -857,9 +858,11 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
     let server = Server::start(router).await;
     let mut socket = server.connect(&f.token).await;
     closed(&mut socket, 1011).await;
+    drop(held);
+    exhausted.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn malformed_controls_and_future_cursor_do_not_break_subscription_state(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -887,7 +890,7 @@ async fn malformed_controls_and_future_cursor_do_not_break_subscription_state(po
     silent(&mut socket).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn concurrent_message_delivery_is_in_channel_sequence_order(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -919,7 +922,7 @@ async fn concurrent_message_delivery_is_in_channel_sequence_order(pool: PgPool) 
     silent(&mut socket).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn live_delivery_rechecks_private_membership_after_subscription(pool: PgPool) {
     let f = fixture(&pool).await;
     let private = channel(&pool, f.organization, f.member, true).await;
@@ -952,7 +955,7 @@ async fn live_delivery_rechecks_private_membership_after_subscription(pool: PgPo
     denied(&mut recipient_socket, private).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn publication_waits_for_commit_even_when_http_request_is_cancelled(pool: PgPool) {
     let f = fixture(&pool).await;
     // Hold a deferred INSERT trigger at the commit boundary, after the row was inserted.
@@ -1007,7 +1010,7 @@ async fn publication_waits_for_commit_even_when_http_request_is_cancelled(pool: 
     assert_eq!(history[0].id, committed.id);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn out_of_order_publication_fills_committed_gaps_without_duplicate_delivery(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut sockets = Vec::new();

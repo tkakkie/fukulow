@@ -32,13 +32,13 @@ async fn assert_not_ready(router: &Router) {
     );
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_accepts_not_started_worker(pool: PgPool) {
     let router = app(AppState::with_test_pool(pool));
     assert_ready(&router).await;
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_acquire_timeout_recovers_without_changing_liveness(pool: PgPool) {
     let single = PgPoolOptions::new()
         .max_connections(1)
@@ -60,7 +60,7 @@ async fn readiness_acquire_timeout_recovers_without_changing_liveness(pool: PgPo
     assert_not_ready(&router).await;
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_query_timeout_releases_slot_limits_flood_and_recovers(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         let relay = Relay::new(&pool, 1).await;
@@ -93,7 +93,7 @@ async fn readiness_query_timeout_releases_slot_limits_flood_and_recovers(pool: P
     .expect("readiness query timeout and recovery must not hang");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_overlapping_healthy_callers_share_one_check(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         // Spare pool capacity would expose accidentally independent checks.
@@ -132,7 +132,7 @@ async fn readiness_overlapping_healthy_callers_share_one_check(pool: PgPool) {
     .expect("overlapping healthy checks must complete together");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_bounds_return_ping_without_accumulating_connections(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let relay = Relay::new(&pool, 4).await;
@@ -157,7 +157,7 @@ async fn readiness_bounds_return_ping_without_accumulating_connections(pool: PgP
     .expect("pool return must have its own deadline");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_cancelled_query_detaches_connection(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let relay = Relay::new(&pool, 1).await;
@@ -183,7 +183,7 @@ async fn readiness_cancelled_query_detaches_connection(pool: PgPool) {
     .expect("cancellation must release the pool slot");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_cancelled_return_releases_connection(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let relay = Relay::new(&pool, 1).await;
@@ -208,7 +208,7 @@ async fn readiness_cancelled_return_releases_connection(pool: PgPool) {
     .expect("cancellation must also bound return cleanup");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_query_error_detaches_connection(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let relay = Relay::new(&pool, 1).await;
@@ -237,7 +237,7 @@ async fn readiness_query_error_detaches_connection(pool: PgPool) {
     .expect("query errors must release the pool slot");
 }
 
-#[sqlx::test(migrations = false)]
+#[fukulow_test::test(migrations = false)]
 async fn readiness_cancelled_caller_keeps_shared_check_until_cleanup(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let relay = Relay::new(&pool, 4).await;

@@ -11,7 +11,7 @@ async fn waiting(pool: &PgPool, pattern: &str, count: i64) {
     }).await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_rereads_actor_role_activity_and_revision_after_waiting(pool: PgPool) {
     for loss in ["demoted", "deactivated", "revision"] {
         let f = Fixture::new(pool.clone()).await;
@@ -76,7 +76,7 @@ async fn deactivation_rereads_actor_role_activity_and_revision_after_waiting(poo
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_races_with_deactivation_demotion_remove_leave_and_manager_changes(
     pool: PgPool,
 ) {
@@ -178,7 +178,7 @@ async fn deactivation_races_with_deactivation_demotion_remove_leave_and_manager_
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_and_private_creation_serialize_in_both_orders(pool: PgPool) {
     for creation_first in [false, true] {
         let f = Fixture::new(pool.clone()).await;
@@ -249,7 +249,7 @@ async fn deactivation_and_private_creation_serialize_in_both_orders(pool: PgPool
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn deactivation_locks_organization_and_sorted_channels_before_members(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (owner, ot) = f.user("owner").await;

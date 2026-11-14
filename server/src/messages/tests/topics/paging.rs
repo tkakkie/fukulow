@@ -8,7 +8,7 @@ fn position(item: &Value) -> i64 {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_projection_paging_preserves_w_counts_positions_and_unfiltered_holes(pool: PgPool) {
     let (app, _, _, channel, token) = fixture(&pool).await;
     let a = sent(&app, &token, channel, topic_input(Uuid::new_v4(), "A")).await;
@@ -105,7 +105,7 @@ async fn topic_projection_paging_preserves_w_counts_positions_and_unfiltered_hol
     assert_eq!(prefix["items"][0]["topic"]["last_seq"], 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_history_is_bounded_exclusive_ascending_and_projection_queries_validate(
     pool: PgPool,
 ) {
@@ -197,7 +197,7 @@ async fn topic_history_is_bounded_exclusive_ascending_and_projection_queries_val
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_paging_many_moved_topics_has_no_loss_or_duplication(pool: PgPool) {
     let (app, _, _, channel, token) = fixture(&pool).await;
     let mut expected = std::collections::BTreeSet::new();

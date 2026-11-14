@@ -3,7 +3,7 @@ use crate::database::{organization_statement, organization_statement_sql};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn statement_context_precedes_rls_and_clears_on_the_same_connection(pool: PgPool) {
     let pools = pools(pool).await;
     sqlx::raw_sql(
@@ -63,7 +63,7 @@ async fn statement_context_precedes_rls_and_clears_on_the_same_connection(pool: 
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn statement_context_errors_and_unconfirmed_completion_discard(pool: PgPool) {
     let pools = pools(pool).await;
     let pid = clean(&pools.app).await;
