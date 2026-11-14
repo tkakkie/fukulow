@@ -129,12 +129,18 @@
       (matchedAnchor ? matchedAnchor.topic_id : null) ??
       (retained.key === currentKey ? retained.topicId : null),
   )
-  const visibleMessages = $derived(
+  const historyMessages = $derived(
     isCurrentAnchor && rState.messages.length > 0
       ? rState.messages
       : retained.key === currentKey
         ? retained.messages
         : [],
+  )
+  // The active navigation anchor is retained separately from the bounded history.
+  const visibleMessages = $derived(
+    isCurrentAnchor && rState.anchor?.id === anchorMessageId && !historyMessages.some(m => m.id === anchorMessageId)
+      ? [...historyMessages, rState.anchor].sort((a, b) => a.seq - b.seq)
+      : historyMessages,
   )
   const replyCounts = $derived(
     countRepliesByMessageId([s.messages, rState.messages, visibleMessages]),
@@ -283,18 +289,20 @@
   $effect(() => {
     const key = currentKey, root = targetRootId
     if (!root) return
-    if (previousAnchorKey !== key) revealAnchorKey = previousRootId === root ? key : ''
+    if (previousAnchorKey !== key) revealAnchorKey = previousRootId === root || matchedAnchor?.reply_root_id ? key : ''
     previousAnchorKey = key
     previousRootId = root
   })
   $effect(() => {
     const key = currentKey, id = anchorMessageId
-    if (revealAnchorKey !== key || !isCurrentAnchor || rState.loading || !rowWindow ||
+    if (revealAnchorKey !== key || !isCurrentAnchor || chainInitialLoading || !rowWindow ||
       !visibleMessages.some(m => m.id === id)) return
     revealAnchorKey = ''
     void tick().then(async () => {
       if (currentKey !== key) return
-      await rowWindow?.reveal(id)
+      const row = scrollEl?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
+      const rect = row?.getBoundingClientRect(), viewport = scrollEl?.getBoundingClientRect()
+      if (!rect || !viewport || rect.top < viewport.top || rect.bottom > viewport.bottom) await rowWindow?.reveal(id)
       handleScroll()
     }).catch(console.error)
   })

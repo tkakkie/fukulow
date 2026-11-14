@@ -23,6 +23,127 @@ test.beforeEach(async ({ page }) => {
   channelName = created.name
 })
 
+test('same-chain navigation preserves cached scroll and list identity and reveals uncached anchors in one read', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const root = await sendApiMessage(page.request, { body: '長い返信の起点' })
+  const messages: Message[] = [root, ...Array.from({ length: 10_000 }, (_, i) => ({
+    ...root, id: crypto.randomUUID(), seq: i + 2, client_message_id: crypto.randomUUID(),
+    reply_to: root.id, reply_root_id: root.id,
+    body: `返信 ${i + 2}${i % 7 === 0 ? '\n高さの異なる本文'.repeat(4) : ''}`,
+  }))]
+  const base = `/api/v1/orgs/${orgId}/channels/${channelId}`
+  const far = messages[8999]!
+  const timeline: components['schemas']['TimelinePage'] = {
+    as_of_seq: 10_001, has_more: false,
+    items: [root, far, messages.at(-1)!].map(message => ({ kind: 'message', message })),
+  }
+  await page.route(`**${base}/timeline*`, route => route.fulfill({ json: timeline }))
+  // Keep the synthetic projection and subscription watermark in the same generation.
+  await page.routeWebSocket(`**/api/v1/orgs/${orgId}/ws`, ws => {
+    ws.onMessage(data => {
+      const message = JSON.parse(String(data)) as components['schemas']['ClientMessage']
+      if (message.type === 'subscribe') ws.send(JSON.stringify({
+        type: 'subscribed', channel_id: message.channel_id, caught_up_seq: 10_001,
+      } satisfies components['schemas']['Subscribed']))
+    })
+  })
+  const reads: { anchor: string; after: number }[] = []
+  let heldRead: Promise<void> | null = null
+  await page.route(`**${base}/messages/*/chain*`, async route => {
+    const url = new URL(route.request().url())
+    const after = Number(url.searchParams.get('after_seq') ?? 0)
+    reads.push({ anchor: url.pathname.split('/').at(-2)!, after })
+    const pageMessages = messages.filter(m => m.seq > after).slice(0, Number(url.searchParams.get('limit') ?? 50))
+    const data: components['schemas']['ReplyChainPage'] = {
+      root_id: root.id, messages: pageMessages, has_more: pageMessages.at(-1)!.seq < 10_001,
+    }
+    if (after === 150 && heldRead) await heldRead
+    return route.fulfill({ json: data })
+  })
+  const navigate = (id: string) => page.evaluate(url => {
+    history.replaceState(history.state, '', url)
+    dispatchEvent(new PopStateEvent('popstate'))
+  }, `/o/${orgId}/c/${channelId}?panel=reply:${id}`)
+  const frames = () => page.evaluate(() => new Promise<void>(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  }))
+  await page.goto(`/o/${orgId}/c/${channelId}`)
+  await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+  await navigate(root.id)
+  const panel = page.locator('#panel-content'), scroll = panel.locator('.reply-panel__scroll')
+  const more = panel.getByRole('button', { name: 'さらに返信を読み込む', exact: true })
+  await more.click(); await more.click()
+  expect(reads.map(r => r.after)).toEqual([0, 50, 100])
+  await scroll.evaluate(el => { el.scrollTop = el.scrollHeight / 2; el.dispatchEvent(new Event('scroll')) })
+  await frames()
+  const visibleId = await scroll.evaluate(el => {
+    const viewport = el.getBoundingClientRect()
+    return [...el.querySelectorAll<HTMLElement>('[data-message-id]')].find(row => {
+      const rect = row.getBoundingClientRect()
+      return rect.top > viewport.top + 30 && rect.bottom < viewport.bottom - 30
+    })!.dataset.messageId!
+  })
+  const target = panel.locator(`[data-message-id="${visibleId}"]`)
+  const list = await panel.locator('.reply-panel__list').elementHandle()
+  const row = await target.elementHandle()
+  const top = await scroll.evaluate(el => {
+    el.dataset.minScroll = String(el.scrollTop)
+    el.addEventListener('scroll', () => { el.dataset.minScroll = String(Math.min(Number(el.dataset.minScroll), el.scrollTop)) })
+    return el.scrollTop
+  })
+  expect(top).toBeGreaterThan(1000)
+  reads.length = 0
+  await navigate(visibleId)
+  await expect(replyComposer(page)).toBeFocused()
+  await frames()
+  await expect(target).toBeInViewport({ ratio: 1 })
+  expect(Math.abs(await scroll.evaluate(el => el.scrollTop) - top)).toBeLessThan(3)
+  expect(await scroll.evaluate(el => Number(el.dataset.minScroll))).toBeGreaterThan(top - 3)
+  expect(await list!.evaluate(el => el.isConnected)).toBe(true)
+  expect(await row!.evaluate(el => el.isConnected)).toBe(true)
+  expect(reads).toEqual([])
+
+  // Cached but unmounted targets reveal immediately, even while a prior page is stalled.
+  const offscreen = messages[20]!
+  await expect(panel.locator(`[data-message-id="${offscreen.id}"]`)).toHaveCount(0)
+  let releaseRead = () => {}
+  heldRead = new Promise<void>(resolve => { releaseRead = resolve })
+  await Promise.all([
+    page.waitForRequest(request => new URL(request.url()).searchParams.get('after_seq') === '150'),
+    more.evaluate(button => (button as HTMLButtonElement).click()),
+  ])
+  await expect.poll(() => reads.at(-1)?.after).toBe(150)
+  reads.length = 0
+  try {
+    await navigate(offscreen.id)
+    await expect(panel.locator(`[data-message-id="${offscreen.id}"]`)).toBeInViewport()
+    expect(await list!.evaluate(el => el.isConnected)).toBe(true)
+    expect(reads).toEqual([])
+  } finally { releaseRead(); heldRead = null }
+  await expect(more).toBeEnabled()
+
+  // The main projection already knows this far descendant's record, so no hint read is needed.
+  await navigate(far.id)
+  await expect(panel.locator(`[data-message-id="${far.id}"]`)).toBeInViewport()
+  await frames()
+  expect(reads).toEqual([{ anchor: far.id, after: 8975 }])
+  expect(await panel.locator('[data-message-id]').count()).toBeLessThan(40)
+  await expect(panel.getByRole('button', { name: '以前の返信を読み込む', exact: true })).toBeVisible()
+
+  // The root is an active navigation anchor even when its history body is absent.
+  reads.length = 0
+  await navigate(root.id)
+  await expect(panel.locator(`[data-message-id="${root.id}"]`)).toBeInViewport()
+  expect(reads).toEqual([])
+
+  await panel.getByRole('button', { name: 'パネルを閉じる(Esc)', exact: true }).click()
+  reads.length = 0
+  await navigate(far.id)
+  await expect(panel.locator(`[data-message-id="${far.id}"]`)).toBeInViewport()
+  await frames()
+  expect(reads).toEqual([{ anchor: far.id, after: 8975 }])
+})
+
 async function sendApiMessage(
   request: APIRequestContext,
   body: Omit<SendMessageRequest, 'client_message_id'>,
@@ -241,10 +362,7 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await expect(panelTopicRootItem.getByRole('button', { name: '返信 50件›', exact: true })).toBeVisible()
     const nestedReplyBtn = panelTopicReplyItem.getByRole('button', { name: '返信', exact: true })
     await expect(nestedReplyBtn).toBeVisible()
-    await Promise.all([
-      page.waitForResponse(r => r.url().includes('/messages/' + topicReply.id + '/chain') && r.ok()),
-      nestedReplyBtn.click(),
-    ])
+    await nestedReplyBtn.click()
     await expect(page).toHaveURL(
       new RegExp(`/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}\\?panel=reply:${topicReply.id}$`),
     )
@@ -254,18 +372,14 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
 
     // A URL-driven change to another anchor in this chain updates the controller and
     // reveals an anchor outside the mounted rows, without relying on a row click.
-    await Promise.all([
-      page.waitForResponse(r => r.url().includes('/messages/' + lastInitialTopicReply.id + '/chain') && r.ok()),
-      page.evaluate(url => {
-        history.replaceState(history.state, '', url)
-        window.dispatchEvent(new PopStateEvent('popstate'))
-      }, `/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}?panel=reply:${lastInitialTopicReply.id}`),
-    ])
+    await page.evaluate(url => {
+      history.replaceState(history.state, '', url)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }, `/o/${orgId}/c/${channelId}/t/${topicRoot.topic_id}?panel=reply:${lastInitialTopicReply.id}`)
     await expect(panel.locator(`[data-message-id="${lastInitialTopicReply.id}"]`)).toBeInViewport()
     await expect(replyComposer(page)).toBeFocused()
 
-    // Fetch the newer history explicitly; a cached recent suffix no longer bypasses Reply paging.
-    await loadMoreButton.click()
+    // Cached navigation preserves the already complete history and its continuation.
     await expect(loadMoreButton).toHaveCount(0)
     await replyComposer(page).focus()
     // ArrowUp from empty Reply Composer focuses the latest row in ReplyPanel; pressing R opens its chain and focuses Reply Composer

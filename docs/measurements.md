@@ -1014,4 +1014,29 @@ After all arrivals the visit still had boundary 0, entry Unread 1 and first-Unre
 
 The four affected Playwright specs (`message-window`, `topics`, `replies`, `unread`) passed all 11 tests against the rebuilt Rust 1.99.0 debug server and a fresh, migrated, disposable PostgreSQL 18.6 instance, using only the app role. The windowing probe sampled 13/18/12 mounted main/Topic/Reply rows, 139/188/129 descendant elements, and 652 application elements with Topic and Reply open. Reply assertions explicitly scroll to early rows and fetch newer pages before checking the latest keyboard target.
 
+### #308 same-chain anchor navigation request counts (2026-11-14 JST)
+
+Source: `codex/message-window-308`, 2a21764 plus this working tree. macOS 27.0.1 / arm64; pinned Node 26.13.0, Vitest 5.1.0, Playwright 1.65.0 / Chromium, 1440×900 viewport. Controller and browser probes ran sequentially. The production controller uses a fake counting API with a root at seq 1 and 10,000 Replies at seq 2–10,001, default 50-record pages, exclusive `after_seq` and accurate `has_more`. Counts below exclude the initial root open and explicit paging.
+
+| Navigation | Chain reads | First `after_seq` |
+| --- | ---: | ---: |
+| Cached same-chain descendant, current anchor or root | 0 | none |
+| Uncached same-chain descendant at seq 9,000 | 1 | 8,975 |
+| Fresh descendant open at seq 9,000 | 1 | 8,975 |
+
+The jump returns exactly seq 8,976–9,025, including the target and context, and exposes older history. Subsequent forward pages remain contiguous with at most 200 retained history records; older navigation restarts at 0 and forward pages from there retain seq 1–200 without a cached recent suffix replacing them. Separate assertions preserve unsettled, unknown and refused Reply intents across both cached and uncached moves, retry with the original parent/key, and discard after the outcome is known or unknown. A cached move also preserves live availability evidence and continuation, including duplicate-arrival handling.
+
+Reproduce with the pinned Node version:
+
+```bash
+npm --prefix web test -- src/replies-navigation.test.ts
+npm --prefix web run build
+cargo build --locked -p fukulow-server --bins
+DATABASE_URL=<disposable-app-role-url> E2E_PORT=<free-port> npm --prefix web run e2e -- replies.spec.ts message-window.spec.ts
+```
+
+Browser setup: throwaway Docker PostgreSQL 18.6 using the compose-pinned digest, a free loopback port, and `fukulow-server migrate roles` / `migrate` as in `.github/workflows/e2e.yml`; tests connect only as `fukulow_app`. The new replies navigation test uses the embedded production app with mocked timeline/chain responses and a matching subscription watermark for the same 10,001-record dataset. After loading 150 Replies it navigates to a fully visible cached target: scroll displacement stays below 3px, no intermediate scroll to the top occurs, both list and row DOM nodes survive, and there are zero chain/hint reads. A cached unmounted target is revealed with zero additional reads even while a previous page is stalled. An uncached target and a fresh descendant open each take one contextual read and end with the target in view. The root also remains revealable without a read outside the retained history. Existing replies and message-window workloads use real server endpoints.
+
+Negative checks temporarily substituted the original `replies.ts` from 2a21764, restoring the working source afterwards. All six navigation/retention controller regressions failed; the uncached seq-9,000 jump made 180 sequential reads (181 including the initial root open). The browser regression failed with a 109px cached-navigation scroll displacement against its <3px assertion. Limits: synthetic immutable records, one desktop browser and no request latency or server throughput measurement; these are request-count and scroll regressions. Older traversal and explicit latest navigation still use existing forward pages and can require many reads. No API or server change, body-budget increase or overscan adjustment is involved.
+
 Limits: one final controller run; these are retained-store cardinalities, not a process heap/RSS bound or a controlled latency comparison. The full fixture history, timing samples, caller-held snapshots, transient HTTP/fixture allocations and microtask-only peaks are excluded. Weak baseline-identity sets do not strongly retain old baselines. Pending sends and authored drafts remain exempt; Channel cardinality is not capped by this probe. Cursor-gap recovery, stale/denied responses, P4 merge and parent-eviction retry/discard have separate CI tests. The browser recheck proves the exercised viewport/navigation behavior, not low-end-device or production capacity.

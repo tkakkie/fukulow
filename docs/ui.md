@@ -119,6 +119,7 @@ States look the same everywhere (board A2-2):
 - Pinned = scrolled to within 64px of the bottom. When pinned, new Messages keep the view at the bottom; when not pinned, the position does not move and `新着 n件 ↓` appears.
 - Your own send scrolls to the bottom: it is your action, not an automatic follow.
 - Older pages, gap fills and reordering above the viewport keep the first visible Message at the same offset (measured anchor, not only `overflow-anchor`); focus does not move.
+- Selecting another Message in the same Reply chain reveals that row. A cached target already fully in view keeps the scroll position and virtual list; an offscreen target is mounted before revealing it. The active navigation anchor remains available separately from bounded history.
 - On entering the main timeline or a トピック view, the entry boundary is that scope's read position at entry. If an other-sender Message exists above the boundary, older projection pages load until that first Unread Message is in the window, the view opens positioned at it, and `ReadMarker` (`未読`) is shown above it for the whole visit while the read position advances. With no Unread, the view opens pinned at the bottom with no marker.
 - A confirmed Message of the active scope is marked presented when its row is inside the timeline viewport while that view is selected and `document.visibilityState === 'visible'`. Hidden tabs, main-timeline `TopicSummaryLine` rows and `ReplyPanel` never advance read positions.
 

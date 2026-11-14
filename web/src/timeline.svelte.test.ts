@@ -4743,7 +4743,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
     navigation.navigate({ type: 'reply', messageId: r1.id })
     flushSync(); await settle(); flushSync()
     expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
-    expect(net.replyHistory).toHaveLength(reads + 1)
+    expect(net.replyHistory).toHaveLength(reads)
     // Rendering and live eviction of that anchor's body must not reopen the chain.
     for (let seq = 4; seq <= 254; seq++) net.event({ type: 'message', message: {
       ...record(seq, 'c1'), sender: 'other', reply_to: mRoot.id, reply_root_id: mRoot.id,
@@ -4751,7 +4751,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
     await settle(); flushSync()
     expect(rawSession.replies.get('c1').messages.some(m => m.id === r1.id)).toBe(false)
     expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
-    expect(net.replyHistory).toHaveLength(reads + 1)
+    expect(net.replyHistory).toHaveLength(reads)
 
     navigation.destroy()
     await unmount(instance)
