@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 mod concurrency;
+mod filtered_paging;
 mod integrity;
 mod paging;
 mod reclamation;
