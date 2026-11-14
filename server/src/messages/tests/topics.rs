@@ -1,6 +1,7 @@
 use super::*;
 
 mod measurement;
+mod plan_cache;
 
 pub(super) fn topic_input(key: Uuid, name: &str) -> Value {
     json!({"client_message_id": key, "body": "Topic Message", "topic_name": name})

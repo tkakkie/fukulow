@@ -821,6 +821,29 @@ The maintainer accepted the current RLS policies with this regression as a **one
 - Current policies stay; candidates a/b/c are not adopted; no optimisation may weaken the security guarantees.
 - Follow-ups: fan-out `access_rows`/`member_access` (#354), Unread list/counts (#355), Unread Topic-count `seq` index bound (#356), History re-measurement on a stable host with realistic API-path load and query-level improvements (#357). The timeline Generic-plan cost, increased by RLS, stays tracked in #326.
 
+## Timeline statement persistence (#326, 2026-11-14)
+
+Purpose: prevent the shared timeline/single-Topic projection from switching to its expensive generic plan. Source: 6a87a35 plus this fix; SQL, RLS, Unread counts, indexes and responses unchanged.
+
+Conditions: Apple M5 / 10 CPUs / 32 GiB, macOS 27.0.1 arm64; Docker 29.9.3 VM 10 CPUs / 7.748 GiB; PostgreSQL 18.6 (Debian aarch64), default shared_buffers 128MB / work_mem 4MB; Rust 1.99.0 release, SQLx 0.8.6, loopback TCP. Fresh throwaway database with current migrations/grants and unchanged `load/hot-plans/seed.sql` (#325 dataset): hot Channel 100,000 Messages, 70,000 in 2,000 Topics; Org A 10,000 Members / 50 Channels, Org B 1,000 Members / 10 Channels; 406,800 Channel positions and 2,000 measured-Member Topic positions. Current RLS enabled throughout; measured role is non-owner, NOBYPASSRLS `fukulow_app` with transaction-local Organization context.
+
+Reproduce: migrate/grant/seed a throwaway PostgreSQL 18.6 as owner, supply its app-role `DATABASE_URL`, then run `cargo test --release -p fukulow-server --lib measure_timeline_plan_cache -- --ignored --nocapture`. The ignored probe uses production `page_sql()` and the handler's nine bindings (latest limit 51; single Topic: Topics only / limit 2). Each run holds one pooled connection for before/custom/after, clearing its statement cache between modes to represent fresh deployment connections. Each mode/variant uses REPEATABLE READ READ ONLY and the production Organization-setting helper; ten warm-ups precede 30 timed fetches. Before switches naturally to generic (35 generic / 5 custom executions after latest sampling); reference forces custom only on this measurement connection; after uses auto/non-persistent. Nearest-rank wall p50/p95 include planning, preparation and fetching, excluding transaction/context round trips, HTTP and watermark work. Buffers are root execution shared hits from a subsequent warm EXPLAIN ANALYZE BUFFERS of the cached statement (before/reference) or non-persistent query (after); planning excluded, shared reads zero in every run.
+
+| Query / mode | p50 ms, runs 1 / 2 / 3 | p95 ms, runs 1 / 2 / 3 | Shared hits (all runs) |
+|---|---:|---:|---:|
+| Latest before, cached auto | 232.523 / 181.056 / 211.756 | 482.668 / 316.425 / 292.309 | 502617 |
+| Latest custom reference | 31.143 / 23.510 / 28.163 | 47.813 / 26.165 / 33.014 | 3478 |
+| Latest after, non-persistent auto | 24.219 / 22.628 / 29.941 | 29.557 / 24.077 / 47.700 | 3478 |
+| Single Topic before, cached auto | 13.062 / 13.680 / 10.628 | 48.023 / 25.686 / 15.851 | 12409 |
+| Single Topic custom reference | 1.185 / 0.784 / 1.251 | 1.581 / 1.203 / 3.557 | 267 |
+| Single Topic after, non-persistent auto | 1.587 / 1.092 / 1.356 | 2.010 / 1.399 / 2.043 | 267 |
+
+Chosen option: `.persistent(false)` on this query only, avoiding SET LOCAL's extra round trip while leaving Unread statement caching unchanged. The projection disappears from `pg_prepared_statements` in every after sample and retains custom-range buffer use. The non-ignored `timeline_and_single_topic_never_cache_a_generic_plan` guard runs both production handlers 12 times each through restricted-role RLS on one reused backend and checks no projection is retained. Temporarily removing `.persistent(false)` makes it fail with one cached projection; restoring it passes. Existing response/paging/denial/Unread tests are unchanged; full server fmt/clippy/tests passed (613 passed, 15 ignored).
+
+Acceptance (p95 against the same run's forced-custom p95; the earlier "single Topic below 1 ms" target came from EXPLAIN Execution Time and does not apply to wall time, which includes planning and fetching): latest 0.62 / 0.92 / 1.44, single Topic 1.27 / 1.16 / 0.57, all within 1.5x. Before was 10x (latest) and 12x (single Topic) slower than custom.
+
+Limits: other AI workers ran builds and tests on this shared host during all three runs, so absolute numbers are noisy (run 3 latest p95 47.7 ms); the ratios hold in every run. Statement fetches only, not endpoint latency or capacity. The custom plan still aggregates the Channel's immutable prefix; Channel-size growth is a separate Backlog Issue because current `topics.last_seq` cannot enumerate Topics moved after W. Raw logs stay outside Git in `/private/tmp/fukulow-326/`.
+
 ## Sign-in admission under a credential flood (#196 C, 2026-11-13 JST)
 
 Reproduce from the repository root, one run at a time, nothing else running (add `LOAD_MALLOC_MMAP_THRESHOLD=131072` for the allocator check):
