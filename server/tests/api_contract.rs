@@ -28,6 +28,44 @@ const HTTP_METHODS: [&str; 8] = [
 const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 232;
 
 #[test]
+fn mention_contract_requires_one_shared_set_and_nonnegative_counts() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        let schemas = &document["components"]["schemas"];
+        assert!(
+            schemas["Message"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("mentions"))
+        );
+        assert_eq!(
+            schemas["Message"]["properties"]["mentions"]["items"]["$ref"],
+            "#/components/schemas/Mention"
+        );
+        assert_eq!(schemas["Mention"]["required"], json!(["member_id", "name"]));
+        let channel = &schemas["UnreadChannel"]["allOf"][1];
+        for (shape, field) in [
+            (channel, "mention_unread_count"),
+            (channel, "main_mention_unread_count"),
+            (&schemas["TopicSummary"], "mention_unread_count"),
+        ] {
+            assert!(
+                shape["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field))
+            );
+            assert_eq!(shape["properties"][field]["minimum"], 0);
+        }
+        let event_names = schemas["ServerEvent"]["discriminator"]["mapping"]
+            .as_object()
+            .unwrap();
+        assert!(!event_names.keys().any(|name| name.contains("mention")));
+    }
+}
+
+#[test]
 fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
@@ -668,6 +706,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         topic_id: None,
         reply_to: None,
         reply_root_id: None,
+        mentions: Vec::new(),
     };
     assert_eq!(
         serde_json::to_value(&message).unwrap()["topic_id"],
@@ -914,7 +953,7 @@ fn topic_openapi_contract_includes_all_shapes_and_discriminators() {
             .as_array()
             .unwrap()
             .len(),
-        8
+        9
     );
     for (route, shape) in [
         ("timeline", "TimelinePage"),

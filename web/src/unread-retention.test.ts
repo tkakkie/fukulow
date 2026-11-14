@@ -52,7 +52,7 @@ it('retains only Message identity and sequence metadata without holding display 
   await c.boot([source])
   expect(c.records.size).toBeGreaterThan(0)
   const retained = c.records.get(1)!
-  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'id', 'sender', 'seq', 'topic_id'])
+  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'id', 'mentions', 'sender', 'seq', 'topic_id'])
   expect(source.body).toBeDefined()
   expect(retained).not.toBe(source)
   c.close()
@@ -71,10 +71,10 @@ it('skips own Message bookkeeping and still advances across own rows to a presen
 })
 
 it.each([
-  { name: 'baseline subtraction and future reads', baseline: { asOfSeq: 8, readSeq: 3, count: 4 }, aggregate: Infinity, visit: Infinity, first: 4 },
-  { name: 'aggregate held suffix', baseline: { asOfSeq: 8, readSeq: 8, count: 0 }, aggregate: 3, visit: Infinity, first: 4 },
-  { name: 'fixed visit', baseline: { asOfSeq: 8, readSeq: 8, count: 0 }, aggregate: Infinity, visit: 3, first: 4 },
-  { name: 'unresolved visit', baseline: { asOfSeq: 8, readSeq: 8, count: 0 }, aggregate: Infinity, visit: 0, first: 1 },
+  { name: 'baseline subtraction and future reads', baseline: { asOfSeq: 8, readSeq: 3, count: 4, mentionCount: 0 }, aggregate: Infinity, visit: Infinity, first: 4 },
+  { name: 'aggregate held suffix', baseline: { asOfSeq: 8, readSeq: 8, count: 0, mentionCount: 0 }, aggregate: 3, visit: Infinity, first: 4 },
+  { name: 'fixed visit', baseline: { asOfSeq: 8, readSeq: 8, count: 0, mentionCount: 0 }, aggregate: Infinity, visit: 3, first: 4 },
+  { name: 'unresolved visit', baseline: { asOfSeq: 8, readSeq: 8, count: 0, mentionCount: 0 }, aggregate: Infinity, visit: 0, first: 1 },
   { name: 'missing baseline', baseline: undefined, aggregate: 8, visit: Infinity, first: 1 },
 ])('keeps the first row inside the $name window and excludes its boundary', ({ baseline, aggregate, visit, first }) => {
   expect(needsUnreadRecord(first - 1, baseline, aggregate, visit)).toBe(false)

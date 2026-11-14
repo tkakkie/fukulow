@@ -8,6 +8,7 @@ export async function checkHealth(fetchFn: typeof fetch = fetch): Promise<boolea
   }
 }
 
+import { rememberIdentityResponse } from './identity-order'
 import type { components } from './api-schema'
 
 export type AccountIdentity = components['schemas']['AccountIdentity']
@@ -43,7 +44,9 @@ async function call<T>(
         ...(res.status === 429 ? { retryAfterMs: Number.isSafeInteger(delay) && delay >= 1000 ? delay : 1000 } : {}) }
     }
     if (successStatus !== undefined && res.status !== successStatus) return { ok: false, kind: 'network' }
-    return { ok: true, data: (parse ? await res.json() : undefined) as T }
+    const data = (parse ? await res.json() : undefined) as T
+    rememberIdentityResponse(data)
+    return { ok: true, data }
   } catch {
     return { ok: false, kind: 'network' }
   }

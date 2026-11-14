@@ -6,9 +6,52 @@ import { deferred, msg, ok, page, summary, topicClient } from './topic-test-help
 import { createTopics } from './topics'
 import { selectMainTimeline } from './topic-selectors'
 import { windowClient } from './message-window-test-helpers'
+import { rememberIdentityResponse } from './identity-order'
+import { mentionText } from './mentions'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
+
+it('Topic projections refresh same-Message Mention names independently of count baselines', async () => {
+  const target = '123e4567-e89b-12d3-a456-426614174000'
+  const message = (name: string) => ({ ...msg(8, 'T'), body: `@{member:${target}}`, mentions: [{ member_id: target, name }] })
+  const initial = { ...summary('T', 8, 3), latest_message: message('Old name'), unread_count: 2, mention_unread_count: 1 }
+  rememberIdentityResponse(initial)
+  const c = topicClient()
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 10, has_more: false,
+    items: [{ kind: 'topic', topic: initial }, { kind: 'message', message: msg(10) }] }))
+  try {
+    await c.boot()
+    const expectPreview = (name: string) => {
+      const snapshot = c.topics.get('A')
+      for (const lines of [snapshot.lines, snapshot.topics]) {
+        const line = lines.find(l => l.kind === 'topic' && l.topicId === 'T')!
+        expect(line.kind).toBe('topic')
+        if (line.kind !== 'topic') throw new Error('missing Topic projection')
+        expect(mentionText(line.latestMessage.body, line.latestMessage.mentions)).toBe(`@${name}`)
+        expect(line).toMatchObject({ position: 8, messageCount: 3, baseline: { asOfSeq: 10, summary: { unread_count: 2, mention_unread_count: 1 } } })
+      }
+    }
+    expectPreview('Old name')
+    c.handlers[0].onEvent({ type: 'message', message: message('Live rename') })
+    await flush()
+    expectPreview('Live rename')
+
+    // A later authorized response can have an older count snapshot.
+    const refetched = { ...initial, latest_message: message('Refetched rename'), unread_count: 3, mention_unread_count: 2 }
+    rememberIdentityResponse(refetched)
+    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 9, topics: [refetched], has_more: false }))
+    await c.topics.loadList('A')
+    expectPreview('Refetched rename')
+
+    const newer = message('Newest name')
+    rememberIdentityResponse(newer)
+    for (const [live, cached] of [[newer, initial.latest_message], [initial.latest_message, newer]]) {
+      const line = selectMainTimeline([live], [cached], [{ asOfSeq: 10, summary: initial }])[0]
+      expect(line.kind === 'topic' && mentionText(line.latestMessage.body, line.latestMessage.mentions)).toBe('@Newest name')
+    }
+  } finally { c.topics.close(); await c.sync.close() }
+})
 
 it('bounds repeated stale successful summaries after arrivals checkpoint their evidence', async () => {
   const c = topicClient()

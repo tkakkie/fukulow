@@ -37,6 +37,8 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 | Only Vite manifest assets get immutable caching; HTML/fallback/unhashed files revalidate; API remains no-store | `server/src/lib.rs::html_and_unhashed_files_revalidate_and_hashed_assets_are_immutable`, `server/src/lib.rs::security_headers_cover_success_errors_and_fallbacks` |
 | Membership/manager PATCH and Capabilities are generated; Channel members expose manager, no email/credentials; loss-event data is channel_id only | `server/tests/api_contract.rs::channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated` |
 
+| Shared Message.mentions and Channel/Topic Mention counts are required in generated OpenAPI; counts are nonnegative; no Mention event exists | `server/tests/api_contract.rs::mention_contract_requires_one_shared_set_and_nonnegative_counts` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

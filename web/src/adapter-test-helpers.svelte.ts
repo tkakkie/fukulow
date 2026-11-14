@@ -93,6 +93,7 @@ export function fakeNetwork() {
       } else {
         const prev = byTopic.get(m.topic_id)
         byTopic.set(m.topic_id, {
+          mention_unread_count: 0,
           id: m.topic_id,
           name: prev?.name ?? m.topic_id,
           first_seq: prev?.first_seq ?? m.seq,
@@ -121,6 +122,7 @@ export function fakeNetwork() {
       page?.ok ? (page.data.messages.at(-1)?.seq ?? 0) : 0,
     )
     return {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       id,
       name: id,
       visibility: 'public',

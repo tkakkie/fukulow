@@ -53,6 +53,12 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 | Web Topic sends reject P7 reply_to+topic_name, keep topic_name on C6 retry, validate 1..60 OpenAPI scalars, and scope topic_not_found to that Topic | `web/src/messages-body.test.ts::matches openapi.json SendMessageRequest.topic_name rules`, `web/src/messages-body.test.ts::protocol rejects reply_to combined with topic_name (P7) and preserves topic_name on C6 retry`, `web/src/topics.test.ts::records notFound per Topic on 404 topic_not_found for summary and Topic history reads` |
 | Web preserves 429 ErrorBody and Retry-After; invalid/missing whole seconds >= 1 falls back to 1 s | `web/src/api.test.ts::preserves 429 ErrorBody and Retry-After with a safe one-second fallback`, `web/src/api.test.ts::retains the 429 delay even when ErrorBody is malformed` |
 
+| Mention tokens are exact lower-case UUIDs; persisted sorted sets alone resolve current names on every shared Message read | `server/src/messages/tests/mentions.rs::mention_exact_syntax_deduplicates_sorts_and_preserves_plain_text`, `server/src/messages/tests/mentions.rs::mention_shared_surfaces_keep_sets_and_follow_non_author_rename` |
+| Mention targets need active same-Organization Channel access; denied tokens disclose no identity, row or count and do not refuse ordinary sends | `server/src/messages/tests/mentions/denials.rs::mention_denies_private_owner_without_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_private_admin_without_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_private_member_without_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_guest_without_public_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_guest_without_private_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_foreign_target`, `server/src/messages/tests/mentions/denials.rs::mention_denies_nonexistent_target`, `server/src/messages/tests/mentions/denials.rs::mention_denies_inactive_target`, `server/src/messages/tests/mentions/denials.rs::mention_denies_stale_private_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_stale_guest_public_grant` |
+| Message, Mention set, Topic and seq are atomic; matching retries retain original acceptance after target loss and recover unknown COMMIT | `server/src/messages/tests/mentions.rs::mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic`, `server/src/messages/tests/mentions/ordering.rs::mention_send_before_revoke_or_deactivate_holds_authority_through_commit` |
+| Sends lock sorted Members before grants, retain target authority through COMMIT, and recheck concurrent loss before accepting Mentions | `server/src/messages/tests/mentions/ordering.rs::mention_waiting_acceptance_rechecks_committed_role_revision_revocation_and_activity`, `server/src/messages/tests/mentions/ordering.rs::mention_reciprocal_reversed_targets_and_database_duplicates_do_not_deadlock`, `server/src/messages/tests/mentions/ordering.rs::mention_revoke_or_deactivate_before_acceptance_is_silently_omitted` |
+| Mention migration accepts no historical tokens; scoped FKs and one row per Message/Member enforce integrity; Message deletion cascades | `server/src/messages/tests/mentions.rs::mention_migration_has_no_backfill_and_enforces_scoped_keys_and_cascade` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
@@ -71,3 +77,9 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [channels](channels.md): `guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_keeps_past_authors`
 - [web](web.md): `Guest Workspace resolves Member list then author lookup then fallback in timeline and announcements`
+
+- [deployment](deployment.md): `mention_contract_requires_one_shared_set_and_nonnegative_counts`
+- [realtime](realtime.md): `mention_live_and_replay_follow_current_names_and_never_accept_later_grants`, `mention_lost_channel_live_and_fetched_replay_never_handoff_identities`
+- [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`, `mention_counts_missing_position_suppresses_only_its_channel_without_writes`, `mention_access_loss_removes_counts_and_regrant_never_resurrects_them`
+
+- [web](web.md): `Mention components render accepted tokens highlight the reader and follow authorized non-author renames without resolving rejected tokens`

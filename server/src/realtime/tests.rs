@@ -1155,6 +1155,7 @@ mod replies;
 pub(super) mod access_loss;
 
 mod account_security;
+mod mentions;
 mod round_trips;
 
 mod activity;

@@ -21,6 +21,19 @@ describe('pure protocol shared client fixtures', () => {
 import { initialState, step, type Input, type Effect, type State } from './protocol'
 import { record } from './protocol-test-helpers'
 
+it('keeps duplicate Mention arrays stable and accepts a refreshed display name', () => {
+  const d = boot()
+  const input = (name: string): Input => ({ type: 'event', connection: d.connection,
+    event: { type: 'message', message: { ...record(100), mentions: [{ member_id: 'target', name }] } } })
+  const accepted = step(d.get(), input('Original')).state
+  const duplicate = step(accepted, input('Original'))
+  expect(duplicate.state).toBe(accepted)
+  expect(duplicate.changedChannels.size).toBe(0)
+  const renamed = step(accepted, input('Renamed'))
+  expect(renamed.changedChannels).toEqual(new Set(['A']))
+  expect(renamed.state.channels.A.messages[0].mentions[0].name).toBe('Renamed')
+})
+
 function boot() {
   let state = initialState('me')
   const feed = (input: Input) => {

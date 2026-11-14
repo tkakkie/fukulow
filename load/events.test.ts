@@ -17,7 +17,7 @@ test('Message load accepts the automatic ready frame and notices without countin
   for (const event of [
     { type: 'message', message: { id: 'm', channel_id: 'c', client_message_id: 'key', sender: 'member',
       body: 'Load test message', seq: 1, created_at: '2026-11-14T00:00:00Z',
-      topic_id: null, reply_to: null, reply_root_id: null } },
+      topic_id: null, reply_to: null, reply_root_id: null, mentions: [] } },
     { type: 'subscribed', channel_id: 'c', caught_up_seq: 0 },
     { type: 'channel_access_lost', channel_id: 'c' },
     { type: 'error', channel_id: 'c', code: 'channel_not_found' },

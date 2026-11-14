@@ -16,6 +16,9 @@ pub struct TopicSummary {
     pub read_seq: i64,
     /// Other senders' Messages above read_seq, bounded by the enclosing as_of_seq.
     pub unread_count: i64,
+    /// Messages mentioning the reader above this Topic's read position.
+    #[schema(minimum = 0)]
+    pub mention_unread_count: i64,
     pub latest_message: Message,
 }
 
@@ -193,6 +196,7 @@ pub async fn topic_history(
             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
             ORDER BY seq {order} LIMIT $5"
         );
+        let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
         let mut messages = sqlx::query_as::<_, Message>(&sql)
             .bind(organization)
             .bind(channel)

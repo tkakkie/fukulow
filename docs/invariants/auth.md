@@ -101,3 +101,7 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [realtime](realtime.md): `private_channel_activity_skips_non_members`
 - [channels](channels.md): `guest_directory_denies_unrelated_ungranted_public_private_and_stale_grants`, `guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_keeps_past_authors`, `directory_full_roles_keep_exact_bytes_name_id_order_and_organization_isolation`, `directory_reads_fresh_role_after_auth_and_keeps_inactive_stale_caller_denials`, `guest_directory_role_grants_and_results_share_one_nonlocking_snapshot`
+
+- [messages](messages.md): `mention_denies_private_owner_without_grant`, `mention_waiting_acceptance_rechecks_committed_role_revision_revocation_and_activity`
+- [unread](unread.md): `mention_access_loss_removes_counts_and_regrant_never_resurrects_them`
+- [realtime](realtime.md): `mention_lost_channel_live_and_fetched_replay_never_handoff_identities`

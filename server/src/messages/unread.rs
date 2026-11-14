@@ -13,6 +13,10 @@ pub struct UnreadChannel {
     pub main_unread_count: i64,
     /// Channel badge: main-timeline Unread plus all Topic Unread, bounded by as_of_seq.
     pub unread_count: i64,
+    #[schema(minimum = 0)]
+    pub main_mention_unread_count: i64,
+    #[schema(minimum = 0)]
+    pub mention_unread_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -43,25 +47,32 @@ SELECT c.channel_id, COALESCE(s.seq, 0) AS as_of_seq,
     COALESCE(p.read_seq, s.seq, 0) AS read_seq,
     p.channel_id IS NULL AS missing_position,
     main.unread_count AS main_unread_count,
-    main.unread_count + topic.unread_count AS unread_count
+    main.unread_count + topic.unread_count AS unread_count,
+    main.mention_unread_count AS main_mention_unread_count,
+    main.mention_unread_count + topic.mention_unread_count AS mention_unread_count
 FROM unnest($4::uuid[]) c(channel_id)
 LEFT JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $2
     AND p.membership_revision = $3 AND p.channel_id = c.channel_id
 LEFT JOIN channel_message_sequences s ON s.organization_id = $1 AND s.channel_id = c.channel_id
 CROSS JOIN LATERAL (
-    SELECT count(*) AS unread_count FROM messages m
+    SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count FROM messages m
+    LEFT JOIN message_mentions mm ON mm.organization_id=$1 AND mm.member_id=$2
+        AND mm.channel_id=m.channel_id AND mm.message_id=m.id
     WHERE p.channel_id IS NOT NULL AND m.organization_id = $1 AND m.channel_id = c.channel_id
-        AND m.topic_id IS NULL AND m.seq > p.read_seq AND m.sender <> $2
+        AND m.topic_id IS NULL AND m.seq > p.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
 ) main
 CROSS JOIN LATERAL (
-    SELECT COALESCE(sum(unread.unread_count), 0)::bigint AS unread_count
+    SELECT COALESCE(sum(unread.unread_count), 0)::bigint AS unread_count,
+        COALESCE(sum(unread.mention_unread_count), 0)::bigint AS mention_unread_count
     FROM topics t
     LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = c.channel_id
         AND tr.member_id = $2 AND tr.topic_id = t.id
     CROSS JOIN LATERAL (
-        SELECT count(*) AS unread_count FROM messages m
+        SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count FROM messages m
+        LEFT JOIN message_mentions mm ON mm.organization_id=$1 AND mm.member_id=$2
+            AND mm.channel_id=m.channel_id AND mm.message_id=m.id
         WHERE m.organization_id = $1 AND m.channel_id = c.channel_id AND m.topic_id = t.id
-            AND m.seq > COALESCE(tr.read_seq, p.initial_seq) AND m.sender <> $2
+            AND m.seq > COALESCE(tr.read_seq, p.initial_seq) AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
     ) unread
     WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
         AND t.last_seq > COALESCE(tr.read_seq, p.initial_seq)
@@ -114,12 +125,14 @@ pub async fn list_channels(
                     row.try_get::<i64, _>("read_seq")?,
                     row.try_get::<i64, _>("main_unread_count")?,
                     row.try_get::<i64, _>("unread_count")?,
+                    row.try_get::<i64, _>("main_mention_unread_count")?,
+                    row.try_get::<i64, _>("mention_unread_count")?,
                 ),
             );
         }
         let mut result = Vec::with_capacity(channels.len());
         for channel in channels {
-            let (as_of_seq, read_seq, main_unread_count, unread_count) =
+            let (as_of_seq, read_seq, main_unread_count, unread_count, main_mention_unread_count, mention_unread_count) =
                 counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
             result.push(UnreadChannel {
                 channel,
@@ -127,6 +140,8 @@ pub async fn list_channels(
                 read_seq,
                 main_unread_count,
                 unread_count,
+                main_mention_unread_count,
+                mention_unread_count,
             });
         }
         Ok((

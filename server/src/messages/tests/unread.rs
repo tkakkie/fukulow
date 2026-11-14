@@ -34,6 +34,26 @@ async fn post(app: &Router, token: &str, channel: Uuid, topic: Option<&str>) -> 
     .await
 }
 
+// Historical migration fixtures predate today's Message response schema.
+async fn historical_post(
+    pool: &PgPool,
+    org: Uuid,
+    sender: Uuid,
+    channel: Uuid,
+    topic: Option<&str>,
+) {
+    let seq:i64=sqlx::query_scalar("INSERT INTO channel_message_sequences VALUES ($1,$2,1) ON CONFLICT (organization_id,channel_id) DO UPDATE SET seq=channel_message_sequences.seq+1 RETURNING seq")
+        .bind(org).bind(channel).fetch_one(pool).await.unwrap();
+    let topic = if let Some(name) = topic {
+        Some(sqlx::query_scalar::<_,Uuid>("INSERT INTO topics (organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES ($1,$2,gen_random_uuid(),$3,$4,$4,1) ON CONFLICT (organization_id,channel_id,name_key) DO UPDATE SET last_seq=$4,message_count=topics.message_count+1 RETURNING id")
+            .bind(org).bind(channel).bind(name).bind(seq).fetch_one(pool).await.unwrap())
+    } else {
+        None
+    };
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES ($1,gen_random_uuid(),$2,$3,$4,gen_random_uuid(),'Historical fixture',$5)")
+        .bind(org).bind(channel).bind(seq).bind(sender).bind(topic).execute(pool).await.unwrap();
+}
+
 async fn topics(app: &Router, token: &str, channel: Uuid) -> Value {
     get_projection(app, token, channel, "topics").await
 }
@@ -244,12 +264,12 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
     let (app, org, owner_id, channel, owner) = fixture(&pool).await;
     let viewer_id = Uuid::new_v4();
     let viewer = member(&pool, org, viewer_id).await;
-    post(&app, &owner, channel, Some("A")).await;
-    post(&app, &owner, channel, Some("B")).await;
-    post(&app, &owner, channel, None).await;
+    historical_post(&pool, org, owner_id, channel, Some("A")).await;
+    historical_post(&pool, org, owner_id, channel, Some("B")).await;
+    historical_post(&pool, org, owner_id, channel, None).await;
     let private = Uuid::new_v4();
     super::channel(&pool, org, private, owner_id, true).await;
-    post(&app, &owner, private, Some("Private")).await;
+    historical_post(&pool, org, owner_id, private, Some("Private")).await;
     sqlx::raw_sql(include_str!("../../../migrations/202611110199_unread.sql"))
         .execute(&pool)
         .await

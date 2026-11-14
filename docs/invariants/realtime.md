@@ -67,6 +67,9 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 | Role/deactivation directory notices reach non-Guests; unrelated Guests receive no notice | `server/src/realtime/tests/activity.rs::role_change_and_deactivation_notify_members_changed_per_directory_rule` |
 | Guest directory notices follow shared usable grants; old authorized notices cannot survive directory loss, while fresh notices reach Guests | `server/src/realtime/tests/activity.rs::guest_directory_notices_follow_shared_grants_and_deny_unrelated_guests`, `server/src/realtime/tests/activity.rs::guest_directory_loss_discards_older_authorized_notice_but_keeps_fresh_publication` |
 
+| Live/replay resolve current names for persisted Mention ids only; rejected tokens stay literal after later grants, including canonical retry | `server/src/realtime/tests/mentions.rs::mention_live_and_replay_follow_current_names_and_never_accept_later_grants` |
+| Observed access loss fences queued live/fetched replay Mention ids and names; authorized readers and other Channels retain ordinary delivery | `server/src/realtime/tests/mentions.rs::mention_lost_channel_live_and_fetched_replay_never_handoff_identities` |
+
 ## Rows in other parts
 
 - [deployment](deployment.md): `pool_configuration_defaults_bounds_and_overrides`, `both_barriers_set_transaction_local_timeouts`
@@ -87,3 +90,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [channels](channels.md): `channel_manager_creation_management_and_capabilities_match_authorize`, `channel_manager_denial_matrix_preserves_grants_unread_and_notifications`, `channel_manager_rechecks_right_grant_role_and_revision_after_auth`, `channel_manager_last_manager_denials_and_unmanaged_controls`, `channel_manager_role_changes_are_atomic_and_preserve_grant_subscription_and_unread`, `channel_manager_new_lifetimes_never_revive_right_or_old_subscription`, `channel_manager_invite_reactivation_leaves_stale_right_unusable_and_renewal_clears_it`, `channel_manager_inactive_and_stale_rights_never_count_as_managers`, `channel_manager_migration_has_no_backfill_and_rejects_public_or_guest_rights`, `channel_manager_concurrent_revoke_leave_role_and_removal_preserve_manager`, `channel_manager_mutation_locks_members_before_grants`
 
 - [auth](auth.md): `password_change_http_cancellation_finishes_commit_and_all_signals`, `password_change_closes_other_cookie_bearer_idle_and_replaying_sockets_only`
+
+- [unread](unread.md): `Mention notices only refetch both fields coalesce duplicates and keep Topic coverage independent from aggregate`

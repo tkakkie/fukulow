@@ -32,8 +32,8 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     let mut queue = delivery.queue(org, (viewer_id, 0), 256);
     queue.subscribe(channel);
     let app = crate::app(state);
-    let before_main = post(&app, &owner, channel, None).await;
-    let before_topic = post(&app, &owner, channel, Some("Hidden")).await;
+    let before_main = mention_post(&app, &owner, channel, viewer_id, None).await;
+    let before_topic = mention_post(&app, &owner, channel, viewer_id, Some("Hidden")).await;
     let gate = Arc::new(ListGate {
         entered: Semaphore::new(0),
         release: Semaphore::new(0),
@@ -48,8 +48,8 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     // These commits complete while the actual REST handler is paused between
     // visibility and counts. Neither counts nor positions may see them.
     let (after_main, after_topic) = tokio::time::timeout(Duration::from_secs(5), async {
-        let main = post(&app, &owner, channel, None).await;
-        let topic = post(&app, &owner, channel, Some("Hidden")).await;
+        let main = mention_post(&app, &owner, channel, viewer_id, None).await;
+        let topic = mention_post(&app, &owner, channel, viewer_id, Some("Hidden")).await;
         mark(&app, &viewer, channel, None, 4).await;
         (main, topic)
     })
@@ -73,6 +73,8 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     assert_eq!(c["read_seq"], 0);
     assert_eq!(c["main_unread_count"], 1);
     assert_eq!(c["unread_count"], 2);
+    assert_eq!(c["main_mention_unread_count"], c["main_unread_count"]);
+    assert_eq!(c["mention_unread_count"], 2);
     let baseline = c["as_of_seq"].as_i64().unwrap();
     for message in [before_main, before_topic] {
         assert!(message["seq"].as_i64().unwrap() <= baseline);
@@ -138,7 +140,7 @@ async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(
     let (app, org, _, channel, owner) = fixture(&pool).await;
     let viewer_id = Uuid::new_v4();
     let viewer = member(&pool, org, viewer_id).await;
-    post(&app, &owner, channel, None).await;
+    mention_post(&app, &owner, channel, viewer_id, None).await;
     let gate = Arc::new(ListGate {
         entered: Semaphore::new(0),
         release: Semaphore::new(0),
@@ -150,7 +152,7 @@ async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(
         _ = &mut old => panic!("old list did not pause after its snapshot started"),
         permit = tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire()) => permit.unwrap().unwrap().forget(),
     }
-    let message = post(&app, &owner, channel, None).await;
+    let message = mention_post(&app, &owner, channel, viewer_id, None).await;
     let fresh_app = router(&pool).await;
     let newer = channels(&fresh_app, &viewer).await;
     mark(&app, &viewer, channel, None, 2).await;
@@ -168,9 +170,22 @@ async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(
     assert_eq!(newer["as_of_seq"], message["seq"]);
     assert_eq!(newer["as_of_seq"], 2);
     assert_eq!(newer["unread_count"], 2);
+    assert_eq!(old["mention_unread_count"], 1);
+    assert_eq!(newer["mention_unread_count"], 2);
     assert_eq!(read["as_of_seq"], newer["as_of_seq"]);
     assert_eq!(read["read_seq"], 2);
     assert_eq!(read["unread_count"], 0);
+    assert_eq!(read["mention_unread_count"], 0);
     // These real responses supply the two ordering keys for #143's proposed
     // client fixture: larger as_of_seq, then larger read_seq for equal baselines.
+}
+
+async fn mention_post(
+    app: &Router,
+    author: &str,
+    channel: Uuid,
+    target: Uuid,
+    topic: Option<&str>,
+) -> Value {
+    sent(app,author,channel,json!({"client_message_id":Uuid::new_v4(),"body":format!("@{{member:{target}}}"),"topic_name":topic})).await
 }

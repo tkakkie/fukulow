@@ -23,7 +23,9 @@ mod commit;
 mod delivery;
 mod failure;
 mod limiter;
+mod mentions;
 pub use limiter::SendLimit;
+pub use mentions::Mention;
 pub(crate) mod replies;
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub(crate) mod topics;
@@ -46,7 +48,7 @@ pub use unread::{
     mark_topic_read,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Message {
     pub id: Uuid,
     pub channel_id: Uuid,
@@ -67,6 +69,33 @@ pub struct Message {
     /// Stable root even when the parent is outside the loaded window; null for a non-Reply.
     #[schema(required = true)]
     pub reply_root_id: Option<Uuid>,
+    /// Persisted accepted ids, sorted by UUID, with current retained display names.
+    pub mentions: Vec<Mention>,
+}
+
+impl sqlx::FromRow<'_, sqlx::postgres::PgRow> for Message {
+    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let mentions: String = row.try_get("mentions")?;
+        Ok(Self {
+            id: row.try_get("id")?,
+            channel_id: row.try_get("channel_id")?,
+            seq: row.try_get("seq")?,
+            client_message_id: row.try_get("client_message_id")?,
+            sender: row.try_get("sender")?,
+            body: row.try_get("body")?,
+            created_at: row.try_get("created_at")?,
+            topic_id: row.try_get("topic_id")?,
+            reply_to: row.try_get("reply_to")?,
+            reply_root_id: row.try_get("reply_root_id")?,
+            mentions: serde_json::from_str(&mentions).map_err(|error| {
+                sqlx::Error::ColumnDecode {
+                    index: "mentions".into(),
+                    source: Box::new(error),
+                }
+            })?,
+        })
+    }
 }
 
 /// Idempotency key: (organization, sender, client_message_id), derived from the session.
@@ -173,7 +202,8 @@ pub async fn list_messages(
             // Convert exclusive before to an inclusive upper bound; validation guarantees >= 1.
             query.before_seq.map(|seq| seq - 1).unwrap_or(i64::MAX)
         };
-        let mut messages = sqlx::query_as::<_, Message>(sql)
+        let sql = mentions::page_sql(sql, if ascending { "p.seq ASC" } else { "p.seq DESC" });
+        let mut messages = sqlx::query_as::<_, Message>(&sql)
             .bind(organization_id)
             .bind(channel_id)
             .bind(cursor)
@@ -554,11 +584,12 @@ async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     sender: Uuid,
     client_message_id: Uuid,
 ) -> Result<Option<Message>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(&mentions::page_sql(
         "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
-    )
+        "p.seq",
+    ))
     .bind(organization_id)
     .bind(sender)
     .bind(client_message_id)
@@ -618,33 +649,40 @@ async fn persist_admitted(
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", Some(organization_id)).await?;
-    match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
-        .await?
-    {
-        Some(true) => {}
-        Some(false) => return Err(MessageError::NotFound),
-        None => return Err(MessageError::OrganizationUnavailable),
-    }
-    #[cfg(test)]
-    tests::removal::pause(input.client_message_id).await;
+    require_visible(tx.connection()?, organization_id, sender, channel_id).await?;
     let member = sender;
     let sender = sender.0;
-    if let Some(message) = existing(
+    if existing(
         tx.connection()?,
         organization_id,
         sender,
         input.client_message_id,
     )
     .await?
+    .is_some()
     {
-        let name_key = if message.reply_to.is_none() {
-            topics::name_key(tx.connection()?, organization_id, message.topic_id).await?
-        } else {
-            None
-        };
         tx.rollback().await?;
-        return canonical(message, channel_id, &input, name_key);
+        // Reauthorize and resolve names together in the canonical read snapshot.
+        return committed(pool, organization_id, member, channel_id, &input)
+            .await?
+            .ok_or(MessageError::Database(sqlx::Error::RowNotFound));
     }
+    let targets = mentions::extract(&input.body);
+    let (visible, accepted) = channels::authorize_send_targets(
+        tx.connection()?,
+        organization_id,
+        member,
+        channel_id,
+        &targets,
+    )
+    .await?;
+    match visible {
+        Some(true) => {}
+        Some(false) => return Err(MessageError::NotFound),
+        None => return Err(MessageError::OrganizationUnavailable),
+    }
+    #[cfg(test)]
+    tests::removal::pause(input.client_message_id).await;
     // Read before waiting for the Channel barrier: an uncommitted parent is absent,
     // never a foreign-key wait or an implicitly accepted optimistic client id.
     let parent = replies::parent(
@@ -681,10 +719,11 @@ async fn persist_admitted(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
          RETURNING id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at",
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions",
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
         .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).fetch_optional(tx.connection()?).await?;
-    if let Some(message) = message {
+    if let Some(mut message) = message {
+        mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
         // connected subscribers silently missing a possibly committed message.
@@ -751,9 +790,10 @@ pub(crate) async fn replay_page(
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $4 \
              ORDER BY seq ASC LIMIT $5";
+    let sql = mentions::page_sql(sql, "p.seq");
     crate::database::organization_statement(
         pool,
-        sql,
+        &sql,
         async |tx: &mut sqlx::PgConnection, sql: &str| {
             let sql = format!("{sql} ORDER BY seq");
             sqlx::query_as(&sql)
@@ -793,6 +833,7 @@ pub(crate) async fn authorized_replay_page(
         ) m ON true ORDER BY m.seq"#,
         channels::member_visibility_sql(false)
     );
+    let sql = mentions::page_sql(&sql, "p.seq");
     let rows = crate::database::organization_statement(
         pool,
         &sql,

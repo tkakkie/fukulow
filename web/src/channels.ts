@@ -1,3 +1,4 @@
+import { completeCountFields } from './unread-counts'
 import { createActivityTarget, type Activity } from './activity'
 import type { Channel, ChannelVisibility, CreateChannelRequest, Result } from './api'
 
@@ -38,7 +39,10 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   }
 
   const target = activity ? createActivityTarget({
-    load: signal => api.listChannels(signal),
+    async load(signal) {
+      const result = await api.listChannels(signal)
+      return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' as const } : result
+    },
     accept(data) {
       set({ status: 'ready', channels: data.channels, selectedId: state.selectedId ?? data.channels[0]?.id ?? null })
       onSnapshot?.(data.channels)

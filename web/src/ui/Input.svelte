@@ -17,6 +17,10 @@
     inputRef = $bindable(null),
     oninput,
     onkeydown,
+    onselect,
+    onblur,
+    ariaControls,
+    ariaActiveDescendant,
   }: {
     label?: string
     ariaLabel?: string
@@ -35,6 +39,10 @@
     inputRef?: HTMLInputElement | HTMLTextAreaElement | null
     oninput?: (value: string, event: Event) => void
     onkeydown?: (event: KeyboardEvent) => void
+    onselect?: (event: Event) => void
+    onblur?: (event: FocusEvent) => void
+    ariaControls?: string
+    ariaActiveDescendant?: string
   } = $props()
 
   function handleInput(e: Event & { currentTarget: HTMLInputElement | HTMLTextAreaElement }) {
@@ -60,6 +68,11 @@
         {value}
         oninput={handleInput}
         {onkeydown}
+        {onselect}
+        {onblur}
+        aria-autocomplete={ariaControls ? 'list' : undefined}
+        aria-controls={ariaControls}
+        aria-activedescendant={ariaActiveDescendant}
       ></textarea>
     {:else}
       <input
@@ -76,6 +89,11 @@
         {value}
         oninput={handleInput}
         {onkeydown}
+        {onselect}
+        {onblur}
+        aria-autocomplete={ariaControls ? 'list' : undefined}
+        aria-controls={ariaControls}
+        aria-activedescendant={ariaActiveDescendant}
       />
     {/if}
     {#if hint}
@@ -97,6 +115,11 @@
     {value}
     oninput={handleInput}
     {onkeydown}
+    {onselect}
+    {onblur}
+    aria-autocomplete={ariaControls ? 'list' : undefined}
+    aria-controls={ariaControls}
+    aria-activedescendant={ariaActiveDescendant}
   ></textarea>
 {:else}
   <input
@@ -114,6 +137,11 @@
     {value}
     oninput={handleInput}
     {onkeydown}
+    {onselect}
+    {onblur}
+    aria-autocomplete={ariaControls ? 'list' : undefined}
+    aria-controls={ariaControls}
+    aria-activedescendant={ariaActiveDescendant}
   />
 {/if}
 

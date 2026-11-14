@@ -1,3 +1,4 @@
+import { completeCountFields } from './unread-counts'
 import { createActivity, createActivityTarget, type ActivityTarget } from './activity'
 import { createNavigationTargets } from './navigation-targets'
 import * as api from './api'
@@ -44,7 +45,10 @@ export function createSession(options: SessionOptions) {
       if (notice.type === 'channel_activity') return (unread.get(notice.channel_id).asOfSeq ?? -1) >= notice.seq
       if (notice.type !== 'read_position_changed') return false
       if (target === 'channels') return notice.topic_id === null && unread.activityMainCoverage(notice.channel_id) >= notice.read_seq
-      if (notice.topic_id !== null) return (topics.get(notice.channel_id).topics.find(t => t.topicId === notice.topic_id)?.baseline?.summary.read_seq ?? -1) >= notice.read_seq
+      if (notice.topic_id !== null) {
+        const summary = topics.get(notice.channel_id).topics.find(t => t.topicId === notice.topic_id)?.baseline?.summary
+        return summary !== undefined && completeCountFields(summary) && summary.read_seq >= notice.read_seq
+      }
       return false
     },
     revoke: id => { channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.unavailable() },
@@ -126,7 +130,7 @@ export function createSession(options: SessionOptions) {
     },
     activity,
     rows => {
-      const baselines = rows.filter((row): row is api.UnreadChannel => 'as_of_seq' in row)
+      const baselines = rows.filter((row): row is api.UnreadChannel => 'as_of_seq' in row && completeCountFields(row))
       if (baselines.length || rows.length === 0) unread.activitySnapshot(baselines)
     },
   )
