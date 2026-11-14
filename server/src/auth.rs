@@ -890,6 +890,12 @@ pub async fn sign_out(
     Ok(response)
 }
 
+impl Auth {
+    pub(crate) fn session_scope(&self) -> &[u8] {
+        &self.token_hash
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

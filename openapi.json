@@ -832,7 +832,7 @@
             }
           },
           "400": {
-            "description": "Invalid ids",
+            "description": "Invalid ids; accessible DMs refuse dm_membership_fixed",
             "content": {
               "application/json": {
                 "schema": {
@@ -947,7 +947,7 @@
             "description": "Grant added, renewed, or already current"
           },
           "400": {
-            "description": "Invalid ids or body",
+            "description": "Invalid ids or body; accessible DMs refuse dm_membership_fixed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1237,7 +1237,7 @@
             "description": "Manager right updated or already current; grant lifetime and access unchanged"
           },
           "400": {
-            "description": "Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets",
+            "description": "Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets; accessible DMs refuse dm_membership_fixed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1554,7 +1554,7 @@
             }
           },
           "400": {
-            "description": "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed",
+            "description": "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed; accessible DMs reject non-null Topic intent with dm_topics_not_allowed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1584,7 +1584,7 @@
             }
           },
           "409": {
-            "description": "Client message id reused with different body, Channel, normalized Topic name or reply target",
+            "description": "Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1879,7 +1879,7 @@
             }
           },
           "400": {
-            "description": "Invalid ids, negative read_seq or malformed JSON",
+            "description": "Invalid ids, negative read_seq or malformed JSON; Topic read in an accessible DM refuses dm_topics_not_allowed",
             "content": {
               "application/json": {
                 "schema": {
@@ -2674,6 +2674,409 @@
           },
           "503": {
             "description": "Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/dms": {
+      "get": {
+        "tags": [
+          "crate::messages::dms"
+        ],
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Creation-order continuation, exclusive",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "query",
+            "description": "Repeated distinct ids, 1..50; exclusive with cursor",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "At most 50 current participant DMs in one snapshot; ordinary Channels excluded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DmList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid input, including cursor scope, unknown fields or duplicate ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "crate::messages::dms"
+        ],
+        "operationId": "open",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenDmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resolved existing DM; explicit renew replaces only lapsed grants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dm"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created immutable pair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dm"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid input or dm_self_not_allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden: Guest cannot open even existing DMs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or member_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "request body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "expected application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error; unknown outcome is recovered by authorized list traversal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/dms/changes": {
+      "get": {
+        "tags": [
+          "crate::channels::dms::discovery"
+        ],
+        "operationId": "changes",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "lane",
+            "in": "query",
+            "description": "Required delta or coverage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque lane-specific continuation",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "At most 50 authorized identities, no Unread or Message scans; independent rolling delta or frozen-birth coverage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DmChanges"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid input, including unknown fields or wrong-scope cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -4382,6 +4785,7 @@
         "type": "object",
         "required": [
           "id",
+          "kind",
           "name",
           "visibility",
           "capabilities"
@@ -4393,6 +4797,9 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/OrdinaryChannelKind"
           },
           "name": {
             "type": "string",
@@ -4570,6 +4977,164 @@
         ],
         "properties": {
           "deactivated": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Dm": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "peer",
+          "capabilities",
+          "as_of_seq",
+          "read_seq",
+          "main_unread_count",
+          "unread_count",
+          "mention_unread_count"
+        ],
+        "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ChannelCapabilities"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DmKind"
+          },
+          "main_unread_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mention_unread_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "peer": {
+            "$ref": "#/components/schemas/DmPeer"
+          },
+          "read_seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unread_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "DmChanges": {
+        "type": "object",
+        "required": [
+          "dms",
+          "next_cursor",
+          "caught_up"
+        ],
+        "properties": {
+          "caught_up": {
+            "type": "boolean"
+          },
+          "dms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DmDiscovery"
+            }
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        }
+      },
+      "DmDiscovery": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "peer"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DmKind"
+          },
+          "peer": {
+            "$ref": "#/components/schemas/DmPeer"
+          }
+        }
+      },
+      "DmKind": {
+        "type": "string",
+        "enum": [
+          "dm"
+        ]
+      },
+      "DmList": {
+        "type": "object",
+        "required": [
+          "dms",
+          "next_cursor"
+        ],
+        "properties": {
+          "dms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Dm"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DmListChanged": {
+        "type": "object",
+        "description": "Own-Member DM list invalidation; recipient delivery integrates with #307.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "dm_list_changed"
+            ]
+          }
+        }
+      },
+      "DmPeer": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "active"
+        ],
+        "properties": {
+          "active": {
             "type": "boolean"
           },
           "id": {
@@ -4905,6 +5470,28 @@
           }
         }
       },
+      "OpenDmRequest": {
+        "type": "object",
+        "required": [
+          "member_id"
+        ],
+        "properties": {
+          "member_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "renew": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "OrdinaryChannelKind": {
+        "type": "string",
+        "enum": [
+          "channel"
+        ]
+      },
       "Organization": {
         "type": "object",
         "required": [
@@ -5072,6 +5659,9 @@
       "ServerEvent": {
         "oneOf": [
           {
+            "$ref": "#/components/schemas/DmListChanged"
+          },
+          {
             "$ref": "#/components/schemas/MessageEvent"
           },
           {
@@ -5089,6 +5679,7 @@
           "propertyName": "type",
           "mapping": {
             "channel_access_lost": "#/components/schemas/ChannelAccessLost",
+            "dm_list_changed": "#/components/schemas/DmListChanged",
             "error": "#/components/schemas/ErrorEvent",
             "message": "#/components/schemas/MessageEvent",
             "subscribed": "#/components/schemas/Subscribed"

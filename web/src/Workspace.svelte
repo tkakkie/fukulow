@@ -80,7 +80,7 @@
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
   const selected = $derived<Channel | undefined>(s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
-    id: routeChannelId, name: 'チャンネル', visibility: 'public',
+    id: routeChannelId, kind: 'channel', name: 'チャンネル', visibility: 'public',
     capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
   } : undefined))
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)

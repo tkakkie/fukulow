@@ -142,7 +142,7 @@ pub async fn list_channels(
     params(("org" = Uuid, Path), ("id" = Uuid, Path)),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Monotonic Channel position for Messages without Topic only", body = ReadPosition),
-        (status = 400, description = "Invalid ids, negative read_seq or malformed JSON", body = ErrorBody),
+        (status = 400, description = "Invalid ids, negative read_seq or malformed JSON; Topic read in an accessible DM refuses dm_topics_not_allowed", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found", body = ErrorBody),
         (status = 413, description = "Request body exceeds size limit", body = ErrorBody),
@@ -210,6 +210,9 @@ async fn mark_inner(
     let organization = auth.identity.organization.organization_id;
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
+    if topic.is_some() {
+        reject_dm_topics_scoped(state, auth, channel).await?;
+    }
     let w = topics::watermark(state, organization, channel).await?;
     let read_seq = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
         sqlx::query("SET LOCAL lock_timeout = '5s'")
@@ -224,6 +227,7 @@ async fn mark_inner(
         tests::removal::pause(member.0).await;
         // Serialize positions with revocation's cascading delete/reset. If access
         // is lost while waiting, the deleted position itself makes this return 404.
+        if topic.is_some() {reject_dm_topics(tx,organization,channel).await?;}
         let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")
             .bind(organization).bind(channel).bind(member.0).bind(member.1).fetch_optional(&mut *tx).await?.ok_or(MessageError::NotFound)?;
         let requested = input.read_seq.min(w).max(initial);

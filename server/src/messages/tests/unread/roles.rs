@@ -336,7 +336,7 @@ async fn unread_access_migration_repairs_guest_rows_and_backfills_without_resett
             .await
             .unwrap();
     }
-    let (app, org, owner_id, public, owner) = fixture(&pool).await;
+    let (_, org, owner_id, public, _) = fixture(&pool).await;
     let guest = Uuid::new_v4();
     member(&pool, org, guest).await;
     let granted = Uuid::new_v4();
@@ -344,9 +344,11 @@ async fn unread_access_migration_repairs_guest_rows_and_backfills_without_resett
     let missing = Uuid::new_v4();
     for (c, private) in [(granted, false), (private, true), (missing, false)] {
         super::super::channel(&pool, org, c, owner_id, private).await;
-        post(&app, &owner, c, Some("Before migration")).await;
+        crate::messages::tests::historical_send(&pool, org, owner_id, c, Some("Before migration"))
+            .await;
     }
-    post(&app, &owner, public, Some("Must disappear")).await;
+    crate::messages::tests::historical_send(&pool, org, owner_id, public, Some("Must disappear"))
+        .await;
     grant(&pool, org, granted, guest).await;
     grant(&pool, org, private, guest).await;
     role(&pool, org, guest, "guest").await;
@@ -384,6 +386,7 @@ async fn unread_access_migration_repairs_guest_rows_and_backfills_without_resett
         topic_positions(&pool, org, missing, owner_id).await,
         vec![1]
     );
+    crate::messages::tests::migrate_after(&pool, "202611110201_unread_access.sql").await;
     assert_positions_match_visibility(&pool).await;
 }
 

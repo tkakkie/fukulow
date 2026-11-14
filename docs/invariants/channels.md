@@ -44,6 +44,15 @@ Channels, membership, Capabilities (server and member UI). Writing rules and the
 | Revoke/revoke, revoke/leave, revoke/Role and remove/grant races in both orders preserve a manager; PATCH cannot recreate a removed grant; no deadlock | `server/src/channels/tests/managers/concurrency.rs::channel_manager_concurrent_revoke_leave_role_and_removal_preserve_manager` |
 | Manager writes lock Organization, Channel, Members, then grants; right-only changes skip Unread locks and preserve positions and grant_id | `server/src/channels/tests/managers/concurrency.rs::channel_manager_mutation_locks_members_before_grants`, `server/src/channels/tests/managers/concurrency.rs::channel_manager_right_only_changes_skip_unread_locks_and_preserve_positions`, `server/src/channels/tests/managers/concurrency.rs::channel_manager_guest_change_and_send_never_invert_member_grant_locks` |
 
+| DMs are visible only to their two active current-grant participants, including Guests; Owner/Admin never bypass participation | `server/src/channels/dms/tests.rs::only_current_pair_participants_read_write_retry_and_discover` |
+| Guests cannot open DMs; current Guest participants can read, send and Reply; every DM Topic and grant route refuses | `server/src/channels/dms/tests.rs::guests_cannot_open_but_participate_and_every_management_and_topic_route_denies` |
+| DM open is unique per immutable Member pair; concurrent renewal replaces each lapsed grant once and preserves current lifetimes | `server/src/channels/dms/tests/concurrency.rs::reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread` |
+| DMs never block Admin demotion; ordinary private Channels retain last-manager protection | `server/src/channels/dms/tests/concurrency.rs::admin_demotion_ignores_dms_but_private_last_manager_still_denies` |
+| DM discovery coalesces per Member/revision/pair; frozen birth coverage cannot skip hot rows or advance the independent delta | `server/src/channels/dms/tests/paging.rs::discovery_coalesces_and_coverage_cannot_skip_hot_rows_or_acknowledge_delta` |
+| Delayed renewal cannot be acknowledged before COMMIT; discovery counters, rows, grants and positions roll back atomically | `server/src/channels/dms/tests/paging.rs::delayed_renewal_behind_both_cursors_remains_pending_and_rollback_is_atomic` |
+| Quiet discovery drains J pending DMs in ceil(J/50) accepted delta pages, independently of saved coverage progress | `server/src/channels/dms/tests/paging.rs::quiet_500_501_and_9999_pending_dms_drain_in_q_pages_with_independent_coverage` |
+| DM migration preserves ordinary Channels, grants, Messages, Unread positions and case-insensitive name uniqueness | `server/tests/dms_migration.rs::existing_channels_grants_messages_and_unread_survive_dm_migration` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

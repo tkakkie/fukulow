@@ -78,6 +78,10 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 
 ## Rows in other parts
 
+- [channels](channels.md): `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
+- [messages](messages.md): `send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions`, `default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime`
+- [realtime](realtime.md): `dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied`, `dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access`, `dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message`
+
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [messages](messages.md): `author_lookup_authorization_and_identities_share_a_nonlocking_snapshot`, `author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bounds_batches`

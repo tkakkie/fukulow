@@ -53,6 +53,9 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 | Web Topic sends reject P7 reply_to+topic_name, keep topic_name on C6 retry, validate 1..60 OpenAPI scalars, and scope topic_not_found to that Topic | `web/src/messages-body.test.ts::matches openapi.json SendMessageRequest.topic_name rules`, `web/src/messages-body.test.ts::protocol rejects reply_to combined with topic_name (P7) and preserves topic_name on C6 retry`, `web/src/topics.test.ts::records notFound per Topic on 404 topic_not_found for summary and Topic history reads` |
 | Web preserves 429 ErrorBody and Retry-After; invalid/missing whole seconds >= 1 falls back to 1 s | `web/src/api.test.ts::preserves 429 ErrorBody and Retry-After with a safe one-second fallback`, `web/src/api.test.ts::retains the 429 delay even when ErrorBody is malformed` |
 
+| DM sends hold peer eligibility through COMMIT in both directions; deactivation-first refuses without persistence; mark-read stays available | `server/src/channels/dms/tests/concurrency.rs::send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions` |
+| DM canonical retries resolve before peer eligibility; default open never renews a peer; explicit renewal preserves current grants and Unread | `server/src/channels/dms/tests.rs::default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

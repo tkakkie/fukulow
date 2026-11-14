@@ -244,12 +244,12 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
     let (app, org, owner_id, channel, owner) = fixture(&pool).await;
     let viewer_id = Uuid::new_v4();
     let viewer = member(&pool, org, viewer_id).await;
-    post(&app, &owner, channel, Some("A")).await;
-    post(&app, &owner, channel, Some("B")).await;
-    post(&app, &owner, channel, None).await;
+    super::historical_send(&pool, org, owner_id, channel, Some("A")).await;
+    super::historical_send(&pool, org, owner_id, channel, Some("B")).await;
+    super::historical_send(&pool, org, owner_id, channel, None).await;
     let private = Uuid::new_v4();
     super::channel(&pool, org, private, owner_id, true).await;
-    post(&app, &owner, private, Some("Private")).await;
+    super::historical_send(&pool, org, owner_id, private, Some("Private")).await;
     sqlx::raw_sql(include_str!("../../../migrations/202611110199_unread.sql"))
         .execute(&pool)
         .await

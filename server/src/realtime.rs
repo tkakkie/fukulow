@@ -52,6 +52,8 @@ pub enum ClientMessage {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    /// Own-Member DM list invalidation; recipient delivery integrates with #307.
+    DmListChanged,
     /// Live and replayed messages have exactly the same canonical shape.
     Message { message: Message },
     /// Sent after committed replay and queued live events have been handed off.

@@ -59,6 +59,10 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 | Public Role changes preserve continuous access and adopt grant lifetimes; later remove/re-grant retires old subscriptions; Membership loss stays 4003 | `server/src/realtime/tests/access_loss.rs::continuous_public_role_changes_adopt_grant_lifetimes_and_membership_loss_keeps_4003` |
 | Replay authorization and page data share a fresh snapshot; removal committed before that snapshot denies even with its fast signal dropped | `server/src/realtime/tests/access_loss.rs::replay_snapshot_after_removal_commit_denies_even_without_a_fast_signal` |
 
+| DM Message replay/live delivery reaches only current participants, including Guests, with no Owner/Admin bypass | `server/src/realtime/tests/dms.rs::dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied` |
+| DM participant deactivation closes idle/replaying sockets with 4003; reactivation alone restores no access | `server/src/realtime/tests/dms.rs::dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access` |
+| DM discovery after an early snapshot recovers a delayed send COMMIT without notices or another mutation; reconnect loses no first Message | `server/src/realtime/tests/dms.rs::dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

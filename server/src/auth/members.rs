@@ -298,3 +298,52 @@ async fn deactivate_transaction<G: RoleChangeGuard>(
             .bind(org).bind(id).fetch_one(tx).await.map_err(member_write_error)
     }).await
 }
+
+// Retained identity/eligibility snapshots for fixed-participant resources. The
+// caller locks the whole sorted pair before touching any grants.
+#[derive(sqlx::FromRow)]
+pub(crate) struct Participant {
+    pub id: Uuid,
+    pub name: String,
+    pub active: bool,
+    pub membership_revision: i64,
+    pub role: Role,
+}
+
+pub(crate) async fn participants(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    ids: &[Uuid],
+    lock: bool,
+) -> Result<Vec<Participant>, sqlx::Error> {
+    let locking = if lock { " FOR SHARE" } else { "" };
+    let sql = format!(
+        "SELECT id,name,deactivated_at IS NULL AS active,membership_revision,role FROM users WHERE organization_id=$1 AND id=ANY($2) ORDER BY id{locking}"
+    );
+    sqlx::query_as(&sql)
+        .bind(organization)
+        .bind(ids)
+        .fetch_all(connection)
+        .await
+}
+
+pub(crate) async fn require_current(
+    connection: &mut sqlx::PgConnection,
+    auth: &Auth,
+) -> Result<(), ApiError> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM ({} ) u)",
+        current_member_sql(false)
+    );
+    let current: bool = sqlx::query_scalar(&sql)
+        .bind(auth.identity.organization.organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision)
+        .fetch_one(connection)
+        .await?;
+    if current {
+        Ok(())
+    } else {
+        Err(ApiError::organization_unavailable())
+    }
+}

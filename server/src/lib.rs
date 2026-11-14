@@ -175,6 +175,14 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(auth::invites::accept_invite),
         )
         .route(
+            "/api/v1/orgs/{org}/dms",
+            get(messages::dms::list).post(messages::dms::open),
+        )
+        .route(
+            "/api/v1/orgs/{org}/dms/changes",
+            get(channels::dms::discovery::changes),
+        )
+        .route(
             "/api/v1/orgs/{org}/channels",
             get(messages::list_channels).post(channels::create_channel),
         )

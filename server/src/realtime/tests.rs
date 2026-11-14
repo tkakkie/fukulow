@@ -1105,6 +1105,7 @@ mod measurement;
 mod shutdown;
 mod topics;
 
+mod dms;
 mod roles;
 
 mod replies;

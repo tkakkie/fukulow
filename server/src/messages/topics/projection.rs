@@ -70,6 +70,9 @@ async fn read(
         channel,
     )
     .await?;
+    if topics_only || topic.is_some() {
+        reject_dm_topics_scoped(state, auth, channel).await?;
+    }
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
         let w = super::watermark(state, organization, channel).await?;
         if query.as_of_seq.is_some_and(|requested| requested > w) {

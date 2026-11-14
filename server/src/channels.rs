@@ -27,6 +27,7 @@ pub enum ChannelVisibility {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Channel {
     pub id: Uuid,
+    pub kind: dms::OrdinaryChannelKind,
     /// 1..=128 Unicode scalar values.
     #[schema(min_length = 1, max_length = 128)]
     pub name: String,
@@ -43,6 +44,21 @@ pub struct ChannelCapabilities {
 }
 
 impl ChannelCapabilities {
+    pub(crate) fn for_dm(organization: Uuid, role: Role) -> Self {
+        let actor = Actor::Member {
+            organization,
+            role,
+            channel_member: true,
+            channel_manager: false,
+        };
+        let resource = Resource::Dm { organization };
+        Self {
+            can_add_members: authorize(actor, Action::AddChannelMembers, resource),
+            can_remove_members: authorize(actor, Action::RemoveChannelMembers, resource),
+            can_manage_managers: authorize(actor, Action::ManageChannelManagers, resource),
+            can_leave: authorize(actor, Action::LeaveChannel, resource),
+        }
+    }
     fn for_visible(organization: Uuid, role: Role, public: bool, manager: bool) -> Self {
         let actor = Actor::Member {
             organization,
@@ -98,7 +114,7 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     // The LEFT JOIN retains one empty row for an active Member with no visible Channels.
     let sql = format!(
         "SELECT c.id, c.name, c.visibility, u.role, EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision AND cm.manager) FROM ({}) u \
-         LEFT JOIN channels c ON c.organization_id = $1 \
+         LEFT JOIN channels c ON c.organization_id = $1 AND c.kind='channel' \
          AND ({visible}) WHERE u.id = $2 AND u.membership_revision = $3 \
          ORDER BY lower(c.name COLLATE \"C\"), c.id",
         auth::ACTIVE_MEMBERS_SQL
@@ -132,6 +148,7 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
                 manager,
             );
             Some(Channel {
+                kind: dms::OrdinaryChannelKind::Channel,
                 id: id?,
                 name: name?,
                 visibility,
@@ -200,6 +217,7 @@ pub async fn create_channel(
             Err(error) => return Err(error.into()),
         };
         let channel = Channel {
+            kind: dms::OrdinaryChannelKind::Channel,
             id: channel.0,
             name: channel.1,
             capabilities: ChannelCapabilities::for_visible(
@@ -237,9 +255,9 @@ fn visible_channel_sql() -> String {
     let public_roles = auth::authorization::channel_roles_sql(false);
     let explicit_roles = auth::authorization::channel_roles_sql(true);
     format!(
-        "(c.visibility = 'public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND EXISTS (SELECT 1 FROM channel_members cm \
+        "(c.kind='channel' AND c.visibility = 'public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND EXISTS (SELECT 1 FROM channel_members cm \
     WHERE cm.organization_id = c.organization_id AND cm.channel_id = c.id \
-    AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision))"
+    AND cm.member_id = u.id AND cm.membership_revision = u.membership_revision AND (c.kind='channel' OR u.id IN(c.lower_member_id,c.higher_member_id))))"
     )
 }
 
@@ -282,10 +300,11 @@ pub(crate) async fn is_visible_for_write(
         return Ok(None);
     };
     let public: Option<bool> = sqlx::query_scalar(
-        "SELECT visibility = 'public' FROM channels WHERE organization_id=$1 AND id=$2",
+        "SELECT COALESCE(visibility = 'public',false) FROM channels WHERE organization_id=$1 AND id=$2 AND (kind='channel' OR $3 IN(lower_member_id,higher_member_id))",
     )
     .bind(organization_id)
     .bind(channel_id)
+    .bind(member.0)
     .fetch_optional(&mut *connection)
     .await?;
     let Some(public) = public else {
@@ -405,6 +424,7 @@ pub(crate) async fn visible_members(
 }
 
 mod access;
+pub mod dms;
 pub mod members;
 pub use access::AccessChanges;
 pub(crate) use access::AccessWatch;

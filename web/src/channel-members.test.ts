@@ -350,6 +350,7 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
 
     const makeChannel = (canManageManagers: boolean): api.Channel => ({
       id: 'ch-1',
+      kind: 'channel',
       name: 'secret',
       visibility: 'private',
       capabilities: {
