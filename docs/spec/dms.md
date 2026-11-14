@@ -274,4 +274,4 @@ This table defines the full acceptance scope. Implemented server cases are regis
 
 None remain for #151. The maintainer resolved Open decision 1 on 2026-11-14; implementation and measurement must still pass the adopted gates.
 
-#152 owns Mention syntax/target semantics and #153 owns Search request/ranking semantics; neither may change the shared visibility, snapshot or Unread hooks above.
+#152 owns [Mention syntax, accepted sets and counts](realtime.md#mention-and-mention-unread-152-specification-for-approval); #153 owns Search request/ranking semantics. Neither may change the shared visibility, snapshot or Unread hooks above. The #152 contract also applies to #385's DM implementation pass; its Mention assertions run jointly once both implementations are available.
