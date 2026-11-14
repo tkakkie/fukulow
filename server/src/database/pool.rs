@@ -32,8 +32,8 @@ impl PoolConfig {
             Some(value) => value
                 .parse::<u32>()
                 .ok()
-                .filter(|value| *value >= 3)
-                .ok_or("FUKULOW_DB_MAX_CONNECTIONS must be an integer in 3..=4294967295")?,
+                .filter(|value| (3..=100).contains(value))
+                .ok_or("FUKULOW_DB_MAX_CONNECTIONS must be an integer in 3..=100")?,
         };
         let acquire_timeout_ms = match acquire_timeout_ms {
             None => 1_000,

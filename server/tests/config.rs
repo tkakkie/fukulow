@@ -267,7 +267,18 @@ fn startup_rejects_invalid_pool_configuration_before_database_access() {
     for (name, values) in [
         (
             "FUKULOW_DB_MAX_CONNECTIONS",
-            vec!["", "0", "1", "2", "-1", "3.5", "4294967296", "invalid"],
+            vec![
+                "",
+                "0",
+                "1",
+                "2",
+                "-1",
+                "3.5",
+                "101",
+                "4294967295",
+                "4294967296",
+                "invalid",
+            ],
         ),
         (
             "FUKULOW_DB_ACQUIRE_TIMEOUT_MS",

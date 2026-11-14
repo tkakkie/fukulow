@@ -6,7 +6,7 @@ fn pool_configuration_defaults_bounds_and_overrides() {
     let defaults = PoolConfig::configured(None, None).unwrap().options();
     assert_eq!(defaults.get_max_connections(), 20);
     assert_eq!(defaults.get_acquire_timeout(), Duration::from_secs(1));
-    for size in ["3", "4", "20", "100", "4294967295"] {
+    for size in ["3", "4", "20", "100"] {
         for timeout in ["1", "250", "5000"] {
             let options = PoolConfig::configured(Some(size), Some(timeout))
                 .unwrap()
@@ -18,7 +18,19 @@ fn pool_configuration_defaults_bounds_and_overrides() {
             );
         }
     }
-    for value in ["", "0", "1", "2", "-3", "3.5", " 20", "4294967296", "many"] {
+    for value in [
+        "",
+        "0",
+        "1",
+        "2",
+        "-3",
+        "3.5",
+        " 20",
+        "101",
+        "4294967295",
+        "4294967296",
+        "many",
+    ] {
         assert!(
             PoolConfig::configured(Some(value), None).is_err(),
             "{value}"
@@ -30,6 +42,28 @@ fn pool_configuration_defaults_bounds_and_overrides() {
             "{value}"
         );
     }
+}
+
+#[fukulow_test::test]
+async fn maximum_pool_constructs_and_next_size_is_rejected(pool: PgPool) {
+    assert!(PoolConfig::configured(Some("101"), None).is_err());
+    // Construct SQLx's real pool (including its eagerly allocated idle queue),
+    // without requiring 100 PostgreSQL backends to be open simultaneously.
+    let app = PoolConfig::configured(Some("100"), None)
+        .unwrap()
+        .options()
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    assert_eq!(app.options().get_max_connections(), 100);
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&app)
+            .await
+            .unwrap(),
+        1
+    );
+    app.close().await;
 }
 
 #[fukulow_test::test]
