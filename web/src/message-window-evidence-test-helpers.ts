@@ -50,7 +50,7 @@ export async function evidenceClient() {
   const reads = { main: 0, history: 0, reply: 0, summary: 0, unread: 0, mark: 0 }
   const summary = (topic: string, w = c.records.at(-1)!.seq): TopicSummary => {
     const rows = c.records.filter(m => m.topic_id === topic && m.seq <= w)
-    return { id: topic, name: topic, first_seq: rows[0].seq, last_seq: rows.at(-1)!.seq,
+    return { mention_unread_count: 0, id: topic, name: topic, first_seq: rows[0].seq, last_seq: rows.at(-1)!.seq,
       latest_message: rows.at(-1)!, message_count: rows.length, read_seq: topic === 'T' ? readSeq : 0,
       unread_count: rows.filter(m => m.seq > (topic === 'T' ? readSeq : 0)).length }
   }

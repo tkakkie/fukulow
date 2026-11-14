@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 mod admission;
 pub(super) mod authors;
+mod mentions;
 mod text_input;
 pub(super) mod unread;
 
@@ -110,6 +111,22 @@ async fn fixture(pool: &PgPool) -> (Router, Uuid, Uuid, Uuid, String) {
 
 fn input(client_message_id: Uuid, text: &str) -> Value {
     json!({"client_message_id": client_message_id, "body": text})
+}
+
+async fn apply_migrations_after(pool: &PgPool, boundary: &str) {
+    let mut paths =
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.file_name().unwrap().to_str().unwrap() > boundary)
+            .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        sqlx::raw_sql(&std::fs::read_to_string(path).unwrap())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
 }
 
 async fn send(app: &Router, token: &str, channel_id: Uuid, value: Value) -> Response {

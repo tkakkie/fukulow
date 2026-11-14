@@ -241,7 +241,10 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         else hi = mid
       }
       const existing = c.messages[lo]
-      if (existing?.seq === m.seq && sameFields(existing, m)) continue
+      if (existing?.seq === m.seq &&
+        existing.mentions.length === m.mentions.length && existing.mentions.every((mention, i) =>
+          mention.member_id === m.mentions[i].member_id && mention.name === m.mentions[i].name) &&
+        sameFields({ ...existing, mentions: m.mentions }, m)) continue
       if (!merged) merged = c.messages.slice(0, lo)
       else for (; offset < lo; offset++) merged.push(c.messages[offset])
       merged.push(m)

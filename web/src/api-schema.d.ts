@@ -764,6 +764,12 @@ export interface components {
              */
             type: "members_changed";
         };
+        Mention: {
+            /** Format: uuid */
+            member_id: string;
+            /** @description Current retained Member name in this authorized Message snapshot. */
+            name: string;
+        };
         Message: {
             body: string;
             /** Format: uuid */
@@ -774,6 +780,8 @@ export interface components {
             created_at: string;
             /** Format: uuid */
             id: string;
+            /** @description Persisted accepted ids, sorted by UUID, with current retained display names. */
+            mentions: components["schemas"]["Mention"][];
             /**
              * Format: uuid
              * @description Stable root even when the parent is outside the loaded window; null for a non-Reply.
@@ -999,6 +1007,11 @@ export interface components {
             latest_message: components["schemas"]["Message"];
             /**
              * Format: int64
+             * @description Messages mentioning the reader above this Topic's read position.
+             */
+            mention_unread_count: number;
+            /**
+             * Format: int64
              * @description Absolute count at the enclosing as_of_seq, excluding later Messages.
              */
             message_count: number;
@@ -1025,11 +1038,15 @@ export interface components {
              * @description Latest committed Channel seq in the positions/counts snapshot; 0 if empty.
              */
             as_of_seq: number;
+            /** Format: int64 */
+            main_mention_unread_count: number;
             /**
              * Format: int64
              * @description Other senders' Messages without Topic above read_seq, bounded by as_of_seq.
              */
             main_unread_count: number;
+            /** Format: int64 */
+            mention_unread_count: number;
             /**
              * Format: int64
              * @description Current Member position for Messages without Topic; independent of as_of_seq.
@@ -1095,6 +1112,7 @@ export type MarkReadRequest = components['schemas']['MarkReadRequest'];
 export type Member = components['schemas']['Member'];
 export type MemberList = components['schemas']['MemberList'];
 export type MembersChanged = components['schemas']['MembersChanged'];
+export type Mention = components['schemas']['Mention'];
 export type Message = components['schemas']['Message'];
 export type MessageEvent = components['schemas']['MessageEvent'];
 export type MessagePage = components['schemas']['MessagePage'];

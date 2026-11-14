@@ -53,3 +53,6 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
 
 - [unread](unread.md): `bounds Topic identities and Unread scope bookkeeping across one-off Topics during the same visit`
+
+- [messages](messages.md): `mention_shared_surfaces_keep_sets_and_follow_non_author_rename`, `mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic`
+- [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`

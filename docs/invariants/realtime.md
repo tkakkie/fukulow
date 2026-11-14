@@ -67,6 +67,9 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 | Role/deactivation directory notices reach non-Guests; unrelated Guests receive no notice | `server/src/realtime/tests/activity.rs::role_change_and_deactivation_notify_members_changed_per_directory_rule` |
 | Guest directory notices follow shared usable grants; old authorized notices cannot survive directory loss, while fresh notices reach Guests | `server/src/realtime/tests/activity.rs::guest_directory_notices_follow_shared_grants_and_deny_unrelated_guests`, `server/src/realtime/tests/activity.rs::guest_directory_loss_discards_older_authorized_notice_but_keeps_fresh_publication` |
 
+| Live/replay resolve current names for persisted Mention ids only; rejected tokens stay literal after later grants, including canonical retry | `server/src/realtime/tests/mentions.rs::mention_live_and_replay_follow_current_names_and_never_accept_later_grants` |
+| Observed access loss fences queued live/fetched replay Mention ids and names; authorized readers and other Channels retain ordinary delivery | `server/src/realtime/tests/mentions.rs::mention_lost_channel_live_and_fetched_replay_never_handoff_identities` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

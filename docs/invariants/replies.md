@@ -48,3 +48,6 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [web](web.md): `Guest Workspace resolves isolated older Topic and Reply authors without widening its Member list`
 - [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
+
+- [messages](messages.md): `mention_shared_surfaces_keep_sets_and_follow_non_author_rename`
+- [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`

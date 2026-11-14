@@ -3,7 +3,7 @@ use crate::auth::SessionChanges;
 type GateKey = (Uuid, String, i64);
 static LOSS_GATES: LazyLock<Mutex<HashMap<GateKey, Arc<Gate>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-fn gate(channel: Uuid, phase: &str, seq: i64) -> Arc<Gate> {
+pub(super) fn gate(channel: Uuid, phase: &str, seq: i64) -> Arc<Gate> {
     let g = Arc::new(Gate {
         entered: Semaphore::new(0),
         release: Semaphore::new(0),

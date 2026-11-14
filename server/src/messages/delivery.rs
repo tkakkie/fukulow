@@ -499,8 +499,8 @@ impl Delivery {
             .into_iter()
             .collect();
         let allowed =
-            channels::member_access(pool, organization, messages[0].channel_id, &members).await;
-        let Ok(allowed) = allowed else {
+            super::mentions::delivery_snapshot(pool, organization, &members, messages).await;
+        let Ok((allowed, messages)) = allowed else {
             // No protected delivery on a failed authorization query. Reconnect and replay.
             for sender in &recipients {
                 sender.overflow.send_replace(true);
@@ -526,7 +526,7 @@ impl Delivery {
             .filter(|s| allowed.contains(&s.member))
             .collect();
         for message in messages {
-            let message = Arc::new(message.clone());
+            let message = Arc::new(message);
             for sender in &recipients {
                 sender.send(message.clone());
             }
@@ -619,6 +619,7 @@ mod tests {
             topic_id: None,
             reply_to: None,
             reply_root_id: None,
+            mentions: Vec::new(),
         }
     }
 
@@ -1014,6 +1015,7 @@ mod tests {
                 topic_id: None,
                 reply_to: None,
                 reply_root_id: None,
+                mentions: Vec::new(),
             },
         );
         gate.entered.acquire().await.unwrap().forget();
@@ -1078,6 +1080,7 @@ mod tests {
                 topic_id: None,
                 reply_to: None,
                 reply_root_id: None,
+                mentions: Vec::new(),
             },
         );
         // The current-thread runtime cannot poll the spawned future until we yield.
@@ -1116,6 +1119,7 @@ mod tests {
             topic_id: None,
             reply_to: None,
             reply_root_id: None,
+            mentions: Vec::new(),
         });
         queue.sender.send(message.clone());
         queue.sender.send(message);

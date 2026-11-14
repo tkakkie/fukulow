@@ -3,7 +3,7 @@ import { replyClient, reply, root } from './reply-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { lookupAuthors, Member, ReadPosition, Result } from './api'
+import type { lookupAuthors, Member, ReadPosition, Result, TopicSummary } from './api'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
@@ -1884,6 +1884,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         {
           kind: 'topic',
           topic: {
+            mention_unread_count: 0,
             id: 't-1',
             name: '仕様相談',
             first_seq: 2,
@@ -1901,6 +1902,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t-1'] = ok({
       as_of_seq: 3,
       topic: {
+        mention_unread_count: 0,
         id: 't-1',
         name: '仕様相談',
         first_seq: 2,
@@ -2013,6 +2015,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t-2'] = ok({
       as_of_seq: 4,
       topic: {
+        mention_unread_count: 0,
         id: 't-2',
         name: 'リリース計画',
         first_seq: 4,
@@ -2067,6 +2070,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       has_more: false,
       topics: [
         {
+          mention_unread_count: 0,
           id: 't-2',
           name: 'リリース計画',
           first_seq: 4,
@@ -2077,6 +2081,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           unread_count: 0,
         },
         {
+          mention_unread_count: 0,
           id: 't-1',
           name: '仕様相談',
           first_seq: 2,
@@ -2398,7 +2403,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const older = { ...record(3, 'c1'), sender: 'topic-only', body: '古いトピックだけの本文', topic_id: 't-1' }
     const latest = { ...record(9, 'c1'), sender: 'known', body: '最新トピック本文', topic_id: 't-1' }
     const recent = { ...record(10, 'c1'), sender: 'known', body: '最新チャンネル本文' }
-    const summary = { id: 't-1', name: '相談', first_seq: 3, last_seq: 9, message_count: 2, latest_message: latest, read_seq: 9, unread_count: 0 }
+    const summary = { mention_unread_count: 0, id: 't-1', name: '相談', first_seq: 3, last_seq: 9, message_count: 2, latest_message: latest, read_seq: 9, unread_count: 0 }
     net.timelines.c1 = ok({ as_of_seq: 10, has_more: true, items: [
       { kind: 'topic', topic: summary }, { kind: 'message', message: recent },
     ] })
@@ -2525,6 +2530,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           {
             kind: 'topic',
             topic: {
+              mention_unread_count: 0,
               id: 't-1',
               name: '継続トピック',
               first_seq: 1,
@@ -2542,6 +2548,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       net.topicSummaries['c1:t-1'] = ok({
         as_of_seq: 2,
         topic: {
+          mention_unread_count: 0,
           id: 't-1',
           name: '継続トピック',
           first_seq: 1,
@@ -2751,6 +2758,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         {
           kind: 'topic',
           topic: {
+            mention_unread_count: 0,
             id: 't-1',
             name: 'クランプ検証',
             first_seq: 5,
@@ -2768,6 +2776,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t-1'] = ok({
       as_of_seq: 10,
       topic: {
+        mention_unread_count: 0,
         id: 't-1',
         name: 'クランプ検証',
         first_seq: 5,
@@ -2837,6 +2846,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         {
           kind: 'topic',
           topic: {
+            mention_unread_count: 0,
             id: 't-1',
             name: 'クランプ検証',
             first_seq: 1,
@@ -2904,6 +2914,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         {
           kind: 'topic',
           topic: {
+            mention_unread_count: 0,
             id: 't-known',
             name: '既知トピック',
             first_seq: 1,
@@ -2975,6 +2986,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       has_more: false,
       topics: [
         {
+          mention_unread_count: 0,
           id: 't-older',
           name: '古いトピック',
           first_seq: 1,
@@ -2985,6 +2997,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           unread_count: 0,
         },
         {
+          mention_unread_count: 0,
           id: 't-known',
           name: '既知トピック',
           first_seq: 1,
@@ -3011,8 +3024,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
   it('announces the first live Message after opening a Topic whose name was still loading', async () => {
     vi.useFakeTimers()
-    let resolveNavSummary!: (res: ReturnType<typeof ok<{ as_of_seq: number; topic: { id: string; name: string; first_seq: number; last_seq: number; message_count: number; latest_message: ReturnType<typeof record>; read_seq: number; unread_count: number } }>>) => void
-    const navSummaryPromise = new Promise<ReturnType<typeof ok<{ as_of_seq: number; topic: { id: string; name: string; first_seq: number; last_seq: number; message_count: number; latest_message: ReturnType<typeof record>; read_seq: number; unread_count: number } }>>>((r) => {
+    let resolveNavSummary!: (res: ReturnType<typeof ok<{ as_of_seq: number; topic: TopicSummary }>>) => void
+    const navSummaryPromise = new Promise<ReturnType<typeof ok<{ as_of_seq: number; topic: TopicSummary }>>>((r) => {
       resolveNavSummary = r
     })
     const net = fakeNetwork()
@@ -3111,6 +3124,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       ok({
         as_of_seq: 1,
         topic: {
+          mention_unread_count: 0,
           id: 't-slow',
           name: '遅延読込トピック',
           first_seq: 1,
@@ -3162,6 +3176,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             return ok({
               as_of_seq: 2,
               topic: {
+                mention_unread_count: 0,
                 id: 't-retry',
                 name: '再取得成功トピック',
                 first_seq: 2,
@@ -3286,6 +3301,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
             return ok({
               as_of_seq: 2,
               topic: {
+                mention_unread_count: 0,
                 id: 't-503',
                 name: '手動再試行トピック',
                 first_seq: 2,
@@ -3436,16 +3452,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
               | { kind: 'message'; message: ReturnType<typeof record> }
               | {
                   kind: 'topic'
-                  topic: {
-                    id: string
-                    name: string
-                    first_seq: number
-                    last_seq: number
-                    message_count: number
-                    latest_message: ReturnType<typeof record>
-                    read_seq: number
-                    unread_count: number
-                  }
+                  topic: TopicSummary
                 }
             >
           }>
@@ -3502,6 +3509,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t-delayed'] = ok({
       as_of_seq: 1,
       topic: {
+        mention_unread_count: 0,
         id: 't-delayed',
         name: '遅延表示トピック',
         first_seq: 1,
@@ -3517,6 +3525,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c2:t-absent'] = ok({
       as_of_seq: 1,
       topic: {
+        mention_unread_count: 0,
         id: 't-absent',
         name: '不在トピック',
         first_seq: 1,
@@ -3532,6 +3541,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c3:t-err'] = ok({
       as_of_seq: 1,
       topic: {
+        mention_unread_count: 0,
         id: 't-err',
         name: 'エラートピック',
         first_seq: 1,
@@ -3611,6 +3621,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           {
             kind: 'topic',
             topic: {
+              mention_unread_count: 0,
               id: 't-delayed',
               name: '遅延表示トピック',
               first_seq: 1,
@@ -3733,6 +3744,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         {
           kind: 'topic',
           topic: {
+            mention_unread_count: 0,
             id: 't-kbd',
             name: 'キーボード議題',
             first_seq: 1,
@@ -3749,6 +3761,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t-kbd'] = ok({
       as_of_seq: 1,
       topic: {
+        mention_unread_count: 0,
         id: 't-kbd',
         name: 'キーボード議題',
         first_seq: 1,
@@ -3872,16 +3885,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         has_more: boolean
         items: Array<{
           kind: 'topic'
-          topic: {
-            id: string
-            name: string
-            first_seq: number
-            last_seq: number
-            message_count: number
-            latest_message: ReturnType<typeof record>
-            read_seq: number
-            unread_count: number
-          }
+          topic: TopicSummary
         }>
       }>
     >
@@ -3936,6 +3940,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       net.topicSummaries[`${ch}:${tid}`] = ok({
         as_of_seq: 1,
         topic: {
+          mention_unread_count: 0,
           id: tid,
           name: `トピック-${tid}`,
           first_seq: 1,
@@ -4013,6 +4018,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           {
             kind: 'topic',
             topic: {
+              mention_unread_count: 0,
               id: 't-1',
               name: 'トピック-t-1',
               first_seq: 1,
@@ -4060,6 +4066,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           {
             kind: 'topic',
             topic: {
+              mention_unread_count: 0,
               id: 't-2',
               name: 'トピック-t-2',
               first_seq: 1,
@@ -4111,6 +4118,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         {
           kind: 'topic',
           topic: {
+            mention_unread_count: 0,
             id: 't-1',
             name: '設計相談',
             first_seq: 3,
@@ -4126,6 +4134,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t-1'] = ok({
       as_of_seq: 3,
       topic: {
+        mention_unread_count: 0,
         id: 't-1',
         name: '設計相談',
         first_seq: 3,
@@ -5604,6 +5613,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const t1Latest = { ...record(5, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック1最新' }
     const t2Latest = { ...record(6, 'c1'), sender: 'other', topic_id: 't2', body: 'トピック2最新' }
     const t1Summary = {
+      mention_unread_count: 0,
       id: 't1',
       name: '進行中トピック',
       first_seq: 5,
@@ -5614,6 +5624,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 2,
     }
     const t2Summary = {
+      mention_unread_count: 0,
       id: 't2',
       name: '既読トピック',
       first_seq: 6,
@@ -5701,6 +5712,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // Now resolve the Channel-list baseline: c1 has 2 Unread (from t1), c2 has 4 Unread
     net.unreadListResult = null
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
       read_seq: 6,
@@ -5708,6 +5720,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 0,
     }
     net.unreadChannels.c2 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c2', 'random'),
       as_of_seq: 4,
       read_seq: 0,
@@ -5756,6 +5769,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const m6 = { ...record(6, 'c1'), sender: 'other', body: '4番目の未読メッセージ' }
 
     const t1Summary = {
+      mention_unread_count: 0,
       id: 't1',
       name: '別トピック',
       first_seq: 5,
@@ -5812,6 +5826,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t1'] = ok({ as_of_seq: 6, topic: t1Summary })
     net.replyChains[`c1:${m2.id}`] = ok({ root_id: m2.id, messages: [m2], has_more: false })
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
       read_seq: 1,
@@ -5971,6 +5986,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const t2m1 = { ...record(3, 'c1'), sender: 'other', topic_id: 't2', body: 'トピック2の未読1' }
 
     const t1Summary = {
+      mention_unread_count: 0,
       id: 't1',
       name: 'トピックA',
       first_seq: 1,
@@ -5981,6 +5997,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 2,
     }
     const t2Summary = {
+      mention_unread_count: 0,
       id: 't2',
       name: 'トピックB',
       first_seq: 3,
@@ -6004,6 +6021,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicMessages['c1:t1'] = ok({ messages: [t1m1, t1m2], has_more: false })
     net.topicMessages['c1:t2'] = ok({ messages: [t2m1], has_more: false })
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 3,
       read_seq: 3,
@@ -6166,6 +6184,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const m1 = { ...record(1, 'c1'), sender: 'other', body: '未読メッセージ1' }
     const t1m1 = { ...record(2, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック未読1' }
     const t1Summary = {
+      mention_unread_count: 0,
       id: 't1',
       name: 'トピックA',
       first_seq: 2,
@@ -6188,6 +6207,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t1'] = ok({ as_of_seq: 2, topic: t1Summary })
     net.topicMessages['c1:t1'] = ok({ messages: [t1m1], has_more: false })
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 2,
       read_seq: 0,
@@ -6376,6 +6396,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       items: msgs.map((message) => ({ kind: 'message' as const, message })),
     })
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
       read_seq: 4,
@@ -6489,6 +6510,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       items: msgs.map((message) => ({ kind: 'message' as const, message })),
     })
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
       read_seq: 6,
@@ -6567,6 +6589,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // 4. Access returns with boundary 20 and 0 Unread (unchanged rows); user explicitly reselects Channel c1
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 20,
       read_seq: 20,
@@ -6629,6 +6652,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       body: `トピックメッセージ${seq}`,
     }))
     const t1Summary = {
+      mention_unread_count: 0,
       id: 't1',
       name: 'トピックA',
       first_seq: 7,
@@ -6652,6 +6676,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicSummaries['c1:t1'] = ok({ as_of_seq: 12, topic: t1Summary })
     net.topicMessages['c1:t1'] = ok({ messages: topicMsgs, has_more: false })
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 12,
       read_seq: 2,
@@ -6866,6 +6891,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.pages.c1 = ok({ messages: [record(1, 'c1')], has_more: false })
     net.pages.c2 = ok({ messages: [record(1, 'c2')], has_more: false })
     net.unreadChannels.c1 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 1,
       read_seq: 0,
@@ -6873,6 +6899,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 1,
     }
     net.unreadChannels.c2 = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c2', 'random'),
       as_of_seq: 1,
       read_seq: 0,

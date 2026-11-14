@@ -203,6 +203,7 @@ async fn reply_migration_preserves_existing_rows_and_scopes_both_foreign_keys(po
     .execute(&pool)
     .await
     .unwrap();
+    apply_migrations_after(&pool, "202611110198_replies.sql").await;
     let app = router(&pool).await;
     let root = list(&app, &token, channel, "").await["messages"][0].clone();
     assert_eq!(root["id"], root_id.to_string());

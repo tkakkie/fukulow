@@ -5,7 +5,7 @@ import type { components } from '../src/api-schema.d.ts'
 
 type Message = components['schemas']['Message']
 const record = (seq: number, channel: string): Message => ({ channel_id: channel, seq, body: `m${seq}`,
-  id: `${channel}-${seq}`, sender: 'other', client_message_id: `c${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null, reply_to: null, reply_root_id: null })
+  id: `${channel}-${seq}`, sender: 'other', client_message_id: `c${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null, reply_to: null, reply_root_id: null, mentions: [] })
 const iterations = 100
 const rounds = 5
 console.log(`Node ${process.version}; median of ${rounds} rounds, ${iterations} independent steps per round; microseconds/step`)

@@ -231,7 +231,7 @@ async fn shared_gap_authorization_failure_sets_overflow_and_advances_cursor(pool
         .await
         .unwrap()
         .remove(0);
-    sqlx::query("ALTER TABLE users RENAME TO unavailable_users")
+    sqlx::query("ALTER TABLE users RENAME COLUMN role TO unavailable_role")
         .execute(&pool)
         .await
         .unwrap();
@@ -242,7 +242,7 @@ async fn shared_gap_authorization_failure_sets_overflow_and_advances_cursor(pool
     assert!(*queue.overflow.borrow());
     assert!(!queue.notification_failed.is_failed());
     assert!(queue.events.try_recv().is_err());
-    sqlx::query("ALTER TABLE unavailable_users RENAME TO users")
+    sqlx::query("ALTER TABLE users RENAME COLUMN unavailable_role TO role")
         .execute(&pool)
         .await
         .unwrap();

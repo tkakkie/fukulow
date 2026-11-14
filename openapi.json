@@ -4912,6 +4912,23 @@
           }
         }
       },
+      "Mention": {
+        "type": "object",
+        "required": [
+          "member_id",
+          "name"
+        ],
+        "properties": {
+          "member_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "Current retained Member name in this authorized Message snapshot."
+          }
+        }
+      },
       "Message": {
         "type": "object",
         "required": [
@@ -4924,7 +4941,8 @@
           "created_at",
           "topic_id",
           "reply_to",
-          "reply_root_id"
+          "reply_root_id",
+          "mentions"
         ],
         "properties": {
           "body": {
@@ -4945,6 +4963,13 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "mentions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Mention"
+            },
+            "description": "Persisted accepted ids, sorted by UUID, with current retained display names."
           },
           "reply_root_id": {
             "type": [
@@ -5550,6 +5575,7 @@
           "message_count",
           "read_seq",
           "unread_count",
+          "mention_unread_count",
           "latest_message"
         ],
         "properties": {
@@ -5568,6 +5594,12 @@
           },
           "latest_message": {
             "$ref": "#/components/schemas/Message"
+          },
+          "mention_unread_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages mentioning the reader above this Topic's read position.",
+            "minimum": 0
           },
           "message_count": {
             "type": "integer",
@@ -5616,7 +5648,9 @@
               "as_of_seq",
               "read_seq",
               "main_unread_count",
-              "unread_count"
+              "unread_count",
+              "main_mention_unread_count",
+              "mention_unread_count"
             ],
             "properties": {
               "as_of_seq": {
@@ -5624,10 +5658,20 @@
                 "format": "int64",
                 "description": "Latest committed Channel seq in the positions/counts snapshot; 0 if empty."
               },
+              "main_mention_unread_count": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
               "main_unread_count": {
                 "type": "integer",
                 "format": "int64",
                 "description": "Other senders' Messages without Topic above read_seq, bounded by as_of_seq."
+              },
+              "mention_unread_count": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
               },
               "read_seq": {
                 "type": "integer",

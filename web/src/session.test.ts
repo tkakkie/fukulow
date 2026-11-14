@@ -500,6 +500,7 @@ it('composes unread, replies and topics over a single sync instance and fences r
     const anchor = { ...record(100, 'A'), sender: 'other' }
     net.pages.A = ok({ messages: [anchor], has_more: false })
     net.unreadChannels.A = {
+      mention_unread_count: 0, main_mention_unread_count: 0,
       id: 'A',
       name: 'A',
       visibility: 'public',
