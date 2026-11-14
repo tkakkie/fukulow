@@ -64,3 +64,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [auth](auth.md): `handlers_and_fanout_require_authenticated_context`, `deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled`
 
 - [auth](auth.md): `account_security_contract_records_paths_errors_and_account_lock_order`
+- [auth](auth.md): `invite_revocation_upgrade_backfills_existing_rows_and_pages_tied_expiries`
