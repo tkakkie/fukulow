@@ -87,11 +87,17 @@ pub async fn open(
 ) -> Result<Response, ApiError> {
     // The transaction survives HTTP cancellation, including renewal and baselines.
     let result = tokio::spawn(async move {
-        crate::database::organization(
+        let (dm, created, notice) = crate::database::organization(
             &state.pool,
             auth.identity.organization.organization_id,
             async |tx: &mut PgConnection| {
-                let (id, created) = dms::open(tx, &auth, &input).await?;
+                let (id, created, notice) = dms::open(
+                    tx,
+                    &auth,
+                    &input,
+                    &state.message_delivery.channel_access.activity,
+                )
+                .await?;
                 let selected = dms::select(tx, &auth, None, Some(&[id])).await?;
                 let dm = baselines(
                     tx,
@@ -101,10 +107,14 @@ pub async fn open(
                 .await?
                 .pop()
                 .ok_or(sqlx::Error::RowNotFound)?;
-                Ok::<_, ApiError>((dm, created))
+                Ok::<_, ApiError>((dm, created, notice))
             },
         )
-        .await
+        .await?;
+        if let Some(notice) = notice {
+            notice.committed(state.pool.clone());
+        }
+        Ok::<_, ApiError>((dm, created))
     })
     .await
     .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;

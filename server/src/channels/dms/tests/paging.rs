@@ -165,13 +165,14 @@ async fn delayed_renewal_behind_both_cursors_remains_pending_and_rollback_is_ato
     f.reactivate(f.b).await;
     let actor = extract_auth(f.state.clone(), &f.at).await;
     let mut pending = f.pools.admin.begin().await.unwrap();
-    let (id, new) = open(
+    let (id, new, _notice) = open(
         &mut pending,
         &actor,
         &OpenDmRequest {
             member_id: f.b,
             renew: true,
         },
+        &activity::Activity::default(),
     )
     .await
     .unwrap();
@@ -274,13 +275,14 @@ async fn delayed_empty_creation_is_above_early_counter_and_later_allocation_wait
     let initial = changes(&f, &f.at, "delta", None).await;
     assert_eq!(initial["dms"], json!([]));
     let mut creation = f.pools.admin.begin().await.unwrap();
-    let (c, created) = open(
+    let (c, created, _notice) = open(
         &mut creation,
         &actor,
         &OpenDmRequest {
             member_id: f.b,
             renew: false,
         },
+        &activity::Activity::default(),
     )
     .await
     .unwrap();

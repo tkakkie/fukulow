@@ -413,7 +413,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     case 'event': {
       if (input.connection !== state.connection || !state.connected) break
       const e = input.event
-      if (e.type === 'dm_list_changed') break
+      if (e.type !== 'message' && e.type !== 'subscribed' && e.type !== 'channel_access_lost' && e.type !== 'error') break
       const id = e.type === 'message' ? e.message.channel_id : e.channel_id
       if (!id) break
       let c = state.channels[id]

@@ -1,6 +1,9 @@
 use super::*;
 use sqlx::{FromRow, Row};
 
+#[cfg(test)]
+mod measurement;
+
 // Reconstruct every Topic's position BEFORE the exclusive boundary. Current
 // topics.last_seq cannot enumerate Topics that moved after W. Counts use the same
 // immutable prefix. Only selected candidates fetch payloads (no per-Topic SQL).
@@ -86,6 +89,8 @@ async fn read(
             organization,
             async |tx: &mut sqlx::PgConnection| {
                 sqlx::query(&page_sql())
+                    // Repeated reads otherwise select a much slower generic plan (#326).
+                    .persistent(false)
                     .bind(organization)
                     .bind(auth.identity.member.id)
                     .bind(auth.membership_revision)

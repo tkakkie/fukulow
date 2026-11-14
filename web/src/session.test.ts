@@ -312,7 +312,7 @@ it('a Member panel created during C9 recovers on explicit Channel re-selection',
     expect(session.sync.get().channels.A.state).toBe('ready')
     expect(panel.get()).toMatchObject({ unavailable: false, loading: false,
       members: [{ id: 'me', name: '本人', role: 'admin', manager: false }] })
-    expect(list).toHaveBeenCalledExactlyOnceWith('', 'A')
+    expect(list).toHaveBeenCalledExactlyOnceWith('', 'A', undefined, expect.any(AbortSignal))
   } finally {
     session.close()
     list.mockRestore()

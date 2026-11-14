@@ -1,10 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createChannels } from './channels'
+import { createActivity } from './activity'
 
 const ch = (id: string, name = id) => ({ id, kind: 'channel' as const, name, visibility: 'public' as const, capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true } } })
 const ok = <T>(data: T) => ({ ok: true as const, data })
 
 describe('channels', () => {
+  it('does not duplicate a created Channel discovered by a notice before its POST response', async () => {
+    const activity = createActivity({ watched: () => false })
+    let resolve!: (value: ReturnType<typeof ok<ReturnType<typeof ch>>>) => void
+    const c = createChannels({ listChannels: async () => ok({ channels: [ch('new')] }),
+      createChannel: () => new Promise(r => { resolve = r }) }, undefined, activity)
+    try {
+      const created = c.create({ name: 'new', visibility: 'public' })
+      await c.load()
+      expect(c.get().channels.map(c => c.id)).toEqual(['new'])
+      resolve(ok(ch('new'))); await created
+      expect(c.get().channels.map(c => c.id)).toEqual(['new'])
+      expect(c.get().selectedId).toBe('new')
+    } finally { c.close(); activity.close() }
+  })
   it('loads and selects the first channel', async () => {
     const c = createChannels({ listChannels: async () => ok({ channels: [ch('a'), ch('b')] }), createChannel: vi.fn() })
     await c.load()

@@ -50,8 +50,21 @@ describe('web boundary: network', () => {
 })
 
 describe('web boundary: storage', () => {
-  it('rejects web storage, IndexedDB, caches and document.cookie outside the helper (negative)', () => {
+  it('allows localStorage only in src/ui-settings.ts (positive)', () => {
+    expect(
+      uses(
+        'localStorage.getItem("fukulow.ui.theme"); localStorage.setItem("fukulow.ui.theme", "dark"); localStorage.removeItem("fukulow.ui.theme")',
+        'src/ui-settings.ts',
+      ),
+    ).toEqual([])
+    expect(uses('window.localStorage.getItem("fukulow.ui.text-size"); globalThis.localStorage', 'src/ui-settings.ts')).toEqual([])
+  })
+
+  it('rejects web storage, IndexedDB, caches and document.cookie outside src/ui-settings.ts (negative)', () => {
     expect(uses('localStorage.setItem("token", t)', 'src/auth.ts')).toEqual(['localStorage'])
+    expect(uses('<script>localStorage.getItem("fukulow.ui.theme")</script>', 'src/AccountSettings.svelte')).toEqual(['localStorage'])
+    expect(uses('localStorage.getItem("fukulow.ui.theme")', 'src/main.ts')).toEqual(['localStorage'])
+    expect(uses('localStorage.getItem("fukulow.ui.theme")', 'src/ui-settings.svelte.ts')).toEqual(['localStorage'])
     expect(uses('window.sessionStorage.getItem("a")', 'src/auth.ts')).toEqual(['sessionStorage'])
     expect(uses('indexedDB.open("db")', 'src/auth.ts')).toEqual(['indexedDB'])
     expect(uses('caches.open("v1")', 'src/auth.ts')).toEqual(['caches'])
@@ -63,9 +76,12 @@ describe('web boundary: storage', () => {
     expect(uses('<script>caches.open("v1")</script>')).toEqual(['caches'])
   })
 
-  it('has no file-name exemption until the ui-settings helper exists (negative)', () => {
-    expect(uses('localStorage.setItem("theme", "dark")', 'src/ui-settings.ts')).toEqual(['localStorage'])
+  it('rejects non-localStorage storage and network use even in src/ui-settings.ts (negative)', () => {
+    expect(uses('sessionStorage.setItem("fukulow.ui.theme", "dark")', 'src/ui-settings.ts')).toEqual(['sessionStorage'])
+    expect(uses('indexedDB.open("ui")', 'src/ui-settings.ts')).toEqual(['indexedDB'])
     expect(uses('caches.open("ui")', 'src/ui-settings.ts')).toEqual(['caches'])
+    expect(uses('cookieStore.get("s")', 'src/ui-settings.ts')).toEqual(['cookieStore'])
+    expect(uses('document.cookie = "s=1"', 'src/ui-settings.ts')).toEqual(['document.cookie'])
     expect(uses('fetch("/x")', 'src/ui-settings.ts')).toEqual(['fetch'])
   })
 

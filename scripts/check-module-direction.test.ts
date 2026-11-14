@@ -4,21 +4,113 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { buildDriver } from './check-module-direction.ts'
+import { buildDriver, checkWorkspace, root } from './check-module-direction.ts'
 
 test('module direction uses compiler resolution in production and tests', async (t) => {
   const driver = buildDriver()
+  const fixtureDriver = buildDriver(true)
+  const table = spawnSync(driver, ['--print-module-direction-table'], { encoding: 'utf8' })
+  assert.equal(table.status, 0, table.stderr)
+  const [modules, ...edges] = table.stdout.trim().split('\n')
+  const names = modules.split(',')
+  const allowed = (from: string, to: string) => from === to || edges.includes(`${from}->${to}`)
   const directory = mkdtempSync(join(tmpdir(), 'fukulow-module-direction-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
 
-  function compile(source: string, checked: boolean, tests = false, extra: string[] = []) {
+  function compile(source: string, checked: boolean, tests = false, extra: string[] = [], fixtureEdges?: string) {
     const file = join(directory, 'lib.rs')
     writeFileSync(file, `#![allow(dead_code, unused_imports)]\n${source}`)
-    return spawnSync(checked ? driver : 'rustc', [
+    return spawnSync(checked ? (fixtureEdges === undefined ? driver : fixtureDriver) : 'rustc', [
       '--edition=2024', '--crate-name', 'fixture', '--crate-type', 'lib',
       '--emit=metadata', '--out-dir', directory,
       ...(tests ? ['--test'] : []), ...extra, file,
-    ], { encoding: 'utf8' })
+    ], {
+      encoding: 'utf8',
+      env: fixtureEdges === undefined ? process.env : { ...process.env, MODULE_DIRECTION_EDGES: fixtureEdges },
+    })
+  }
+
+  await t.test('the six production edges preserve the old order for all 16 pairs', () => {
+    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime'])
+    assert.equal(edges.length, 6)
+    assert.equal(new Set(edges).size, 6)
+    for (let from = 0; from < names.length; from++) {
+      for (let to = 0; to < names.length; to++) {
+        assert.equal(allowed(names[from], names[to]), to <= from)
+      }
+    }
+  })
+
+  for (const [name, fixtureEdges, message] of [
+    ['two-node cycle', 'auth->channels,channels->auth', /cycle in allowed-edge table/],
+    ['longer cycle', 'auth->channels,channels->messages,messages->realtime,realtime->auth', /cycle in allowed-edge table/],
+    ['self-edge', 'auth->auth', /self-edge auth->auth/],
+    ['unknown source', 'unknown->auth', /unknown node "unknown"/],
+    ['unknown target', 'auth->unknown', /unknown node "unknown"/],
+    ['duplicate edge', 'channels->auth,channels->auth', /duplicate edge channels->auth/],
+    ['malformed edge', 'channels:auth', /invalid edge.*expected from->to/],
+    ['empty node', '->auth', /unknown node ""/],
+  ] as const) {
+    await t.test(`table rejects ${name} at driver startup`, () => {
+      const result = spawnSync(fixtureDriver, ['--version'], {
+        encoding: 'utf8', env: { ...process.env, MODULE_DIRECTION_EDGES: fixtureEdges },
+      })
+      assert.equal(result.status, 1, result.stderr)
+      assert.match(result.stderr, message)
+      assert.equal(result.stdout, '')
+    })
+  }
+
+  await t.test('production driver and workspace entry point reject fixture injection', () => {
+    for (const value of ['', 'channels->messages', 'not an edge']) {
+      const env = { ...process.env, MODULE_DIRECTION_EDGES: value }
+      const result = spawnSync(driver, ['--version'], { encoding: 'utf8', env })
+      assert.equal(result.status, 1, result.stderr)
+      assert.match(result.stderr, /MODULE_DIRECTION_EDGES is only supported by the fixture driver/)
+      const workspace = spawnSync(process.execPath, ['scripts/check-module-direction.ts'], {
+        cwd: root, encoding: 'utf8', env,
+      })
+      assert.equal(workspace.status, 1, workspace.stderr)
+      assert.match(workspace.stderr, /MODULE_DIRECTION_EDGES is only supported by the fixture driver/)
+    }
+    const previous = process.env.MODULE_DIRECTION_EDGES
+    try {
+      process.env.MODULE_DIRECTION_EDGES = 'channels->messages'
+      // No Cargo invocation, even when all workspace artifacts are cached.
+      assert.throws(() => checkWorkspace(driver), /only supported by the fixture driver/)
+    } finally {
+      if (previous === undefined) delete process.env.MODULE_DIRECTION_EDGES
+      else process.env.MODULE_DIRECTION_EDGES = previous
+    }
+  })
+
+  for (const [name, fixtureEdges, pairs] of [
+    ['siblings', 'channels->auth,messages->auth', [
+      ['channels', 'auth', 0], ['messages', 'auth', 0],
+      ['channels', 'messages', 1], ['messages', 'channels', 1],
+    ]],
+    ['direct edges only', 'messages->channels,channels->auth', [
+      ['messages', 'channels', 0], ['channels', 'auth', 0], ['messages', 'auth', 1],
+    ]],
+    ['empty table', '', [['channels', 'auth', 1], ['auth', 'auth', 0]]],
+  ] as const) {
+    await t.test(`fixture DAG: ${name}`, () => {
+      for (const [from, to, status] of pairs) {
+        for (const tests of [false, true]) {
+          for (const inferred of [false, true]) {
+            const body = inferred ? 'fn f() { let _value = crate::make(); }' : `fn f(_: crate::${to}::Item) {}`
+            const source = `pub fn make() -> ${to}::Item { ${to}::Item }\n` + names.map(name =>
+              `pub mod ${name} { pub struct Item; ${name === from ? (tests ? `#[cfg(test)] mod tests { ${body} }` : body) : ''} }`,
+            ).join('\n')
+            const baseline = compile(source, false, tests)
+            assert.equal(baseline.status, 0, `invalid fixture: ${baseline.stderr}`)
+            const result = compile(source, true, tests, [], fixtureEdges)
+            assert.equal(result.status, status, result.stderr)
+            if (status) assert.match(result.stderr, new RegExp(`module direction: ${from} must not reference ${to}`))
+          }
+        }
+      }
+    })
   }
 
   const denied: Record<string, string> = {
@@ -290,7 +382,6 @@ fn root() {
   })
 
   await t.test('inferred root returns enforce every reverse pair and allow forward pairs', () => {
-    const names = ['auth', 'channels', 'messages', 'realtime']
     for (let from = 0; from < names.length; from++) {
       for (let to = 0; to < names.length; to++) {
         const source = `pub fn make() -> ${names[to]}::Item { ${names[to]}::Item }\n` +
@@ -301,15 +392,14 @@ fn root() {
         const baseline = compile(source, false)
         assert.equal(baseline.status, 0, `invalid fixture: ${baseline.stderr}`)
         const result = compile(source, true)
-        assert.equal(result.status, to > from ? 1 : 0, result.stderr)
-        if (to > from) assert.match(result.stderr,
+        assert.equal(result.status, allowed(names[from], names[to]) ? 0 : 1, result.stderr)
+        if (!allowed(names[from], names[to])) assert.match(result.stderr,
           new RegExp(`module direction: ${names[from]} must not reference ${names[to]}`))
       }
     }
   })
 
   await t.test('all reverse pairs fail and forward pairs pass', () => {
-    const names = ['auth', 'channels', 'messages', 'realtime']
     for (let from = 0; from < names.length; from++) {
       for (let to = 0; to < names.length; to++) {
         const source = names.map((name, index) => `pub mod ${name} {
@@ -317,7 +407,7 @@ fn root() {
           ${index === from ? `fn f(_: crate::${names[to]}::Item) {}` : ''}
         }`).join('\n')
         const result = compile(source, true)
-        assert.equal(result.status, to > from ? 1 : 0, result.stderr)
+        assert.equal(result.status, allowed(names[from], names[to]) ? 0 : 1, result.stderr)
       }
     }
   })

@@ -87,7 +87,8 @@ pub(crate) async fn open(
     connection: &mut PgConnection,
     auth: &Auth,
     input: &OpenDmRequest,
-) -> Result<(Uuid, bool), ApiError> {
+    activity: &activity::Activity,
+) -> Result<(Uuid, bool, Option<activity::DmPublication>), ApiError> {
     let org = auth.identity.organization.organization_id;
     let caller = auth.identity.member.id;
     auth::members::lock_organization(connection, org).await?;
@@ -144,7 +145,7 @@ pub(crate) async fn open(
             .iter()
             .any(|g| g.0 == caller && g.1 == auth.membership_revision)
     {
-        return Ok((channel, false));
+        return Ok((channel, false, None));
     }
     members
         .iter()
@@ -166,7 +167,7 @@ pub(crate) async fn open(
         })
         .collect();
     if !lifetimes.iter().any(|g| g.3) {
-        return Ok((channel, false));
+        return Ok((channel, false, None));
     }
     if existing.is_none() {
         sqlx::query("INSERT INTO channels(organization_id,id,kind,lower_member_id,higher_member_id) VALUES($1,$2,'dm',$3,$4)")
@@ -183,13 +184,14 @@ pub(crate) async fn open(
             .collect::<Vec<_>>(),
     )
     .await?;
+    let notice = activity.arm_dm(org, lifetimes.iter().map(|g| (channel, g.0, g.3)).collect());
     for (member, revision, grant, changed) in lifetimes {
         if changed {
             sqlx::query("INSERT INTO channel_members(organization_id,channel_id,member_id,membership_revision,grant_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(organization_id,channel_id,member_id) DO UPDATE SET membership_revision=EXCLUDED.membership_revision,grant_id=EXCLUDED.grant_id,manager=false")
                 .bind(org).bind(channel).bind(member).bind(revision).bind(grant).execute(&mut *connection).await?;
         }
     }
-    Ok((channel, existing.is_none()))
+    Ok((channel, existing.is_none(), Some(notice)))
 }
 
 // Grant projection limits the authorized candidate set before identity/count work.

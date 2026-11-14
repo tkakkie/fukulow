@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+mod guest_members;
 mod managers;
 mod membership;
 mod name_length;
@@ -478,8 +479,11 @@ async fn private_channel_creation_rolls_back_if_membership_insert_fails(pool: Pg
 }
 
 fn scoped_path(path: &str, token: &str) -> String {
-    if (path.starts_with("/api/v1/channels") || path.starts_with("/api/v1/dms"))
+    if path.starts_with("/api/v1/channels")
+        || path.starts_with("/api/v1/dms")
         || path.starts_with("/api/v1/ws")
+        || path.starts_with("/api/v1/members")
+        || path.starts_with("/api/v1/message-authors")
     {
         let organization = token
             .split_once('.')
@@ -626,6 +630,11 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
         format!("Bearer {token}").parse().unwrap(),
     );
     let (mut socket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    let ready = socket.next().await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(ready.to_text().unwrap()).unwrap()["type"],
+        "activity_ready"
+    );
     for (channel_id, expected) in [(private_id, "error"), (public_id, "subscribed")] {
         socket
             .send(Message::text(

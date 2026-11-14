@@ -1,0 +1,21 @@
+{
+  "kind": "client",
+  "scenarios": [{
+    "id": "activity-held-target-coalescing",
+    "title": "Organization notices refetch held targets while preserving Message state",
+    "layer": "controller",
+    "covers": ["A9", "A10", "A13"],
+    "steps": [
+      {"input":{"type":"session_start"}},
+      {"input":{"type":"connection_ready"}},
+      {"input":{"type":"hold_target","target":"channels"}},
+      {"input":{"type":"activity_notice","notice":{"type":"channel_activity","channel_id":"unwatched","seq":1}},"effects":{"forbidden":[{"type":"fetch_history"},{"type":"refetch"}]}},
+      {"input":{"type":"time_passed","ms":200},"effects":{"required":[{"type":"refetch","target":"channels","as":"first"}]}},
+      {"input":{"type":"activity_notice","notice":{"type":"channel_activity","channel_id":"unwatched","seq":2}},"effects":{"forbidden":[{"type":"refetch"}]}},
+      {"input":{"type":"activity_notice","notice":{"type":"channel_members_changed","channel_id":"unheld"}},"effects":{"forbidden":[{"type":"refetch"}]}},
+      {"input":{"type":"refetch_result","respond_to":"first","status":200}},
+      {"input":{"type":"time_passed","ms":200},"effects":{"required":[{"type":"refetch","target":"channels","times":1,"as":"second"}]}},
+      {"input":{"type":"refetch_result","respond_to":"second","status":200},"observe":{"channels":{}}}
+    ]
+  }]
+}

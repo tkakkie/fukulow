@@ -1,11 +1,11 @@
 # Spec: Direct messages
 
 Index and Terms: [docs/spec.md](../spec.md).
-Related: [Memberships and Channel managers](accounts.md#members-roles-and-invites); [sync, Replies and Unread](realtime.md#real-time-sync-contract); [Organization activity notices](realtime.md#organization-activity-notices-307-specified-not-implemented).
+Related: [Memberships and Channel managers](accounts.md#members-roles-and-invites); [sync, Replies and Unread](realtime.md#real-time-sync-contract); [Organization activity notices](realtime.md#organization-activity-notices-307-implemented).
 
 ## Scope and status (#151)
 
-Server core implementation is in progress: migration, pair/grant authorization, open/renewal, lists/discovery, sends, Replies and Unread are implemented and tested. The #307 A5-A8 activity buffer is absent on this base, so mutation notices and their provenance/overflow tests remain unimplemented. Web/controller integration and all performance/operational measurements remain pending. The guarantees below remain binding. The maintainer decided 1:1 participation, no Topics and Guest participation on 2026-11-12, and B2 renewal, B3 send/retry, B4 durable discovery (Option A), list/page/retention/request limits and performance acceptance on 2026-11-14 (see Decided). The bounded coalesced index and coverage passes below implement the approved discovery guarantee without replay proportional to past events. Other routes, shapes and additional error names remain proposals. The adopted performance budgets still require measured verification.
+Server core implementation is in progress: migration, pair/grant authorization, open/renewal, lists/discovery, sends, Replies and Unread are implemented and tested. Server E1-E3 mutation notices now reuse #307 A1-A14 with participant authorization and tested provenance, coalescing and rollback boundaries. Web/controller integration and all performance/operational measurements remain pending. The guarantees below remain binding. The maintainer decided 1:1 participation, no Topics and Guest participation on 2026-11-12, and B2 renewal, B3 send/retry, B4 durable discovery (Option A), list/page/retention/request limits and performance acceptance on 2026-11-14 (see Decided). The bounded coalesced index and coverage passes below implement the approved discovery guarantee without replay proportional to past events. Other routes, shapes and additional error names remain proposals. The adopted performance budgets still require measured verification.
 
 ## Model and permissions
 

@@ -563,6 +563,20 @@ export interface components {
             account: components["schemas"]["Account"];
             organizations: components["schemas"]["Organization"][];
         };
+        ActivityReady: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "activity_ready";
+        };
+        ActivityReset: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "activity_reset";
+        };
         AddChannelMemberRequest: {
             /** Format: uuid */
             member_id: string;
@@ -603,6 +617,15 @@ export interface components {
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
         };
+        ChannelAccessGained: {
+            /** Format: uuid */
+            channel_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "channel_access_gained";
+        };
         /** @description Effective Channel access loss; the socket and other Channels stay open. */
         ChannelAccessLost: {
             /** Format: uuid */
@@ -613,6 +636,26 @@ export interface components {
              */
             type: "channel_access_lost";
         };
+        ChannelAccessRevoked: {
+            /** Format: uuid */
+            channel_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "channel_access_revoked";
+        };
+        ChannelActivity: {
+            /** Format: uuid */
+            channel_id: string;
+            /** Format: int64 */
+            seq: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "channel_activity";
+        };
         ChannelCapabilities: {
             can_add_members: components["schemas"]["Capability"];
             can_leave: components["schemas"]["Capability"];
@@ -621,6 +664,13 @@ export interface components {
         };
         ChannelList: {
             channels: components["schemas"]["UnreadChannel"][];
+        };
+        ChannelListChanged: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "channel_list_changed";
         };
         ChannelMember: {
             /** Format: uuid */
@@ -631,6 +681,15 @@ export interface components {
         };
         ChannelMemberList: {
             members: components["schemas"]["ChannelMember"][];
+        };
+        ChannelMembersChanged: {
+            /** Format: uuid */
+            channel_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "channel_members_changed";
         };
         /** @enum {string} */
         ChannelVisibility: "public" | "private";
@@ -690,7 +749,7 @@ export interface components {
             dms: components["schemas"]["Dm"][];
             next_cursor: string | null;
         };
-        /** @description Own-Member DM list invalidation; recipient delivery integrates with #307. */
+        /** @description Own-Member DM list invalidation. */
         DmListChanged: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -779,6 +838,13 @@ export interface components {
         MemberList: {
             members: components["schemas"]["Member"][];
         };
+        MembersChanged: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "members_changed";
+        };
         Message: {
             body: string;
             /** Format: uuid */
@@ -861,6 +927,19 @@ export interface components {
             /** Format: int64 */
             read_seq: number;
         };
+        ReadPositionChanged: {
+            /** Format: uuid */
+            channel_id: string;
+            /** Format: int64 */
+            read_seq: number;
+            /** Format: uuid */
+            topic_id: string | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "read_position_changed";
+        };
         ReplyChainPage: {
             /** @description More matching Messages follow; continue after the last returned seq. */
             has_more: boolean;
@@ -907,7 +986,7 @@ export interface components {
             topic_name?: string | null;
         };
         /** @description Server -> client events. Clients dedupe messages by (channel_id, seq). */
-        ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
+        ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
         SessionResponse: {
             /** Format: int32 */
             expires_in: number;
@@ -1069,6 +1148,8 @@ export interface components {
 export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
 export type Account = components['schemas']['Account'];
 export type AccountIdentity = components['schemas']['AccountIdentity'];
+export type ActivityReady = components['schemas']['ActivityReady'];
+export type ActivityReset = components['schemas']['ActivityReset'];
 export type AddChannelMemberRequest = components['schemas']['AddChannelMemberRequest'];
 export type AuthorIdentities = components['schemas']['AuthorIdentities'];
 export type AuthorLookupRequest = components['schemas']['AuthorLookupRequest'];
@@ -1077,11 +1158,16 @@ export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelMa
 export type ChangePasswordRequest = components['schemas']['ChangePasswordRequest'];
 export type ChangeRoleRequest = components['schemas']['ChangeRoleRequest'];
 export type Channel = components['schemas']['Channel'];
+export type ChannelAccessGained = components['schemas']['ChannelAccessGained'];
 export type ChannelAccessLost = components['schemas']['ChannelAccessLost'];
+export type ChannelAccessRevoked = components['schemas']['ChannelAccessRevoked'];
+export type ChannelActivity = components['schemas']['ChannelActivity'];
 export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
 export type ChannelList = components['schemas']['ChannelList'];
+export type ChannelListChanged = components['schemas']['ChannelListChanged'];
 export type ChannelMember = components['schemas']['ChannelMember'];
 export type ChannelMemberList = components['schemas']['ChannelMemberList'];
+export type ChannelMembersChanged = components['schemas']['ChannelMembersChanged'];
 export type ChannelVisibility = components['schemas']['ChannelVisibility'];
 export type ClientMessage = components['schemas']['ClientMessage'];
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest'];
@@ -1103,6 +1189,7 @@ export type ListProjectionQuery = components['schemas']['ListProjectionQuery'];
 export type MarkReadRequest = components['schemas']['MarkReadRequest'];
 export type Member = components['schemas']['Member'];
 export type MemberList = components['schemas']['MemberList'];
+export type MembersChanged = components['schemas']['MembersChanged'];
 export type Message = components['schemas']['Message'];
 export type MessageEvent = components['schemas']['MessageEvent'];
 export type MessagePage = components['schemas']['MessagePage'];
@@ -1112,6 +1199,7 @@ export type OrdinaryChannelKind = components['schemas']['OrdinaryChannelKind'];
 export type Organization = components['schemas']['Organization'];
 export type OrganizationCapabilities = components['schemas']['OrganizationCapabilities'];
 export type ReadPosition = components['schemas']['ReadPosition'];
+export type ReadPositionChanged = components['schemas']['ReadPositionChanged'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
 export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
 export type RevokeOtherSessionsRequest = components['schemas']['RevokeOtherSessionsRequest'];

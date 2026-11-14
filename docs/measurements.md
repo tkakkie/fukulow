@@ -404,6 +404,17 @@ This proves only the controlled single-Organization reservation scenario. Simult
 
 #80 cost evaluation (Rust 1.99.0, local macOS ARM64, Node 26.13.0): the exact `node scripts/check-module-direction.ts` step, with dependencies cached and `cargo clean -p fukulow-server` before each of three runs, had medians 1.74 s before / 1.68 s after (no measurable regression at this scale). The negative/positive fixture suite grew from 54 to 71 tests, 6.07 s / 7.48 s in single runs. New unstable surface: HIR binding visitation, `pat_ty`, `expr_ty_opt`, `Ty::walk`, `GenericArg::as_type` and `AdtDef::did`; existing typeck queries are reused, with no new rustc crate or application dependency. This is a small accepted maintenance increment: each toolchain bump must rebuild the driver, verify these APIs and run all fixtures plus production/test targets, including type-level array constants without body expression types. The root nominal-wrapper limit stays Tier 2.
 
+### #318 explicit edge-table cost (2026-11-14)
+
+Before: `c30f79d8177fc0645159a11b98fc5d5abf97f3a5` (`origin/main`, the clean starting checkout; local `main` was older, but its checker files were identical). After: the same checkout with #318 checker changes. Rust 1.99.0 (b940084d7), Node 26.13.0, macOS 27.0.1 ARM64, Apple M5, 32 GiB RAM. Same method as #80: prebuilt web assets, cached dependencies, an untimed warm-up per version, then the exact `node scripts/check-module-direction.ts` step timed with `/usr/bin/time -p`, with `cargo clean -p fukulow-server` before each of three runs. The fixture command is `node --test scripts/check-module-direction.test.ts`, timed once per version, including driver builds.
+
+| Version | Check runs (s) | Check median (s) | Fixture suite (s) | Tests passed |
+| --- | --- | --- | --- | --- |
+| Before | 10.22, 9.58, 9.12 | 9.58 | 8.25 | 71 |
+| After | 9.05, 8.96, 9.15 | 9.05 | 12.06 | 84 |
+
+No observed production-check regression; the fixture suite now builds both production and fixture-only drivers and covers table validation, injection isolation, siblings and direct-edge enforcement. Limits: other AI workers may be running on this host; runs were sequential before/after, with no CPU isolation, and the difference is within run variability. #80's historical 1.74 s / 1.68 s medians used the same method, but a different source snapshot and host conditions, so absolute times are not directly comparable. No new rustc API or dependency was added.
+
 ## Topic projection paging feasibility (#137, 2026-11-11)
 
 Target chosen before measurement: full in-process HTTP timeline-page p95 <=100 ms at concurrency 4, 50 items, both recent and deep W-relative boundaries. Query: aggregate immutable Messages <=W by Topic (min/max/count), union plain Messages, apply the exclusive boundary and descending LIMIT 51, then join only selected latest payloads/names; return ascending. Index: `messages (organization_id, channel_id, topic_id, seq)` plus the existing unique Channel/seq index. It does not establish page-size-bounded query work.
@@ -821,6 +832,29 @@ The maintainer accepted the current RLS policies with this regression as a **one
 - Current policies stay; candidates a/b/c are not adopted; no optimisation may weaken the security guarantees.
 - Follow-ups: fan-out `access_rows`/`member_access` (#354), Unread list/counts (#355), Unread Topic-count `seq` index bound (#356), History re-measurement on a stable host with realistic API-path load and query-level improvements (#357). The timeline Generic-plan cost, increased by RLS, stays tracked in #326.
 
+## Timeline statement persistence (#326, 2026-11-14)
+
+Purpose: prevent the shared timeline/single-Topic projection from switching to its expensive generic plan. Source: 6a87a35 plus this fix; SQL, RLS, Unread counts, indexes and responses unchanged.
+
+Conditions: Apple M5 / 10 CPUs / 32 GiB, macOS 27.0.1 arm64; Docker 29.9.3 VM 10 CPUs / 7.748 GiB; PostgreSQL 18.6 (Debian aarch64), default shared_buffers 128MB / work_mem 4MB; Rust 1.99.0 release, SQLx 0.8.6, loopback TCP. Fresh throwaway database with current migrations/grants and unchanged `load/hot-plans/seed.sql` (#325 dataset): hot Channel 100,000 Messages, 70,000 in 2,000 Topics; Org A 10,000 Members / 50 Channels, Org B 1,000 Members / 10 Channels; 406,800 Channel positions and 2,000 measured-Member Topic positions. Current RLS enabled throughout; measured role is non-owner, NOBYPASSRLS `fukulow_app` with transaction-local Organization context.
+
+Reproduce: migrate/grant/seed a throwaway PostgreSQL 18.6 as owner, supply its app-role `DATABASE_URL`, then run `cargo test --release -p fukulow-server --lib measure_timeline_plan_cache -- --ignored --nocapture`. The ignored probe uses production `page_sql()` and the handler's nine bindings (latest limit 51; single Topic: Topics only / limit 2). Each run holds one pooled connection for before/custom/after, clearing its statement cache between modes to represent fresh deployment connections. Each mode/variant uses REPEATABLE READ READ ONLY and the production Organization-setting helper; ten warm-ups precede 30 timed fetches. Before switches naturally to generic (35 generic / 5 custom executions after latest sampling); reference forces custom only on this measurement connection; after uses auto/non-persistent. Nearest-rank wall p50/p95 include planning, preparation and fetching, excluding transaction/context round trips, HTTP and watermark work. Buffers are root execution shared hits from a subsequent warm EXPLAIN ANALYZE BUFFERS of the cached statement (before/reference) or non-persistent query (after); planning excluded, shared reads zero in every run.
+
+| Query / mode | p50 ms, runs 1 / 2 / 3 | p95 ms, runs 1 / 2 / 3 | Shared hits (all runs) |
+|---|---:|---:|---:|
+| Latest before, cached auto | 232.523 / 181.056 / 211.756 | 482.668 / 316.425 / 292.309 | 502617 |
+| Latest custom reference | 31.143 / 23.510 / 28.163 | 47.813 / 26.165 / 33.014 | 3478 |
+| Latest after, non-persistent auto | 24.219 / 22.628 / 29.941 | 29.557 / 24.077 / 47.700 | 3478 |
+| Single Topic before, cached auto | 13.062 / 13.680 / 10.628 | 48.023 / 25.686 / 15.851 | 12409 |
+| Single Topic custom reference | 1.185 / 0.784 / 1.251 | 1.581 / 1.203 / 3.557 | 267 |
+| Single Topic after, non-persistent auto | 1.587 / 1.092 / 1.356 | 2.010 / 1.399 / 2.043 | 267 |
+
+Chosen option: `.persistent(false)` on this query only, avoiding SET LOCAL's extra round trip while leaving Unread statement caching unchanged. The projection disappears from `pg_prepared_statements` in every after sample and retains custom-range buffer use. The non-ignored `timeline_and_single_topic_never_cache_a_generic_plan` guard runs both production handlers 12 times each through restricted-role RLS on one reused backend and checks no projection is retained. Temporarily removing `.persistent(false)` makes it fail with one cached projection; restoring it passes. Existing response/paging/denial/Unread tests are unchanged; full server fmt/clippy/tests passed (613 passed, 15 ignored).
+
+Acceptance (p95 against the same run's forced-custom p95; the earlier "single Topic below 1 ms" target came from EXPLAIN Execution Time and does not apply to wall time, which includes planning and fetching; the maintainer approved the 1.5x-of-custom target for both pages on 2026-11-14, #326): latest 0.62 / 0.92 / 1.44, single Topic 1.27 / 1.16 / 0.57, all within 1.5x. Before was 10x (latest) and 12x (single Topic) slower than custom.
+
+Limits: other AI workers ran builds and tests on this shared host during all three runs, so absolute numbers are noisy (run 3 latest p95 47.7 ms); the ratios hold in every run. Statement fetches only, not endpoint latency or capacity. The custom plan still aggregates the Channel's immutable prefix; Channel-size growth is a separate Backlog Issue because current `topics.last_seq` cannot enumerate Topics moved after W. Raw logs stay outside Git in `/private/tmp/fukulow-326/`.
+
 ## Sign-in admission under a credential flood (#196 C, 2026-11-13 JST)
 
 Reproduce from the repository root, one run at a time, nothing else running (add `LOAD_MALLOC_MMAP_THRESHOLD=131072` for the allocator check):
@@ -1040,3 +1074,140 @@ Browser setup: throwaway Docker PostgreSQL 18.6 using the compose-pinned digest,
 Negative checks temporarily substituted the original `replies.ts` from 2a21764, restoring the working source afterwards. All six navigation/retention controller regressions failed; the uncached seq-9,000 jump made 180 sequential reads (181 including the initial root open). The browser regression failed with a 109px cached-navigation scroll displacement against its <3px assertion. Limits: synthetic immutable records, one desktop browser and no request latency or server throughput measurement; these are request-count and scroll regressions. Older traversal and explicit latest navigation still use existing forward pages and can require many reads. No API or server change, body-budget increase or overscan adjustment is involved.
 
 Limits: one final controller run; these are retained-store cardinalities, not a process heap/RSS bound or a controlled latency comparison. The full fixture history, timing samples, caller-held snapshots, transient HTTP/fixture allocations and microtask-only peaks are excluded. Weak baseline-identity sets do not strongly retain old baselines. Pending sends and authored drafts remain exempt; Channel cardinality is not capped by this probe. Cursor-gap recovery, stale/denied responses, P4 merge and parent-eviction retry/discard have separate CI tests. The browser recheck proves the exercised viewport/navigation behavior, not low-end-device or production capacity.
+
+## Organization activity periodic REST reconciliation (#307 item 5, 2026-11-14 JST)
+
+Conditions: Apple M5, 10 CPUs, 32 GiB, macOS 27.0.1; Docker 29.9.3, VM 10 CPUs / 7.748 GiB. Pinned PostgreSQL 18.6; application Docker release build, Rust 1.99.0 and Node 26.13.0, image `sha256:f64d067475f426aec033d8aba546cf7b196d931cef27ca6aa5adcd33089d0b43`; default image allocator settings, 20-connection restricted `fukulow_app` pool. Direct Docker bridge HTTP, no proxy or TLS. Four k6 1.8.2 generators, one VU each, 2,500 sockets each, disjoint socket ranges, one Account/Session per 32 sockets (313 total); production socket caps unchanged. Generators use nofile 65,536 and source-port range 1024–65535. Each opens batches of 100 every 500 ms. No build/test from this worktree ran during the measurement; unrelated host activity was uncontrolled.
+
+Dataset: one Organization, 313 active non-Guest Members, 10 public Channels, one Topic and one Message. Held targets: all 10,000 connections hold the Channel list and Organization Capabilities; disjoint groups of 2,500 additionally hold the Organization Member directory, a Channel member list, main-scope Topic summaries, or a Topic summary. Exactly 30,000 held targets; no unheld target requests. `load/activity.ts` executes the production `createActivity` / `createActivityTarget` scheduler, including ready reconciliation, first offset uniform over 30 s, later 30 s + 0–2 s jitter, 200 ms debounce and retry bounds. No sends occur in this periodic-load window.
+
+All four generators reported 2,500 registered/live sockets, with a common 10,000-socket interval of **92.056 s**. Each continued for 95 s after its ready condition. Zero request errors, unexpected socket closes or HTTP failures; every sampled HTTP result was 200. Total REST completions: **128,220** (29,790 ready, 30,000 first periodic, 68,430 later periodic). Early periodic demand coalesced some ready requests. A common steady interval, starting 35 s after the last full-ready condition and ending 1 s before the first socket close, contained **54,153 requests / 56.056 s = 966.05 requests/s**. Its target counts were Channel lists 18,051, Capabilities 18,051, directories 4,521, Channel member lists 4,526, main summaries 4,471 and Topic summaries 4,533.
+
+| Observation (milliseconds) | Samples | Min | p50 | p95 | p99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| First periodic scheduled offset per socket | 10,000 | 6 | 14,890 | 28,450 | 29,687 | 30,001 |
+| First periodic Channel-list request offset (includes debounce) | 10,000 | 200 | 15,091 | 28,650 | 29,887 | 30,203 |
+| Later periodic schedule interval | 22,886 | 30,000 | 31,003 | 31,904 | 31,981 | 32,001 |
+| First periodic REST round trip, all held targets | 30,000 | 0 | 1 | 13 | 31 | 101 |
+| Later periodic REST round trip, all held targets | 68,430 | 0 | 1 | 2 | 5 | 58 |
+
+First-offset 5 s buckets across 0–30 s: **1,685 / 1,608 / 1,740 / 1,649 / 1,643 / 1,675**. The 1 ms overshoot reflects timer scheduling; request offsets additionally include debounce. App-only sampled peak Docker CPU was **46.8%** (100% = one CPU), memory **264.2 MiB**; the pool retained 20 app connections. Resource sampling began after all sockets registered, so these are sampled steady peaks, excluding startup peaks and generator/database memory.
+
+Assessment: retain the provisional **30 s** period, 200 ms debounce, 0–2 s reset jitter and 256-key buffer. This sample has substantial REST latency headroom; it does not establish capacity for large histories/directories, more held targets, concurrent mutation-driven refetches, TLS, WANs or other hardware. It is a single small-data run, with mixed targets, four generator loops, millisecond clock resolution and only about three periodic passes per socket; no before/after or worst-case claim. Multi-sender notice correctness is checked separately, not measured by this no-send REST window.
+
+Two earlier attempts are excluded from these figures. Docker-to-host forwarding produced connection refusals; its concurrent gauge also incorrectly decremented failed handshakes (fixed before the direct runs), so its 4,341 registrations do not prove a concurrent scale. One direct-network generator then exhausted source ports (`cannot assign requested address`), reaching a measured peak of 8,500 sockets before interruption. Four direct generators with wider source-port ranges removed those generator limits and reached 10,000 without changing the 30 s product period.
+
+Reproduce: build the repository Dockerfile; start an isolated migrated PostgreSQL/app pair on one Docker network; run `ACTIVITY_DB_CONTAINER=<throwaway-postgres> ACTIVITY_SEED_OUT=<outside-checkout>/seed.json node load/activity-seed.ts`. Run four `grafana/k6:1.8.2` containers on that network with the seed mounted at `/seed.json`, the checkout at `/work:ro`, an individual writable `/output`, `--ulimit nofile=65536:65536`, `--sysctl net.ipv4.ip_local_port_range='1024 65535'`, `BASE_URL=http://<app>:8080`, `ACTIVITY_SOCKETS=2500`, `ACTIVITY_OFFSET=0|2500|5000|7500`, `ACTIVITY_CONNECT_INTERVAL_MS=500`, and `ACTIVITY_SECONDS=95`; command `run --out json=/output/metrics.json /work/load/activity.ts`. Artifacts outside Git: `/private/tmp/fukulow-307-load-shards` contains per-generator metrics/summaries, combined percentiles, source patch, metadata and resource samples; the earlier attempts are `/private/tmp/fukulow-307-load` and `/private/tmp/fukulow-307-load-direct`. Credentials exist only in the disposable database and a mode-0600 external seed file; no response bodies or credentials are recorded in the metrics.
+
+### #307 multi-sender coalescing probe (2026-11-14 JST)
+
+Separate from the no-send O5 window above: `DATABASE_URL=<throwaway-admin> cargo test --locked --release --lib realtime::tests::activity::measure_multi_sender_activity_batching -- --ignored --exact --nocapture`. Same host and PostgreSQL 18.6; native Rust 1.99.0 release test/router and loopback clients in one process, restricted app pool capped at **5**. This fixture deliberately lifts socket/control caps to 100,000 so 1,000 reader sockets can share one test Member; production per-Account/global-cap behavior is not measured here. Two sender Members each have two sockets; no Message subscriptions exist.
+
+Pause after the first committed send's recipient authorization, commit Bob/Alice/Bob sends while that batch is held, then release. **4 commits, 1,004 sockets, exactly 2 batched recipient queries** (one frozen query plus one pending batch). Every Alice socket obtained Bob's eligible seq 4; every Bob socket obtained Alice's eligible seq 3; all 1,000 reader sockets obtained seq 4. No Message body stream was involved. Release-to-final-eligible-notice latency across the 1,004 sockets: **p50 17.290 ms, p95 19.270 ms, p99 19.426 ms, max 19.464 ms**. The test passed; SQLx reported a transient test-database cleanup warning while closing sockets, and the throwaway container is removed after validation.
+
+Limits: one artificially paused/coalesced batch sample with tiny bodies; this establishes the bounded batch/query behavior under two senders, not sustained throughput, natural batching frequency, production socket-cap fairness or 10,000-socket mutation fan-out capacity. Raw artifact: `/private/tmp/fukulow-307-batch-measurement.log`. No buffer/debounce/jitter tuning is justified by this probe.
+
+### #307 final-source confirmation (2026-11-14 JST)
+
+Repeat after the final registration-id, access-transition ordering, target coverage and retry fixes. Final Docker image `sha256:f4bb0b7502596022e4dbca60f6dee82f650899e8aafe9d643a25660da50f4b4b`; the same host, pinned tools, restricted 20-connection app pool, direct Docker network, four generators, production socket caps, 95 s after each generator's ready condition, and exactly the same 30,000-held-target mix as above. No worktree builds/tests ran during the measurement. Clarification for both records: the dataset description identifies the measured Organization; the disposable database also contained an idle E2E Organization. Before this repeat, database totals were 2 Organizations, 1,122 Channels, 358 Members and 673 Messages; the measured Organization still contained exactly 313 Members, 10 Channels and 1 Message/Topic. The preceding 12 Compose E2E tests ran against this final app image and Caddy, then that stack was stopped before measurement.
+
+All four generators exited **0**, each with 2,500 ready/live sockets. Common 10,000-socket interval: **95.478 s**; **zero** request errors, unexpected closes or HTTP failures. REST completions: **128,544** (29,778 ready, 30,000 first periodic, 68,766 later periodic). The common steady interval contained **57,549 requests / 59.478 s = 967.57 requests/s**: Channel lists 19,183, Capabilities 19,183, directories 4,798, Channel member lists 4,789, main summaries 4,794 and Topic summaries 4,802.
+
+| Observation (milliseconds) | Samples | Min | p50 | p95 | p99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| First periodic scheduled offset per socket | 10,000 | 2 | 14,524 | 28,475 | 29,629 | 30,002 |
+| First periodic Channel-list request offset (includes debounce) | 10,000 | 200 | 14,724 | 28,676 | 29,830 | 30,203 |
+| Later periodic schedule interval | 22,976 | 30,000 | 30,987 | 31,899 | 31,980 | 32,003 |
+| First periodic REST round trip, all held targets | 30,000 | 0 | 1 | 36 | 101 | 195 |
+| Later periodic REST round trip, all held targets | 68,766 | 0 | 1 | 2 | 3 | 124 |
+
+First-offset 5 s buckets: **1,756 / 1,722 / 1,680 / 1,579 / 1,633 / 1,630**. App sampled peak CPU **34.77%**, memory **285.2 MiB**; app pool **20** connections. The larger first-run tail includes overlap with ready reconciliation; this is not an isolated endpoint benchmark. Retain **30 s**: steady load and latency agree with the earlier run, with no evidence requiring a period/debounce/jitter/buffer adjustment. The earlier small-data, mixed-target, same-host, HTTP-only and no-concurrent-mutation limits still apply; this does not establish 10,000-socket mutation fan-out capacity. Raw per-generator metrics, exit codes, combined statistics, resource samples, database counts, final image metadata and measured source snapshots are in `/private/tmp/fukulow-307-load-final`; reproduce with the four-generator command above.
+## Web first-paint and timeline waterfall (#345, 2026-11-14 JST)
+
+Purpose: measure where time goes between opening the web app and seeing a usable timeline across cache states, network conditions and entry URLs before choosing among first-paint proposals.
+
+Environment and commit: `c30f79d8177fc0645159a11b98fc5d5abf97f3a5` (`antigravity/first-paint-345`, zero production code changes). Host: Apple M5 (10 CPUs, 32 GiB RAM), macOS 27.0.1 (`darwin 27.0.0`, `arm64`), Docker 29.9.3, Node v26.8.1, Playwright 1.65.0 / Chromium (1280×800 viewport, set in the script). Stack: production multi-stage image served by `docker compose --profile caddy up` (Caddy 2.11.9, HTTPS `tls internal`, HTTP/2, `encode zstd gzip`, `Cache-Control: public, max-age=31536000, immutable` on `/assets/*`), PostgreSQL `18.6 (Debian 18.6-1.pgdg13+2)`.
+
+Dataset (`load/hot-plans/seed.sql`, #325 scale): Organization A (`00000000-0000-4000-8000-00000000000a`) with 10,000 Members, 40 public Channels and 10 private Channels. Signed in as Member 2 (`m2@a.invalid`), who is a member of all 50 Channels (50 visible Channels). The first visible and directly opened Channel is `channel-1` (`386df2c5-c664-ee3d-2a08-b1c9f0a0275c`) with 100,000 Messages across 2,000 Topics (50 Messages/Topic); the other 49 Channels hold 2,000 Messages across 50 Topics each. Because `load/hot-plans/seed.sql` inserts non-Argon2 placeholder hashes, the script creates a throwaway account via `POST /api/v1/setup` before running `load/hot-plans/seed.sql` and copies its Argon2 `password_hash` to `m2@a.invalid` (same pattern as `load/signin.ts`), then running `ANALYZE`.
+
+Matrix and method: 8 cells × 10 runs (after 12 warm-up navigations to warm OS/PostgreSQL buffers and SQLx prepared-statement caches):
+- Cache: Cold (`Network.clearBrowserCache` before navigation, new page) vs Warm (priming navigation in the same browser context, then measured reload; Chromium trusts Caddy's TLS SPKI via `--ignore-certificate-errors-spki-list` so immutable `/assets/*` hit disk/memory cache with 0 transfer bytes).
+- Network: Unthrottled vs CDP `Network.emulateNetworkConditions` (`latency: 150` ms RTT, `downloadThroughput: 200000` B/s = 1.6 Mbps, `uploadThroughput: 93750` B/s = 750 kbps).
+- URL: `/` vs direct Channel URL `/o/00000000-0000-4000-8000-00000000000a/c/386df2c5-c664-ee3d-2a08-b1c9f0a0275c`.
+- Instrumentation: injected via Playwright `context.addInitScript` only (Navigation/Resource/Paint Timing, `MutationObserver` on `#app` and `.timeline-list .timeline-list__item`, `window.fetch` and `window.WebSocket` wrappers). Because `index.html` ships an empty `<div id="app"></div>` with external CSS/JS, blank-screen duration equals First Contentful Paint (FCP).
+
+Reproduce (self-contained: builds image, starts `fukulow-fp345` Caddy stack on ephemeral ports, seeds DB, runs 80 navigations, writes `results.json` to `fukulow-345` under `os.tmpdir()` or to `FIRST_PAINT_OUT`, and tears down `down -v`):
+
+```bash
+node web/scripts/first-paint.ts
+```
+
+### Page-level metrics (ms, `p50 / p95` across 10 runs per cell)
+
+With 10 runs, nearest-rank p95 is the 10th value: every p95 below is the slowest run of its cell and can come from a single run.
+
+| URL | Network | Cache | `index.html` TTFB | JS/CSS End | App Mount | FCP / Blank Screen | WS `subscribed` | Timeline Visible | Asset Transfer (B) |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `/` | Unthrottled | Cold | 2.1 / 2.4 | 8.9 / 11.1 | 17.5 / 19.5 | 28.0 / 32.0 | 142.5 / 272.9 | 129.9 / 263.8 | 92,187 / 92,281 |
+| `/` | Unthrottled | Warm | 1.2 / 1.3 | 3.5 / 3.5 | 14.8 / 15.4 | 28.0 / 28.0 | 141.2 / 270.6 | 130.1 / 260.2 | 0 / 0 |
+| `/o/:org/c/:channel` | Unthrottled | Cold | 2.1 / 2.3 | 8.8 / 10.4 | 17.2 / 18.7 | 28.0 / 32.0 | 130.5 / 266.2 | 120.9 / 252.7 | 92,203 / 92,256 |
+| `/o/:org/c/:channel` | Unthrottled | Warm | 1.2 / 1.3 | 3.4 / 3.6 | 14.8 / 15.3 | 28.0 / 28.0 | 127.4 / 265.0 | 119.1 / 253.1 | 0 / 0 |
+| `/` | Throttled (150 ms, 1.6 Mbps) | Cold | 152.9 / 153.3 | 790.2 / 804.3 | 808.1 / 822.0 | 828.0 / 836.0 | 2130.1 / 2153.6 | 2091.4 / 2106.4 | 92,187 / 92,208 |
+| `/` | Throttled (150 ms, 1.6 Mbps) | Warm | 150.4 / 150.7 | 170.3 / 178.6 | 187.3 / 201.3 | 208.0 / 220.0 | 1522.4 / 1567.7 | 1471.2 / 1512.4 | 0 / 0 |
+| `/o/:org/c/:channel` | Throttled (150 ms, 1.6 Mbps) | Cold | 153.1 / 153.8 | 795.4 / 804.6 | 808.2 / 824.2 | 828.0 / 848.0 | 2130.4 / 2155.2 | 2077.5 / 2108.3 | 92,187 / 92,216 |
+| `/o/:org/c/:channel` | Throttled (150 ms, 1.6 Mbps) | Warm | 150.4 / 150.6 | 163.6 / 174.2 | 185.9 / 198.6 | 200.0 / 216.0 | 1508.0 / 1539.7 | 1457.3 / 1485.7 | 0 / 0 |
+
+Static bundle sizes over the wire (compressed by Caddy): `index.html` 756 B, CSS (`index-*.css`) ~7.5 KB (finishes at 6.9–7.2 ms unthrottled cold, 385.9–390.6 ms throttled cold), JS (`index-*.js`) ~84.7 KB (finishes at 8.8–8.9 ms unthrottled cold, 790.2–795.4 ms throttled cold).
+
+### API request waterfall before timeline is visible (ms from `navigationStart`, `p50 / p95`)
+
+The browser shows time order only, not which response a request waited for. The "Latest ended before start" column (`latestEndedBefore` in `results.json`) names the latest API request that finished before this one started; it is not a dependency.
+
+Dependencies read from the source at the measured commit (not measured):
+- `GET /api/v1/me` -> `GET /api/v1/orgs/{org}/me`: `auth.svelte.ts` shows the app after `getMe()`, and `selectOrganization()` then awaits the Organization.
+- `GET /api/v1/orgs/{org}/me` -> `channels`, `members` and the session: `selectOrganization()` opens the session (`session.ts`, which calls `channels.load()`) and starts `members.load()` only after that response.
+- `channels` -> `timeline`: `channels.ts` selects a Channel when the list arrives, and `Workspace.svelte` applies the URL's Channel only once the list is `ready`; the selection then calls `sync.watch()`, which fetches the timeline. This holds for direct Channel URLs too.
+- `channels #2` / `#3` are Unread list refreshes (`unread.ts` `refresh()`). Their triggering response was not traced; `#3` following `#2` is time order only.
+
+The timing in all 8 cells is consistent with the critical path `me` -> `orgs/{org}/me` -> `channels` -> `timeline`.
+
+Representative cells (`/` vs `/o/:org/c/:channel`, Cold cache):
+
+| Cell | Request (in start order) | Runs before timeline | Latest ended before start (time order) | Start (ms) | End (ms) | Duration (ms) | Transfer (B) |
+|---|---|---:|---|---:|---:|---:|---:|
+| `/` Unthrottled Cold | `GET /api/v1/me` | 10/10 | — | 15.6 / 17.5 | 24.7 / 27.1 | 9.2 / 9.6 | 702 |
+| | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 24.9 / 27.3 | 26.9 / 29.3 | 1.9 / 2.1 | 709 |
+| | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.3 / 30.8 | 84.4 / 88.2 | 55.5 / 59.3 | 19,715 |
+| | `GET /api/v1/orgs/{org}/members` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.6 / 31.0 | 58.7 / 62.3 | 30.0 / 33.9 | 829,006 |
+| | `GET /api/v1/orgs/{org}/channels #2` | 10/10 | `GET /api/v1/orgs/{org}/me` | 31.2 / 33.8 | 91.4 / 95.7 | 59.9 / 63.9 | 19,715 |
+| | `GET /api/v1/orgs/{org}/channels/{channel}/timeline` | 10/10 | `GET /api/v1/orgs/{org}/channels` | 90.9 / 94.6 | 121.3 / 255.0 | 31.9 / 163.0 | 21,455 |
+| | `GET /api/v1/orgs/{org}/channels #3` | 4/10 | `GET /api/v1/orgs/{org}/channels #2` | 92.2 / 96.6 | 119.6 / 139.7 | 34.9 / 44.7 | 19,715 |
+| `/o/:org/c/:channel` Unthrottled Cold | `GET /api/v1/me` | 10/10 | — | 15.4 / 16.8 | 24.5 / 26.1 | 9.2 / 9.4 | 702 |
+| | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 24.7 / 26.3 | 26.7 / 28.4 | 1.9 / 2.8 | 709 |
+| | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.2 / 29.9 | 78.9 / 82.3 | 50.7 / 53.1 | 19,715 |
+| | `GET /api/v1/orgs/{org}/members` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.4 / 30.1 | 53.9 / 65.6 | 25.0 / 37.7 | 829,006 |
+| | `GET /api/v1/orgs/{org}/channels #2` | 10/10 | `GET /api/v1/orgs/{org}/me` | 49.1 / 51.5 | 84.8 / 94.5 | 34.4 / 46.0 | 19,715 |
+| | `GET /api/v1/orgs/{org}/channels/{channel}/timeline` | 10/10 | `GET /api/v1/orgs/{org}/channels` | 82.0 / 86.1 | 112.5 / 241.4 | 31.2 / 157.5 | 21,455 |
+| | `GET /api/v1/orgs/{org}/channels #3` | 5/10 | `GET /api/v1/orgs/{org}/channels #2` | 85.7 / 95.4 | 108.6 / 125.5 | 22.0 / 40.6 | 19,715 |
+| `/` Throttled Cold | `GET /api/v1/me` | 10/10 | — | 804.2 / 817.4 | 970.4 / 985.3 | 166.4 / 171.9 | 702 |
+| | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 971.2 / 986.2 | 1133.7 / 1147.9 | 161.3 / 164.5 | 709 |
+| | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 1138.9 / 1152.0 | 1578.6 / 1598.3 | 440.8 / 455.8 | 19,715 |
+| | `GET /api/v1/orgs/{org}/members` | 0/10 (in flight) | `GET /api/v1/orgs/{org}/me` | 1139.5 / 1152.7 | 6106.8 / 6203.7 | 4967.4 / 5060.9 | 829,006 |
+| | `GET /api/v1/orgs/{org}/channels #2` | 10/10 | `GET /api/v1/orgs/{org}/me` | 1146.5 / 1160.4 | 1594.1 / 1611.0 | 450.6 / 466.0 | 19,715 |
+| | `GET /api/v1/orgs/{org}/channels #3` | 10/10 | `GET /api/v1/orgs/{org}/channels #2` | 1596.1 / 1612.4 | 2035.4 / 2051.4 | 439.6 / 443.5 | 19,715 |
+| | `GET /api/v1/orgs/{org}/channels/{channel}/timeline` | 10/10 | `GET /api/v1/orgs/{org}/channels` | 1599.1 / 1618.7 | 2070.7 / 2087.5 | 468.0 / 478.9 | 21,455 |
+| `/o/:org/c/:channel` Throttled Cold | `GET /api/v1/me` | 10/10 | — | 803.8 / 819.1 | 970.0 / 986.8 | 163.8 / 168.4 | 702 |
+| | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 970.6 / 987.5 | 1134.6 / 1151.2 | 162.9 / 165.7 | 709 |
+| | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 1139.4 / 1156.1 | 1575.8 / 1591.0 | 437.9 / 446.3 | 19,715 |
+| | `GET /api/v1/orgs/{org}/members` | 0/10 (in flight) | `GET /api/v1/orgs/{org}/me` | 1140.0 / 1156.7 | 6105.7 / 6120.1 | 4965.5 / 4974.2 | 829,006 |
+| | `GET /api/v1/orgs/{org}/channels #2` | 10/10 | `GET /api/v1/orgs/{org}/me` | 1156.8 / 1176.2 | 1592.3 / 1613.1 | 438.0 / 445.9 | 19,715 |
+| | `GET /api/v1/orgs/{org}/channels/{channel}/timeline` | 10/10 | `GET /api/v1/orgs/{org}/channels` | 1584.1 / 1602.6 | 2057.5 / 2088.1 | 468.5 / 485.5 | 21,455 |
+| | `GET /api/v1/orgs/{org}/channels #3` | 10/10 | `GET /api/v1/orgs/{org}/channels #2` | 1594.6 / 1615.0 | 2035.1 / 2055.9 | 440.9 / 442.6 | 19,715 |
+
+### Key waterfall findings
+
+1. **Four-step sequential API chain even on direct Channel URLs**: Opening `/o/:org/c/:channel` still runs `GET /api/v1/me` -> `GET /api/v1/orgs/{org}/me` -> `GET /api/v1/orgs/{org}/channels` -> `GET /api/v1/orgs/{org}/channels/{channel}/timeline` one after another. The dependencies come from the source (see above); the measurement shows only that each step started after the previous one ended. On the 150 ms RTT / 1.6 Mbps profile, this post-mount serial chain takes ~1,270 ms (`185.9 ms` mount -> `1,457.3 ms` timeline visible on warm cache).
+2. **Duplicate `channels` calls and a 10,000-member download saturate the link and DB during bootstrap**: Every page load fires `GET /api/v1/orgs/{org}/channels` 3–4 times (`channels.load()` in `session.ts` plus 2–3 `unread` refreshes on discovery/scope entry, each 19.7 KB compressed and ~51–60 ms server time for `unread.visible_list` + `unread.list_counts`) and unconditionally starts `GET /api/v1/orgs/{org}/members` (all 10,000 Members = 829 KB compressed, taking 4,967 ms on 1.6 Mbps and competing with `channels` and `timeline` on the downlink).
+3. **One slow timeline run per unthrottled cell, and cold blank screen**: Unthrottled, `GET .../timeline` takes 30.8–31.9 ms at p50. In each unthrottled cell exactly 1 of 10 runs took 157–163 ms and the other 9 took 28–41 ms, so the p95 (157.3–163.0 ms) is that single run. It accounts for the p50 -> p95 jump in `timelineVisibleMs` (119–130 ms vs 253–264 ms). None of the 40 throttled runs shows such a tail (454–488 ms). This run captured no server plans. That the slow run is #326's generic plan is an estimate from the existing #326 statement-level DB measurements (generic plan about 10x the custom plan), not observed here. On cold throttled visits, the screen is blank for 828 ms p50 (836–848 ms p95) until the 84.7 KB JS bundle downloads and mounts `#app`.
+
+Limits: local loopback Docker stack on a developer Mac (says nothing about VPS network/CPU latency). PR #375 (#326 timeline query fix) is not merged on this base commit, so any generic-plan timeline cost is included in `timeline` and `timelineVisibleMs`. 10 runs per cell bound only the median; a tail seen in one run per cell is not a stable p95. Other AI workers and containers may run on the same host. This run saved its raw per-run JSON outside the repository at `/private/tmp/fukulow-345/results.json`; the script now defaults to `os.tmpdir()`.

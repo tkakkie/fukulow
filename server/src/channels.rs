@@ -185,6 +185,9 @@ pub async fn create_channel(
         return Err(ApiError::bad_request());
     }
     let organization_id = auth.identity.organization.organization_id;
+    let task_state = state.clone();
+    let channel = tokio::spawn(async move {
+    let state = task_state;
     let channel = crate::database::organization(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
         if matches!(input.visibility, ChannelVisibility::Private) {
             auth::members::lock_organization(&mut *tx, organization_id).await?;
@@ -242,6 +245,9 @@ pub async fn create_channel(
         }
         Ok::<_, ApiError>(channel)
     }).await?;
+    state.session_changes.channel_changed(state.pool.clone(), organization_id, auth::activity::ChannelChange::Created { channel: channel.id, creator: auth.identity.member.id, public: matches!(channel.visibility, ChannelVisibility::Public) });
+    Ok::<_, ApiError>(channel)
+    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -458,4 +464,6 @@ pub(crate) async fn member_access(
     .await
 }
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+pub(crate) mod activity;

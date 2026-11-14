@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createMembers, createInviteAcceptance, takeInvite } from './members'
-import type { Identity, Member, Result } from './api'
+import type { Identity, Member, MemberList, Result } from './api'
 import { signOut } from './auth'
 
 const member: Member = { id: 'm', name: 'メンバー', role: 'member' }
@@ -254,4 +254,81 @@ it('deactivates through the API, preserves denied targets, and fences late resul
   finish({ ok: false, kind: 'http', status: 401 })
   expect(await late).toBe(false); expect(ended).toHaveBeenCalledOnce()
   expect(unavailable).not.toHaveBeenCalled()
+})
+
+it('held Member loads coalesce with reconciliation, replace author Maps and reject pre-invalidation responses', async () => {
+  const { createActivity } = await import('./activity')
+  vi.useFakeTimers()
+  const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []
+  const listMembers = vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finishes.push(resolve) }))
+  const c = createMembers(org, vi.fn(), vi.fn(), {
+    listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const activity = createActivity({ watched: () => false })
+  activity.hold('members', c.activityTarget)
+  try {
+    const first = c.load()
+    finishes[0](ok({ members: [member] })); await first
+    const initial = c.authors.get()
+    expect(initial.get(member.id)?.name).toBe(member.name)
+    const pending = c.load()
+    activity.notice({ type: 'members_changed' })
+    void c.load(); void c.load()
+    expect(listMembers).toHaveBeenCalledTimes(2)
+    expect(c.get().members).toEqual([])
+    finishes[1](ok({ members: [{ ...member, name: 'stale' }] })); await pending
+    expect(c.get().members).toEqual([])
+    expect(c.authors.get()).toBe(initial)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(listMembers).toHaveBeenCalledTimes(3)
+    finishes[2](ok({ members: [] }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(c.authors.get()).not.toBe(initial)
+    expect(c.authors.get().has(member.id)).toBe(false)
+  } finally { activity.close(); c.close(); vi.useRealTimers() }
+})
+
+it('held Member loads retain Membership loss and late 401 authority across invalidation and shutdown', async () => {
+  const { createActivity } = await import('./activity')
+  const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []
+  const ended = vi.fn(), unavailable = vi.fn(), lookupAuthors = vi.fn()
+  const listMembers = vi.fn(() => new Promise<Result<{ members: Member[] }>>(resolve => { finishes.push(resolve) }))
+  const c = createMembers(org, ended, unavailable, {
+    listMembers, lookupAuthors, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const activity = createActivity({ watched: () => false })
+  activity.hold('members', c.activityTarget)
+  const pending = c.load()
+  activity.notice({ type: 'members_changed' })
+  finishes[0]({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+  await pending
+  expect(unavailable).toHaveBeenCalledOnce()
+  await c.load(); c.authors.watch(['unknown']); c.authors.retry()
+  await Promise.resolve()
+  expect(listMembers).toHaveBeenCalledOnce(); expect(lookupAuthors).not.toHaveBeenCalled()
+  activity.close(); c.close()
+
+  const next = createMembers(org, ended, unavailable, {
+    listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const late = next.activityTarget.refresh()
+  next.close()
+  finishes[1]({ ok: false, kind: 'http', status: 401 }); await late
+  await Promise.resolve()
+  expect(ended).toHaveBeenCalledOnce()
+})
+
+it('ignores an older unscoped response after a newer Guest directory load completes', async () => {
+  const finishes: ((result: Result<MemberList>) => void)[] = []
+  const c = createMembers(org, vi.fn(), vi.fn(), {
+    listMembers: () => new Promise(resolve => finishes.push(resolve)),
+    lookupAuthors: vi.fn(), changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  })
+  const self: Member = { id: 'self', name: 'ゲスト', role: 'guest' }
+  const older = c.load(), newer = c.load()
+  finishes[1](ok({ members: [self] })); await newer
+  finishes[0](ok({ members: [self, member] })); await older
+  expect(c.get().members).toEqual([self])
+  expect([...c.authors.get().keys()]).toEqual(['self'])
+  c.close()
 })

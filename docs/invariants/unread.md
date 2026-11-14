@@ -54,3 +54,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
 
 - [sync](sync.md): `caps disjoint cursor evidence and refetches its forgotten final sequence without advancing across a gap`
+
+- [realtime](realtime.md): `dm_notice_denies_nonparticipant_owner_with_participant_control`, `dm_notices_reach_both_participants_and_only_other_senders_and_own_read_sessions`, `dm_peer_deactivation_reactivation_and_rename_invalidate_only_current_viewers_and_renewal_gains_only_lapsed_participant`, `dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival`

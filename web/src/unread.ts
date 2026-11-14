@@ -11,12 +11,12 @@ export type { UnreadScope } from './unread-counts'
 
 type Sync = ReturnType<typeof createSync>
 export type UnreadApi = {
-  listChannels(): Promise<Result<ChannelList>>
+  listChannels(signal?: AbortSignal): Promise<Result<ChannelList>>
   markRead(scope: UnreadScope, body: MarkReadRequest): Promise<Result<ReadPosition>>
   getTopicSummary(channel: string, topic: string): Promise<Result<TopicSummaryResponse>>
 }
 export const unreadApi = (org: string): UnreadApi => ({
-  listChannels: () => api.listChannels(org),
+  listChannels: signal => api.listChannels(org, undefined, signal),
   markRead: (s, body) => s.topicId === null ? api.markChannelRead(org, s.channel, body) : api.markTopicRead(org, s.channel, s.topicId, body),
   getTopicSummary: (c, t) => api.getTopicSummary(org, c, t),
 })
@@ -35,7 +35,7 @@ type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAt
 type Deadline = { channel?: string; cancel(): void }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
-export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
+export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void> }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -158,8 +158,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       })])
     } finally { if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) } }
   }
-  const retryDelay = (attempt: number, r: Result<unknown>) => Math.max(backoffCap(attempt), !r.ok && r.kind === 'network' ? r.retryAfterMs ?? 0 : 0)
-  const retryable = (r: Result<unknown>) => !r.ok && (r.kind === 'network' || r.status >= 500)
+  const retryDelay = (attempt: number, r: Result<unknown>) => Math.max(backoffCap(attempt), !r.ok ? r.retryAfterMs ?? 0 : 0)
+  const retryable = (r: Result<unknown>) => !r.ok && (r.kind === 'network' || r.status === 429 || r.status >= 500)
   function acceptScope(s: Scope, b: ScopeBaseline) {
     s.baseline = chooseBaseline(s.baseline, b)
     // Accepted baselines and successful mark-read responses supply persisted positions.
@@ -173,6 +173,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   async function refresh(retryTokens?: Map<string, symbol>) {
     if (!active()) return
+    if (options.refreshList) return options.refreshList()
     // Before discovery there are no Channel generations to scope a list retry to.
     const discovering = channels.size === 0
     const eligible = (id: string, c: Channel) => !c.stopped && (!retryTokens || retryTokens.get(id) === c.token)
@@ -548,6 +549,37 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   if (active()) { reconcile(); void refresh() }
   return {
     subscribe,
+    activityMainCoverage(id: string) { return channels.get(id)?.aggregate?.read_seq ?? -1 },
+    activitySnapshot(rows: UnreadChannel[]) {
+      if (!active()) return
+      const ids = new Set(rows.map(r => r.id))
+      for (const [id, c] of channels) if (!ids.has(id) && !watched(id)) { fence(id, c); channels.delete(id) }
+      for (const row of rows) {
+        const c = getChannel(row.id)
+        if (c.stopped) continue
+        acceptScope(c.main, mainBaseline(row))
+        c.aggregate = chooseChannelBaseline(c.aggregate, row); c.error = false; c.heldPositions.clear(); prune(c)
+      }
+      resolveBoundary(); notify()
+    },
+    activityReconcile() {
+      for (const [id, c] of channels) if (!watched(id)) { fence(id, c); channels.set(id, channelState()) }
+      notify()
+    },
+    activityAccess(id: string) {
+      const c = channels.get(id)
+      if (c) fence(id, c)
+      channels.set(id, channelState()); notify(id)
+    },
+    activityRevoke(id: string) {
+      const c = channels.get(id)
+      if (c) fence(id, c)
+      channels.delete(id); notify(id)
+    },
+    activityRead(id: string, topic: string | null) {
+      if (!watched(id)) return
+      if (topic !== null && (channels.get(id)?.topics.has(topic))) void refreshTopic(id, topic)
+    },
     get(id: string) { let s = snapshots.get(id); if (!s) snapshots.set(id, s = snapshot(id)); return s },
     refresh: () => refresh(),
     async enter(scope: UnreadScope) {

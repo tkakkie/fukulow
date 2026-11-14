@@ -5,6 +5,12 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
+/// Channel-owned sharing query, injected by the composition root. The query
+/// correlates the current caller `u` and active candidate `m` in one snapshot.
+pub trait MemberListVisibility {
+    fn shared_channel_sql() -> String;
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct DisplayIdentity {
     pub id: Uuid,
@@ -99,12 +105,17 @@ pub(crate) async fn current_actor(
     (status=401, description="Account Session ended", body=ErrorBody),
     (status=404, description="organization_unavailable", body=ErrorBody),
     (status=500, description="Database failure", body=ErrorBody)))]
-pub async fn list_members(State(state): State<AppState>, auth: Auth) -> Result<Response, ApiError> {
+pub async fn list_members<V: MemberListVisibility>(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Response, ApiError> {
     auth.require(Action::ReadOrganization)?;
     // One statement keeps authorization and results in one non-locking snapshot.
     let sql = format!(
-        "SELECT m.id,m.name,m.role,u.role FROM ({}) u JOIN users m ON m.organization_id=$1 AND m.deactivated_at IS NULL ORDER BY m.name,m.id",
-        current_member_sql(false)
+        "SELECT m.id,m.name,m.role,u.role FROM ({}) u JOIN users m ON m.organization_id=$1 AND m.deactivated_at IS NULL \
+         WHERE u.role<>'guest' OR m.id=u.id OR EXISTS ({}) ORDER BY m.name,m.id",
+        current_member_sql(false),
+        V::shared_channel_sql()
     );
     let rows = crate::database::organization_read_only(
         &state.pool,
@@ -156,14 +167,17 @@ pub async fn list_members(State(state): State<AppState>, auth: Auth) -> Result<R
     (status=413, description="Request too large", body=ErrorBody),
     (status=415, description="Expected application/json", body=ErrorBody),
     (status=500, description="Database failure", body=ErrorBody)))]
-pub async fn change_role<G: RoleChangeGuard>(
+pub async fn change_role<G: RoleChangeGuard + Send + 'static>(
     State(state): State<AppState>,
     auth: Auth,
     path: Result<Path<(Uuid, Uuid)>, axum::extract::rejection::PathRejection>,
     ApiJson(input): ApiJson<ChangeRoleRequest>,
 ) -> Result<Response, ApiError> {
     let Path((org, id)) = path.map_err(|_| ApiError::bad_request())?;
-    let row = crate::database::organization(&state.pool, auth.identity.organization.organization_id, async |tx: &mut sqlx::PgConnection| {
+    let task_state = state.clone();
+    let row = tokio::spawn(async move {
+    let state = task_state;
+    let (row, notice) = crate::database::organization(&state.pool, auth.identity.organization.organization_id, async |tx: &mut sqlx::PgConnection| {
         lock_organization(&mut *tx, org).await?;
         let guard = G::lock(&mut *tx, org, id).await?;
         current_actor(&mut *tx, &auth, Action::ChangeRole).await?;
@@ -181,15 +195,20 @@ pub async fn change_role<G: RoleChangeGuard>(
             }
         }
         guard.check(&mut *tx, org, id, input.role).await?;
+        let previous: Role = sqlx::query_scalar("SELECT role FROM users WHERE organization_id=$1 AND id=$2").bind(org).bind(id).fetch_one(&mut *tx).await?;
+        let notice = if previous != input.role { state.session_changes.capture_activity(tx, org, id).await? } else { None };
         let row = sqlx::query_as::<_,(Uuid,String,Role)>("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING id,name,role")
             .bind(org).bind(id).bind(input.role).fetch_optional(&mut *tx).await.map_err(member_write_error)?
             .ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
-        Ok::<_, ApiError>(row)
+        Ok::<_, ApiError>((row, notice))
     }).await?;
+    if let Some(notice) = notice { notice.committed(state.pool.clone()); }
     state
         .session_changes
         .recheck_subscriptions(&state.pool, SubscriptionScope::Member(org, id))
         .await;
+    Ok::<_, ApiError>(row)
+    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(Member {
@@ -252,7 +271,7 @@ pub async fn deactivate<G: RoleChangeGuard + Send + 'static>(
     let Path((org, id)) = path.map_err(|_| ApiError::bad_request())?;
     // Own COMMIT and signaling together, even if the HTTP future is cancelled.
     tokio::spawn(async move {
-        let (account, revision) = deactivate_transaction::<G>(&state.pool, &auth, org, id).await?;
+        let (account, revision) = deactivate_transaction::<G>(&state, &auth, org, id).await?;
         state
             .session_changes
             .membership_revoked(org, account, revision);
@@ -272,12 +291,12 @@ pub async fn deactivate<G: RoleChangeGuard + Send + 'static>(
 }
 
 async fn deactivate_transaction<G: RoleChangeGuard>(
-    pool: &sqlx::PgPool,
+    state: &AppState,
     auth: &Auth,
     org: Uuid,
     id: Uuid,
 ) -> Result<(Uuid, i64), ApiError> {
-    crate::database::organization(pool, org, async |tx: &mut sqlx::PgConnection| {
+    let (result, notice) = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
         lock_organization(tx, org).await?;
         let guard = G::lock(tx, org, id).await?;
         let actor = current_actor(tx, auth, Action::DeactivateMember).await?;
@@ -293,10 +312,16 @@ async fn deactivate_transaction<G: RoleChangeGuard>(
             }
         }
         guard.check_deactivation(tx, org, id).await?;
+        let notice = state.session_changes.capture_activity(tx, org, id).await?;
         // Route ids are Member ids. Resolve the Account only in this scoped UPDATE.
-        sqlx::query_as("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING account_id,membership_revision")
-            .bind(org).bind(id).fetch_one(tx).await.map_err(member_write_error)
-    }).await
+        let result = sqlx::query_as("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING account_id,membership_revision")
+            .bind(org).bind(id).fetch_one(tx).await.map_err(member_write_error)?;
+        Ok::<_, ApiError>((result, notice))
+    }).await?;
+    if let Some(notice) = notice {
+        notice.committed(state.pool.clone());
+    }
+    Ok(result)
 }
 
 // Retained identity/eligibility snapshots for fixed-participant resources. The

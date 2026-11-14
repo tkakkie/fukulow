@@ -143,21 +143,21 @@ pub enum Role {
 
 pub(crate) const ALL_ROLES: [Role; 4] = [Role::Owner, Role::Admin, Role::Member, Role::Guest];
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Organization {
     pub organization_id: Uuid,
     pub name: String,
     pub capabilities: OrganizationCapabilities,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Member {
     pub id: Uuid,
     pub name: String,
     pub role: Role,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Identity {
     pub organization: Organization,
     pub member: Member,
@@ -622,6 +622,7 @@ impl FromRequestParts<AppState> for AccountAuth {
 }
 
 /// Resolve authority only from the authenticated Account and Organization URL.
+#[derive(Clone)]
 pub struct Auth {
     pub identity: Identity,
     pub(crate) account_id: Uuid,
@@ -1281,3 +1282,16 @@ mod tests {
         }
     }
 }
+
+impl Auth {
+    pub(crate) fn session_hash(&self) -> Vec<u8> {
+        self.token_hash.clone()
+    }
+}
+
+// Channel-owned fan-out composes this auth-owned live Session/Member projection.
+pub(crate) fn notice_members_sql() -> &'static str {
+    "SELECT u.organization_id,u.id,u.role,u.membership_revision,s.token_hash FROM users u JOIN account_sessions s ON s.account_id=u.account_id WHERE u.deactivated_at IS NULL AND s.expires_at>clock_timestamp()"
+}
+
+pub(crate) mod activity;

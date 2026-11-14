@@ -63,6 +63,9 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #204 section notices share #307's post-COMMIT publication, buffer, proven-recipient resets and O5 periodic REST reconciliation of held targets. Reason: recovery must converge without another mutation or disclosing personal activity to other Members.
 - #204 section display intersects authorized layout and Channel-list snapshots under A11/A12 fences; loss hides immediately. Reason: a stale personal-layout response must never restore a Channel hidden by access loss.
 
+- #307 one conservative socket epoch plus at most 256 retained authorization lifetimes fences notice publication and handoff; the existing batched fallback checks them. Reason: bounded provenance without one subscription per visible Channel.
+- #307 auth exposes injected mutation hooks implemented by channels; all held REST targets share one refetch controller. Reason: preserve the module DAG and apply identical retry, debounce and generation fences without dependencies.
+
 ## Admission and timeouts
 - #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
 - Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).

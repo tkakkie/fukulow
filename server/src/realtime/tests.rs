@@ -307,8 +307,25 @@ async fn resubscribe(client: &mut Client, channel: Uuid, after: i64) {
     .unwrap();
     subscribe(client, channel, after).await;
 }
+fn is_notice(frame: &tungstenite::Message) -> bool {
+    let tungstenite::Message::Text(text) = frame else {
+        return false;
+    };
+    serde_json::from_str::<crate::channels::activity::Notice>(text).is_ok()
+}
+async fn message_next(
+    client: &mut Client,
+) -> Option<Result<tungstenite::Message, tungstenite::Error>> {
+    loop {
+        let result = client.next().await?;
+        if result.as_ref().is_ok_and(is_notice) {
+            continue;
+        }
+        return Some(result);
+    }
+}
 async fn frame(client: &mut Client) -> tungstenite::Message {
-    tokio::time::timeout(Duration::from_secs(5), client.next())
+    tokio::time::timeout(Duration::from_secs(5), message_next(client))
         .await
         .unwrap()
         .unwrap()
@@ -346,7 +363,7 @@ async fn denied(client: &mut Client, channel: Uuid) {
 }
 async fn silent(client: &mut Client) {
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), client.next())
+        tokio::time::timeout(Duration::from_millis(100), message_next(client))
             .await
             .is_err()
     );
@@ -1117,3 +1134,5 @@ pub(super) mod access_loss;
 
 mod account_security;
 mod round_trips;
+
+mod activity;

@@ -4,6 +4,8 @@ import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { lookupAuthors, Member, ReadPosition, Result } from './api'
+import * as api from './api'
+import { createChannelMembers } from './channel-members'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
@@ -993,6 +995,33 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Channel creation visibility', () => {
+  it('blocks submit events while capabilities are pending, then permits the retained draft', async () => {
+    const props = $state({ disabled: false })
+    const oncreate = vi.fn(async () => null)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(CreateChannelForm, { target: host as unknown as Element, props: {
+      oncreate, get disabled() { return props.disabled },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      input.value = '下書き'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      props.disabled = true
+      await settle()
+      host.querySelector('form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      expect(oncreate).not.toHaveBeenCalled()
+      expect(input.value).toBe('下書き')
+      props.disabled = false
+      await settle()
+      buttonsByText(host, 'チャンネルを作成')[0]!.click()
+      await settle()
+      expect(oncreate).toHaveBeenCalledExactlyOnceWith('下書き', 'public')
+    } finally { await unmount(instance) }
+  })
+
   for (const visibility of ['public', 'private'] as const) {
     it(`submits ${visibility} from the form and resets to public after success`, async () => {
       const oncreate = vi.fn(async () => null)
@@ -1120,6 +1149,49 @@ describe('Channel creation visibility', () => {
       raw.close()
     })
   }
+
+  it('keeps the creation input attached during capability reconciliation and removes it on a confirmed denial', async () => {
+    const props = $state({ allowed: true as boolean | null })
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.lists[0]!.resolve(ok({ channels: [] }))
+    const navigation = createNavigation({
+      location: { href: 'http://localhost/' }, history: { state: null, pushState() {}, replaceState() {} },
+      innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, get canCreateChannels() { return props.allowed },
+      session: { channels: channelsAdapter(raw.channels), sync: syncAdapter(raw.sync),
+        topics: id => topicsAdapter(raw.topics, id), close: raw.close },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      for (let i = 0; i < 3; i++) {
+        props.allowed = null
+        await settle()
+        expect(host.querySelector('input[name="channel_name"]')).toBe(input)
+        input.value = '入力中'
+        input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+        await settle()
+        expect(buttonsByText(host, 'チャンネルを作成')[0]!.disabled).toBe(true)
+        props.allowed = true
+        await settle()
+        expect(buttonsByText(host, 'チャンネルを作成')[0]!.disabled).toBe(false)
+      }
+      props.allowed = false
+      await settle()
+      expect(host.querySelector('form.create-channel-form')).toBeNull()
+      props.allowed = null
+      await settle()
+      expect(host.querySelector('form.create-channel-form')).toBeNull()
+      props.allowed = true
+      await settle()
+      expect(host.querySelector('input[name="channel_name"]')!.value).toBe('入力中')
+    } finally { await unmount(instance); navigation.destroy(); raw.close() }
+  })
 })
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
@@ -2149,8 +2221,79 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     memberController.close()
   })
 
-  it.each(['active', 'deactivated', 'omitted', 'failed', 'view changed'] as const)(
-    'handles live sender lookup settlement (%s) without early or duplicate announcements', async outcome => {
+  it('Guest member panels reload remote grants on every open and keep the add-candidate picker hidden', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...net.options() })
+    const self: Member = { id: 'me', name: '自分', role: 'guest' }
+    const peer: Member = { id: 'peer', name: '共有メンバー', role: 'member' }
+    let shared = false
+    const listMembers = vi.fn(async () => ok({ members: shared ? [self, peer] : [self] }))
+    const memberController = createMembers('org-1', vi.fn(), vi.fn(), {
+      listMembers, lookupAuthors: async () => ok({ identities: [] }),
+      changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })
+    await memberController.load()
+    const channelMembers = createChannelMembers('org-1', 'c1', vi.fn(), {
+      ...api, listChannelMembers: async () => ok({ members: [{ ...self, manager: false }] }),
+    })
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      channelMembers: () => channelMembers, close: rawSession.close,
+    }
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    let href = '/o/org-1/c/c1'
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: { state: null,
+        pushState(_s: unknown, _t: string, url: string) { href = url },
+        replaceState(_s: unknown, _t: string, url: string) { href = url },
+      }, innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, session: sessionModel, selectedOrganizationId: 'org-1', members: membersAdapter(memberController),
+      organization: { member: self, organization: { organization_id: 'org-1', name: 'Acme', capabilities: {
+        can_create_channels: { allowed: false }, can_invite: { allowed: false },
+        can_deactivate_members: { allowed: false }, can_manage_roles: { allowed: false },
+      } } },
+    } })
+    await settle()
+    shared = true // Remote grant changes emit no channel_access_lost.
+    expect(memberController.get().members).toEqual([self])
+    const details = host.querySelector('details') as MiniElement & { open: boolean }
+    details.open = true
+    details.dispatchEvent(new MiniDomEvent('toggle'))
+    await settle()
+    expect(memberController.get().members).toEqual([self, peer])
+    expect(details.textContent).toContain(peer.name)
+    details.open = false
+    details.dispatchEvent(new MiniDomEvent('toggle'))
+    await settle()
+    shared = false
+    details.open = true
+    details.dispatchEvent(new MiniDomEvent('toggle'))
+    await settle()
+    expect(memberController.get().members).toEqual([self])
+    shared = true
+    navigation.navigate({ type: 'tab', tab: 'members' })
+    await settle()
+    expect(memberController.get().members).toEqual([self, peer])
+    expect(host.querySelector('#panel-content')?.textContent).not.toContain('を追加')
+    navigation.navigate({ type: 'close' }); await settle()
+    shared = false
+    navigation.navigate({ type: 'tab', tab: 'members' }); await settle()
+    expect(memberController.get().members).toEqual([self])
+    expect(listMembers).toHaveBeenCalledTimes(5)
+    navigation.destroy()
+    await unmount(instance)
+    memberController.close(); channelMembers.close(); rawSession.close()
+  })
+
+  it('Guest Workspace resolves Member list then author lookup then fallback in timeline and announcements', async () => {
+    for (const outcome of ['active', 'deactivated', 'omitted', 'failed', 'view changed'] as const) {
       vi.useFakeTimers()
       const net = fakeNetwork()
       net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [
@@ -2170,6 +2313,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         lookupAuthors: lookup, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
       })
       await memberController.load()
+      // Conflicting cache data proves directory precedence through Workspace's real resolver.
+      const cached = memberController.authors.get() as Map<string, api.DisplayIdentity>
+      cached.set('known', {
+        id: 'known', name: '古いキャッシュ名', deactivated: false,
+      })
       net.socket.onReady()
       net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'other')] }))
       let href = '/o/org-1/c/c1'
@@ -2185,10 +2333,10 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       testDoc.body.appendChild(host)
       const instance = mount(Workspace, { target: host as unknown as Element, props: {
         navigation, session: sessionModel, selectedOrganizationId: 'org-1', members: membersAdapter(memberController),
-        organization: { member: { id: 'me', name: '自分', role: 'owner' }, organization: {
+        organization: { member: { id: 'me', name: '自分', role: 'guest' }, organization: {
           organization_id: 'org-1', name: 'Acme', capabilities: {
-            can_create_channels: { allowed: true }, can_invite: { allowed: true },
-            can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
+            can_create_channels: { allowed: false }, can_invite: { allowed: false },
+            can_deactivate_members: { allowed: false }, can_manage_roles: { allowed: false },
           },
         } },
         onannounce: text => announcements.push(text),
@@ -2204,6 +2352,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       await settle()
       await vi.advanceTimersByTimeAsync(2_000)
       expect(announcements).toEqual(['既知の著者: 既知の新着'])
+      // Self is absent from this Member list and author cache; the Organization identity still names it.
+      expect(host.querySelector('[data-message-id="id3"] .ui-message-row__sender')?.textContent).toBe('自分')
       announcements.length = 0
       net.event({ type: 'message', message: { ...record(4, 'c1'), sender: 'unknown', body: '新着本文' } })
       await settle()
@@ -2222,6 +2372,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       await settle()
       await vi.advanceTimersByTimeAsync(2_000)
       const name = outcome === 'active' ? '田中' : outcome === 'deactivated' ? '田中（無効）' : 'メンバー'
+      expect(memberController.get().members.map(m => m.id)).toEqual(['known'])
+      if (outcome !== 'view changed') {
+        expect(host.querySelector('[data-message-id="' + record(4, 'c1').id + '"] .ui-message-row__sender')?.textContent).toBe(name)
+        expect(host.querySelector('[data-message-id="' + record(2, 'c1').id + '"] .ui-message-row__sender')?.textContent).toBe('既知の著者')
+      }
       const expected = outcome === 'view changed' ? [] : [name + ': 新着本文']
       expect(announcements).toEqual(expected)
       // A further cache notification and timer tick cannot announce the seq again.
@@ -2233,10 +2388,10 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       await unmount(instance)
       memberController.close()
       sessionModel.close()
-    },
-  )
+    }
+  })
 
-  it('resolves isolated older Topic and Reply-chain page authors with accessible names and deactivation refresh in both views', async () => {
+  it('Guest Workspace resolves isolated older Topic and Reply authors without widening its Member list', async () => {
     const net = fakeNetwork()
     const root = { ...record(1, 'c1'), sender: 'known', body: '過去の返信ルート' }
     const reply = { ...record(2, 'c1'), sender: 'reply-only', body: '返信ページだけの本文', reply_to: root.id, reply_root_id: root.id }
@@ -2285,10 +2440,10 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     testDoc.body.appendChild(host)
     const instance = mount(Workspace, { target: host as unknown as Element, props: {
       navigation, session: sessionModel, selectedOrganizationId: 'org-1', members: membersAdapter(memberController),
-      organization: { member: { id: 'me', name: '自分', role: 'owner' }, organization: {
+      organization: { member: { id: 'me', name: '自分', role: 'guest' }, organization: {
         organization_id: 'org-1', name: 'Acme', capabilities: {
-          can_create_channels: { allowed: true }, can_invite: { allowed: true },
-          can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
+          can_create_channels: { allowed: false }, can_invite: { allowed: false },
+          can_deactivate_members: { allowed: false }, can_manage_roles: { allowed: false },
         },
       } },
     } })
@@ -3098,7 +3253,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(host.querySelector('#main-content')?.textContent).toContain('トピック: トピック')
 
     // After backoff elapses, controller retries and both Timeline and TopicList display the resolved Topic name
-    await vi.advanceTimersByTimeAsync(500)
+    await vi.advanceTimersByTimeAsync(1000)
     await settle()
     flushSync()
     expect(summaryCalls).toBe(2)
@@ -3110,7 +3265,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     sessionModel.close()
   })
 
-  it('stops automatic summary retries at terminal error, offers 再試行 only for retryable failures, and restarts on click', async () => {
+  it('retries transient summary failures without a budget, stops ordinary 4xx and supports explicit retry', async () => {
     vi.useFakeTimers()
     let retryableCalls = 0
     let nonRetryableCalls = 0
@@ -3142,9 +3297,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
               },
             })
           }
-          if (topicId === 't-429') {
+          if (topicId === 't-400') {
             nonRetryableCalls++
-            return { ok: false, kind: 'http', status: 429 }
+            return { ok: false, kind: 'http', status: 400 }
           }
           return baseOptions.topicsApi!.getTopicSummary(channelId, topicId)
         },
@@ -3215,26 +3370,26 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
 
-    // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 429 Topic t-429
+    // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 400 Topic t-400
     net.event({
       type: 'message',
       message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一時障害本文', topic_id: 't-503' },
     })
     net.event({
       type: 'message',
-      message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-429' },
+      message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-400' },
     })
     await settle()
     flushSync()
 
-    // Non-retryable 429 stops immediately at 1 request with no retry button
+    // Non-retryable 400 stops immediately at 1 request with no retry button
     expect(nonRetryableCalls).toBe(1)
 
-    // Advance past bounded backoff budget; persistent 503 stops at 5 requests and shows 再試行 on t-503 only
+    // Persistent 503 keeps retrying beyond the former finite budget; ordinary 400 stays stopped.
     await vi.advanceTimersByTimeAsync(120_000)
     await settle()
     flushSync()
-    expect(retryableCalls).toBe(5)
+    expect(retryableCalls).toBeGreaterThan(5)
     expect(nonRetryableCalls).toBe(1)
 
     const mainRetryButtons = queryAll(host, '#main-content button').filter((b) => b.textContent?.trim() === '再試行')
@@ -3242,7 +3397,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(mainRetryButtons).toHaveLength(1)
     expect(panelRetryButtons).toHaveLength(1)
 
-    // Subsequent live traffic re-renders both Timeline and TopicList without triggering any more summary calls
+    // Later traffic leaves the permanent refusal stopped while transient failures keep retrying.
+    const beforeLater = retryableCalls
     net.event({
       type: 'message',
       message: { ...record(4, 'c1'), id: 'm-4', sender: 'other', body: '後続メッセージ', topic_id: null },
@@ -3250,15 +3406,16 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(retryableCalls).toBe(5)
+    expect(retryableCalls).toBeGreaterThan(beforeLater)
     expect(nonRetryableCalls).toBe(1)
 
     // 2. Clicking 再試行 on the summary line restarts and displays the resolved Topic name and count
     allowSuccess = true
+    const beforeManual = retryableCalls
     mainRetryButtons[0]!.click()
     await settle()
     flushSync()
-    expect(retryableCalls).toBe(6)
+    expect(retryableCalls).toBe(beforeManual + 1)
     expect(host.querySelector('#main-content')?.textContent).toContain('トピック: 手動再試行トピック')
     expect(host.querySelector('#main-content')?.textContent).toContain('1件›')
     expect(host.querySelector('#panel-content')?.textContent).toContain('トピック: 手動再試行トピック')

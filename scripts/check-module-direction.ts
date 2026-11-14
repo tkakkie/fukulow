@@ -13,10 +13,11 @@ function run(command: string, args: string[], env = process.env): string {
   return result.stdout.trim()
 }
 
-export function buildDriver(): string {
+export function buildDriver(fixture = false): string {
   const sysroot = run('rustc', ['--print', 'sysroot'])
   const source = join(root, 'scripts/module-direction.rs')
-  const hash = createHash('sha256').update(readFileSync(source)).update(run('rustc', ['-Vv'])).digest('hex')
+  const hash = createHash('sha256').update(readFileSync(source)).update(run('rustc', ['-Vv']))
+    .update(String(fixture)).digest('hex')
   // Cargo hashes the wrapper path into artifact names. Changing the checker must
   // invalidate checked artifacts, while ordinary dependency builds stay reusable.
   const directory = join(root, 'target/module-direction', hash)
@@ -26,6 +27,7 @@ export function buildDriver(): string {
   // Bootstrap is limited to compiling this development tool, never the application.
   run('clippy-driver', [
     '--edition=2024', '--crate-name', 'module_direction', '-Dwarnings',
+    ...(fixture ? ['--cfg', 'module_direction_fixture'] : []),
     '-C', 'rpath=yes', '-L', join(sysroot, 'lib'),
     source, '-o', driver,
   ], { ...process.env, RUSTC_BOOTSTRAP: 'module_direction' })
@@ -33,6 +35,10 @@ export function buildDriver(): string {
 }
 
 export function checkWorkspace(driver: string): void {
+  // Reject before Cargo: cached artifacts must not hide an attempted override.
+  if (process.env.MODULE_DIRECTION_EDGES !== undefined) {
+    throw new Error('MODULE_DIRECTION_EDGES is only supported by the fixture driver')
+  }
   run('cargo', ['check', '--locked', '--all-targets'], {
     ...process.env,
     RUSTC_WORKSPACE_WRAPPER: driver,

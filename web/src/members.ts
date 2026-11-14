@@ -1,7 +1,36 @@
+import { createActivityTarget } from './activity'
 import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
 import { createAuthors } from './authors'
 import type { lookupAuthors } from './api'
+import type { createChannels } from './channels'
+import type { createSync } from './sync'
+
+/** Follow access changes for this Organization selection; panel opens call load directly. */
+export function watchMemberAccess(
+  channels: Pick<ReturnType<typeof createChannels>, 'get' | 'subscribe'>,
+  sync: Pick<ReturnType<typeof createSync>, 'get' | 'subscribe'>,
+  refresh: () => void,
+) {
+  let channelIds = JSON.stringify(channels.get().channels.map(c => c.id).sort())
+  let connection = sync.get().connected ? sync.get().connection : null
+  let lost = new Set<string>()
+  const stopChannels = channels.subscribe(() => {
+    const ids = JSON.stringify(channels.get().channels.map(c => c.id).sort())
+    if (ids !== channelIds) { channelIds = ids; refresh() }
+  })
+  const stopSync = sync.subscribe(() => {
+    const state = sync.get()
+    if (state.organization === 'unavailable') return
+    const next = new Set(Object.keys(state.channels).filter(id => state.channels[id].state === 'unavailable'))
+    const accessLost = [...next].some(id => !lost.has(id))
+    lost = next
+    const reconnected = state.connected && state.connection !== connection
+    if (state.connected) connection = state.connection
+    if (accessLost || reconnected) refresh()
+  })
+  return () => { stopChannels(); stopSync() }
+}
 
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
 export const roles = Object.keys(roleNames) as Role[]
@@ -25,10 +54,12 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   let state = { members: [] as Member[], loading: true, busy: false, error: '', inviteLink: '' }
   let closed = false
   let loadSequence = 0
+  // Standalone loads keep sequence fencing; held UI loads share the reconciliation queue.
+  let activityManaged = false
   const listeners = new Set<() => void>()
   const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
-  function unavailable() { closed = true; loadSequence++; authors.unavailable() }
+  function unavailable() { closed = true; loadSequence++; activityTarget.close(); authors.unavailable() }
   function membershipLost() {
     if (closed) return
     unavailable()
@@ -39,20 +70,43 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     else if (isOrganizationUnavailable(r)) membershipLost()
     set({ error: memberError(r) })
   }
+  const activityTarget = createActivityTarget({
+    async load(signal) {
+      const sequence = ++loadSequence
+      const r = await deps.listMembers(organizationId, undefined, signal)
+      // Account rejection and current-selection Membership loss outlive freshness fences.
+      if (!r.ok && (r.kind === 'http' && r.status === 401 || !closed && isOrganizationUnavailable(r))) failed(r)
+      return r.ok ? { ok: true as const, data: { members: r.data.members, sequence } } : r
+    },
+    accept: data => {
+      if (closed || data.sequence !== loadSequence) return
+      authors.replaceMembers(data.members)
+      set({ members: data.members, loading: false, error: '' })
+    },
+    hide: () => { loadSequence++; set({ members: [], loading: true }) },
+    error: r => {
+      if (!(r.kind === 'http' && r.status === 401) && !isOrganizationUnavailable(r)) failed(r)
+      set({ loading: false })
+    },
+    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r)),
+  })
   return {
+    activityTarget: { ...activityTarget, held() { activityManaged = true } },
     authors,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
     unavailable,
-    close() { closed = true; authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
+    close() { closed = true; activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
     async load() {
       if (closed) return
+      if (activityManaged) { await activityTarget.refresh(); return }
       const sequence = ++loadSequence
       const r = await deps.listMembers(organizationId)
       if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
       if (closed) return
       // Freshness changes cannot invalidate Membership loss within this selection.
       if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
+      // Only the latest started load can replace the scoped directory and names.
       if (sequence !== loadSequence) return
       if (!r.ok) failed(r)
       else if (!closed) { authors.replaceMembers(r.data.members); set({ members: r.data.members }) }
@@ -77,6 +131,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
         if (r.kind === 'http' && r.error === 'member_not_found') set({ error: 'このメンバーは利用できません。メンバー一覧を開き直してください。' })
       } else if (!closed) {
         loadSequence++
+        if (activityManaged) activityTarget.invalidate()
         const members = state.members.filter(m => m.id !== id)
         authors.replaceMembers(members)
         set({ members })
@@ -91,6 +146,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       if (!r.ok) failed(r)
       else if (!closed) {
         loadSequence++
+        if (activityManaged) activityTarget.invalidate()
         const members = state.members.map(m => m.id === id ? r.data : m)
         authors.replaceMembers(members)
         set({ members })

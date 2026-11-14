@@ -1,3 +1,4 @@
+import type { ActivityTarget } from './activity'
 import { createSubscriber } from 'svelte/reactivity'
 import { createAuthOperations } from './auth-operations'
 import { createAccountSecurity } from './account-security'
@@ -10,7 +11,7 @@ import { getOrganizationMe, isOrganizationUnavailable, type Identity } from './a
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
-import { createMembers } from './members'
+import { createMembers, watchMemberAccess } from './members'
 import { membersAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
@@ -18,7 +19,7 @@ import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
+export type SessionModel = { holdActivity?(key: string, target: ActivityTarget): unknown; navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; onMemberListRefresh?(listener: () => void): () => void; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -27,18 +28,20 @@ export type AuthDeps = {
   getOrganization: typeof getOrganizationMe
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe,
   openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
-  openSession(selfId, onEnded, organizationId, drafts) {
-    const session = createSession({ selfId, onEnded, organizationId, sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity) {
+    const session = createSession({ selfId, onEnded, organizationId, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
     return {
+      holdActivity: session.holdActivity,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
+      onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
       sync: syncAdapter(session.sync),
       topics(id: string) {
@@ -67,10 +70,12 @@ const sessionEndedNotice = 'セッションが終了しました。もう一度�
 export function createAuth(deps: AuthDeps = defaults) {
   let view = $state<AuthState>({ screen: 'loading' })
   let organization = $state<Identity | null>(null)
+  let capabilitiesPending = $state(false)
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
   let stopMemberAvailability: (() => void) | undefined
+  let stopMemberRefresh: (() => void) | undefined
   let members = $state<ReturnType<typeof membersAdapter> | null>(null)
   let security = $state<ReturnType<typeof accountSecurityAdapter> | null>(null)
   let changes = $state(0)
@@ -80,9 +85,11 @@ export function createAuth(deps: AuthDeps = defaults) {
 
   function closeOrganization() {
     stopMemberAvailability?.(); stopMemberAvailability = undefined
+    stopMemberRefresh?.(); stopMemberRefresh = undefined
     session?.close(); session = null
     members?.close(); members = null
     organization = null
+    capabilitiesPending = false
     selectionGeneration++
     changes++
   }
@@ -106,15 +113,24 @@ export function createAuth(deps: AuthDeps = defaults) {
       return
     }
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope())
+    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
+      if (account !== accountGeneration || selection !== selectionGeneration) return
+      capabilitiesPending = identity === null
+      if (identity) organization = identity
+      else if (organization) organization = { ...organization, organization: { ...organization.organization,
+        capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
+    })
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       void session?.sync.markUnavailable()
     }) ?? null
+    if (members) session.holdActivity?.('members', members.activityTarget)
     stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
     if (session.sync.unavailable) members?.unavailable()
     void members?.load()
+    const currentMembers = members
+    stopMemberRefresh = session.onMemberListRefresh?.(() => { void currentMembers?.load() })
     changes++
   }
   async function show(next: AuthState) {
@@ -154,6 +170,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     get error() { subscribe(); return operations.get().error },
     get busy() { subscribe(); return operations.get().busy },
     get organization() { return organization },
+    get capabilitiesPending() { return capabilitiesPending },
     get members() { return members },
     get security() { return security },
     get selectedOrganizationId() { return selectedOrganizationId },

@@ -56,7 +56,7 @@
   }: {
     navigation: Navigation
     session: SessionModel
-    canCreateChannels?: boolean
+    canCreateChannels?: boolean | null
     members?: ReturnType<typeof membersAdapter> | null
     organization?: Identity | null
     organizations?: Organization[]
@@ -72,6 +72,11 @@
   } = $props()
 
   const channels = $derived(session.channels)
+  const channelCreation = $state({ name: '', visibility: 'public' as Channel['visibility'], error: '', busy: false })
+  let creationAllowed = $state(false)
+  $effect(() => {
+    if (canCreateChannels !== null) creationAllowed = canCreateChannels
+  })
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
   const channelListStatus = $derived(s.status)
@@ -184,7 +189,10 @@
   const channelMemberController = $derived.by(() => {
     if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId) return undefined
     const open = session.channelMembers
-    return untrack(() => open?.(selectedChannelId))
+    return untrack(() => {
+      void members?.load()
+      return open?.(selectedChannelId)
+    })
   })
   const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
   $effect(() => {
@@ -196,6 +204,7 @@
   let openedReplyTarget = ''
 
   const authorIdentities = $derived(members?.authors.identities)
+  const memberNames = $derived(new Map((members?.state.members ?? []).map(member => [member.id, member.name])))
   $effect(() => {
     const ids: string[] = []
     for (const line of currentTopicsState?.lines ?? []) {
@@ -214,10 +223,13 @@
 
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
+    const listed = memberNames.get(senderId)
+    if (listed !== undefined) return listed
     const identity = authorIdentities?.get(senderId)
     if (identity) return senderName(identity)
+    // A pending or failed directory load must not hide the caller's own name.
     if (organization?.member.id === senderId) return organization.member.name
-    return 'メンバー'
+    return senderName(undefined)
   }
 
   $effect(() => () => announcementController.destroy())
@@ -650,13 +662,14 @@
         onselecttopic={handleSelectTopic}
         onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
       />
-      {#if !organizationUnavailable && canCreateChannels}
-        <CreateChannelForm oncreate={handleCreateChannel} />
+      {#if !organizationUnavailable && (canCreateChannels ?? creationAllowed)}
+        <CreateChannelForm oncreate={handleCreateChannel} draft={channelCreation} disabled={canCreateChannels !== true} />
       {/if}
       {#if !organizationUnavailable && members && organization}
         <Members
           model={members}
           identity={organization}
+          onopen={() => { void members?.load() }}
           onchanged={(id) => {
             if (id === organization.member.id && currentOrganizationId) {
               onselectorganization?.(currentOrganizationId)

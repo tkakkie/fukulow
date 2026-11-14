@@ -4,6 +4,12 @@ Channels, membership, Capabilities (server and member UI). Writing rules and the
 
 | Rule | Test |
 |---|---|
+| Capability revalidation retains the creation input; pending permission blocks submission; confirmed denial removes the form | `web/src/timeline.svelte.test.ts::keeps the creation input attached during capability reconciliation and removes it on a confirmed denial`, `web/src/timeline.svelte.test.ts::blocks submit events while capabilities are pending, then permits the retained draft` |
+| Guest directory is self plus active current grantees on currently visible Channels; no unrelated, ungranted public/private or stale grants | `server/src/channels/tests/guest_members.rs::guest_directory_denies_unrelated_ungranted_public_private_and_stale_grants` |
+| Guest directory reload removes revoked, inactive or stale peers; readable past author names remain available without directory widening | `server/src/channels/tests/guest_members.rs::guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_keeps_past_authors` |
+| Owner/Admin/Member keep byte-identical full active directories in name/id order; Guest always includes self; foreign Organizations stay 404 | `server/src/channels/tests/guest_members.rs::directory_full_roles_keep_exact_bytes_name_id_order_and_organization_isolation` |
+| Directory uses fresh Roles after Auth capture; Member/Guest changes rescope; inactive and stale-revision callers remain 404 | `server/src/channels/tests/guest_members.rs::directory_reads_fresh_role_after_auth_and_keeps_inactive_stale_caller_denials` |
+| Directory Role, grants and Members share one non-locking snapshot; concurrent revocation commits and the next fetch applies it | `server/src/channels/tests/guest_members.rs::guest_directory_role_grants_and_results_share_one_nonlocking_snapshot` |
 | Deactivation atomically preserves a private Channel's last usable Owner/Admin or right-holding Member manager; public/unmanaged Channels are excepted | `server/src/channels/tests/managers/deactivation.rs::deactivation_denies_last_role_manager_unchanged`, `server/src/channels/tests/managers/deactivation.rs::deactivation_denies_last_right_manager_unchanged`, `server/src/channels/tests/managers/deactivation.rs::deactivation_manager_controls_and_public_unmanaged_exceptions`, `server/src/channels/tests/managers/deactivation.rs::deactivation_is_atomic_across_private_channels` |
 | Deactivation races with deactivation, demotion, removal, leave, creation and manager grant/revoke preserve managed private Channels without deadlock | `server/src/channels/tests/managers/deactivation/concurrency.rs::deactivation_races_with_deactivation_demotion_remove_leave_and_manager_changes`, `server/src/channels/tests/managers/deactivation/concurrency.rs::deactivation_and_private_creation_serialize_in_both_orders` |
 | Channel creation rejects surrounding `str::trim()` whitespace with 400 before a write transaction; keeps internal whitespace; never trims | `server/src/channels/tests/name_whitespace.rs::surrounding_channel_name_whitespace_is_rejected_without_writes`, `server/src/channels/tests/name_whitespace.rs::channel_name_whitespace_preserves_internal_whitespace`, `server/src/channels/tests/name_whitespace.rs::surrounding_channel_name_whitespace_is_rejected_before_opening_transaction` |
@@ -70,3 +76,8 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [deployment](deployment.md): `channel_list_database_failure_returns_generic_500`, `channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated`
 
 - [auth](auth.md): `handlers_and_fanout_require_authenticated_context`, `multi_chunk_recheck_uses_one_transaction_per_organization`
+
+- [realtime](realtime.md): `private_channel_activity_skips_non_members`
+- [web](web.md): `Guest member panels reload remote grants on every open and keep the add-candidate picker hidden`
+
+- [realtime](realtime.md): `dm_notice_denies_nonparticipant_owner_with_participant_control`, `dm_notices_reach_both_participants_and_only_other_senders_and_own_read_sessions`, `dm_peer_deactivation_reactivation_and_rename_invalidate_only_current_viewers_and_renewal_gains_only_lapsed_participant`, `dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival`
