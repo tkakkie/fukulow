@@ -4,7 +4,8 @@ export type UnreadScope = { channel: string; topicId: string | null }
 export type ScopeBaseline = { asOfSeq: number; readSeq: number; count: number }
 /** Coverage proves every matching projection row in (after, through] is loaded. */
 export type Coverage = { after: number; through: number }
-export const inScope = (m: Message, scope: UnreadScope) => m.channel_id === scope.channel && m.topic_id === scope.topicId
+export type UnreadRecord = Pick<Message, 'id' | 'seq' | 'channel_id' | 'topic_id' | 'sender'>
+export const inScope = (m: Pick<Message, 'channel_id' | 'topic_id'>, scope: UnreadScope) => m.channel_id === scope.channel && m.topic_id === scope.topicId
 export const mainBaseline = (c: UnreadChannel): ScopeBaseline => ({ asOfSeq: c.as_of_seq, readSeq: c.read_seq, count: c.main_unread_count })
 export const topicBaseline = (w: number, t: TopicSummary): ScopeBaseline => ({ asOfSeq: w, readSeq: t.read_seq, count: t.unread_count })
 export function chooseBaseline(old: ScopeBaseline | undefined, next: ScopeBaseline): ScopeBaseline {
@@ -18,7 +19,7 @@ export function chooseChannelBaseline(old: UnreadChannel | undefined, next: Unre
     unread_count: Math.min(old.unread_count, next.unread_count), main_unread_count: Math.min(old.main_unread_count, next.main_unread_count) }
   return old
 }
-export function scopeCount(b: ScopeBaseline, position: number, records: Iterable<Message>, scope: UnreadScope, self: string): number {
+export function scopeCount(b: ScopeBaseline, position: number, records: Iterable<UnreadRecord>, scope: UnreadScope, self: string): number {
   let count = b.count
   const seen = new Set<number>()
   for (const m of records) {
@@ -42,7 +43,7 @@ export function coveredThrough(position: number, coverage: Coverage[]): number {
   return through
 }
 /** Own rows can be skipped, but never create an intent. Unseen rows and projection gaps stop progress. */
-export function sequenceToSubmit(position: number, records: Iterable<Message>, coverage: Coverage[], presented: ReadonlySet<number>, scope: UnreadScope, self: string): number {
+export function sequenceToSubmit(position: number, records: Iterable<UnreadRecord>, coverage: Coverage[], presented: ReadonlySet<number>, scope: UnreadScope, self: string): number {
   const through = coveredThrough(position, coverage)
   let result = position
   for (const m of [...records].filter(m => inScope(m, scope) && m.seq > position && m.seq <= through).sort((a, b) => a.seq - b.seq)) {

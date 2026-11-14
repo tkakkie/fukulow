@@ -57,6 +57,12 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #151 B4 adopts Option A durable discovery, rejects Option B (2026-11-14). Reason: no still-accessible DM may be missed after lost notices/delayed COMMITs; first-page or descending mutable-key recovery cannot guarantee it. Protocol: spec/dms.md P-D1-P-D7.
 - #151 coalesces discovery by Organization/Member/revision/DM; latest positions only move forward, birth keys stay fixed. Reason: pending/storage O(DMs), not O(events); finite coverage prevents a hot DM moving beyond every delta window. Strict catch-up-budget conflict: spec/dms.md Open decisions.
 
+## Personal section notices (#204, specified)
+
+- #204 sections_changed goes only to the changed Member's current sessions in that Organization, including the caller and sockets with no subscriptions. It carries no section data. Reason: devices converge without disclosing personal grouping.
+- #204 section notices share #307's post-COMMIT publication, buffer, proven-recipient resets and O5 periodic REST reconciliation of held targets. Reason: recovery must converge without another mutation or disclosing personal activity to other Members.
+- #204 section display intersects authorized layout and Channel-list snapshots under A11/A12 fences; loss hides immediately. Reason: a stale personal-layout response must never restore a Channel hidden by access loss.
+
 ## Admission and timeouts
 - #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
 - Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).
@@ -94,6 +100,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 new sends hold`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
 
 - [auth](auth.md): `#305 owns the deactivation transaction`
 

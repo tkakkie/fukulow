@@ -3,6 +3,7 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
+- #301 author lookup takes at most 100 input ids, collapses duplicates and omits unreadable authors. Channel access, Message authorship and retained identities share history's non-locking snapshot, preventing directory expansion or authorization/data races.
 - #149 usable managers (Owner/Admin with access or usable Channel manager right, #311) add/remove; every Role may leave its own grant. Private removal preserves the last usable grant and, if present, manager (409); serialize checks/removal per Channel to prevent races.
 - #231/#305 reject Role demotion or deactivation with 409 last_channel_manager if a private Channel loses its last usable manager; atomic, no Channel details. Reuse #149 locks/check via auth's injected guard for module direction. Unmanaged Channels stay allowed.
 - #292/#311: a private Channel's creator gets a Channel manager right on their grant, independent of Role; usable manager = usable grant with Owner/Admin Role or the right. Reason: a Member's private Channel must be able to add people without giving Owner/Admin implicit access.
@@ -32,6 +33,13 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Message body: 1..=4000 Unicode scalars (the spec sets no limit), no NUL, not whitespace-only, never trimmed (whitespace counts for idempotency); 400 before seq allocation (#17, maintainer-approved).
 - Sends re-check Member/revision/private grant after BEGIN and hold a shared Member row lock through COMMIT, so deactivation cannot commit between authorization and persistence. Channel creation keeps the same lock (#146 review).
 - History reads authorization and its page in one read-only REPEATABLE READ transaction without row locks: loss committed before the snapshot denies; an authorized page sees no later Messages (#146).
+
+## Personal sections (#204, specified)
+
+- #204 sections belong to one Member in one Organization, including Guest; Owner/Admin have no override. Reason: personal grouping must neither grant Channel access nor affect another Member's view.
+- #204 access loss hides but retains placement/order; regain restores it. Section/Channel deletion removes placements atomically; hidden Channel cleanup changes no exposed generation or notice. Reason: retain grouping without dangling placements or disclosing deletion after loss.
+- #204 composite Organization/Member/section keys enforce placement ownership; unique Organization/Member/Channel enforces cardinality. Reason: application checks alone cannot prevent cross-owner or cross-Organization data.
+- #204 moves, reorders and deletes serialize per Member; complete reorders use last-committing-writer-wins. Keep Organization -> sorted Channels -> Members -> grants lock order. Reason: atomic orders and delete races must not introduce a deadlock.
 
 ## Topics, Replies and Unread (planned, spec P1-P8)
 - A Topic is created by its first Message (or a Move to a new Topic); empty Topics do not exist. The main-timeline Topic line is a derived display that moves with the Topic's latest activity (maintainer, 2026-11-10, #148).
@@ -89,6 +97,9 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
+- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
 
 - [auth](auth.md): `#314 single-statement hot reads use`
 - [auth](auth.md): `#299 shared raw-text validation`
+
+- [web](web.md): `#308 bounds Topic/Reply/cursor evidence`, `#308 uses 400 main/300 Topic/200 Reply`, `#308 refetches older main pages`

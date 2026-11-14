@@ -3,6 +3,7 @@
 API contract and generated types. Writing rules and the other parts: [index](../decisions.md).
 
 ## API contract
+- #301 POST /orgs/{org}/message-authors takes {ids}, returns {identities:[{id,name,deactivated}]}. Limit 100 before deduplication; excess is 400 ErrorBody. Omitted ids stay unresolved so foreign, unknown and unreadable authors are indistinguishable.
 - `make api` exports the contract without a database; `openapi-typescript` is pinned in an isolated npm environment because its TypeScript 5 peer conflicts with the SPA's TypeScript 6.
 - #23 published REST and `ClientMessage`/`ServerEvent` types before runtime work. Message pages: `after_seq` XOR `before_seq` (neither = latest), limit 50 default / 200 max, always ascending seq; `has_more` follows the queried direction.
 - `ListMessagesQuery` keeps every field optional in the shared schema; the limit default (50) lives only on REST query metadata so generated TypeScript accepts an omitted limit. Both keep min 1 / max 200.
@@ -20,6 +21,9 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [auth](auth.md): `#299 shared raw-text validation`
 - [messages](messages.md): `#299 Channel names are`, `#299 migration validates`
+
+- [messages](messages.md): `#204 sections belong`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
+- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section display intersects`
 
 - [auth](auth.md): `#305 Owner may deactivate another active Member`, `#305 owns the deactivation transaction`
 

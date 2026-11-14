@@ -144,7 +144,7 @@ export function submitAndFocusComposer(
   onsubmit: () => Promise<boolean>,
   composer: FocusableTarget | null | undefined,
 ): void {
-  void onsubmit()
+  void onsubmit().catch(console.error)
   focusTarget(composer)
 }
 

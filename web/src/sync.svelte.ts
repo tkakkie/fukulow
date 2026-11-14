@@ -101,6 +101,10 @@ export function syncAdapter(sync: Sync) {
   const subscribe = createSubscriber(update => sync.subscribe(update))
   return {
     get unavailable() { subscribe(); return sync.get().organization === 'unavailable' },
+    markUnavailable: () => sync.unavailable(),
+    onUnavailable(listener: () => void) {
+      return sync.subscribe(() => { if (sync.get().organization === 'unavailable') listener() })
+    },
     hasUnsavedChanges: () => sync.hasUnsavedChanges(),
     channel(id: string): ChannelSync {
       let c = channels.get(id)

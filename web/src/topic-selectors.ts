@@ -1,4 +1,5 @@
 import type { Message, TimelineItem, TopicSummary } from './api'
+import { countSequencesAfter, type TopicEvidence } from './message-window'
 
 export type TopicSummaryError = 'retryable' | 'non_retryable'
 export type TopicBaseline = { asOfSeq: number; summary: TopicSummary }
@@ -15,7 +16,7 @@ export type MainTimelineLine = Extract<TimelineItem, { kind: 'message' }> | Topi
 export const linePosition = (line: MainTimelineLine) => line.kind === 'message' ? line.message.seq : line.position
 
 /** Projection records never supply cursor evidence; only the controller's unfiltered window is input here. */
-export function selectMainTimeline(messages: Message[], pageMessages: Iterable<Message>, baselines: Iterable<TopicBaseline>): MainTimelineLine[] {
+export function selectMainTimeline(messages: Message[], pageMessages: Iterable<Message>, baselines: Iterable<TopicBaseline>, evidence?: TopicEvidence): MainTimelineLine[] {
   const records = new Map<number, Message>()
   for (const m of pageMessages) records.set(m.seq, m)
   for (const m of messages) records.set(m.seq, m)
@@ -33,9 +34,14 @@ export function selectMainTimeline(messages: Message[], pageMessages: Iterable<M
       topic = { kind: 'topic', topicId: m.topic_id, position: m.seq, baseline: null, latestMessage: m, messageCount: null, summaryError: null }
       topics.set(m.topic_id, topic)
     } else {
-      if (topic.baseline && m.seq > topic.baseline.asOfSeq) topic.messageCount = (topic.messageCount ?? 0) + 1
+      if (!evidence && topic.baseline && m.seq > topic.baseline.asOfSeq) topic.messageCount = (topic.messageCount ?? 0) + 1
       if (m.seq > topic.position) { topic.position = m.seq; topic.latestMessage = m }
     }
+  }
+  if (evidence) for (const topic of topics.values()) {
+    topic.position = Math.max(topic.position, evidence.sequences.get(topic.topicId)?.at(-1)?.end ?? 0)
+    if (topic.baseline) topic.messageCount = topic.baseline.asOfSeq < evidence.floor ? null : topic.baseline.summary.message_count +
+      countSequencesAfter(evidence.sequences.get(topic.topicId) ?? [], topic.baseline.asOfSeq)
   }
   return [...lines, ...topics.values()].sort((a, b) => linePosition(a) - linePosition(b))
 }

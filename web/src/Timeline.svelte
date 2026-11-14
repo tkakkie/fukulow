@@ -4,6 +4,7 @@
   import type { Message } from './api'
   import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
   import Composer from './Composer.svelte'
+  import VirtualRows from './ui/VirtualRows.svelte'
   import {
     confirmReplaceDraftWithFailedSend,
     decideEditAndResend,
@@ -85,6 +86,7 @@
   const lines = $derived<MainTimelineLine[]>(
     tState ? tState.lines : s.messages.map((message) => ({ kind: 'message', message })),
   )
+  let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === null ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
   const entryId = $derived(entry?.id ?? null)
@@ -97,8 +99,9 @@
   const needsOlderUnreadPage = $derived(
     Boolean(
       entry &&
+        scrolledFirstUnreadId === null &&
         (entry.unreadAtEntry ?? 0) > 0 &&
-        (entry.needsOlder || (entry.firstUnread !== null && !hasFirstUnreadInView)),
+        (entry.needsOlder || (entry.firstUnread !== null && !hasFirstUnreadInView && scrolledFirstUnreadId !== entry.firstUnread.id)),
     ),
   )
   const awaitingEntryBoundary = $derived(
@@ -117,8 +120,8 @@
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
-      entry.firstUnread
-      ? entry.firstUnread.id
+      (entry.firstUnread || scrolledFirstUnreadId)
+      ? (scrolledFirstUnreadId ?? entry.firstUnread?.id ?? null)
       : null,
   )
   const replyCounts = $derived(
@@ -149,11 +152,11 @@
     return scrollController.get()
   })
 
+  let rowWindow = $state<{ reveal(id: string, focus?: boolean, align?: 'start' | 'end'): Promise<void> } | null>(null)
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
-  let initialScrollApplied = false
-  let scrolledFirstUnreadId: string | null = null
+  let initialScrollApplied = $state(false)
   let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
@@ -161,7 +164,8 @@
   const focusableMessageIds = $derived(
     lines.flatMap((l) => (l.kind === 'message' ? [l.message.id] : [])),
   )
-  const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds, activeRowId))
+  let mountedIds = $state<string[]>([])
+  const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds.filter(id => mountedIds.includes(id)), activeRowId))
 
   function isDocumentVisible(): boolean {
     if (typeof document === 'undefined') return true
@@ -185,6 +189,23 @@
     }
   }
 
+  async function focusMessage(id: string | undefined) {
+    if (!id) return
+    activeRowId = id
+    await rowWindow?.reveal(id, true)
+  }
+  function handleRowKeydown(e: KeyboardEvent) {
+    const id = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-message-id]')?.getAttribute('data-message-id')
+    const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
+    if (next === null) return
+    e.preventDefault()
+    void focusMessage(focusableMessageIds[next]).catch(console.error)
+  }
+  async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
+    const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
+  }
+
   function captureCurrentAnchor() {
     if (!scrollEl) return
     scrollController.captureAnchor(measureTimelineItems(scrollEl))
@@ -192,6 +213,7 @@
 
   function handleScroll() {
     handleTimelineContainerScroll(scrollEl, scrollController)
+    topics?.setMainPinned(scrollController.get().pinned)
     reportPresented()
   }
 
@@ -200,10 +222,17 @@
     anchor: ScrollAnchor | null,
     firstUnreadId?: string | null,
   ) {
-    applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
+    const id = action === 'scroll_first_unread' ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) {
+      void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
+        applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
+        reportPresented()
+      }).catch(console.error)
+    } else applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
   }
 
-  function jumpToBottom() {
+  async function jumpToBottom() {
+    if (tState?.main.hasNewer) { await topics?.loadMainLatest(); await tick() }
     const action = scrollController.jumpToBottom()
     applyScrollAction(action, null)
     reportPresented()
@@ -211,14 +240,14 @@
 
   function loadOlderWithAnchor() {
     captureCurrentAnchor()
-    if (topics) void topics.loadMain()
-    else void channel.loadOlder()
+    if (topics) void topics.loadMain().catch(console.error)
+    else void channel.loadOlder().catch(console.error)
   }
 
   function retryInitialLoad() {
     scrollController.resetLoadingTimeout()
-    if (topics && s.status === 'ready') void topics.loadMain()
-    else void channel.loadLatest()
+    if (topics && s.status === 'ready') void topics.loadMain().catch(console.error)
+    else void channel.loadLatest().catch(console.error)
   }
 
   let requestedMainFor = ''
@@ -272,7 +301,7 @@
         enteredTarget = true
         currentVisitId = vid
       }
-    })
+    }).catch(console.error)
     return () => {
       cancelled = true
     }
@@ -302,11 +331,11 @@
       requestedMainFor !== mainKey
     ) {
       requestedMainFor = mainKey
-      void topics.loadMain()
+      void topics.loadMain().catch(console.error)
     }
     for (const topic of tState.topics) {
-      if (topic.baseline === null && topic.summaryError === null) {
-        void topics.ensureSummary(topic.topicId)
+      if ((topic.baseline === null || topic.latestMessage.seq < topic.position) && topic.summaryError === null) {
+        void topics.ensureSummary(topic.topicId).catch(console.error)
       }
     }
   })
@@ -336,7 +365,7 @@
       line.kind === 'message'
         ? { id: line.message.id, seq: line.message.seq, sender: line.message.sender }
         : {
-            id: `topic:${line.topicId}:${line.position}`,
+            id: `topic:${line.topicId}`,
             seq: linePosition(line),
             sender: line.latestMessage.sender,
           },
@@ -390,7 +419,7 @@
         }
       }
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
   $effect(() => {
@@ -398,27 +427,9 @@
     if (entry?.boundary === null || needsOlderUnreadPage) return
     void tick().then(() => {
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
-  $effect(() => {
-    const container = scrollEl
-    const u = unread
-    if (!container || !u || typeof IntersectionObserver === 'undefined') return
-    void lines
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          reportPresented()
-        }
-      },
-      { root: container, threshold: 0 },
-    )
-    for (const node of container.querySelectorAll<HTMLElement>('[data-confirmed-seq]')) {
-      observer.observe(node)
-    }
-    return () => observer.disconnect()
-  })
 
   function handleDiscard(clientMessageId: string) {
     discardAndFocusComposer(clientMessageId, (id) => channel.discard(id), composerRef)
@@ -462,10 +473,11 @@
   async function handleSubmit(): Promise<boolean> {
     const ok = await channel.submit()
     if (!ok) return false
+    if (tState?.main.hasNewer) await topics?.loadMainLatest()
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
-    })
+    }).catch(console.error)
     return true
   }
 </script>
@@ -536,14 +548,26 @@
     {/if}
 
     {#if lines.length > 0 || mainPending.length > 0}
-      <ul class="timeline-list" aria-label="メッセージ一覧">
-        {#each lines as line (line.kind === 'message' ? line.message.id : `topic:${line.topicId}`)}
+      <VirtualRows
+        class="timeline-list"
+        bind:this={rowWindow}
+        items={lines}
+        rowId={(line) => line.kind === 'message' ? line.message.id : `topic:${line.topicId}`}
+        confirmedSeq={(line) => line.kind === 'message' ? line.message.seq : null}
+        pendingItems={mainPending}
+        pendingId={(p) => p.clientMessageId}
+        pendingStatus={(p) => p.status}
+        pendingClass="timeline-list__item"
+        itemClass="timeline-list__item"
+        container={scrollEl}
+        label="メッセージ一覧"
+        followBottom={scrollView.pinned && initialScrollApplied}
+        onmounted={(ids) => { mountedIds = ids }}
+        onvisible={reportPresented}
+        onfocuslost={() => focusTarget(composerRef)}
+      >
+        {#snippet children(line)}
           {#if line.kind === 'message'}
-            <li
-              class="timeline-list__item"
-              data-message-id={line.message.id}
-              data-confirmed-seq={line.message.seq}
-            >
               {#if firstUnreadMessageId === line.message.id}
                 <ReadMarker />
               {/if}
@@ -560,23 +584,10 @@
                 onrowfocus={() => {
                   activeRowId = line.message.id
                 }}
-                onrowkeydown={(e) => {
-                  if (!scrollEl) return
-                  const rows = Array.from(scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]'))
-                  const idx = rows.indexOf(e.currentTarget as HTMLElement)
-                  const nextIdx = stepMessageRowIndex(idx, rows.length, e)
-                  if (nextIdx !== null) {
-                    e.preventDefault()
-                    const nextId = focusableMessageIds[nextIdx]
-                    if (nextId) activeRowId = nextId
-                    focusTarget(rows[nextIdx])
-                  }
-                }}
+                onrowkeydown={handleRowKeydown}
               />
-            </li>
           {:else}
             {@const topicUnread = uState?.topics[line.topicId]?.unreadCount ?? null}
-            <li class="timeline-list__item" data-message-id={`topic:${line.topicId}:${line.position}`}>
               <TopicSummaryLine
                 topicId={line.topicId}
                 name={line.baseline?.summary.name ?? 'トピック'}
@@ -585,41 +596,43 @@
                 unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
                 onclick={() => onopentopic?.(line.topicId)}
                 onretry={!targetUnavailable && line.summaryError === 'retryable' && topics
-                  ? () => void topics.retrySummary(line.topicId)
+                  ? () => void topics.retrySummary(line.topicId).catch(console.error)
                   : undefined}
               />
-            </li>
           {/if}
-        {/each}
-        {#each mainPending as p (p.clientMessageId)}
-          <li class="timeline-list__item" data-status={p.status}>
-            {#if p.topicName}
-              <p class="timeline-list__pending-topic">トピック: {p.topicName}</p>
-            {/if}
-            <MessageRow
-              body={p.body}
-              pendingStatus={p.status}
-              retryable={p.retryable}
-              {targetUnavailable}
-              onretry={() => void channel.retry(p.clientMessageId)}
-              onrestore={() => handleRestoreRequest(p.clientMessageId)}
-              ondiscard={() => handleDiscard(p.clientMessageId)}
-            />
-          </li>
-        {/each}
-      </ul>
+
+          {/snippet}
+        {#snippet pendingRow(p)}
+          {#if p.topicName}
+            <p class="timeline-list__pending-topic">トピック: {p.topicName}</p>
+          {/if}
+          <MessageRow
+            body={p.body}
+            pendingStatus={p.status}
+            retryable={p.retryable}
+            {targetUnavailable}
+            onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
+            onrestore={() => handleRestoreRequest(p.clientMessageId)}
+            ondiscard={() => handleDiscard(p.clientMessageId)}
+          />
+        {/snippet}
+        </VirtualRows>
     {:else if effectiveStatus === 'ready' && !organizationUnavailable}
       <EmptyState
         title="まだメッセージがありません。"
         description="下の入力欄から最初のメッセージを送信できます。"
       />
     {/if}
+    {#if tState?.main.hasNewer && !targetUnavailable && topics}
+      <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
+    {/if}
+
   </div>
 
-  {#if !scrollView.pinned && scrollView.belowCount > 0}
+  {#if !scrollView.pinned && (scrollView.belowCount > 0 || (tState?.main.newerCount ?? 0) > 0)}
     <div class="timeline-new-below">
-      <Button variant="primary" onclick={jumpToBottom}>
-        新着 {scrollView.belowCount}件 ↓
+      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
+        新着 {Math.max(scrollView.belowCount, tState?.main.newerCount ?? 0)}件 ↓
       </Button>
     </div>
   {/if}
@@ -636,15 +649,7 @@
       oninput={(b) => channel.setDraft(b)}
       ontopicinput={(t) => channel.setTopicDraft(t)}
       onsubmit={handleSubmit}
-      onarrowupempty={() => {
-        if (!scrollEl) return
-        const rows = scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]')
-        if (rows.length > 0) {
-          const lastId = focusableMessageIds.at(-1)
-          if (lastId) activeRowId = lastId
-          focusTarget(rows[rows.length - 1])
-        }
-      }}
+      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
   </div>
 
@@ -679,6 +684,7 @@
   .timeline-scroll {
     grid-row: 2;
     overflow-y: auto;
+    overflow-anchor: none;
     padding: var(--space-8) var(--space-16);
     display: flex;
     flex-direction: column;
@@ -691,19 +697,6 @@
     display: grid;
     justify-items: start;
     gap: var(--space-8);
-    min-width: 0;
-  }
-
-  .timeline-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: var(--space-4);
-    min-width: 0;
-  }
-
-  .timeline-list__item {
     min-width: 0;
   }
 

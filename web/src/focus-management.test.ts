@@ -331,6 +331,19 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     expect(visibleHeading.focus).toHaveBeenCalledOnce()
   })
 
+  it('submitAndFocusComposer reports a rejected submission while keeping synchronous Composer focus', async () => {
+    const failure = new Error('submission failed')
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const composer = { focus: vi.fn(), isConnected: true }
+    try {
+      submitAndFocusComposer(() => Promise.reject(failure), composer)
+      expect(composer.focus).toHaveBeenCalledOnce()
+      await Promise.resolve()
+      expect(report).toHaveBeenCalledExactlyOnceWith(failure)
+      expect(composer.focus).toHaveBeenCalledOnce()
+    } finally { report.mockRestore() }
+  })
+
   it('submitAndFocusComposer focuses the submitted Composer synchronously and never steals focus when send settles later', async () => {
     let resolveSend!: (ok: boolean) => void
     const onsubmit = vi.fn(

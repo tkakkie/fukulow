@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte'
+  import { onMount, tick, untrack } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
   import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
   import Composer from './Composer.svelte'
+  import VirtualRows from './ui/VirtualRows.svelte'
   import {
     confirmReplaceDraftWithFailedSend,
     decideEditAndResend,
@@ -85,6 +86,7 @@
   const rState = $derived(replies ? replies.state : null)
   const uState = $derived(unread ? unread.state : null)
   const view = $derived(tState.topic(currentTopicId))
+  let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === currentTopicId ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
   const entryId = $derived(entry?.id ?? null)
@@ -94,8 +96,9 @@
   const needsOlderUnreadPage = $derived(
     Boolean(
       entry &&
+        scrolledFirstUnreadId === null &&
         (entry.unreadAtEntry ?? 0) > 0 &&
-        (entry.needsOlder || (entry.firstUnread !== null && !hasFirstUnreadInView)),
+        (entry.needsOlder || (entry.firstUnread !== null && !hasFirstUnreadInView && scrolledFirstUnreadId !== entry.firstUnread.id)),
     ),
   )
   const firstUnreadMessageId = $derived(
@@ -103,8 +106,8 @@
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
-      entry.firstUnread
-      ? entry.firstUnread.id
+      (entry.firstUnread || scrolledFirstUnreadId)
+      ? (scrolledFirstUnreadId ?? entry.firstUnread?.id ?? null)
       : null,
   )
   const replyCounts = $derived(
@@ -148,12 +151,12 @@
     return scrollController.get()
   })
 
+  let rowWindow = $state<{ reveal(id: string, focus?: boolean, align?: 'start' | 'end'): Promise<void> } | null>(null)
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
   let requestedHistoryFor = ''
-  let initialScrollApplied = false
-  let scrolledFirstUnreadId: string | null = null
+  let initialScrollApplied = $state(false)
   let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
@@ -161,7 +164,8 @@
   let enteredTarget = false
   const topicStopped = $derived(Boolean(uState?.stopped || topicScope?.stopped))
   const focusableMessageIds = $derived(view.messages.map((m) => m.id))
-  const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds, activeRowId))
+  let mountedIds = $state<string[]>([])
+  const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds.filter(id => mountedIds.includes(id)), activeRowId))
 
   function isDocumentVisible(): boolean {
     if (typeof document === 'undefined') return true
@@ -185,6 +189,23 @@
     }
   }
 
+  async function focusMessage(id: string | undefined) {
+    if (!id) return
+    activeRowId = id
+    await rowWindow?.reveal(id, true)
+  }
+  function handleRowKeydown(e: KeyboardEvent) {
+    const id = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-message-id]')?.getAttribute('data-message-id')
+    const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
+    if (next === null) return
+    e.preventDefault()
+    void focusMessage(focusableMessageIds[next]).catch(console.error)
+  }
+  async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
+    const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
+  }
+
   function captureCurrentAnchor() {
     if (!scrollEl) return
     scrollController.captureAnchor(measureTimelineItems(scrollEl))
@@ -192,6 +213,7 @@
 
   function handleScroll() {
     handleTimelineContainerScroll(scrollEl, scrollController)
+    topics.setTopicPinned(topicId, scrollController.get().pinned)
     reportPresented()
   }
 
@@ -200,10 +222,17 @@
     anchor: ScrollAnchor | null,
     firstUnreadId?: string | null,
   ) {
-    applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
+    const id = action === 'scroll_first_unread' ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) {
+      void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
+        applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
+        reportPresented()
+      }).catch(console.error)
+    } else applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
   }
 
-  function jumpToBottom() {
+  async function jumpToBottom() {
+    if (view.hasNewer) { await topics.loadTopicLatest(topicId); await tick() }
     const action = scrollController.jumpToBottom()
     applyScrollAction(action, null)
     reportPresented()
@@ -211,18 +240,22 @@
 
   function loadOlderWithAnchor() {
     captureCurrentAnchor()
-    void topics.loadTopic(topicId)
+    void topics.loadTopic(topicId).catch(console.error)
   }
 
   function retryInitial() {
     scrollController.resetLoadingTimeout()
     if (topicStatus === 'error') onretrytopicmeta?.()
     requestedHistoryFor = ''
-    void topics.retrySummary(topicId)
-    void topics.loadTopic(topicId)
+    void topics.retrySummary(topicId).catch(console.error)
+    void topics.loadTopic(topicId).catch(console.error)
   }
 
   $effect(() => () => scrollController.destroy())
+  onMount(() => {
+    const id = topicId, release = topics.releaseTopic
+    return () => release(id)
+  })
 
   $effect(() => {
     const u = unread
@@ -271,7 +304,7 @@
         enteredTarget = true
         currentVisitId = vid
       }
-    })
+    }).catch(console.error)
     return () => {
       cancelled = true
     }
@@ -297,11 +330,11 @@
     if (targetUnavailable || s.status === 'loading') return
     const hasBaseline = tState.topics.some((t) => t.topicId === tId && t.baseline !== null)
     if (!hasBaseline && view.summaryError === null) {
-      void topics.ensureSummary(tId)
+      void topics.ensureSummary(tId).catch(console.error)
     }
     if (!view.initialized && view.hasMore && !view.loading && !view.error && requestedHistoryFor !== key) {
       requestedHistoryFor = key
-      void topics.loadTopic(tId)
+      void topics.loadTopic(tId).catch(console.error)
     }
   })
 
@@ -387,7 +420,7 @@
         }
       }
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
   $effect(() => {
@@ -395,27 +428,9 @@
     if (entry?.boundary === null || needsOlderUnreadPage) return
     void tick().then(() => {
       reportPresented()
-    })
+    }).catch(console.error)
   })
 
-  $effect(() => {
-    const container = scrollEl
-    const u = unread
-    if (!container || !u || typeof IntersectionObserver === 'undefined') return
-    void view.messages
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          reportPresented()
-        }
-      },
-      { root: container, threshold: 0 },
-    )
-    for (const node of container.querySelectorAll<HTMLElement>('[data-confirmed-seq]')) {
-      observer.observe(node)
-    }
-    return () => observer.disconnect()
-  })
 
   function handleDiscard(clientMessageId: string) {
     discardAndFocusComposer(clientMessageId, (id) => channel.discard(id), composerRef)
@@ -455,10 +470,11 @@
     if (!topicName) return false
     const ok = await tc.submit(topicName)
     if (!ok) return false
+    if (view.hasNewer) await topics.loadTopicLatest(topicId)
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
-    })
+    }).catch(console.error)
     return true
   }
 </script>
@@ -538,14 +554,27 @@
         </div>
       {/if}
 
-      {#if view.messages.length > 0 || pending.length > 0}
-        <ul class="topic-view__list" aria-label="メッセージ一覧">
-          {#each view.messages as m (m.id)}
-            <li
-              class="topic-view__item"
-              data-message-id={m.id}
-              data-confirmed-seq={m.seq}
-            >
+          {#if view.messages.length > 0 || pending.length > 0}
+        <VirtualRows
+        class="topic-view__list"
+        bind:this={rowWindow}
+        items={view.messages}
+        rowId={(m) => m.id}
+        confirmedSeq={(m) => m.seq}
+        pendingItems={pending}
+        pendingId={(p) => p.clientMessageId}
+        pendingStatus={(p) => p.status}
+        pendingClass="topic-view__item"
+        itemClass="topic-view__item"
+        container={scrollEl}
+        label="メッセージ一覧"
+        followBottom={scrollView.pinned && initialScrollApplied}
+        onmounted={(ids) => { mountedIds = ids }}
+        onvisible={reportPresented}
+        onfocuslost={() => focusTarget(composerRef)}
+      >
+        {#snippet children(m)}
+
               {#if firstUnreadMessageId === m.id}
                 <ReadMarker />
               {/if}
@@ -562,35 +591,22 @@
                 onrowfocus={() => {
                   activeRowId = m.id
                 }}
-                onrowkeydown={(e) => {
-                  if (!scrollEl) return
-                  const rows = Array.from(scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]'))
-                  const idx = rows.indexOf(e.currentTarget as HTMLElement)
-                  const nextIdx = stepMessageRowIndex(idx, rows.length, e)
-                  if (nextIdx !== null) {
-                    e.preventDefault()
-                    const nextId = focusableMessageIds[nextIdx]
-                    if (nextId) activeRowId = nextId
-                    focusTarget(rows[nextIdx])
-                  }
-                }}
+                onrowkeydown={handleRowKeydown}
               />
-            </li>
-          {/each}
-          {#each pending as p (p.clientMessageId)}
-            <li class="topic-view__item" data-status={p.status}>
-              <MessageRow
-                body={p.body}
-                pendingStatus={p.status}
-                retryable={p.retryable}
-                {targetUnavailable}
-                onretry={() => void channel.retry(p.clientMessageId)}
-                onrestore={() => handleRestoreRequest(p.clientMessageId)}
-                ondiscard={() => handleDiscard(p.clientMessageId)}
-              />
-            </li>
-          {/each}
-        </ul>
+
+          {/snippet}
+        {#snippet pendingRow(p)}
+          <MessageRow
+            body={p.body}
+            pendingStatus={p.status}
+            retryable={p.retryable}
+            {targetUnavailable}
+            onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
+            onrestore={() => handleRestoreRequest(p.clientMessageId)}
+            ondiscard={() => handleDiscard(p.clientMessageId)}
+          />
+        {/snippet}
+        </VirtualRows>
       {:else if effectiveStatus === 'ready'}
         <EmptyState
           title="まだメッセージがありません。"
@@ -598,12 +614,16 @@
         />
       {/if}
     {/if}
+      {#if view.hasNewer && !targetUnavailable}
+      <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
+    {/if}
+
   </div>
 
-  {#if !scrollView.pinned && scrollView.belowCount > 0}
+  {#if !scrollView.pinned && (scrollView.belowCount > 0 || (view.newerCount ?? 0) > 0)}
     <div class="topic-view__new-below">
-      <Button variant="primary" onclick={jumpToBottom}>
-        新着 {scrollView.belowCount}件 ↓
+      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
+        新着 {Math.max(scrollView.belowCount, view.newerCount ?? 0)}件 ↓
       </Button>
     </div>
   {/if}
@@ -618,15 +638,7 @@
       submitDisabled={!topicName}
       oninput={(b) => tc.setDraft(b)}
       onsubmit={handleSubmit}
-      onarrowupempty={() => {
-        if (!scrollEl) return
-        const rows = scrollEl.querySelectorAll<HTMLElement>('.ui-message-row[data-focusable="true"]')
-        if (rows.length > 0) {
-          const lastId = focusableMessageIds.at(-1)
-          if (lastId) activeRowId = lastId
-          focusTarget(rows[rows.length - 1])
-        }
-      }}
+      onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
   </div>
 
@@ -661,6 +673,7 @@
   .topic-view__scroll {
     grid-row: 2;
     overflow-y: auto;
+    overflow-anchor: none;
     padding: var(--space-8) var(--space-16);
     display: flex;
     flex-direction: column;
@@ -673,19 +686,6 @@
     display: grid;
     justify-items: start;
     gap: var(--space-8);
-    min-width: 0;
-  }
-
-  .topic-view__list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: var(--space-4);
-    min-width: 0;
-  }
-
-  .topic-view__item {
     min-width: 0;
   }
 

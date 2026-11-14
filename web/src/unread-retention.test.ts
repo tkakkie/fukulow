@@ -11,6 +11,65 @@ vi.mock('./unread-counts', async importOriginal => {
 })
 afterEach(() => { mode.prune = true; vi.useRealTimers() })
 
+it('coalesces overflow recovery through in-flight reads and backoff until the completed baselines suffice', async () => {
+  vi.useFakeTimers()
+  for (const baseline of [1, 9000]) {
+    const c = retentionClient(); await c.boot(); await c.baseline(1, 0, 1, 1)
+    await c.enter()
+    const list = held<ChannelList>(), topics = new Map(['T', 'U'].map(id => [id, held<TopicSummaryResponse>()]))
+    const listRead = vi.fn(() => list.promise)
+    const summaryRead = vi.fn((_channel: string, topic: string) => topics.get(topic)!.promise)
+    c.setList(listRead); c.api.getTopicSummary = summaryRead
+    for (let seq = 2; seq <= 5000; seq++) c.feed([msg(seq)])
+    await flush()
+    expect(listRead).toHaveBeenCalledTimes(1)
+    expect(summaryRead.mock.calls.map(([, id]) => id).sort()).toEqual(['T', 'U'])
+    // Sufficient completions need no follow-up; insufficient ones retain backoff across more overflows.
+    list.resolve(ok({ channels: [row({ as_of_seq: baseline, main_unread_count: baseline, unread_count: baseline })] }))
+    for (const [id, topic] of topics) topic.resolve(ok({ as_of_seq: baseline, topic: summary(id, baseline, 0, 0) }))
+    await flush()
+    for (let seq = 5001; seq <= 9000; seq++) c.feed([msg(seq)])
+    await flush()
+    expect(listRead).toHaveBeenCalledTimes(1)
+    expect(summaryRead).toHaveBeenCalledTimes(2)
+    listRead.mockImplementation(async () => ok({ channels: [row({ as_of_seq: 9000, main_unread_count: 9000, unread_count: 9000 })] }))
+    summaryRead.mockImplementation(async (_channel, id) => ok({ as_of_seq: 9000, topic: summary(id, 9000, 0, 0) }))
+    await vi.advanceTimersByTimeAsync(500)
+    const attempts = baseline === 1 ? 2 : 1
+    expect(listRead).toHaveBeenCalledTimes(attempts)
+    expect(summaryRead.mock.calls.filter(([, id]) => id === 'T')).toHaveLength(attempts)
+    expect(summaryRead.mock.calls.filter(([, id]) => id === 'U')).toHaveLength(attempts)
+    expect(c.unread.get('A').main.unreadCount).toBe(9000)
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(listRead).toHaveBeenCalledTimes(attempts)
+    expect(summaryRead).toHaveBeenCalledTimes(2 * attempts)
+    c.close(); expect(vi.getTimerCount()).toBe(0)
+  }
+})
+
+it('retains only Message identity and sequence metadata without holding display bodies', async () => {
+  const c = retentionClient(), source = msg(1)
+  await c.boot([source])
+  expect(c.records.size).toBeGreaterThan(0)
+  const retained = c.records.get(1)!
+  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'id', 'sender', 'seq', 'topic_id'])
+  expect(source.body).toBeDefined()
+  expect(retained).not.toBe(source)
+  c.close()
+})
+
+it('skips own Message bookkeeping and still advances across own rows to a presented other-sender Message', async () => {
+  const c = retentionClient(), own = { ...msg(1), sender: 'me' }
+  await c.boot([own])
+  const visit = await c.enter()
+  expect(c.records.size).toBe(0)
+  c.feed([own, msg(2)])
+  await c.present(visit, [2])
+  expect(c.unread.get('A').main.position).toBe(2)
+  expect(c.records.has(1)).toBe(false)
+  c.close()
+})
+
 it.each([
   { name: 'baseline subtraction and future reads', baseline: { asOfSeq: 8, readSeq: 3, count: 4 }, aggregate: Infinity, visit: Infinity, first: 4 },
   { name: 'aggregate held suffix', baseline: { asOfSeq: 8, readSeq: 8, count: 0 }, aggregate: 3, visit: Infinity, first: 4 },
