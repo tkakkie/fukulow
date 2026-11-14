@@ -918,3 +918,42 @@ pub(super) mod removal;
 mod context;
 mod limit;
 mod rls_statements;
+
+// Historical migrations are tested before schema upgrades; current handlers
+// must only run after all later migrations have been applied.
+async fn migrate_after(pool: &PgPool, version: &str) {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut paths = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_str().unwrap() > version)
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        sqlx::raw_sql(&std::fs::read_to_string(path).unwrap())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+async fn historical_send(
+    pool: &PgPool,
+    org: Uuid,
+    sender: Uuid,
+    channel: Uuid,
+    name: Option<&str>,
+) {
+    let mut tx = pool.begin().await.unwrap();
+    let seq:i64=sqlx::query_scalar("INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,1) ON CONFLICT(organization_id,channel_id) DO UPDATE SET seq=channel_message_sequences.seq+1 RETURNING seq")
+        .bind(org).bind(channel).fetch_one(&mut *tx).await.unwrap();
+    let topic = if let Some(name) = name {
+        Some(sqlx::query_scalar::<_,Uuid>("INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES($1,$2,$3,$4,$5,$5,1) RETURNING id")
+            .bind(org).bind(channel).bind(Uuid::new_v4()).bind(name).bind(seq).fetch_one(&mut *tx).await.unwrap())
+    } else {
+        None
+    };
+    sqlx::query("INSERT INTO messages(organization_id,channel_id,id,seq,sender,client_message_id,body,topic_id) VALUES($1,$2,$3,$4,$5,$6,'Historical Message',$7)")
+        .bind(org).bind(channel).bind(Uuid::new_v4()).bind(seq).bind(sender).bind(Uuid::new_v4()).bind(topic).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+}

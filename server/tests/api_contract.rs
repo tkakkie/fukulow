@@ -24,8 +24,41 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 35 operations document shutdown, including Invite listing and revocation.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 246;
+// All 38 operations document shutdown, including author lookup, Account security actions and Invite listing/revocation.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 268;
+
+fn unique_operation_ids(document: &Value) -> bool {
+    let mut ids = BTreeSet::new();
+    document["paths"].as_object().unwrap().values().all(|item| {
+        HTTP_METHODS.iter().all(|method| {
+            item.get(method).is_none_or(|operation| {
+                operation["operationId"]
+                    .as_str()
+                    .is_some_and(|id| ids.insert(id))
+            })
+        })
+    })
+}
+
+#[test]
+fn every_openapi_operation_id_is_unique() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        assert!(unique_operation_ids(&document));
+    }
+}
+
+#[test]
+fn duplicate_operation_id_is_rejected() {
+    let mut document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    assert!(unique_operation_ids(&document));
+    let existing =
+        document["paths"]["/api/v1/orgs/{org}/channels/{channel}/members"]["get"]["operationId"]
+            .clone();
+    document["paths"]["/api/v1/orgs/{org}/dms"]["get"]["operationId"] = existing;
+    assert!(!unique_operation_ids(&document));
+}
 
 #[test]
 fn list_invites_cursor_is_an_optional_query_parameter() {
@@ -154,7 +187,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 35);
+        assert_eq!(operations, 38);
     }
 }
 
@@ -193,7 +226,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 35);
+    assert_eq!(requests.len(), 38);
     requests.extend(
         [
             "/",
@@ -690,6 +723,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
     assert_variant_contract(
         "ServerEvent",
         &[
+            (ServerEvent::DmListChanged, "dm_list_changed"),
             (ServerEvent::ActivityReady, "activity_ready"),
             (ServerEvent::ActivityReset, "activity_reset"),
             (
@@ -1328,6 +1362,56 @@ fn account_security_contract_records_paths_errors_and_account_lock_order() {
                 .as_str()
                 .unwrap()
                 .contains("invalid_new_password")
+        );
+    }
+}
+
+#[test]
+fn dm_contract_has_fixed_kind_strict_open_and_separate_discovery_identities() {
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for doc in [
+        serde_json::from_str::<Value>(include_str!("../../openapi.json")).unwrap(),
+        generated,
+    ] {
+        let s = &doc["components"]["schemas"];
+        assert_eq!(s["OpenDmRequest"]["additionalProperties"], false);
+        assert_eq!(s["OpenDmRequest"]["required"], json!(["member_id"]));
+        assert_eq!(s["DmKind"]["enum"], json!(["dm"]));
+        assert_eq!(s["OrdinaryChannelKind"]["enum"], json!(["channel"]));
+        for field in [
+            "id",
+            "kind",
+            "peer",
+            "capabilities",
+            "as_of_seq",
+            "read_seq",
+            "main_unread_count",
+            "unread_count",
+            "mention_unread_count",
+        ] {
+            assert!(
+                s["Dm"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field))
+            );
+        }
+        assert!(s["Dm"]["properties"].get("name").is_none());
+        assert!(s["Dm"]["properties"].get("visibility").is_none());
+        assert_eq!(s["DmDiscovery"]["required"], json!(["id", "kind", "peer"]));
+        for status in [
+            "200", "201", "400", "401", "403", "404", "413", "415", "500",
+        ] {
+            assert!(
+                doc["paths"]["/api/v1/orgs/{org}/dms"]["post"]["responses"]
+                    .get(status)
+                    .is_some()
+            );
+        }
+        assert_eq!(s["DmListChanged"]["required"], json!(["type"]));
+        assert_eq!(
+            s["DmListChanged"]["properties"].as_object().unwrap().len(),
+            1
         );
     }
 }

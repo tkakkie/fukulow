@@ -24,11 +24,17 @@ async fn router(pool: &PgPool) -> Router {
     crate::app(AppState::for_test(pool.clone()).await)
 }
 
-async fn body(response: Response) -> Value {
+pub(crate) async fn body(response: Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap()
 }
 
-async fn request(app: &Router, method: &str, path: &str, token: &str, input: Value) -> Response {
+pub(crate) async fn request(
+    app: &Router,
+    method: &str,
+    path: &str,
+    token: &str,
+    input: Value,
+) -> Response {
     let path = scoped_path(path, token);
     app.clone()
         .oneshot(
@@ -44,7 +50,7 @@ async fn request(app: &Router, method: &str, path: &str, token: &str, input: Val
         .unwrap()
 }
 
-async fn organization(pool: &PgPool) -> Uuid {
+pub(crate) async fn organization(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Organization')")
         .bind(id)
@@ -56,7 +62,7 @@ async fn organization(pool: &PgPool) -> Uuid {
 
 // Members and sessions are test fixtures, not a membership-management API.
 // Allow shared member ids across tenants to expose missing composite-key joins.
-async fn member(pool: &PgPool, organization_id: Uuid, id: Uuid, role: &str) -> String {
+pub(crate) async fn member(pool: &PgPool, organization_id: Uuid, id: Uuid, role: &str) -> String {
     let account_id = Uuid::new_v4();
     sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'unused')")
         .bind(account_id)
@@ -94,7 +100,7 @@ async fn create(app: &Router, token: &str, name: &str, visibility: &str) -> Valu
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let channel = body(response).await;
     assert!(Uuid::parse_str(channel["id"].as_str().unwrap()).is_ok());
-    assert_eq!(channel.as_object().unwrap().len(), 4);
+    assert_eq!(channel.as_object().unwrap().len(), 5);
     assert_eq!(channel["name"], name);
     assert_eq!(channel["visibility"], visibility);
     channel
@@ -474,6 +480,7 @@ async fn private_channel_creation_rolls_back_if_membership_insert_fails(pool: Pg
 
 fn scoped_path(path: &str, token: &str) -> String {
     if path.starts_with("/api/v1/channels")
+        || path.starts_with("/api/v1/dms")
         || path.starts_with("/api/v1/ws")
         || path.starts_with("/api/v1/members")
         || path.starts_with("/api/v1/message-authors")
@@ -488,7 +495,7 @@ fn scoped_path(path: &str, token: &str) -> String {
     }
 }
 
-async fn extract_auth(state: AppState, token: &str) -> Auth {
+pub(crate) async fn extract_auth(state: AppState, token: &str) -> Auth {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(sender)));
     let app = Router::new()

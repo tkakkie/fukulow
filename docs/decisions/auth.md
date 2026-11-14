@@ -56,6 +56,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - #314 definer EXECUTE is revoked from PUBLIC in the migration and granted to fukulow_app in db-grants.sql, which the roles step reapplies after pg_restore --no-acl resets function ACLs.
 - #314 single-statement risk: RLS safety depends on the materialized CTE running before the LATERAL read. Step 4 tests every use with production policies (custom/generic plans, Organization switch, reuse, unset, cancellation); any unguaranteed case reverts to an explicit transaction (#334).
 - #293 exceptions stay narrow, never BYPASSRLS: accounts/account_sessions have no RLS; /me uses a SELECT-only policy for the caller's own Members; setup uses a boolean-only SECURITY DEFINER function; fallback rechecks run one transaction per Organization.
+- #151 maintenance enumerates one Organization UUID with wraparound via a restricted SECURITY DEFINER function; no names/data. Reclamation visits one Organization/minute without client traffic, then uses local RLS context and bounded transactions; no global tenant read/delete permission is added.
 - #293 Owner jobs (migrations, pg_dump, restore drill) run as the superuser owner and bypass RLS by design; ENABLE without FORCE. RLS tests connect as a non-superuser role (AppState::for_test), because CI tests connect as postgres. Merge needs before/after hot-path measurements.
 - #294 A (#315): a Guest lists only themself and active Members with a usable grant on a Channel the Guest can access; other Roles keep the full list. Sender names come from #301's author lookup scoped to readable Messages, never by widening the list.
 
@@ -97,6 +98,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
+- [messages](messages.md): `#151 reclaim only discovery revisions`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
 - [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
 - [realtime](realtime.md): `#204 sections_changed goes only`

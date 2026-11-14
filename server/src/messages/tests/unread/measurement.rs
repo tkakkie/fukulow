@@ -17,6 +17,69 @@ SELECT p.channel_id, p.read_seq,
 "#;
 
 #[fukulow_test::test]
+async fn main_unread_count_uses_covering_range_without_message_heap(pool: PgPool) {
+    let (_, org, sender, channel, _) = fixture(&pool).await;
+    let viewer = Uuid::new_v4();
+    member(&pool, org, viewer).await;
+    sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,CASE WHEN n%2=0 THEN $3 ELSE $4 END,gen_random_uuid(),repeat('x',1024) FROM generate_series(1,10000) n")
+        .bind(org).bind(channel).bind(sender).bind(viewer).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,10000)",
+    )
+    .bind(org)
+    .bind(channel)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("VACUUM(ANALYZE) messages")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = crate::test_app_pool(pool.clone()).await;
+    let mut tx = app.begin().await.unwrap();
+    crate::database::set_organization(&mut tx, org)
+        .await
+        .unwrap();
+    sqlx::query("SET LOCAL plan_cache_mode=force_generic_plan")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let row = sqlx::query(crate::messages::unread::LIST_COUNTS_SQL)
+        .bind(org)
+        .bind(viewer)
+        .bind(0_i64)
+        .bind([channel])
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("unread_count"), 5_000);
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {}",
+        crate::messages::unread::LIST_COUNTS_SQL
+    ))
+    .bind(org)
+    .bind(viewer)
+    .bind(0_i64)
+    .bind([channel])
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    fn covering(node: &Value) -> Option<&Value> {
+        if node["Index Name"] == "messages_main_unread_covering" {
+            return Some(node);
+        }
+        node["Plans"].as_array()?.iter().find_map(covering)
+    }
+    let scan = covering(&plan[0]["Plan"]).expect("covering main-scope index range");
+    assert_eq!(scan["Node Type"], "Index Only Scan");
+    assert_eq!(scan["Heap Fetches"], 0);
+    assert_eq!(scan["Actual Rows"].as_f64().unwrap(), 5_000.0);
+    assert_eq!(scan["Rows Removed by Filter"].as_f64().unwrap(), 5_000.0);
+    tx.rollback().await.unwrap();
+    app.close().await;
+}
+
+#[fukulow_test::test]
 #[ignore = "manual before/after release query measurement; run without other builds/tests"]
 async fn measure_unread_list_read_position_ranges(pool: PgPool) {
     let history: i64 = std::env::var("MEASURE_HISTORY")

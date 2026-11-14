@@ -94,6 +94,20 @@ export const listChannels = (organizationId: string, f: typeof fetch = fetch, si
 export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
   call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)
 
+export type { Dm, DmChanges, DmDiscovery, DmList, OpenDmRequest } from './api-schema'
+export type DmListQuery = NonNullable<import('./api-schema').operations['list_dms']['parameters']['query']>
+export type DmChangesQuery = import('./api-schema').operations['dm_changes']['parameters']['query']
+export const listDms = (org: string, query: DmListQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) => {
+  const params = new URLSearchParams()
+  if (query.cursor !== undefined) params.set('cursor', query.cursor)
+  for (const id of query.channel_id ?? []) params.append('channel_id', id)
+  return call<components['schemas']['DmList']>(f, `${orgPath(org)}/dms${params.size ? `?${params}` : ''}`, { cache: 'no-store', signal }, true)
+}
+export const listDmChanges = (org: string, query: DmChangesQuery, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['DmChanges']>(f, `${orgPath(org)}/dms/changes${querySuffix(query)}`, { cache: 'no-store', signal }, true)
+export const openDm = (org: string, body: components['schemas']['OpenDmRequest'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['Dm']>(f, `${orgPath(org)}/dms`, { ...json(body), signal }, true)
+
 /** No cursor = latest page; pages are ascending by seq. */
 export const listMessages = (organizationId: string, channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch) => {
   const qs = new URLSearchParams()

@@ -1,0 +1,136 @@
+use super::*;
+use axum::extract::{Query, State, rejection::QueryRejection};
+
+pub(crate) async fn bump(
+    connection: &mut PgConnection,
+    org: Uuid,
+    channel: Uuid,
+    grants: &[(Uuid, i64, Uuid)],
+) -> Result<(), sqlx::Error> {
+    let mut grants = grants.to_vec();
+    grants.sort_by_key(|g| g.0);
+    if grants.is_empty() {
+        return Ok(());
+    }
+    let members = grants.iter().map(|g| g.0).collect::<Vec<_>>();
+    let revisions = grants.iter().map(|g| g.1).collect::<Vec<_>>();
+    let lifetimes = grants.iter().map(|g| g.2).collect::<Vec<_>>();
+    // ORDER BY preserves the Member counter lock order in one batched statement.
+    // Acquire every counter before any discovery row, as on the single-row path.
+    let mut positions: Vec<(i64, Uuid)> = sqlx::query_as("INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT $1,m,r,1 FROM unnest($2::uuid[],$3::bigint[]) v(m,r) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision) DO UPDATE SET position=dm_discovery_counters.position+1 RETURNING position,member_id")
+        .bind(org).bind(&members).bind(&revisions).fetch_all(&mut *connection).await?;
+    positions.sort_by_key(|p| p.1);
+    let positions = positions.into_iter().map(|p| p.0).collect::<Vec<_>>();
+    sqlx::query("INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) SELECT $1,m,r,$2,g,p,p FROM unnest($3::uuid[],$4::bigint[],$5::uuid[],$6::bigint[]) v(m,r,g,p) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision,channel_id) DO UPDATE SET latest_position=EXCLUDED.latest_position,grant_id=EXCLUDED.grant_id")
+        .bind(org).bind(channel).bind(&members).bind(&revisions).bind(&lifetimes).bind(&positions).execute(&mut *connection).await?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DmChanges {
+    pub dms: Vec<DmDiscovery>,
+    pub next_cursor: String,
+    pub caught_up: bool,
+}
+
+#[utoipa::path(get,path="/api/v1/orgs/{org}/dms/changes",operation_id="dm_changes",
+    params(("org"=Uuid,Path),("lane"=String,Query,description="Required delta or coverage"),("cursor"=Option<String>,Query,description="Opaque lane-specific continuation")),
+    security(("cookie"=[]),("bearer"=[])),
+    responses((status=200,description="At most 50 authorized identities, no Unread or Message scans; independent rolling delta or frozen-birth coverage",body=DmChanges),
+    (status=400,description="invalid input, including unknown fields or wrong-scope cursor",body=ErrorBody),
+    (status=401,description="invalid credentials",body=ErrorBody),(status=404,description="organization_unavailable",body=ErrorBody),
+    (status=500,description="internal error",body=ErrorBody)))]
+pub async fn changes(
+    State(state): State<AppState>,
+    auth: Auth,
+    query: Result<Query<Vec<(String, String)>>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    crate::database::organization_read_only(
+        &state.pool,
+        auth.identity.organization.organization_id,
+        async |tx: &mut PgConnection| {
+            auth::members::require_current(tx, &auth).await?;
+            let Query(query) = query.map_err(|_| ApiError::bad_request())?;
+            let mut lane = None;
+            let mut token = None;
+            for (k, v) in query {
+                match k.as_str() {
+                    "lane" if lane.is_none() && matches!(v.as_str(), "delta" | "coverage") => {
+                        lane = Some(v)
+                    }
+                    "cursor" if token.is_none() => token = Some(v),
+                    _ => return Err(ApiError::bad_request()),
+                }
+            }
+            let lane = lane.ok_or_else(ApiError::bad_request)?;
+            let cursor = token
+                .map(|t| Cursor::decode(&t, &state.setup_token, &auth, &lane))
+                .transpose()?
+                .unwrap_or_default();
+            let response = page(tx, &auth, &state.setup_token, &lane, cursor).await?;
+            Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response())
+        },
+    )
+    .await
+}
+
+pub(crate) async fn page(
+    tx: &mut PgConnection,
+    auth: &Auth,
+    secret: &str,
+    lane: &str,
+    mut cursor: Cursor,
+) -> Result<DmChanges, ApiError> {
+    let org = auth.identity.organization.organization_id;
+    let h:i64=sqlx::query_scalar("SELECT COALESCE((SELECT position FROM dm_discovery_counters WHERE organization_id=$1 AND member_id=$2 AND membership_revision=$3),0)")
+        .bind(org).bind(auth.identity.member.id).bind(auth.membership_revision).fetch_one(&mut *tx).await?;
+    let coverage = lane == "coverage";
+    if coverage && cursor.exhausted {
+        cursor = Cursor::default();
+    }
+    let ceiling = if coverage {
+        *cursor.ceiling.get_or_insert(h)
+    } else {
+        h
+    };
+    let column = if coverage {
+        "birth_position"
+    } else {
+        "latest_position"
+    };
+    // Consume lookahead before authorization/identity work: only 50 selected
+    // rows may touch current grants/Channels. Bounds survive even an empty page.
+    let sql = format!(
+        "WITH candidates AS MATERIALIZED (SELECT organization_id,member_id,membership_revision,channel_id,grant_id,{column} AS position FROM dm_discovery WHERE organization_id=$1 AND member_id=$2 AND membership_revision=$3 AND {column}>$4 AND {column}<=$5 ORDER BY {column} LIMIT 51), selected AS MATERIALIZED (SELECT * FROM candidates ORDER BY position LIMIT 50) SELECT a.channel_id,a.peer,b.caught_up,COALESCE((SELECT max(position) FROM selected),$4) FROM (SELECT count(*)<=50 AS caught_up FROM candidates) b LEFT JOIN LATERAL (SELECT d.channel_id,CASE WHEN c.lower_member_id=$2 THEN c.higher_member_id ELSE c.lower_member_id END AS peer,d.position FROM selected d JOIN LATERAL (SELECT cm.channel_id FROM channel_members cm WHERE cm.organization_id=d.organization_id AND cm.channel_id=d.channel_id AND cm.member_id=d.member_id AND cm.membership_revision=d.membership_revision AND cm.grant_id=d.grant_id OFFSET 0) cm ON true JOIN LATERAL (SELECT c.kind,c.lower_member_id,c.higher_member_id FROM channels c WHERE c.organization_id=d.organization_id AND c.id=cm.channel_id OFFSET 0) c ON c.kind='dm' AND $2 IN(c.lower_member_id,c.higher_member_id)) a ON true ORDER BY a.position"
+    );
+    let rows: Vec<(Option<Uuid>, Option<Uuid>, bool, i64)> = sqlx::query_as(&sql)
+        .bind(org)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision)
+        .bind(cursor.at)
+        .bind(ceiling)
+        .fetch_all(&mut *tx)
+        .await?;
+    let (caught_up, at) = rows
+        .first()
+        .map(|r| (r.2, r.3))
+        .unwrap_or((true, cursor.at));
+    cursor.at = if caught_up { ceiling } else { at };
+    cursor.exhausted = caught_up;
+    let dms = identities(
+        tx,
+        auth,
+        rows.into_iter()
+            .filter_map(|r| Some((r.0?, r.1?, String::new())))
+            .collect(),
+    )
+    .await?
+    .into_iter()
+    .map(|d| d.identity)
+    .collect();
+    Ok(DmChanges {
+        dms,
+        next_cursor: cursor.encode(secret, auth, lane)?,
+        caught_up,
+    })
+}

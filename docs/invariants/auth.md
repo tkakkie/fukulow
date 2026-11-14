@@ -22,6 +22,7 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 | Deactivation keeps historical authorship; send-first may commit, deactivation-first denies new sends and canonical retries | `server/src/messages/tests/removal.rs::deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries` |
 | HTTP cancellation cannot interrupt deactivation COMMIT or 4003 signaling to affected Sessions; other Organizations remain usable | `server/src/realtime/tests/session.rs::deactivation_http_cancellation_still_commits_and_signals_every_session`, `server/src/realtime/tests/session.rs::membership_loss_closes_all_account_sessions_only_in_its_organization` |
 | App role owns nothing, has no memberships in either direction or elevated/DDL/TRUNCATE/trigger rights; updates/future grants preserve Member/tenant denials | `server/tests/auth.rs::app_role_denies_ddl_and_both_memberships_and_preserves_member_and_tenant_protection` |
+| Maintenance enumerates one Organization UUID with wraparound, restricted EXECUTE and fixed search_path; direct tenant reads still require RLS context | `server/src/channels/dms/tests/reclamation_task.rs::maintenance_enumerator_is_bounded_restricted_and_does_not_bypass_tenant_rls` |
 | Setup creates exactly one organization and owner, even for concurrent requests | `server/tests/auth.rs::setup_works_once_and_is_atomic`, `server/tests/auth.rs::invalid_setup_does_not_consume_bootstrap` |
 | Startup rejects blank/public-example tokens in every mode; POST setup rejects absent/wrong tokens before semantic validation or database access | `server/tests/config.rs::startup_requires_setup_token_regardless_of_cookie_security`, `server/tests/auth.rs::setup_token_is_required_and_does_not_reveal_bootstrap_state`, `server/tests/auth.rs::setup_token_precedes_semantic_validation_and_database_access` |
 | Proxy IP/CIDR configuration fails closed; only trusted peers may select the rightmost client IP; repeated/invalid headers fall back to the peer | `server/tests/config.rs::startup_rejects_partial_or_invalid_proxy_configuration_before_database_access`, `server/src/auth/throttle.rs::forwarded_ip_requires_configured_header_and_trusted_peer`, `server/src/auth/throttle.rs::proxy_cidrs_match_only_peers_in_the_configured_networks`, `server/src/auth/throttle.rs::untrusted_or_malformed_forwarding_cannot_rotate_failure_budgets` |
@@ -86,10 +87,14 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 
 ## Rows in other parts
 
+- [channels](channels.md): `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
+- [messages](messages.md): `send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions`, `default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime`
+- [realtime](realtime.md): `dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied`, `dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access`, `dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message`
 - [deployment](deployment.md): `cleanup_database_failure_identifies_operation_without_raw_details`, `startup_panics_never_echo_payloads_or_secrets`, `ordinary_statement_timeout_fires_and_local_context_clears`
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [channels](channels.md): `reclaims_only_strictly_older_revisions_and_preserves_other_organizations`, `reclaimed_revision_cursors_fail_and_older_read_snapshots_stay_complete`
 - [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`
 
 - [messages](messages.md): `author_lookup_authorization_and_identities_share_a_nonlocking_snapshot`, `author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bounds_batches`
@@ -111,3 +116,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [realtime](realtime.md): `private_channel_activity_skips_non_members`
 - [channels](channels.md): `guest_directory_denies_unrelated_ungranted_public_private_and_stale_grants`, `guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_keeps_past_authors`, `directory_full_roles_keep_exact_bytes_name_id_order_and_organization_isolation`, `directory_reads_fresh_role_after_auth_and_keeps_inactive_stale_caller_denials`, `guest_directory_role_grants_and_results_share_one_nonlocking_snapshot`
+
+- [realtime](realtime.md): `dm_notice_denies_nonparticipant_owner_with_participant_control`, `dm_notices_reach_both_participants_and_only_other_senders_and_own_read_sessions`, `dm_peer_deactivation_reactivation_and_rename_invalidate_only_current_viewers_and_renewal_gains_only_lapsed_participant`, `dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival`

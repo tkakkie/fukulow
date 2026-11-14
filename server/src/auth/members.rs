@@ -234,6 +234,27 @@ pub(crate) fn member_write_error(error: sqlx::Error) -> ApiError {
 // Batched Channel fallback composes this projection; auth retains table ownership.
 pub(crate) const ACTIVE_SCOPED_MEMBERS_SQL: &str = "SELECT organization_id,id,name,role,membership_revision FROM users WHERE deactivated_at IS NULL";
 
+// Revisions only increase; a strictly older revision can never regain authority.
+pub(crate) const MEMBER_REVISIONS_SQL: &str =
+    "SELECT organization_id,id,membership_revision FROM users";
+
+/// Global maintenance exception: one Organization id, with wraparound, no tenant data.
+pub(crate) async fn next_maintenance_organization(
+    pool: &sqlx::PgPool,
+    after: Option<Uuid>,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    crate::database::read_only(pool, async |tx: &mut sqlx::PgConnection| {
+        sqlx::query("SET LOCAL statement_timeout = '1s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query_scalar("SELECT public.fukulow_next_maintenance_organization($1)")
+            .bind(after)
+            .fetch_one(tx)
+            .await
+    })
+    .await
+}
+
 pub(crate) async fn active_target(
     connection: &mut sqlx::PgConnection,
     organization: Uuid,
@@ -322,4 +343,53 @@ async fn deactivate_transaction<G: RoleChangeGuard>(
         notice.committed(state.pool.clone());
     }
     Ok(result)
+}
+
+// Retained identity/eligibility snapshots for fixed-participant resources. The
+// caller locks the whole sorted pair before touching any grants.
+#[derive(sqlx::FromRow)]
+pub(crate) struct Participant {
+    pub id: Uuid,
+    pub name: String,
+    pub active: bool,
+    pub membership_revision: i64,
+    pub role: Role,
+}
+
+pub(crate) async fn participants(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    ids: &[Uuid],
+    lock: bool,
+) -> Result<Vec<Participant>, sqlx::Error> {
+    let locking = if lock { " FOR SHARE" } else { "" };
+    let sql = format!(
+        "SELECT id,name,deactivated_at IS NULL AS active,membership_revision,role FROM users WHERE organization_id=$1 AND id=ANY($2) ORDER BY id{locking}"
+    );
+    sqlx::query_as(&sql)
+        .bind(organization)
+        .bind(ids)
+        .fetch_all(connection)
+        .await
+}
+
+pub(crate) async fn require_current(
+    connection: &mut sqlx::PgConnection,
+    auth: &Auth,
+) -> Result<(), ApiError> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM ({} ) u)",
+        current_member_sql(false)
+    );
+    let current: bool = sqlx::query_scalar(&sql)
+        .bind(auth.identity.organization.organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision)
+        .fetch_one(connection)
+        .await?;
+    if current {
+        Ok(())
+    } else {
+        Err(ApiError::organization_unavailable())
+    }
 }

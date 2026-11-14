@@ -82,6 +82,11 @@ async fn configured_pool_bounds_acquisition_and_sets_every_new_connection(pool: 
             .await
             .unwrap();
         assert_eq!(timeout, "10s");
+        let jit: String = sqlx::query_scalar("SHOW jit")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(jit, "off");
         held.push(connection);
     }
     let started = tokio::time::Instant::now();
@@ -99,6 +104,11 @@ async fn configured_pool_bounds_acquisition_and_sets_every_new_connection(pool: 
         .await
         .unwrap();
     assert_eq!(timeout, "10s");
+    let jit: String = sqlx::query_scalar("SHOW jit")
+        .fetch_one(&app)
+        .await
+        .unwrap();
+    assert_eq!(jit, "off");
     app.close().await;
 }
 

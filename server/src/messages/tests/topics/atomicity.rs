@@ -379,6 +379,7 @@ async fn topic_migration_preserves_existing_messages_as_null(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+    crate::messages::tests::migrate_after(&pool, "202611110198_replies.sql").await;
     let app = router(&pool).await;
     let history = list(&app, &token, channel, "").await;
     assert_eq!(history["messages"][0]["id"], id.to_string());

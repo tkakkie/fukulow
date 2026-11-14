@@ -46,6 +46,7 @@
     viewSelected = true,
     organizationUnavailable = false,
     reconnecting = false,
+    sendDisabled = false,
     resolveSenderName,
     composerRef = $bindable(null),
     topicInputRef = $bindable(null),
@@ -64,6 +65,7 @@
     viewSelected?: boolean
     organizationUnavailable?: boolean
     reconnecting?: boolean
+    sendDisabled?: boolean
     resolveSenderName?: (senderId: string) => string
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
@@ -610,9 +612,10 @@
             body={p.body}
             pendingStatus={p.status}
             retryable={p.retryable}
+            failedReason={p.failureCode === 'dm_peer_deactivated' ? 'このメンバーは無効化されています。履歴は引き続き閲覧できます。' : p.failureCode === 'dm_peer_access_lapsed' ? 'このダイレクトメッセージには現在送信できません。' : undefined}
             {targetUnavailable}
             onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
-            onrestore={() => handleRestoreRequest(p.clientMessageId)}
+            onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
         {/snippet}
@@ -645,7 +648,7 @@
       value={cState.draft}
       topicValue={cState.topicDraft}
       error={cState.composerError}
-      disabled={targetUnavailable}
+      disabled={targetUnavailable || sendDisabled}
       oninput={(b) => channel.setDraft(b)}
       ontopicinput={(t) => channel.setTopicDraft(t)}
       onsubmit={handleSubmit}

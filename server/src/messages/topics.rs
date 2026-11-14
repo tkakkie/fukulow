@@ -172,6 +172,7 @@ pub async fn topic_history(
             channel,
         )
         .await?;
+        reject_dm_topics(tx,organization,channel).await?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
             .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
         if !exists {

@@ -6,14 +6,15 @@ export type ScopeBaseline = { asOfSeq: number; readSeq: number; count: number }
 export type Coverage = { after: number; through: number }
 export type UnreadRecord = Pick<Message, 'id' | 'seq' | 'channel_id' | 'topic_id' | 'sender'>
 export const inScope = (m: Pick<Message, 'channel_id' | 'topic_id'>, scope: UnreadScope) => m.channel_id === scope.channel && m.topic_id === scope.topicId
-export const mainBaseline = (c: UnreadChannel): ScopeBaseline => ({ asOfSeq: c.as_of_seq, readSeq: c.read_seq, count: c.main_unread_count })
+export type AggregateBaseline = Pick<UnreadChannel, 'id' | 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count'>
+export const mainBaseline = (c: Pick<AggregateBaseline, 'as_of_seq' | 'read_seq' | 'main_unread_count'>): ScopeBaseline => ({ asOfSeq: c.as_of_seq, readSeq: c.read_seq, count: c.main_unread_count })
 export const topicBaseline = (w: number, t: TopicSummary): ScopeBaseline => ({ asOfSeq: w, readSeq: t.read_seq, count: t.unread_count })
 export function chooseBaseline(old: ScopeBaseline | undefined, next: ScopeBaseline): ScopeBaseline {
   if (!old || next.asOfSeq > old.asOfSeq || (next.asOfSeq === old.asOfSeq && next.readSeq > old.readSeq)) return next
   if (next.asOfSeq === old.asOfSeq && next.readSeq === old.readSeq && next.count < old.count) return next
   return old
 }
-export function chooseChannelBaseline(old: UnreadChannel | undefined, next: UnreadChannel): UnreadChannel {
+export function chooseChannelBaseline<T extends AggregateBaseline>(old: T | undefined, next: T): T {
   if (!old || next.as_of_seq > old.as_of_seq || (next.as_of_seq === old.as_of_seq && next.read_seq > old.read_seq)) return next
   if (next.as_of_seq === old.as_of_seq && next.read_seq === old.read_seq) return { ...next,
     unread_count: Math.min(old.unread_count, next.unread_count), main_unread_count: Math.min(old.main_unread_count, next.main_unread_count) }

@@ -2239,7 +2239,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const sessionModel = {
       channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      channelMembers: () => channelMembers, close: rawSession.close,
+      channelMembers: vi.fn(() => channelMembers), close: rawSession.close,
     }
     net.socket.onReady()
     net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
@@ -2282,6 +2282,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     expect(memberController.get().members).toEqual([self, peer])
     expect(host.querySelector('#panel-content')?.textContent).not.toContain('を追加')
+    // A fresh snapshot of the same Channel must preserve the live panel/controller.
+    const loading = rawSession.channels.load()
+    net.lists.at(-1)!.resolve(ok({ channels: [channel('c1', 'renamed')] }))
+    await loading; await settle()
+    expect(sessionModel.channelMembers).toHaveBeenCalledOnce()
     navigation.navigate({ type: 'close' }); await settle()
     shared = false
     navigation.navigate({ type: 'tab', tab: 'members' }); await settle()

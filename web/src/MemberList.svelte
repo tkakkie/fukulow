@@ -13,11 +13,15 @@
     identity,
     onchanged,
     onopen,
+    onopendm,
+    dmBusy = false,
   }: {
     model: ReturnType<typeof membersAdapter>
     identity: Identity
     onchanged(id: string): void
     onopen?(): void
+    onopendm?(memberId: string): void
+    dmBusy?: boolean
   } = $props()
 
   let email = $state('')
@@ -41,6 +45,9 @@
       {#each s.members as member (member.id)}
         <li class="member-list__item">
           <span class="member-list__name">{member.name}（{roleNames[member.role]}）</span>
+          {#if onopendm && identity.member.role !== 'guest' && member.id !== identity.member.id}
+            <Button disabled={dmBusy} onclick={() => onopendm?.(member.id)}>ダイレクトメッセージを開く</Button>
+          {/if}
           {#if capabilities.can_manage_roles.allowed}
             <label class="member-list__field">
               <span class="member-list__label">ロール</span>

@@ -3,6 +3,7 @@ import { createNavigationTargets } from './navigation-targets'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import { createChannels, type ChannelsApi } from './channels'
+import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplySync } from './reply-sync'
 import type { SyncOptions } from './sync'
@@ -20,6 +21,7 @@ export type SessionOptions = {
   topicsApi?: TopicsApi
   repliesApi?: RepliesApi
   unreadApi?: UnreadApi
+  dmsApi?: DmsApi
   onIdentity?: (identity: api.Identity) => void
   onIdentityInvalidated?: () => void
   sync?: Partial<SyncOptions>
@@ -32,6 +34,7 @@ export function createSession(options: SessionOptions) {
   let ended = false
   const notifyEnded = () => { if (!ended) { ended = true; options.onEnded() } }
   let unavailable = false
+  let dms: Dms | undefined
   const observe = async <T>(promise: Promise<api.Result<T>>): Promise<api.Result<T>> => {
     const result = await promise
     if (!result.ok && result.kind === 'http' && result.status === 401) notifyEnded()
@@ -39,16 +42,17 @@ export function createSession(options: SessionOptions) {
     return result
   }
   const activity = createActivity({
+    kind: id => dms?.get().rows.some(row => row.identity.id === id) ? 'dm' : channels.get().channels.some(row => row.id === id) ? 'channel' : undefined,
     watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
     covered: (notice, target) => {
       if (notice.type === 'channel_activity') return (unread.get(notice.channel_id).asOfSeq ?? -1) >= notice.seq
       if (notice.type !== 'read_position_changed') return false
-      if (target === 'channels') return notice.topic_id === null && unread.activityMainCoverage(notice.channel_id) >= notice.read_seq
+      if (target === 'channels' || target === 'dms') return notice.topic_id === null && unread.activityMainCoverage(notice.channel_id) >= notice.read_seq
       if (notice.topic_id !== null) return (topics.get(notice.channel_id).topics.find(t => t.topicId === notice.topic_id)?.baseline?.summary.read_seq ?? -1) >= notice.read_seq
       return false
     },
-    revoke: id => { channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.unavailable() },
-    access: id => { unread.activityAccess(id); topics.activityAccess(id) },
+    revoke: id => { dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.unavailable() },
+    access: id => { dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
   })
@@ -64,8 +68,13 @@ export function createSession(options: SessionOptions) {
   const replySource = options.repliesApi ?? repliesApi(organizationId)
   const unreadSource = options.unreadApi ?? unreadApi(organizationId)
   const topicComposition = createTopicSync({ ...options.sync, activity, selfId: options.selfId, organizationId,
+    isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
     api: { listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
-      sendMessage: (channel, body) => observe(timeline.sendMessage(channel, body)) },
+      sendMessage: async (channel, body) => {
+        const result = await observe(timeline.sendMessage(channel, body))
+        if (!closed && !unavailable) dms?.peerRefusal(channel, result)
+        return result
+      } },
     topicsApi: {
       listTimeline: (channel, query) => observe(topicSource.listTimeline(channel, query)),
       listTopics: (channel, query, signal) => observe(signal ? topicSource.listTopics(channel, query, signal) : topicSource.listTopics(channel, query)),
@@ -95,6 +104,8 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       refreshList: !options.channelsApi ? () => Promise.resolve().then(() => channels.load()) : undefined,
+      refreshDms: () => dms?.refresh(),
+      isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
       unreadApi: {
         listChannels: () => observe(unreadSource.listChannels()),
         markRead: (scope, body) => observe(unreadSource.markRead(scope, body)),
@@ -130,7 +141,23 @@ export function createSession(options: SessionOptions) {
       if (baselines.length || rows.length === 0) unread.activitySnapshot(baselines)
     },
   )
+  const dmSource = options.dmsApi ?? dmsApi(organizationId)
+  dms = createDms({ api: {
+    list: (query, signal) => observe(dmSource.list(query, signal)),
+    changes: (query, signal) => observe(dmSource.changes(query, signal)),
+    open: (body, signal) => observe(dmSource.open(body, signal)),
+  }, activity, watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
+  baseline: (dm, replace) => unread.activityDmSnapshot(dm, replace),
+  processed: identity => topicComposition.resolveDm(identity.id),
+  drop: id => unread.activityRevoke(id),
+  select: id => {
+    if (closed || unavailable) return
+    const same = channels.get().selectedId === id
+    channels.selectHint(id)
+    if (same && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
+  }, random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs })
   const stopActivity = sync.onActivity(notice => {
+    if (notice.type === 'activity_ready') dms?.ready()
     activity.notice(notice)
   })
   function terminate() {
@@ -138,6 +165,7 @@ export function createSession(options: SessionOptions) {
     unavailable = true
     activity.close(); capabilities.close()
     channels.close()
+    dms?.close()
     void sync.unavailable()
   }
   const capabilities = createActivityTarget({
@@ -171,12 +199,13 @@ export function createSession(options: SessionOptions) {
     if (id === watched) return
     if (watched !== null) void sync.unwatch(watched)
     watched = id
+    dms?.trackSelection(id)
     if (id !== null) void sync.watch(id)
   })
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, unread, channels, navigationTargets,
+    sync, topics, replies, unread, channels, dms, navigationTargets,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
@@ -202,6 +231,7 @@ export function createSession(options: SessionOptions) {
       stopFollowing(); stopSync(); stopMemberAccess()
       memberControllers.forEach(c => c.close()); memberControllers.clear()
       channels.close()
+      dms?.close()
       void sync.close()
     },
   }

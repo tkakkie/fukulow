@@ -21,6 +21,7 @@ mod admission;
 pub mod authors;
 mod commit;
 mod delivery;
+pub mod dms;
 mod failure;
 mod limiter;
 pub use limiter::SendLimit;
@@ -205,10 +206,10 @@ pub async fn list_messages(
     params(("org" = Uuid, Path, description = "Organization id"), ("id" = Uuid, Path, description = "Channel id")),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 201, description = "Confirmed Message; an idempotent retry returns the same Message and sequence", body = Message),
-        (status = 400, description = "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed; accessible DMs reject non-null Topic intent with dm_topics_not_allowed", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; reply_parent_not_found for an unknown, uncommitted or foreign Organization/Channel parent", body = ErrorBody),
-        (status = 409, description = "Client message id reused with different body, Channel, normalized Topic name or reply target", body = ErrorBody),
+        (status = 409, description = "Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed", body = ErrorBody),
         (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody),
         (status = 429, description = "send_rate_limited: the per-(Organization, Member) send limit (burst 10, 1 per second) is exhausted; checked after Channel authorization and before admission; nothing was charged, queued or persisted; retry after the delay with the same request and client_message_id", body = ErrorBody,
@@ -271,6 +272,9 @@ pub async fn send_message(
         committed(&state.pool, organization_id, sender, channel_id, &input).await?
     {
         return Ok(created(message));
+    }
+    if input.topic_name.is_some() {
+        reject_dm_topics_scoped(&state, &auth, channel_id).await?;
     }
     lead.charge()?;
     #[cfg(test)]
@@ -396,6 +400,9 @@ impl ListMessagesQuery {
 #[derive(Debug)]
 pub enum MessageError {
     InvalidInput,
+    DmTopicsNotAllowed,
+    DmPeerDeactivated,
+    DmPeerAccessLapsed,
     NotFound,
     TopicNotFound,
     ReplyTopicNotAllowed,
@@ -418,6 +425,9 @@ impl MessageError {
     fn replay(&self) -> Self {
         match self {
             Self::InvalidInput => Self::InvalidInput,
+            Self::DmTopicsNotAllowed => Self::DmTopicsNotAllowed,
+            Self::DmPeerDeactivated => Self::DmPeerDeactivated,
+            Self::DmPeerAccessLapsed => Self::DmPeerAccessLapsed,
             Self::NotFound => Self::NotFound,
             Self::TopicNotFound => Self::TopicNotFound,
             Self::ReplyTopicNotAllowed => Self::ReplyTopicNotAllowed,
@@ -455,6 +465,9 @@ impl IntoResponse for MessageError {
     fn into_response(self) -> Response {
         let (status, error) = match self {
             Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
+            Self::DmTopicsNotAllowed => (StatusCode::BAD_REQUEST, "dm_topics_not_allowed"),
+            Self::DmPeerDeactivated => (StatusCode::CONFLICT, "dm_peer_deactivated"),
+            Self::DmPeerAccessLapsed => (StatusCode::CONFLICT, "dm_peer_access_lapsed"),
             Self::ReplyTopicNotAllowed => (StatusCode::BAD_REQUEST, "reply_topic_not_allowed"),
             Self::ReplyParentNotFound => (StatusCode::NOT_FOUND, "reply_parent_not_found"),
             Self::ReplyChainNotFound => (StatusCode::NOT_FOUND, "reply_chain_not_found"),
@@ -626,12 +639,20 @@ async fn persist_admitted(
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", Some(organization_id)).await?;
-    match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
-        .await?
-    {
-        Some(true) => {}
-        Some(false) => return Err(MessageError::NotFound),
-        None => return Err(MessageError::OrganizationUnavailable),
+    let dm_grants =
+        channels::dms::send_locks(tx.connection()?, organization_id, sender, channel_id)
+            .await
+            .map_err(dm_error)?;
+    // DM locks already checked and retain the current sender and participant
+    // grant. The ordinary authorizer would repeat those three locked reads.
+    if dm_grants.is_none() {
+        match channels::is_visible_for_write(tx.connection()?, organization_id, sender, channel_id)
+            .await?
+        {
+            Some(true) => {}
+            Some(false) => return Err(MessageError::NotFound),
+            None => return Err(MessageError::OrganizationUnavailable),
+        }
     }
     #[cfg(test)]
     tests::removal::pause(input.client_message_id).await;
@@ -652,6 +673,16 @@ async fn persist_admitted(
         };
         tx.rollback().await?;
         return canonical(message, channel_id, &input, name_key);
+    }
+    if let Some(grants) = dm_grants {
+        if input.topic_name.is_some() {
+            return Err(MessageError::DmTopicsNotAllowed);
+        }
+        channels::dms::eligible_peer(tx.connection()?, organization_id, sender, &grants)
+            .await
+            .map_err(dm_error)?;
+        channels::dms::discovery::bump(tx.connection()?, organization_id, channel_id, &grants)
+            .await?;
     }
     // Read before waiting for the Channel barrier: an uncommitted parent is absent,
     // never a foreign-key wait or an implicitly accepted optimistic client id.
@@ -835,4 +866,48 @@ pub(crate) async fn authorized_replay_page(
         }
     }
     Ok(messages)
+}
+
+fn dm_error(error: ApiError) -> MessageError {
+    match error.1 {
+        "organization_unavailable" => MessageError::OrganizationUnavailable,
+        "channel not found" => MessageError::NotFound,
+        "dm_peer_deactivated" => MessageError::DmPeerDeactivated,
+        "dm_peer_access_lapsed" => MessageError::DmPeerAccessLapsed,
+        _ => MessageError::Database(sqlx::Error::Protocol("DM authorization failed".into())),
+    }
+}
+
+async fn reject_dm_topics(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+) -> Result<(), MessageError> {
+    if channels::dms::is_dm(connection, organization, channel).await? {
+        Err(MessageError::DmTopicsNotAllowed)
+    } else {
+        Ok(())
+    }
+}
+async fn reject_dm_topics_scoped(
+    state: &AppState,
+    auth: &Auth,
+    channel: Uuid,
+) -> Result<(), MessageError> {
+    let org = auth.identity.organization.organization_id;
+    crate::database::organization_read_only(
+        &state.pool,
+        org,
+        async |tx: &mut sqlx::PgConnection| {
+            require_visible(
+                &mut *tx,
+                org,
+                (auth.identity.member.id, auth.membership_revision),
+                channel,
+            )
+            .await?;
+            reject_dm_topics(tx, org, channel).await
+        },
+    )
+    .await
 }

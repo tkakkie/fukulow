@@ -18,6 +18,7 @@ function selectionHandler(nav: Navigation, channels: ChannelsAdapter, retryAutho
   return new Function('nav', 'channels', 'currentOrganizationId', 'members', `
     return id => {
       const s = channels.state;
+      const dmState = undefined;
       let drawerOpen = true;
       ${handlerCode}
       handleSelectChannel(id);

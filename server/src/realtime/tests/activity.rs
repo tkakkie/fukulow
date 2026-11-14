@@ -1735,3 +1735,5 @@ async fn failed_directory_publication_never_resets_invisible_guests(pool: PgPool
         );
     }
 }
+
+mod dms;

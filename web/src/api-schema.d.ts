@@ -297,6 +297,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/dms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_dms"];
+        put?: never;
+        post: operations["open_dm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/dms/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dm_changes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/invites": {
         parameters: {
             query?: never;
@@ -596,6 +628,7 @@ export interface components {
             capabilities: components["schemas"]["ChannelCapabilities"];
             /** Format: uuid */
             id: string;
+            kind: components["schemas"]["OrdinaryChannelKind"];
             /** @description 1..=128 Unicode scalar values. */
             name: string;
             visibility: components["schemas"]["ChannelVisibility"];
@@ -694,6 +727,54 @@ export interface components {
         };
         DisplayIdentity: {
             deactivated: boolean;
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        Dm: {
+            /** Format: int64 */
+            as_of_seq: number;
+            capabilities: components["schemas"]["ChannelCapabilities"];
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["DmKind"];
+            /** Format: int64 */
+            main_unread_count: number;
+            /** Format: int64 */
+            mention_unread_count: number;
+            peer: components["schemas"]["DmPeer"];
+            /** Format: int64 */
+            read_seq: number;
+            /** Format: int64 */
+            unread_count: number;
+        };
+        DmChanges: {
+            caught_up: boolean;
+            dms: components["schemas"]["DmDiscovery"][];
+            next_cursor: string;
+        };
+        DmDiscovery: {
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["DmKind"];
+            peer: components["schemas"]["DmPeer"];
+        };
+        /** @enum {string} */
+        DmKind: "dm";
+        DmList: {
+            dms: components["schemas"]["Dm"][];
+            next_cursor: string | null;
+        };
+        /** @description Own-Member DM list invalidation. */
+        DmListChanged: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "dm_list_changed";
+        };
+        DmPeer: {
+            active: boolean;
             /** Format: uuid */
             id: string;
             name: string;
@@ -844,6 +925,13 @@ export interface components {
             /** @description Opaque bearer credential. Store securely; returned only on native sign-in. */
             token: string;
         };
+        OpenDmRequest: {
+            /** Format: uuid */
+            member_id: string;
+            renew?: boolean;
+        };
+        /** @enum {string} */
+        OrdinaryChannelKind: "channel";
         Organization: {
             capabilities: components["schemas"]["OrganizationCapabilities"];
             name: string;
@@ -931,7 +1019,7 @@ export interface components {
             topic_name?: string | null;
         };
         /** @description Server -> client events. Clients dedupe messages by (channel_id, seq). */
-        ServerEvent: components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
+        ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
         SessionResponse: {
             /** Format: int32 */
             expires_in: number;
@@ -1118,6 +1206,13 @@ export type ClientMessage = components['schemas']['ClientMessage'];
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest'];
 export type CreateInviteRequest = components['schemas']['CreateInviteRequest'];
 export type DisplayIdentity = components['schemas']['DisplayIdentity'];
+export type Dm = components['schemas']['Dm'];
+export type DmChanges = components['schemas']['DmChanges'];
+export type DmDiscovery = components['schemas']['DmDiscovery'];
+export type DmKind = components['schemas']['DmKind'];
+export type DmList = components['schemas']['DmList'];
+export type DmListChanged = components['schemas']['DmListChanged'];
+export type DmPeer = components['schemas']['DmPeer'];
 export type ErrorBody = components['schemas']['ErrorBody'];
 export type ErrorEvent = components['schemas']['ErrorEvent'];
 export type Identity = components['schemas']['Identity'];
@@ -1133,6 +1228,8 @@ export type Message = components['schemas']['Message'];
 export type MessageEvent = components['schemas']['MessageEvent'];
 export type MessagePage = components['schemas']['MessagePage'];
 export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
+export type OpenDmRequest = components['schemas']['OpenDmRequest'];
+export type OrdinaryChannelKind = components['schemas']['OrdinaryChannelKind'];
 export type Organization = components['schemas']['Organization'];
 export type OrganizationCapabilities = components['schemas']['OrganizationCapabilities'];
 export type OutstandingInvite = components['schemas']['OutstandingInvite'];
@@ -1743,7 +1840,7 @@ export interface operations {
                     "application/json": components["schemas"]["ChannelMemberList"];
                 };
             };
-            /** @description Invalid ids */
+            /** @description Invalid ids; accessible DMs refuse dm_membership_fixed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1817,7 +1914,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Invalid ids or body */
+            /** @description Invalid ids or body; accessible DMs refuse dm_membership_fixed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2008,7 +2105,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets */
+            /** @description Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets; accessible DMs refuse dm_membership_fixed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2203,7 +2300,7 @@ export interface operations {
                     "application/json": components["schemas"]["Message"];
                 };
             };
-            /** @description Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed */
+            /** @description Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed; accessible DMs reject non-null Topic intent with dm_topics_not_allowed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2230,7 +2327,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Client message id reused with different body, Channel, normalized Topic name or reply target */
+            /** @description Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2397,7 +2494,7 @@ export interface operations {
                     "application/json": components["schemas"]["ReadPosition"];
                 };
             };
-            /** @description Invalid ids, negative read_seq or malformed JSON */
+            /** @description Invalid ids, negative read_seq or malformed JSON; Topic read in an accessible DM refuses dm_topics_not_allowed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2856,6 +2953,269 @@ export interface operations {
                 };
             };
             /** @description Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_dms: {
+        parameters: {
+            query?: {
+                /** @description Creation-order continuation, exclusive */
+                cursor?: string;
+                /** @description Repeated distinct ids, 1..50; exclusive with cursor */
+                channel_id?: string[];
+            };
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description At most 50 current participant DMs in one snapshot; ordinary Channels excluded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DmList"];
+                };
+            };
+            /** @description invalid input, including cursor scope, unknown fields or duplicate ids */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    open_dm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenDmRequest"];
+            };
+        };
+        responses: {
+            /** @description Resolved existing DM; explicit renew replaces only lapsed grants */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dm"];
+                };
+            };
+            /** @description Created immutable pair */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dm"];
+                };
+            };
+            /** @description invalid input or dm_self_not_allowed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: Guest cannot open even existing DMs */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or member_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error; unknown outcome is recovered by authorized list traversal */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    dm_changes: {
+        parameters: {
+            query: {
+                /** @description Required delta or coverage */
+                lane: string;
+                /** @description Opaque lane-specific continuation */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description At most 50 authorized identities, no Unread or Message scans; independent rolling delta or frozen-birth coverage */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DmChanges"];
+                };
+            };
+            /** @description invalid input, including unknown fields or wrong-scope cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

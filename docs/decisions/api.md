@@ -11,6 +11,8 @@ API contract and generated types. Writing rules and the other parts: [index](../
 - Request bodies are capped at 16 KiB; only the Message send route allows 32 KiB (a 4,000-scalar body is up to ~24 KB JSON-escaped) (#17). Extraction errors map to `ErrorBody`: 400 invalid, 415 content type, 413 size.
 - WebSocket runtime promoted the existing serde_json to a production dependency; test-only tokio-tungstenite and futures-util reuse locked packages to exercise real upgrade/frame/close; no new locked packages (#18).
 
+- #151 opaque DM cursors use ring AES-256-GCM with a domain-separated setup-token key and random nonce. Reason: authenticate scopes and conceal discovery positions without custom crypto; ring was already lockfile-pinned through TLS.
+
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.

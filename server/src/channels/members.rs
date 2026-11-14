@@ -43,7 +43,7 @@ pub struct ChangeChannelManagerRequest {
 #[utoipa::path(get, path="/api/v1/orgs/{org}/channels/{id}/members",
     params(("org"=Uuid,Path),("id"=Uuid,Path)), security(("cookie"=[]),("bearer"=[])),
     responses((status=200,description="Usable Channel grants: Member id, name, Role and manager right; no email",body=ChannelMemberList),
-    (status=400,description="Invalid ids",body=ErrorBody),(status=401,description="Account Session ended",body=ErrorBody),
+    (status=400,description="Invalid ids; accessible DMs refuse dm_membership_fixed",body=ErrorBody),(status=401,description="Account Session ended",body=ErrorBody),
     (status=404,description="organization_unavailable or channel not found",body=ErrorBody),(status=500,description="Database failure",body=ErrorBody)))]
 pub async fn list(
     State(state): State<AppState>,
@@ -53,6 +53,7 @@ pub async fn list(
     let Path((_, channel)) = path.map_err(|_| ApiError::bad_request())?;
     crate::database::organization_read_only(&state.pool, auth.identity.organization.organization_id, async |tx: &mut sqlx::PgConnection| {
         require_visible(&mut *tx, &auth, channel, false).await?;
+        dms::reject_membership(tx,auth.identity.organization.organization_id,channel).await?;
         let sql = format!(
             "SELECT u.id,u.name,u.role,cm.manager FROM channel_members cm JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=$2 ORDER BY u.name,u.id",
             auth::members::ACTIVE_SCOPED_MEMBERS_SQL
@@ -79,7 +80,7 @@ pub async fn list(
 #[utoipa::path(post, path="/api/v1/orgs/{org}/channels/{id}/members",request_body=AddChannelMemberRequest,
     params(("org"=Uuid,Path),("id"=Uuid,Path)),security(("cookie"=[]),("bearer"=[])),
     responses((status=204,description="Grant added, renewed, or already current"),
-    (status=400,description="Invalid ids or body",body=ErrorBody),(status=401,description="Account Session ended",body=ErrorBody),
+    (status=400,description="Invalid ids or body; accessible DMs refuse dm_membership_fixed",body=ErrorBody),(status=401,description="Account Session ended",body=ErrorBody),
     (status=403,description="forbidden: requires Owner/Admin with access or a usable private Channel manager right",body=ErrorBody),
     (status=404,description="organization_unavailable, channel not found or member_not_found",body=ErrorBody),
     (status=413,description="Body too large",body=ErrorBody),(status=415,description="Requires application/json",body=ErrorBody),
@@ -114,7 +115,7 @@ pub async fn remove(
 #[utoipa::path(patch, path="/api/v1/orgs/{org}/channels/{id}/members/{member_id}",request_body=ChangeChannelManagerRequest,
     params(("org"=Uuid,Path),("id"=Uuid,Path),("member_id"=Uuid,Path)),security(("cookie"=[]),("bearer"=[])),
     responses((status=204,description="Manager right updated or already current; grant lifetime and access unchanged"),
-    (status=400,description="Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets",body=ErrorBody),
+    (status=400,description="Invalid input; channel_manager_private_only on public Channels; channel_manager_guest for Guest targets; accessible DMs refuse dm_membership_fixed",body=ErrorBody),
     (status=401,description="Account Session ended",body=ErrorBody),
     (status=403,description="forbidden: requires a usable manager, including for no-ops",body=ErrorBody),
     (status=404,description="organization_unavailable, channel not found, member_not_found (unknown/foreign/inactive), or channel_grant_not_found (absent/stale)",body=ErrorBody),
@@ -218,9 +219,10 @@ async fn mutate_inner(
         // Mark-read releases #135 before Member/grant/position locks; neither path
         // waits back on a mutation's earlier locks.
         auth::members::lock_organization(&mut *tx, org).await?;
-        let public: bool=sqlx::query_scalar("SELECT visibility='public' FROM channels WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
+        let public: bool=sqlx::query_scalar("SELECT COALESCE(visibility='public',false) FROM channels WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
             .bind(org).bind(channel).fetch_optional(&mut *tx).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"channel not found",None))?;
         let actor = auth::members::current_actor(&mut *tx, &auth, Action::ReadOrganization).await?;
+        if dms::is_dm(tx,org,channel).await? { require_visible(tx,&auth,channel,true).await?; dms::reject_membership(tx,org,channel).await?; }
         // Lock every Member before grants. Defer a missing target's error until the
         // actor has passed authorization, so target validation discloses no access.
         let target_member = auth::members::active_target(&mut *tx, org, target).await;
@@ -353,7 +355,7 @@ async fn protect(
         "(cm.manager AND NOT (u.id=$3 AND $5))",
     );
     let sql = format!(
-        "SELECT count(*) FILTER (WHERE {before}),count(*) FILTER (WHERE u.id<>$3),count(*) FILTER (WHERE (NOT $6 OR u.id<>$3) AND ({after})) FROM channel_members cm JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=ANY($2) GROUP BY cm.channel_id",
+        "SELECT count(*) FILTER (WHERE {before}),count(*) FILTER (WHERE u.id<>$3),count(*) FILTER (WHERE (NOT $6 OR u.id<>$3) AND ({after})) FROM channel_members cm JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id AND u.membership_revision=cm.membership_revision WHERE cm.organization_id=$1 AND cm.channel_id=ANY($2) AND EXISTS(SELECT 1 FROM channels c WHERE c.organization_id=cm.organization_id AND c.id=cm.channel_id AND c.kind='channel') GROUP BY cm.channel_id",
         auth::members::ACTIVE_SCOPED_MEMBERS_SQL
     );
     let counts: Vec<(i64, i64, i64)> = sqlx::query_as(&sql)
@@ -410,7 +412,7 @@ impl auth::members::RoleChangeGuard for RoleChangeGuard {
     ) -> Result<Self, ApiError> {
         // Private creation and grant mutations share Organization serialization;
         // lock before current_actor takes its Member lock, even for self changes.
-        let channels = sqlx::query_scalar("SELECT c.id FROM channels c WHERE c.organization_id=$1 AND c.visibility='private' AND EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=$2) ORDER BY c.id FOR NO KEY UPDATE OF c")
+        let channels = sqlx::query_scalar("SELECT c.id FROM channels c WHERE c.organization_id=$1 AND c.kind='channel' AND c.visibility='private' AND EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=$2) ORDER BY c.id FOR NO KEY UPDATE OF c")
             .bind(organization).bind(target).fetch_all(connection).await?;
         Ok(Self(channels))
     }

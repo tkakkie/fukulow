@@ -10,7 +10,7 @@ export { flush } from './sync-test-helpers'
 import { ok } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 export const msg = (seq: number, topic: string | null = null, sender = 'other', channel = 'A'): Message => ({ ...record(seq, channel), topic_id: topic, sender })
-export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ id: 'A', name: 'A', visibility: 'public',
+export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ id: 'A', kind: 'channel', name: 'A', visibility: 'public',
   capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
   as_of_seq: 3, read_seq: 0, main_unread_count: 1, unread_count: 3, ...extra })
 export const summary = (id = 'T', w = 3, p = 0, count = 1): TopicSummary => ({ id, name: id, first_seq: 2,

@@ -309,7 +309,7 @@ async fn access_rows(
 fn access_rows_sql() -> String {
     let public_roles = auth::authorization::channel_roles_sql(false);
     let explicit_roles = auth::authorization::channel_roles_sql(true);
-    format!("SELECT COALESCE((c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL), false),
+    format!("SELECT COALESCE((c.kind='channel' AND c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL AND (c.kind='channel' OR u.id IN(c.lower_member_id,c.higher_member_id))), false),
         CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL, r.n
         FROM unnest($2::uuid[], $3::bigint[], $4::uuid[]) WITH ORDINALITY r(member_id,revision,channel_id,n)
         LEFT JOIN ({}) u ON u.organization_id=$1 AND u.id=r.member_id AND u.membership_revision=r.revision

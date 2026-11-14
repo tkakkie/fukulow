@@ -53,6 +53,8 @@ pub enum ClientMessage {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    /// Own-Member DM list invalidation.
+    DmListChanged,
     ActivityReady,
     ActivityReset,
     ChannelActivity {
@@ -285,6 +287,7 @@ impl From<crate::channels::activity::Notice> for ServerEvent {
                 Self::ChannelAccessRevoked { channel_id }
             }
             Notice::ChannelListChanged => Self::ChannelListChanged,
+            Notice::DmListChanged => Self::DmListChanged,
             Notice::ChannelMembersChanged { channel_id } => {
                 Self::ChannelMembersChanged { channel_id }
             }

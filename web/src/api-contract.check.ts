@@ -27,6 +27,7 @@ export function checkServerEvent(event: ServerEvent): string {
     }
     case 'subscribed':
       return `${event.channel_id}:${event.caught_up_seq}`
+    case 'dm_list_changed': return event.type
     case 'activity_ready': case 'activity_reset': case 'channel_list_changed': case 'members_changed': return event.type
     case 'channel_activity': return String(event.seq)
     case 'read_position_changed': return String(event.read_seq)
