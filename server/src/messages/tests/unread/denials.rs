@@ -25,7 +25,7 @@ const SURFACES: [&str; 5] = [
     "timeline",
 ];
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_denials_have_positive_controls_and_never_change_positions(pool: PgPool) {
     for denial in [
         "cross_organization",
@@ -152,7 +152,7 @@ async fn unread_denials_have_positive_controls_and_never_change_positions(pool: 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_rejects_foreign_topics_invalid_inputs_and_stale_member_revision(pool: PgPool) {
     let (app, org, owner_id, channel, owner) = fixture(&pool).await;
     let topic = post(&app, &owner, channel, Some("Existing")).await;

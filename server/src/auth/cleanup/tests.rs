@@ -75,7 +75,7 @@ async fn wait_for_blocked_deletes(pool: &PgPool, count: i64) {
     .unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn global_cleanup_preserves_valid_sessions_and_bounds_rows_and_frequency(pool: PgPool) {
     let cleanup = SessionCleanup::default();
     let first = seed(&pool, 1_005).await;
@@ -124,7 +124,7 @@ async fn global_cleanup_preserves_valid_sessions_and_bounds_rows_and_frequency(p
     assert_eq!(valid_before, valid_after);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn sign_in_does_not_wait_for_a_blocked_cleanup(pool: PgPool) {
     let cleanup = SessionCleanup::default();
     seed(&pool, 1).await;
@@ -141,7 +141,7 @@ async fn sign_in_does_not_wait_for_a_blocked_cleanup(pool: PgPool) {
     assert!(!cleanup.running());
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn concurrent_sign_ins_start_at_most_one_cleanup_run(pool: PgPool) {
     let cleanup = SessionCleanup::default();
     seed(&pool, 1).await;
@@ -161,7 +161,7 @@ async fn concurrent_sign_ins_start_at_most_one_cleanup_run(pool: PgPool) {
     assert_eq!(cleanup.started(), 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn a_running_cleanup_blocks_new_runs_until_completion_or_cancellation(pool: PgPool) {
     let cleanup = SessionCleanup::with_interval(Duration::ZERO);
     seed(&pool, 1_005).await;
@@ -188,7 +188,7 @@ async fn a_running_cleanup_blocks_new_runs_until_completion_or_cancellation(pool
     assert_eq!(cleanup.started(), 3);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn cancelled_cleanup_releases_the_guard_but_consumes_the_interval(pool: PgPool) {
     let cleanup = SessionCleanup::default();
     seed(&pool, 1).await;
@@ -204,7 +204,7 @@ async fn cancelled_cleanup_releases_the_guard_but_consumes_the_interval(pool: Pg
     assert_eq!(cleanup.started(), 2);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn cleanup_timeout_does_not_block_caller_and_consumes_the_interval(pool: PgPool) {
     let cleanup = SessionCleanup::default();
     seed(&pool, 1).await;
@@ -229,7 +229,7 @@ async fn cleanup_timeout_does_not_block_caller_and_consumes_the_interval(pool: P
     isolated.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn cleanup_failure_is_frequency_limited(pool: PgPool) {
     let cleanup = SessionCleanup::default();
     seed(&pool, 1).await;
@@ -257,7 +257,7 @@ async fn cleanup_failure_is_frequency_limited(pool: PgPool) {
     assert_eq!(expired_sessions(&pool).await, 0);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn successful_sign_in_triggers_cleanup_without_waiting_or_failing_on_cleanup_error(
     pool: PgPool,
 ) {

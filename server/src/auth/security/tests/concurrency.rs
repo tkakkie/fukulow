@@ -121,24 +121,24 @@ async fn sign_in_overlap(pool: PgPool, operation: usize, native: bool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn password_change_serializes_web_sign_in_before_verification(pool: PgPool) {
     sign_in_overlap(pool, 0, false).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn password_change_serializes_native_sign_in_before_verification(pool: PgPool) {
     sign_in_overlap(pool, 0, true).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revoke_others_serializes_web_sign_in_before_verification(pool: PgPool) {
     sign_in_overlap(pool, 1, false).await;
 }
-#[sqlx::test]
+#[fukulow_test::test]
 async fn revoke_others_serializes_native_sign_in_before_verification(pool: PgPool) {
     sign_in_overlap(pool, 1, true).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_rechecks_session_after_account_lock_before_argon2(pool: PgPool) {
     let f = fixture(&pool).await;
     for (method, path) in OPERATIONS {
@@ -191,7 +191,7 @@ async fn security_rechecks_session_after_account_lock_before_argon2(pool: PgPool
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_rechecks_password_after_account_lock(pool: PgPool) {
     let f = fixture(&pool).await;
     for (method, path) in OPERATIONS {
@@ -238,7 +238,7 @@ async fn security_rechecks_password_after_account_lock(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn security_operations_serialize_and_reject_a_revoked_current_session(pool: PgPool) {
     let f = fixture(&pool).await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));

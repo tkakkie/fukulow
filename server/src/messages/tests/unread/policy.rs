@@ -92,7 +92,7 @@ impl AccessCase {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_triggers_and_queries_match_authorize_for_every_role(pool: PgPool) {
     let (app, org, owner_id, _, owner) = fixture(&pool).await;
     role(&pool, org, owner_id, "owner").await;

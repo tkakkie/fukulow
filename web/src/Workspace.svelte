@@ -192,6 +192,8 @@
     return () => controller?.close()
   })
   let lastViewId = $state('')
+  // A cold descendant URL can resolve to its root before its own body is paged in.
+  let openedReplyTarget = ''
 
   const authorIdentities = $derived(members?.authors.identities)
   $effect(() => {
@@ -249,6 +251,7 @@
   $effect(() => {
     if (!currentReplies || !selected) return
     if (!activeReplyMessageId) {
+      openedReplyTarget = ''
       if (currentRepliesState?.anchor) currentReplies.dismiss()
       return
     }
@@ -260,12 +263,14 @@
     const anchor = resolvedReplyAnchor
     if (!anchor || anchor.channel_id !== selected.id) return
     const targetRootId = anchor.reply_root_id ?? anchor.id
+    const targetKey = `${selected.id}:${activeReplyMessageId}`
     const alreadyOpen = Boolean(
       currentRepliesState?.anchor &&
         currentRepliesState.rootId === targetRootId &&
-        currentRepliesState.messages.some((m) => m.id === anchor.id),
+        openedReplyTarget === targetKey,
     )
     if (!alreadyOpen) {
+      openedReplyTarget = targetKey
       void currentReplies.open(anchor)
     }
   })
@@ -453,6 +458,7 @@
 
   function handleOpenReplies(message: Message, opener?: HTMLElement | null) {
     lastOpenedAnchor = message
+    openedReplyTarget = `${message.channel_id}:${message.id}`
     void currentReplies?.open(message)
     nav.navigate({ type: 'reply', messageId: message.id }, opener)
   }

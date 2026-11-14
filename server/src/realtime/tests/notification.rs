@@ -1,7 +1,7 @@
 use super::*;
 
 // Manual before/after probe; includes the idle loopback clients in process CPU/RSS.
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual release-mode socket CPU/RSS and notification-failure latency measurement"]
 async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
     let count: usize = std::env::var("MEASURE_SOCKETS")
@@ -103,7 +103,7 @@ pub(super) async fn publication_entered(gate: &messages::PublicationGate) {
         .forget();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recover_order(
     pool: PgPool,
 ) {
@@ -156,7 +156,7 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
     silent(&mut socket).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturation(pool: PgPool) {
     let f = fixture(&pool).await;
     let cold = channel(&pool, f.organization, f.member, false).await;
@@ -227,7 +227,7 @@ async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturat
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn saturated_notifications_close_only_affected_sockets_and_reconnect_replays(pool: PgPool) {
     let f = fixture(&pool).await;
     let other_channel = channel(&pool, f.organization, f.member, false).await;
@@ -294,7 +294,7 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
     f.state.message_delivery.flush().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lock(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut queues = Vec::new();
@@ -350,7 +350,7 @@ async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lo
     f.state.message_delivery.flush().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_reconnect_replays(
     pool: PgPool,
 ) {
@@ -404,7 +404,7 @@ async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_recon
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_and_replays_in_order(
     pool: PgPool,
 ) {
@@ -476,7 +476,7 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
     silent(&mut recovered).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn notification_authorization_failure_closes_with_4008_and_reconnect_replays(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut socket = f.server.connect(&f.token).await;
@@ -503,7 +503,7 @@ async fn notification_authorization_failure_closes_with_4008_and_reconnect_repla
     ready(&mut reconnect, f.channel, 1).await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn notification_rechecks_public_visibility_after_http_response(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_, nonmember) = member(&pool, f.organization).await;

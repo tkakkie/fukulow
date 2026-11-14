@@ -99,14 +99,17 @@ impl AppState {
 /// already non-superuser (e.g. `TestPools::app`).
 #[cfg(test)]
 pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
-    // A pool that cannot connect (tests asserting no database access) is
-    // returned as is: it can reach no rows, restricted or not.
-    let superuser: Option<bool> =
-        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
-            .fetch_one(&admin)
-            .await
-            .ok();
-    if superuser == Some(true) {
+    // A pool that never connects must use `AppState::with_test_pool`: probing it
+    // here waits out sqlx's 30 s acquire timeout, so an inspection error fails.
+    let superuser: bool = sqlx::query_scalar(
+        "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect(
+        "inspect the test pool role (use AppState::with_test_pool for a pool that never connects)",
+    );
+    if superuser {
         test_support::TestPools::new(admin).await.app
     } else {
         admin

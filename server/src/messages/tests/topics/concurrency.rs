@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_completes_while_topic_projection_query_is_paused(pool: PgPool) {
     let (app, _, _, channel, token) = fixture(&pool).await;
     sent(
@@ -58,7 +58,7 @@ async fn send_completes_while_topic_projection_query_is_paused(pool: PgPool) {
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn future_projection_watermark_is_rejected_before_query(pool: PgPool) {
     let (app, _, _, channel, token) = fixture(&pool).await;
     let mut held = pool.begin().await.unwrap();
@@ -84,7 +84,7 @@ async fn future_projection_watermark_is_rejected_before_query(pool: PgPool) {
     held.rollback().await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn topic_read_admission_rejection_returns_retry_after(pool: PgPool) {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)

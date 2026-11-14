@@ -12,7 +12,7 @@ async fn restore_old_length_check(pool: &PgPool) {
     .unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn empty_channel_name_aborts_migration_and_preserves_rows_until_operator_correction(
     pool: PgPool,
 ) {
@@ -81,7 +81,7 @@ async fn empty_channel_name_aborts_migration_and_preserves_rows_until_operator_c
     sqlx::raw_sql(MIGRATION).execute(&pool).await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn nonempty_channel_name_migration_upgrades_clean_rows_without_changes(pool: PgPool) {
     restore_old_length_check(&pool).await;
     let org = organization(&pool).await;

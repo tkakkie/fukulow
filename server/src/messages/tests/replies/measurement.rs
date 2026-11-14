@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Instant;
 
-#[sqlx::test]
+#[fukulow_test::test]
 #[ignore = "manual Reply chain cost gate; run in release without concurrent builds/tests"]
 async fn measure_reply_chain_pages(pool: PgPool) {
     // Target stated before measuring: warm p95 <100 ms, 200 rows, 10k deep/wide.

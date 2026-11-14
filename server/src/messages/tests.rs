@@ -158,7 +158,7 @@ async fn messages_require_authentication_without_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = router(&pool).await;
+    let app = crate::app(AppState::with_test_pool(pool));
     for method in ["GET", "POST"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
             let mut request = Request::builder().method(method).uri(
@@ -207,7 +207,7 @@ fn message_query_validation_matches_contract() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn message_list_database_failure_returns_generic_500(pool: PgPool) {
     let (app, _, _, channel_id, token) = fixture(&pool).await;
     assert_eq!(
@@ -292,7 +292,7 @@ async fn message_body_validation_matches_contract() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn invalid_message_bodies_write_nothing_and_do_not_allocate_sequences(pool: PgPool) {
     let (app, organization_id, _, channel_id, token) = fixture(&pool).await;
     for expected_seq in [None, Some(1_i64)] {
@@ -336,7 +336,7 @@ async fn invalid_message_bodies_write_nothing_and_do_not_allocate_sequences(pool
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn message_at_body_limit_preserves_whitespace_and_idempotent_retries(pool: PgPool) {
     let (app, organization_id, _, channel_id, token) = fixture(&pool).await;
     let key = Uuid::new_v4();
@@ -378,7 +378,7 @@ async fn message_at_body_limit_preserves_whitespace_and_idempotent_retries(pool:
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn messages_deny_cross_organization_send_and_list(pool: PgPool) {
     let (app, organization_id, sender, channel_id, token) = fixture(&pool).await;
     let second = organization(&pool).await;
@@ -417,7 +417,7 @@ async fn messages_deny_cross_organization_send_and_list(pool: PgPool) {
     assert_eq!(count, 1);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn messages_deny_private_channel_nonmember_send_and_list(pool: PgPool) {
     let (app, organization_id, sender, _, token) = fixture(&pool).await;
     let private = Uuid::new_v4();
@@ -458,7 +458,7 @@ async fn messages_deny_private_channel_nonmember_send_and_list(pool: PgPool) {
     .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
     let (app, first, sender, channel_id, first_token) = fixture(&pool).await;
     let second = organization(&pool).await;
@@ -522,7 +522,7 @@ async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
     .await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn committed_send_retry_returns_canonical_message_without_sequence_allocation(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, _, sender, channel_id, token) = fixture(&pools.admin).await;
@@ -547,7 +547,7 @@ async fn committed_send_retry_returns_canonical_message_without_sequence_allocat
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reused_client_id_conflicts_on_different_body_or_channel(pool: PgPool) {
     let (app, organization_id, sender, channel_id, token) = fixture(&pool).await;
     let other_channel = Uuid::new_v4();
@@ -612,7 +612,7 @@ async fn concurrent_sends(
     responses
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn concurrent_duplicate_sends_create_one_message_and_consume_one_sequence(pool: PgPool) {
     let (app, _, _, channel_id, token) = fixture(&pool).await;
     let mut canonical = None;
@@ -639,7 +639,7 @@ async fn concurrent_duplicate_sends_create_one_message_and_consume_one_sequence(
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn concurrent_cross_channel_duplicate_conflicts_without_sequence_gap(pool: PgPool) {
     let (app, organization_id, sender, first, token) = fixture(&pool).await;
     let second = Uuid::new_v4();
@@ -671,7 +671,7 @@ async fn concurrent_cross_channel_duplicate_conflicts_without_sequence_gap(pool:
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: PgPool) {
     let app_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
@@ -712,7 +712,7 @@ async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: Pg
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn failed_send_after_sequence_allocation_leaves_no_gap(pool: PgPool) {
     let (app, organization_id, _, channel_id, token) = fixture(&pool).await;
     sqlx::raw_sql(
@@ -747,7 +747,7 @@ async fn failed_send_after_sequence_allocation_leaves_no_gap(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn message_pages_are_bounded_exclusive_ascending_and_directional(pool: PgPool) {
     let (app, organization_id, sender, channel_id, token) = fixture(&pool).await;
     assert_eq!(
@@ -849,7 +849,7 @@ async fn message_pages_are_bounded_exclusive_ascending_and_directional(pool: PgP
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn messages_reject_cross_organization_foreign_keys(pool: PgPool) {
     let (_, organization_id, sender, channel_id, _) = fixture(&pool).await;
     let other_org = organization(&pool).await;
@@ -873,7 +873,7 @@ async fn messages_reject_cross_organization_foreign_keys(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_route_accepts_the_largest_valid_body_and_still_caps_the_request(pool: PgPool) {
     let (app, _, _, channel_id, token) = fixture(&pool).await;
     // 3999 control characters + 1 letter: 4000 scalar values, ~24 KB once JSON-escaped (> 16 KiB).

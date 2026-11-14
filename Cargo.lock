@@ -425,6 +425,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
+ "fukulow-test",
  "futures-util",
  "mime_guess",
  "rand 0.10.3",
@@ -439,6 +440,15 @@ dependencies = [
  "tower",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "fukulow-test"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_grant_excludes_uncommitted_send_and_mark_waits_for_commit_barrier(pool: PgPool) {
     for commit_send in [false, true] {
         let (app, org, _, channel, owner) = fixture(&pool).await;
@@ -67,7 +67,7 @@ pub(super) async fn waiting(pool: &PgPool, query: &str) {
     }).await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_grant_holds_baseline_until_access_commit(pool: PgPool) {
     let (app, org, _, channel, owner) = fixture(&pool).await;
     let account = Uuid::new_v4();
@@ -90,7 +90,7 @@ async fn unread_grant_holds_baseline_until_access_commit(pool: PgPool) {
     assert_eq!(initial, 0);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_mark_rechecks_revoked_access_after_barrier_wait(pool: PgPool) {
     for deactivate in [false, true] {
         let (app, org, owner_id, channel, owner) = fixture(&pool).await;
@@ -147,7 +147,7 @@ async fn unread_mark_rechecks_revoked_access_after_barrier_wait(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_concurrent_member_and_channel_creation_initialize_access_once(pool: PgPool) {
     let (_, org, owner, _, _) = fixture(&pool).await;
     let new_channel = Uuid::new_v4();

@@ -1,7 +1,7 @@
 use super::*;
 use crate::auth::{SubscriptionRecheck, SubscriptionScope};
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, org, _, channel, token) = fixture(&pools.admin).await;
@@ -83,7 +83,7 @@ async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool)
     pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, org, sender, channel, token) = fixture(&pools.admin).await;

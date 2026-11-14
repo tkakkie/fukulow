@@ -22,7 +22,7 @@ pub(crate) async fn pause_list(member: Uuid) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(pool: PgPool) {
     let (_, org, _, channel, owner) = fixture(&pool).await;
     let viewer_id = Uuid::new_v4();
@@ -90,7 +90,7 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     assert_eq!(c["unread_count"], 2);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_list_baseline_is_max_seq_for_empty_own_and_read_messages(pool: PgPool) {
     let (app, org, _, channel, owner) = fixture(&pool).await;
     let viewer = member(&pool, org, Uuid::new_v4()).await;
@@ -133,7 +133,7 @@ async fn unread_list_baseline_is_max_seq_for_empty_own_and_read_messages(pool: P
     assert_eq!(other["as_of_seq"], 0);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(pool: PgPool) {
     let (app, org, _, channel, owner) = fixture(&pool).await;
     let viewer_id = Uuid::new_v4();

@@ -130,7 +130,7 @@ async fn rejected_sign_in_skips_account_lookup_for_full_and_expired_admission() 
         };
         for path in ["/api/v1/session", "/api/v1/native/session"] {
             for email in ["owner@example.com", "unknown@example.com"] {
-                let state = AppState::for_test(pool.clone()).await;
+                let state = AppState::with_test_pool(pool.clone());
                 let calls = Arc::new(AtomicUsize::new(0));
                 let app = app_counting_entropy(state.clone(), workers, calls.clone());
                 let start = tokio::time::Instant::now();
@@ -165,7 +165,7 @@ async fn lookup_error_releases_admission_and_throttle_without_token_entropy() {
     pool.close().await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
     for path in ["/api/v1/session", "/api/v1/native/session"] {
-        let state = AppState::for_test(pool.clone()).await;
+        let state = AppState::with_test_pool(pool.clone());
         let calls = Arc::new(AtomicUsize::new(0));
         let response = app_counting_entropy(state.clone(), workers, calls.clone())
             .oneshot(request(path, "owner@example.com", "incorrect password"))
@@ -180,7 +180,7 @@ async fn lookup_error_releases_admission_and_throttle_without_token_entropy() {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn cancelled_lookup_releases_admission_and_throttle_without_token_entropy(
     pool: sqlx::PgPool,
 ) {
@@ -228,7 +228,7 @@ async fn cancelled_lookup_releases_admission_and_throttle_without_token_entropy(
     isolated.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn full_queue_returns_same_503_for_known_and_unknown_accounts(pool: sqlx::PgPool) {
     let state = credential_tests::fixture(pool.clone()).await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
@@ -262,7 +262,7 @@ async fn full_queue_returns_same_503_for_known_and_unknown_accounts(pool: sqlx::
     assert_eq!(workers.running.available_permits(), 4);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn expired_wait_returns_503_without_spending_failure_budget(pool: sqlx::PgPool) {
     let state = credential_tests::fixture(pool.clone()).await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
@@ -308,7 +308,7 @@ async fn expired_wait_returns_503_without_spending_failure_budget(pool: sqlx::Pg
     drop(held);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn successful_and_unknown_sign_ins_share_bounded_workers(pool: sqlx::PgPool) {
     let state = credential_tests::fixture(pool).await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
@@ -356,7 +356,7 @@ async fn successful_and_unknown_sign_ins_share_bounded_workers(pool: sqlx::PgPoo
     tokio::time::resume();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn cancelled_running_sign_in_retains_permits_and_accounts_failures(pool: sqlx::PgPool) {
     let state = credential_tests::fixture(pool.clone()).await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
@@ -417,7 +417,7 @@ async fn cancelled_running_sign_in_retains_permits_and_accounts_failures(pool: s
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn unknown_email_key_exhaustion_still_allows_legitimate_sign_in(pool: sqlx::PgPool) {
     let state = credential_tests::fixture(pool).await;
     // Seed the state left by failed unknown-email checks, without 10,000 Argon2 calls.

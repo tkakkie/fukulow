@@ -973,7 +973,7 @@ mod tests {
             .with_state(state)
     }
 
-    #[sqlx::test]
+    #[fukulow_test::test]
     async fn setup_salt_entropy_failure_returns_500_without_writes_or_fallback(pool: sqlx::PgPool) {
         use std::sync::{
             Arc,
@@ -1126,7 +1126,7 @@ mod tests {
             let app = app_with_workers(
                 AppState {
                     sign_in_throttle: throttle,
-                    ..AppState::for_test(pool.clone()).await
+                    ..AppState::with_test_pool(pool.clone())
                 },
                 &WORKERS,
             );
@@ -1188,7 +1188,7 @@ mod tests {
             .unwrap();
         let app = crate::app(AppState {
             sign_in_throttle: throttle,
-            ..AppState::for_test(pool).await
+            ..AppState::with_test_pool(pool)
         });
         let request = Request::post("/api/v1/session")
             .extension(ConnectInfo(
@@ -1219,7 +1219,7 @@ mod tests {
         }
     }
 
-    #[sqlx::test]
+    #[fukulow_test::test]
     async fn completed_setup_skips_password_workers_and_setup_lock(pool: sqlx::PgPool) {
         sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Existing')")
             .bind(Uuid::new_v4())

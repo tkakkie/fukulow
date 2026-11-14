@@ -164,7 +164,7 @@ mod context;
 mod tests {
     use super::*;
 
-    #[sqlx::test]
+    #[fukulow_test::test]
     async fn both_barriers_set_transaction_local_timeouts(pool: sqlx::PgPool) {
         let mut connection = pool.acquire().await.unwrap();
         let original: (String, String) = sqlx::query_as(

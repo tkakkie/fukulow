@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delivery_contract_rejects_incorrect_unread_counts_and_positions(pool: PgPool) {
     for wrong in 0..3 {
         let mut scenario = scenarios()
@@ -128,7 +128,7 @@ impl Wrong {
 }
 
 // Setup panics, read timeouts and failures at any other step/event do not count.
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delivery_contract_rejects_incorrect_expectations(pool: PgPool) {
     for wrong in [
         Wrong::Sequence,
@@ -175,7 +175,7 @@ async fn delivery_contract_rejects_incorrect_expectations(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delivery_contract_rejects_public_members_even_when_empty(pool: PgPool) {
     for members in [vec![], vec!["alice".into()]] {
         let mut scenario = scenarios()
@@ -197,7 +197,7 @@ async fn delivery_contract_rejects_public_members_even_when_empty(pool: PgPool) 
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn subscription_limit_contract_rejects_delivery_to_unsubscribed_channel(pool: PgPool) {
     let mut scenario = scenarios()
         .into_iter()
@@ -228,7 +228,7 @@ async fn subscription_limit_contract_rejects_delivery_to_unsubscribed_channel(po
     );
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn handoff_contract_rejects_omission_and_reordering(pool: PgPool) {
     for seqs in [
         vec![Seq::Range { from: 9, to: 125 }],
@@ -403,7 +403,7 @@ async fn silence_barrier_returns_typed_failure_after_server_close() {
     task.await.unwrap();
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delivery_contract_rejects_empty_channel_ranges(pool: PgPool) {
     for kind in ["message", "subscribed", "error"] {
         let (scenario, step, event) = scenarios()
@@ -447,7 +447,7 @@ async fn delivery_contract_rejects_empty_channel_ranges(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn timeline_contract_rejects_incorrect_pages(pool: PgPool) {
     for wrong in 0..7 {
         let mut scenario = scenarios()

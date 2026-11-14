@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_unknown_foreign_channel_and_foreign_organization_parent_and_anchor_are_identical(
     pool: PgPool,
 ) {
@@ -49,7 +49,7 @@ async fn reply_unknown_foreign_channel_and_foreign_organization_parent_and_ancho
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_rest_denial_matrix_retry_and_chain_have_positive_controls_before_saturated_admission(
     pool: PgPool,
 ) {
@@ -192,7 +192,7 @@ async fn reply_rest_denial_matrix_retry_and_chain_have_positive_controls_before_
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_stale_member_and_queued_access_loss_deny_send_retry_and_chain(pool: PgPool) {
     for denial in ["member", "revision", "grant"] {
         let (_, org, owner, channel, owner_token) = fixture(&pool).await;
@@ -326,7 +326,7 @@ async fn reply_stale_member_and_queued_access_loss_deny_send_retry_and_chain(poo
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reply_validation_precedes_organization_denial_but_preserves_session_authentication(
     pool: PgPool,
 ) {
@@ -444,7 +444,7 @@ async fn reply_send_rejects_invalid_session_without_polling_the_request_body() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = router(&pool).await;
+    let app = crate::app(AppState::with_test_pool(pool));
     let request = Request::post(format!(
         "/api/v1/orgs/{}/channels/{}/messages",
         Uuid::new_v4(),

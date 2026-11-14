@@ -33,6 +33,28 @@ it('pages the root and siblings from root and descendant anchors without cursor 
 })
 const recordOther = (seq: number): Message => ({ ...root(), seq, id: `other${seq}` })
 
+it('seeks a different same-chain anchor in one page without skipping requested history or moving sync', async () => {
+  const c = replyClient(); await c.boot()
+  const queries: number[] = []
+  c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
+    const after = query?.after_seq ?? 0
+    queries.push(after)
+    return ok({ root_id: 'id1', has_more: after + 50 < 450,
+      messages: Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1)) })
+  })
+  await c.replies.open('A', root())
+  for (let seq = 2; seq <= 450; seq++) c.event(reply(seq))
+  const before = c.sync.get().channels.A
+  await c.replies.open('A', reply(350))
+  expect(c.replies.get('A').anchor?.id).toBe('id350')
+  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 326))
+  expect(queries).toEqual([0, 325])
+  await c.replies.loadMore('A')
+  expect(queries.at(-1)).toBe(375)
+  expect(c.sync.get().channels.A).toMatchObject({ cursor: before.cursor, advancing: before.advancing, wait: before.wait })
+  await c.sync.close()
+})
+
 it('live append during an initial page never skips unpaged siblings', async () => {
   const c = replyClient(); await c.boot()
   const read = deferred<Result<ReplyChainPage>>()
@@ -148,7 +170,7 @@ it('current chain authorization 403 and 404 cause Channel-only C9 and refuse sen
     c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
     await c.replies.send('A', 'unknown outcome')
     c.listReplyChain.mockResolvedValueOnce({ ok: false, kind: 'http', status, error })
-    await c.replies.open('A', root())
+    await c.replies.loadMore('A')
     expect(c.sync.get().channels.A.state).toBe('unavailable')
     expect(c.sync.get().channels.B.state).not.toBe('unavailable')
     const calls = c.listReplyChain.mock.calls.length
@@ -176,7 +198,7 @@ it('reply_chain_not_found fails only the chain and leaves the Channel ready for 
   await c.sync.close()
 })
 
-it('unchanged Channel message arrays skip membership scans and preserve unaffected chain snapshots', async () => {
+it('new records skip rescanning retained Channel Messages and preserve unaffected chain snapshots', async () => {
   const c = replyClient(); await c.boot(); await c.sync.watch('B')
   const unrelated = { ...recordOther(2), get reply_root_id() { return null } }
   const membership = vi.spyOn(unrelated, 'reply_root_id', 'get')
@@ -193,7 +215,7 @@ it('unchanged Channel message arrays skip membership scans and preserve unaffect
   expect(c.replies.get('A')).toBe(snapshot)
   expect(listener).not.toHaveBeenCalled()
   c.event(recordOther(3))
-  expect(membership).toHaveBeenCalled()
+  expect(membership).not.toHaveBeenCalled()
   expect(c.replies.get('A')).toBe(snapshot)
   expect(listener).not.toHaveBeenCalled()
   c.event(reply(4))
@@ -397,7 +419,8 @@ it('timed-out or unwatched reads cannot restore pages or cause late C9 after a f
       if (invalidate === 'timeout') await vi.advanceTimersByTimeAsync(10)
       else if (invalidate === 'unwatch') { await c.sync.unwatch('A'); await c.sync.watch('A') }
       else c.replies.dismiss('A')
-      await c.replies.open('A', root())
+      if (invalidate === 'timeout') await c.replies.loadMore('A')
+      else await c.replies.open('A', root())
       read.resolve(response); await opening
       expect(c.replies.get('A').messages.map(m => m.seq)).toEqual([1, 3])
       expect(c.sync.get().channels.A.state).not.toBe('unavailable')
