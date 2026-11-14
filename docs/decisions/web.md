@@ -33,6 +33,9 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
+- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`
 - [messages](messages.md): `#204 sections belong`, `#204 access loss hides`
 - [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
 

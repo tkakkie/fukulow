@@ -11,9 +11,11 @@ Load testing and measurement rules. Writing rules and the other parts: [index](.
 - #178 harness: `make load-record` with `LOAD_DIRECT_NETWORK=1` (port-forwarding failed at 9,990 sockets), `LOAD_SERVER_SOURCE` for the worktree, `LOAD_LEGACY=1` only for pre-#146 builds; short windows are rejected. Never attach the raw artifact directory publicly (server logs, source patch).
 - Measurements so far are modest single-host runs: none establishes the 10k-connection target, a capacity or a latency guarantee. Heavy run: `CHANNELS=1 SUBSCRIBERS=10000 ... make load` with `nofile` 65536; one generator loop can saturate (#20).
 
+- #151 adopts DM performance acceptance (2026-11-14): 10,000 connections, 2,000 sends/s and spec/dms.md latency/DB/memory budgets. Reason: validate combined O5/write load; include hot bursts, notice loss, bootstrap, bounded backlog/drain and storage/WAL/lock/backup/restore cost.
+
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
 - [process](process.md): `k6 bumps are manual (Dependabot does`
-- [realtime](realtime.md): `#212 follows up handshake admission, listen`
+- [realtime](realtime.md): `#212 follows up handshake admission, listen`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
