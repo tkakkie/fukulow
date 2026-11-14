@@ -2,7 +2,6 @@ use super::{migrate, validate_migrations};
 use sqlx::{
     PgPool,
     migrate::{Migrate, MigrateError},
-    postgres::PgPoolOptions,
 };
 use std::time::{Duration, Instant};
 
@@ -13,7 +12,9 @@ mod rls;
 mod statement;
 
 async fn startup_pool(pool: &PgPool) -> PgPool {
-    PgPoolOptions::new()
+    super::PoolConfig::configured(None, None)
+        .unwrap()
+        .options()
         .max_connections(1)
         .connect_with(pool.connect_options().as_ref().clone())
         .await
@@ -81,20 +82,25 @@ async fn application_rejects_migration_version_checksum_failed_missing_and_extra
     assert!(validate_migrations(&pool).await.is_err());
 }
 
-async fn lock_timeout(pool: &PgPool) -> String {
-    sqlx::query_scalar("SHOW lock_timeout")
-        .fetch_one(pool)
+async fn timeouts(pool: &PgPool) -> (String, String, String) {
+    let mut connection = pool.acquire().await.unwrap();
+    let settings: (String, String, String) = sqlx::query_as(
+        "SELECT current_setting('lock_timeout'), current_setting('statement_timeout'), current_setting('transaction_timeout')",
+    )
+        .fetch_one(&mut *connection)
         .await
-        .unwrap()
+        .unwrap();
+    assert_eq!(settings.1, "10s");
+    settings
 }
 
 #[fukulow_test::test(migrations = false)]
 async fn startup_migrations_succeed_and_keep_timeout_out_of_application_pool(pool: PgPool) {
     let pool = startup_pool(&pool).await;
-    let original_timeout = lock_timeout(&pool).await;
+    let original_timeout = timeouts(&pool).await;
     for _ in 0..2 {
         migrate(&pool).await.unwrap();
-        assert_eq!(lock_timeout(&pool).await, original_timeout);
+        assert_eq!(timeouts(&pool).await, original_timeout);
     }
     let applied: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE success")
         .fetch_one(&pool)
@@ -107,7 +113,7 @@ async fn startup_migrations_succeed_and_keep_timeout_out_of_application_pool(poo
 #[fukulow_test::test(migrations = false)]
 async fn startup_migrations_timeout_on_advisory_lock_and_can_retry(pool: PgPool) {
     let startup = startup_pool(&pool).await;
-    let original_timeout = lock_timeout(&startup).await;
+    let original_timeout = timeouts(&startup).await;
     let mut holder = pool.acquire().await.unwrap();
     holder.close_on_drop();
     // Use SQLx's own lock API so the holder and startup use the same lock key.
@@ -126,7 +132,7 @@ async fn startup_migrations_timeout_on_advisory_lock_and_can_retry(pool: PgPool)
         ),
         error => panic!("expected advisory lock timeout, got {error:?}"),
     }
-    assert_eq!(lock_timeout(&startup).await, original_timeout);
+    assert_eq!(timeouts(&startup).await, original_timeout);
     let history: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations')::text")
             .fetch_one(&startup)
@@ -139,7 +145,7 @@ async fn startup_migrations_timeout_on_advisory_lock_and_can_retry(pool: PgPool)
         .await
         .expect("startup migration must succeed after releasing the advisory lock")
         .unwrap();
-    assert_eq!(lock_timeout(&startup).await, original_timeout);
+    assert_eq!(timeouts(&startup).await, original_timeout);
     let applied: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE success")
         .fetch_one(&startup)
         .await
@@ -159,7 +165,7 @@ async fn startup_migrations_timeout_on_ddl_lock_and_can_retry_without_partial_ch
         .retain(|migration| migration.version < 202611090075);
     initial.run(&pool).await.unwrap();
     let startup = startup_pool(&pool).await;
-    let original_timeout = lock_timeout(&startup).await;
+    let original_timeout = timeouts(&startup).await;
     let mut reader = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE sessions IN ACCESS SHARE MODE")
         .execute(&mut *reader)
@@ -182,7 +188,7 @@ async fn startup_migrations_timeout_on_ddl_lock_and_can_retry_without_partial_ch
         }
         error => panic!("expected migration lock timeout, got {error:?}"),
     }
-    assert_eq!(lock_timeout(&startup).await, original_timeout);
+    assert_eq!(timeouts(&startup).await, original_timeout);
     let unchanged: (bool, i64) = sqlx::query_as(
         "SELECT to_regclass('public.sessions_expiry') IS NOT NULL, \
              (SELECT count(*) FROM _sqlx_migrations WHERE version = 202611090075)",
@@ -197,7 +203,7 @@ async fn startup_migrations_timeout_on_ddl_lock_and_can_retry_without_partial_ch
         .await
         .expect("failed migration must release its advisory lock for retry")
         .unwrap();
-    assert_eq!(lock_timeout(&startup).await, original_timeout);
+    assert_eq!(timeouts(&startup).await, original_timeout);
     let applied: (bool, bool) = sqlx::query_as(
         "SELECT to_regclass('public.sessions_expiry') IS NULL, \
              (SELECT success FROM _sqlx_migrations WHERE version = 202611090075)",

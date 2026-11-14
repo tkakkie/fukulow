@@ -227,6 +227,16 @@ async fn channel(pool: &PgPool, organization: Uuid, member: Uuid, private: bool)
 async fn fixture(pool: &PgPool) -> Fixture {
     fixture_with_app_pool(pool, pool).await
 }
+async fn fixture_with_configured_pool(pool: &PgPool, size: &str) -> Fixture {
+    let restricted = crate::test_app_pool(pool.clone()).await;
+    let configured = crate::database::PoolConfig::configured(Some(size), None)
+        .unwrap()
+        .options()
+        .connect_with(restricted.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    fixture_with_app_pool(pool, &configured).await
+}
 async fn fixture_with_app_pool(admin: &PgPool, app_pool: &PgPool) -> Fixture {
     let organization = organization(admin).await;
     let (member, token) = member(admin, organization).await;
@@ -793,29 +803,42 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
 
 #[fukulow_test::test]
 async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
-    let f = fixture(&pool).await;
-    sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() + interval '2 seconds' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)").bind(f.organization).execute(&pool).await.unwrap();
-    let mut idle = f.server.connect(&f.token).await;
-    subscribe(&mut idle, f.channel, 0).await;
-    ready(&mut idle, f.channel, 0).await;
-    let mut replay = f.server.connect(&f.token).await;
-    let gate = pause(f.channel);
-    subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
-    closed(&mut idle, CLOSE_SESSION_ENDED).await;
-    closed(&mut replay, CLOSE_SESSION_ENDED).await;
+    for (size, admitted) in [("3", 2), ("20", 16)] {
+        let f = fixture_with_configured_pool(&pool, size).await;
+        // Model every send/watermark slot holding a connection. The remaining
+        // shared capacity must still allow session checks and expiry monitoring.
+        let mut held = Vec::new();
+        for _ in 0..admitted {
+            held.push(f.state.pool.acquire().await.unwrap());
+        }
+        sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() + interval '2 seconds' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)").bind(f.organization).execute(&pool).await.unwrap();
+        let mut idle = f.server.connect(&f.token).await;
+        subscribe(&mut idle, f.channel, 0).await;
+        ready(&mut idle, f.channel, 0).await;
+        let mut replay = f.server.connect(&f.token).await;
+        let gate = pause(f.channel);
+        subscribe(&mut replay, f.channel, 0).await;
+        entered(&gate).await;
+        closed(&mut idle, CLOSE_SESSION_ENDED).await;
+        closed(&mut replay, CLOSE_SESSION_ENDED).await;
+        drop(held);
+        f.state.pool.close().await;
+    }
 }
 
 #[fukulow_test::test]
 async fn session_check_database_timeout_at_connect_closes_with_internal_error(pool: PgPool) {
     let f = fixture(&pool).await;
-    let exhausted = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(2))
-        .connect_with(pool.connect_options().as_ref().clone())
+    let exhausted = crate::database::PoolConfig::configured(Some("3"), Some("2000"))
+        .unwrap()
+        .options()
+        .connect_with(f.state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
-    let held = exhausted.acquire().await.unwrap();
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(exhausted.acquire().await.unwrap());
+    }
     let exhausted_for_handler = exhausted.clone();
     // Authenticate normally, then exhaust only the pool used by the post-upgrade session check.
     let router = Router::new()

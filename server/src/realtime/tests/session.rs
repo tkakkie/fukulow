@@ -132,8 +132,10 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
 #[fukulow_test::test]
 async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
     let f = fixture(&pool).await;
-    let isolated_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect_with(pool.connect_options().as_ref().clone())
+    let isolated_pool = crate::database::PoolConfig::configured(Some("3"), None)
+        .unwrap()
+        .options()
+        .connect_with(f.state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
     let server = Server::start(crate::app(AppState {
@@ -239,7 +241,7 @@ async fn deactivation_http_cancellation_still_commits_and_signals_every_session(
 }
 
 async fn endpoint_membership_loss(pool: PgPool, cancel: bool) {
-    let f = fixture(&pool).await;
+    let f = fixture_with_configured_pool(&pool, "3").await;
     let account = account_id(&pool, f.organization, f.member).await;
     let foreign = organization(&pool).await;
     let foreign_member = add_organization_membership(&pool, foreign, account).await;
@@ -343,6 +345,7 @@ async fn endpoint_membership_loss(pool: PgPool, cancel: bool) {
         );
     }
     rejected(f.server.handshake(Some(&f.token), None, None).await, 404);
+    f.state.pool.close().await;
 }
 
 #[fukulow_test::test]

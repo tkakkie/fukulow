@@ -61,6 +61,8 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 ## Rows in other parts
 
+- [deployment](deployment.md): `pool_configuration_defaults_bounds_and_overrides`, `both_barriers_set_transaction_local_timeouts`
+
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [auth](auth.md): `deactivation_http_cancellation_still_commits_and_signals_every_session`, `deactivation_self_denials_preserve_all_session_sockets`
