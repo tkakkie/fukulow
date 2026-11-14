@@ -61,6 +61,8 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 ## Rows in other parts
 
+- [deployment](deployment.md): `socket_admission_and_close_counters_follow_production_paths`, `task_panics_never_echo_payloads_or_secrets`
+
 - [deployment](deployment.md): `pool_configuration_defaults_bounds_and_overrides`, `both_barriers_set_transaction_local_timeouts`
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

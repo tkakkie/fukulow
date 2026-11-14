@@ -111,7 +111,10 @@ async fn run(pool: &PgPool) {
     .await;
     match result {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => crate::observability::database_failure(&error),
+        Ok(Err(error)) => {
+            tracing::info_span!(target: "fukulow", "background", operation = "session_cleanup")
+                .in_scope(|| crate::observability::database_failure(&error));
+        }
         Err(_) => tracing::warn!(target: "fukulow", event = "session_cleanup_deadline"),
     }
 }

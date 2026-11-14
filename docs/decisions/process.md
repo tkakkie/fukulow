@@ -4,6 +4,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 
 ## Product, stack and delivery
 - #198 B: pinned tracing/subscriber emit JSON to stderr. Enable only reviewed fukulow events; dependency SQL/parameters and raw error diagnostics may contain secrets. HTTP spans use fresh UUIDs and route templates; ignore inbound IDs to prevent secret reflection.
+- #198 B: replace the default panic hook before tracing setup/runtime construction. Write a fixed JSON panic event directly to stderr so startup/task payloads and backtraces cannot bypass redaction, even before a subscriber exists.
 - #198 B: a domain-independent observability leaf owns atomic, fixed-bucket counters. Emit cumulative aggregates every 60 s, skipping missed ticks; no metrics route, service or storage. Snapshots are approximate across counters and reset on process replacement.
 - #373 A test-only attribute delegates DB setup to SQLx and awaits registered app-pool closure before teardown, including on panic. TestPools rejects unmanaged callers. Async Drop would race DROP DATABASE; a held admin-connection barrier would starve single-connection tests.
 - #198 A: acquire/query/return each get 200 ms for local DB jitter and fast failure. Coalesced checks hold admission through bounded return; query errors/cancellation detach. One FIFO-pool slot, no send/watermark permits; this avoids unbounded SQLx Drop pings.

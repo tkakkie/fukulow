@@ -21,6 +21,14 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
 // Only our reviewed fields are enabled: dependency diagnostics can include SQL,
 // parameters, URIs or credentials. RUST_LOG cannot broaden this allowlist.
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {
+    // First startup action, before subscriber setup or Tokio runtime construction.
+    // Do not delegate to the default hook: dependency panic payloads can be secrets.
+    std::panic::set_hook(Box::new(|_| {
+        use std::io::Write;
+        let _ = std::io::stderr().lock().write_all(
+            b"{\"level\":\"ERROR\",\"target\":\"fukulow\",\"fields\":{\"event\":\"panic\"}}\n",
+        );
+    }));
     subscriber(std::io::stderr).try_init()?;
     Ok(())
 }
@@ -161,6 +169,14 @@ pub(crate) fn admission(kind: Admission) {
     METRICS.reject(kind);
 }
 
+#[cfg(test)]
+pub(crate) fn socket_counts() -> (u64, u64) {
+    (
+        METRICS.admissions[Admission::Socket as usize].load(Relaxed),
+        METRICS.closes[close_bucket(Some(4029)).0].load(Relaxed),
+    )
+}
+
 pub async fn report_periodically() {
     report_metrics(&METRICS).await;
 }
@@ -236,4 +252,4 @@ pub fn database_failure(error: &sqlx::Error) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

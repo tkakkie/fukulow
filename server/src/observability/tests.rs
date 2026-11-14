@@ -15,7 +15,7 @@ use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
 impl Write for Capture {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(bytes);
@@ -32,14 +32,75 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
     }
 }
 impl Capture {
-    fn text(&self) -> String {
+    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+        subscriber(self.clone())
+    }
+    pub(crate) fn text(&self) -> String {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
     }
-    fn events(&self) -> Vec<Value> {
+    pub(crate) fn events(&self) -> Vec<Value> {
         self.text()
             .lines()
             .map(|s| serde_json::from_str(s).unwrap())
             .collect()
+    }
+}
+
+#[test]
+fn task_panics_never_echo_payloads_or_secrets() {
+    const CHILD: &str = "FUKULOW_TEST_PANIC_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        init().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let task = tokio::spawn(async {
+                panic!("worker panic payload postgres://user:secret-worker-password@localhost/db");
+            });
+            assert!(task.await.unwrap_err().is_panic());
+            let task = tokio::task::spawn_blocking(|| {
+                panic!("blocking panic payload secret-blocking-password");
+            });
+            assert!(task.await.unwrap_err().is_panic());
+        });
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "observability::tests::task_panics_never_echo_payloads_or_secrets",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RUST_BACKTRACE", "full")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for text in [&stdout, &stderr] {
+        for forbidden in [
+            "secret-",
+            "postgres://",
+            "worker panic payload",
+            "blocking panic payload",
+        ] {
+            assert!(!text.contains(forbidden), "{text}");
+        }
+    }
+    let events: Vec<Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    for event in events {
+        assert_eq!(
+            event,
+            serde_json::json!({"level":"ERROR", "target":"fukulow", "fields":{"event":"panic"}})
+        );
     }
 }
 

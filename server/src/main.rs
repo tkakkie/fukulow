@@ -19,9 +19,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         [] => {}
         [command] if command == "migrate" => {
             let pool = migration_pool().await?;
-            fukulow_server::database::migrate_and_grant(&pool)
-                .await
-                .map_err(|_| "Database migration failed (diagnostics suppressed)")?;
+            fukulow_server::database::migrate_and_grant(&pool).await?;
             return Ok(());
         }
         [command, action] if command == "migrate" && action == "roles" => {
