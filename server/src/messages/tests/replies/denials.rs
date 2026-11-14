@@ -444,7 +444,7 @@ async fn reply_send_rejects_invalid_session_without_polling_the_request_body() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = router(&pool).await;
+    let app = crate::app(AppState::with_test_pool(pool));
     let request = Request::post(format!(
         "/api/v1/orgs/{}/channels/{}/messages",
         Uuid::new_v4(),

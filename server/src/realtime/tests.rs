@@ -136,8 +136,13 @@ impl Server {
     }
 }
 async fn state(pool: &PgPool) -> AppState {
+    state_with_test_pool(crate::test_app_pool(pool.clone()).await)
+}
+
+/// `state` over `pool` as given (e.g. a pool that never connects).
+fn state_with_test_pool(pool: PgPool) -> AppState {
     AppState {
-        pool: crate::test_app_pool(pool.clone()).await,
+        pool,
         cookie_secure: false,
         setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
@@ -368,7 +373,7 @@ async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_token
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let router = crate::app(state(&pool).await);
+    let router = crate::app(state_with_test_pool(pool.clone()));
     for path in ["/api/v1/ws", "/api/v1/ws?token=ignored"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
             let mut builder = Request::get(path.replacen(
@@ -1070,7 +1075,7 @@ async fn cookie_origin_is_checked_before_auth_and_organization_without_database(
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = crate::app(state(&pool).await);
+    let app = crate::app(state_with_test_pool(pool.clone()));
     for org in [Uuid::nil().to_string(), "malformed".into()] {
         for cookie in ["invalid".to_owned(), "a".repeat(64)] {
             let response = app
