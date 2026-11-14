@@ -23,6 +23,8 @@ services:
       # Send limit per (Organization, Member); production keeps 10 and 1/s.
       FUKULOW_SEND_BURST: ${FUKULOW_SEND_BURST:-10}
       FUKULOW_SEND_REFILL_PER_SECOND: ${FUKULOW_SEND_REFILL_PER_SECOND:-1}
+      FUKULOW_DB_MAX_CONNECTIONS: ${FUKULOW_DB_MAX_CONNECTIONS-20}
+      FUKULOW_DB_ACQUIRE_TIMEOUT_MS: ${FUKULOW_DB_ACQUIRE_TIMEOUT_MS-1000}
     depends_on:
       migrate:
         condition: service_completed_successfully

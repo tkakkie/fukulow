@@ -158,3 +158,51 @@ fn startup_rejects_invalid_websocket_origins_before_database_access() {
         );
     }
 }
+
+#[test]
+fn startup_rejects_invalid_pool_configuration_before_database_access() {
+    for (name, values) in [
+        (
+            "FUKULOW_DB_MAX_CONNECTIONS",
+            vec![
+                "",
+                "0",
+                "1",
+                "2",
+                "-1",
+                "3.5",
+                "101",
+                "4294967295",
+                "4294967296",
+                "invalid",
+            ],
+        ),
+        (
+            "FUKULOW_DB_ACQUIRE_TIMEOUT_MS",
+            vec![
+                "",
+                "0",
+                "-1",
+                "1.5",
+                "5001",
+                "18446744073709551616",
+                "invalid",
+            ],
+        ),
+    ] {
+        for value in values {
+            let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+                .env_clear()
+                .env("FUKULOW_SETUP_TOKEN", "setup-token-test-only")
+                .env("DATABASE_URL", "invalid-test-url")
+                .env(name, value)
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains(name), "{error}");
+            assert!(!error.contains("panicked"), "{error}");
+            assert!(output.stdout.is_empty());
+        }
+    }
+}
