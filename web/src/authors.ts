@@ -74,8 +74,12 @@ export function createAuthors(
     replaceMembers(members: Member[]) {
       if (closed || unavailable) return
       generation++
-      identities = new Map(members.map(member => [member.id, { id: member.id, name: member.name, deactivated: false }]))
-      for (const identity of identities.values()) rememberIdentityResponse(identity)
+      identities = new Map(members.map(member => {
+        rememberIdentityResponse(member)
+        const identity = { id: member.id, name: member.name, deactivated: false }
+        rememberIdentityResponse(identity, identityOrder(member))
+        return [member.id, identity]
+      }))
       attempted = new Set()
       pending = new Set()
       notify()

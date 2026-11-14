@@ -8,6 +8,7 @@ import type { createSync } from './sync'
 import { selectMainTimeline, selectTopicMessages, type TopicBaseline, type TopicSummaryError } from './topic-selectors'
 import { countSequencesAfter, rememberTopicMessages, trimMessages, topicEvidence, boundTopicEvidence } from './message-window'
 import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
+import { latestMessageCopy } from './identity-order'
 
 type Sync = ReturnType<typeof createSync>
 export type TopicsApi = {
@@ -138,6 +139,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           rememberTopicMessages(w.evidence, incoming)
           if (!w.main.following && w.messages.size + w.baselines.size >= MAIN_MESSAGE_LIMIT) w.main.hasNewer = true
           for (const m of incoming) {
+            const baseline = m.topic_id && w.baselines.get(m.topic_id)
+            if (baseline && baseline.summary.latest_message.id === m.id) {
+              baseline.summary = { ...baseline.summary, latest_message: latestMessageCopy(baseline.summary.latest_message, m) }
+            }
             const arrived = m.seq > (before?.cursor ?? Infinity) && !before?.messages.some(old => old.seq === m.seq)
             if (arrived && w.main.hasNewer) w.main.newerCount++
             if (m.seq > (w.main.asOfSeq ?? 0) && (!w.main.hasNewer || (m.topic_id && w.baselines.has(m.topic_id)))) w.messages.set(m.seq, m)
@@ -240,12 +245,15 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     for (const summary of response.topics) {
       holdSummary(w, summary.id)
       const old = w.baselines.get(summary.id)
+      const latestMessage = old ? latestMessageCopy(old.summary.latest_message, summary.latest_message) : summary.latest_message
       const equal = old && response.as_of_seq === old.asOfSeq && summary.read_seq === old.summary.read_seq
       if (!old || response.as_of_seq > old.asOfSeq || (response.as_of_seq === old.asOfSeq && summary.read_seq >= old.summary.read_seq)) {
         w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary: equal
-          ? { ...summary, unread_count: Math.min(summary.unread_count, old.summary.unread_count),
+          ? { ...summary, latest_message: latestMessage, unread_count: Math.min(summary.unread_count, old.summary.unread_count),
             mention_unread_count: Math.min(summary.mention_unread_count, old.summary.mention_unread_count) }
-          : summary })
+          : { ...summary, latest_message: latestMessage } })
+      } else if (old) {
+        old.summary = { ...old.summary, latest_message: latestMessage }
       }
     }
   }
