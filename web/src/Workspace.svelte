@@ -218,7 +218,13 @@
 
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
-    return memberNames.get(senderId) ?? senderName(authorIdentities?.get(senderId))
+    const listed = memberNames.get(senderId)
+    if (listed !== undefined) return listed
+    const identity = authorIdentities?.get(senderId)
+    if (identity) return senderName(identity)
+    // A pending or failed directory load must not hide the caller's own name.
+    if (organization?.member.id === senderId) return organization.member.name
+    return senderName(undefined)
   }
 
   $effect(() => () => announcementController.destroy())

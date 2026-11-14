@@ -2282,6 +2282,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       await settle()
       await vi.advanceTimersByTimeAsync(2_000)
       expect(announcements).toEqual(['既知の著者: 既知の新着'])
+      // Self is absent from this Member list and author cache; the Organization identity still names it.
+      expect(host.querySelector('[data-message-id="id3"] .ui-message-row__sender')?.textContent).toBe('自分')
       announcements.length = 0
       net.event({ type: 'message', message: { ...record(4, 'c1'), sender: 'unknown', body: '新着本文' } })
       await settle()
