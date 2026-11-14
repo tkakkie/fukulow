@@ -62,6 +62,8 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [realtime](realtime.md): `#196 B app pool`, `#196 B keeps`, `#196 B headroom is shared`, `#196 B sets session-level`, `#196 B leaves RLS`, `#196 B migrations disable`
+
 - [auth](auth.md): `#197 FUKULOW_COOKIE_SECURE describes the public HTTPS`, `#197 HSTS max-age=31536000 lives at TLS`, `#197 Vite manifest outputs alone get`, `#194: forwarded IPs require a trusted`, `#194: require a nonblank FUKULOW_SETUP_TOKEN in`, `#194: Compose separates proxy/app edge from`
 - [auth](auth.md): `CI probes health through Caddy HTTPS`, `#163: after an unexpected worker exit`, `#163 manual check: node scripts/check-compose-restart.ts verifies`
 - [realtime](realtime.md): `#195: retain provisional 60 s drain`, `#88/#194 B bounds one-shot migration lock`

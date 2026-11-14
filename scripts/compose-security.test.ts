@@ -132,3 +132,17 @@ test('both profiles isolate the database and trust only the fixed proxy IP, incl
     }
   }
 })
+
+test('app pool settings forward defaults, overrides and invalid empty values only to app', () => {
+  for (const profile of ['caddy', 'nginx']) {
+    for (const overrides of [{}, { FUKULOW_DB_MAX_CONNECTIONS: '3', FUKULOW_DB_ACQUIRE_TIMEOUT_MS: '250' },
+      { FUKULOW_DB_MAX_CONNECTIONS: '', FUKULOW_DB_ACQUIRE_TIMEOUT_MS: '' }]) {
+      const config = JSON.parse(execFileSync('docker', args(profile),
+        { cwd, env: { ...env, ...overrides }, encoding: 'utf8' }))
+      for (const [name, fallback] of [['FUKULOW_DB_MAX_CONNECTIONS', '20'], ['FUKULOW_DB_ACQUIRE_TIMEOUT_MS', '1000']]) {
+        assert.equal(config.services.app.environment[name], overrides[name as keyof typeof overrides] ?? fallback)
+        assert.equal(config.services.migrate.environment[name], undefined)
+      }
+    }
+  }
+})

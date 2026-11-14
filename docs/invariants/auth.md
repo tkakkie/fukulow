@@ -78,6 +78,8 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 
 ## Rows in other parts
 
+- [deployment](deployment.md): `ordinary_statement_timeout_fires_and_local_context_clears`
+
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [messages](messages.md): `author_lookup_authorization_and_identities_share_a_nonlocking_snapshot`, `author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bounds_batches`
