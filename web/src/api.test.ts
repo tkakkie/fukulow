@@ -176,6 +176,20 @@ it('deactivates a scoped Member with a bodyless POST and accepts empty 204', asy
 
 import { putPassword, revokeOtherSessions } from './api'
 
+it('passes the activity GET cancellation signal to fetch', async () => {
+  const { listMembers } = await import('./api')
+  const controller = new AbortController()
+  const f = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'))
+  await getOrganizationMe('o', f, controller.signal)
+  await listChannels('o', f, controller.signal)
+  await listMembers('o', f, controller.signal)
+  await listChannelMembers('o', 'c', f, controller.signal)
+  await listTopics('o', 'c', {}, f, controller.signal)
+  await getTopicSummary('o', 'c', 't', f, controller.signal)
+  expect(f).toHaveBeenCalledTimes(6)
+  for (const [, init] of f.mock.calls) expect(init?.signal).toBe(controller.signal)
+})
+
 it('uses generated account security bodies with PUT or POST and preserves 403 without ending the session', async () => {
   const current_password = 'current password'
   const passwordBody = { current_password, new_password: 'new password' }

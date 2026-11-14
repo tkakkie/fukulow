@@ -117,6 +117,9 @@ pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
 }
 
 pub fn app(state: AppState) -> Router {
+    state.session_changes.set_activity(std::sync::Arc::new(
+        state.message_delivery.channel_access.activity.clone(),
+    ));
     state
         .session_changes
         .set_subscription_recheck(std::sync::Arc::new(

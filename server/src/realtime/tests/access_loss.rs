@@ -254,7 +254,7 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
             .await
             .unwrap();
         if regrant {
-            let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            let frame = tokio::time::timeout(Duration::from_secs(2), message_next(&mut socket))
                 .await
                 .unwrap()
                 .unwrap()
@@ -669,7 +669,7 @@ async fn continuous_public_role_changes_adopt_grant_lifetimes_and_membership_los
         .session_changes
         .recheck_subscriptions(&pool, crate::auth::SubscriptionScope::All)
         .await;
-    let frame = socket.next().await.unwrap().unwrap();
+    let frame = message_next(&mut socket).await.unwrap().unwrap();
     assert!(
         matches!(frame,tungstenite::Message::Close(Some(close)) if u16::from(close.code)==4003)
     );

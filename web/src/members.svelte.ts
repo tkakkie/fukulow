@@ -7,6 +7,7 @@ export function membersAdapter(controller: ReturnType<typeof createMembers>) {
   return {
     authors: authorsAdapter(controller.authors),
     get state() { subscribe(); return controller.get() },
+    activityTarget: controller.activityTarget,
     load: controller.load, invite: controller.invite, role: controller.role, deactivate: controller.deactivate, unavailable: controller.unavailable, close: controller.close,
   }
 }

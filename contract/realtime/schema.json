@@ -21,7 +21,7 @@
     "Cursor": { "type": "integer", "minimum": 0 },
     "Rule": {
       "$comment": "A rule of docs/spec/realtime.md 'Real-time sync contract'. H = the History pages bullet. P1-P8 = projection and Unread rules. Delivery P1/P2/P5/P6/P7/P8 and controller-layer client P1-P8 run; other P rules remain proposed (semantic).",
-      "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
+      "enum": ["S1", "S2", "S3", "S4", "S5", "H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12", "A13", "A14"]
     },
     "Covers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Rule" } },
     "SeqList": {
@@ -178,9 +178,11 @@
         }
       ]
     },
+    "ActivityExpectation": {"type":"object","required":["do","socket","events"],"properties":{"do":{"const":"activity_expect"},"socket":{"$ref":"#/$defs/Label"},"events":{"type":"array","items":{"$ref":"#/$defs/ActivityNotice"}}},"additionalProperties":false},
     "DeliveryStep": {
       "$comment": "Steps run strictly in order; the runner waits for each step to complete (an HTTP response, a control message written to the socket) before the next, except where a step says it is concurrent. Control messages on one socket are processed by the server in order, so an event produced by a later control message (a 'subscribed' or an 'error') is a barrier showing every earlier control message on that socket has been handled.",
       "oneOf": [
+        { "$ref": "#/$defs/ActivityExpectation" },
         {
           "type": "object",
           "required": [
@@ -628,7 +630,8 @@
       "type": "object",
       "required": ["type"],
       "properties": {
-        "type": { "enum": ["connect", "subscribe", "unsubscribe", "fetch_history", "send", "wait", "membership_check", "fetch_main_timeline", "fetch_reply_chain", "fetch_unread"] },
+        "type": { "enum": ["connect", "subscribe", "unsubscribe", "fetch_history", "send", "wait", "membership_check", "fetch_main_timeline", "fetch_reply_chain", "fetch_unread", "refetch"] },
+        "target": { "$ref": "#/$defs/Label" },
         "channel": { "$ref": "#/$defs/Label" },
         "after_seq": { "$ref": "#/$defs/Cursor" },
         "anchor": { "$ref": "#/$defs/Label" },
@@ -678,9 +681,14 @@
       },
       "additionalProperties": false
     },
+    "ActivityNotice": {"oneOf":[{"type":"object","required":["type"],"properties":{"type":{"const":"activity_ready"}},"additionalProperties":false},{"type":"object","required":["type"],"properties":{"type":{"const":"activity_reset"}},"additionalProperties":false},{"type":"object","required":["type"],"properties":{"type":{"const":"channel_list_changed"}},"additionalProperties":false},{"type":"object","required":["type"],"properties":{"type":{"const":"members_changed"}},"additionalProperties":false},{"type":"object","required":["type","channel_id"],"properties":{"type":{"const":"channel_access_gained"},"channel_id":{"$ref":"#/$defs/Label"}},"additionalProperties":false},{"type":"object","required":["type","channel_id"],"properties":{"type":{"const":"channel_access_revoked"},"channel_id":{"$ref":"#/$defs/Label"}},"additionalProperties":false},{"type":"object","required":["type","channel_id"],"properties":{"type":{"const":"channel_members_changed"},"channel_id":{"$ref":"#/$defs/Label"}},"additionalProperties":false},{"type":"object","required":["type","channel_id","seq"],"properties":{"type":{"const":"channel_activity"},"channel_id":{"$ref":"#/$defs/Label"},"seq":{"$ref":"#/$defs/Seq"}},"additionalProperties":false},{"type":"object","required":["type","channel_id","topic_id","read_seq"],"properties":{"type":{"const":"read_position_changed"},"channel_id":{"$ref":"#/$defs/Label"},"topic_id":{"type":["string","null"]},"read_seq":{"$ref":"#/$defs/Cursor"}},"additionalProperties":false}]},
     "Input": {
       "$comment": "What happened outside the client. 'me' is the signed-in Member; other labels are other Members. Request/response pairing is by respond_to (see ClientScenario); a response delivered after the client has moved on (timer already obsolete, session replaced, Channel reset) is a stale completion and must change nothing.",
       "oneOf": [
+        {"type":"object","required":["type","target"],"properties":{"type":{"const":"hold_target"},"target":{"$ref":"#/$defs/Label"}},"additionalProperties":false},
+        {"type":"object","required":["type","notice"],"properties":{"type":{"const":"activity_notice"},"notice":{"$ref":"#/$defs/ActivityNotice"}},"additionalProperties":false},
+        {"type":"object","required":["type","ms"],"properties":{"type":{"const":"time_passed"},"ms":{"$ref":"#/$defs/Cursor"}},"additionalProperties":false},
+        {"type":"object","required":["type","respond_to"],"properties":{"type":{"const":"refetch_result"},"respond_to":{"$ref":"#/$defs/Label"},"status":{"$ref":"#/$defs/HttpStatus"}},"additionalProperties":false},
         {"type":"object","required":["type","channel"],"properties":{"type":{"const":"channel_access_lost"},"channel":{"$ref":"#/$defs/Label"}},"additionalProperties":false},
         {"$comment":"Controller-only (P8). Refetch a Channel Unread baseline, including on reconnect.","type":"object","required":["type","channel"],"properties":{"type":{"const":"load_unread"},"channel":{"$ref":"#/$defs/Label"}},"additionalProperties":false},
         {"$comment":"Controller-only (P8). A Channel-list REST baseline arrives, possibly after its events or a newer response.","type":"object","required":["type","channel","respond_to","baseline"],"properties":{"type":{"const":"unread_result"},"channel":{"$ref":"#/$defs/Label"},"respond_to":{"$ref":"#/$defs/Label"},"baseline":{"$ref":"#/$defs/UnreadBaseline"}},"additionalProperties":false},

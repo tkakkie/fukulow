@@ -995,6 +995,33 @@ afterAll(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('Channel creation visibility', () => {
+  it('blocks submit events while capabilities are pending, then permits the retained draft', async () => {
+    const props = $state({ disabled: false })
+    const oncreate = vi.fn(async () => null)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(CreateChannelForm, { target: host as unknown as Element, props: {
+      oncreate, get disabled() { return props.disabled },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      input.value = '下書き'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      props.disabled = true
+      await settle()
+      host.querySelector('form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      expect(oncreate).not.toHaveBeenCalled()
+      expect(input.value).toBe('下書き')
+      props.disabled = false
+      await settle()
+      buttonsByText(host, 'チャンネルを作成')[0]!.click()
+      await settle()
+      expect(oncreate).toHaveBeenCalledExactlyOnceWith('下書き', 'public')
+    } finally { await unmount(instance) }
+  })
+
   for (const visibility of ['public', 'private'] as const) {
     it(`submits ${visibility} from the form and resets to public after success`, async () => {
       const oncreate = vi.fn(async () => null)
@@ -1122,6 +1149,49 @@ describe('Channel creation visibility', () => {
       raw.close()
     })
   }
+
+  it('keeps the creation input attached during capability reconciliation and removes it on a confirmed denial', async () => {
+    const props = $state({ allowed: true as boolean | null })
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.lists[0]!.resolve(ok({ channels: [] }))
+    const navigation = createNavigation({
+      location: { href: 'http://localhost/' }, history: { state: null, pushState() {}, replaceState() {} },
+      innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, get canCreateChannels() { return props.allowed },
+      session: { channels: channelsAdapter(raw.channels), sync: syncAdapter(raw.sync),
+        topics: id => topicsAdapter(raw.topics, id), close: raw.close },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      for (let i = 0; i < 3; i++) {
+        props.allowed = null
+        await settle()
+        expect(host.querySelector('input[name="channel_name"]')).toBe(input)
+        input.value = '入力中'
+        input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+        await settle()
+        expect(buttonsByText(host, 'チャンネルを作成')[0]!.disabled).toBe(true)
+        props.allowed = true
+        await settle()
+        expect(buttonsByText(host, 'チャンネルを作成')[0]!.disabled).toBe(false)
+      }
+      props.allowed = false
+      await settle()
+      expect(host.querySelector('form.create-channel-form')).toBeNull()
+      props.allowed = null
+      await settle()
+      expect(host.querySelector('form.create-channel-form')).toBeNull()
+      props.allowed = true
+      await settle()
+      expect(host.querySelector('input[name="channel_name"]')!.value).toBe('入力中')
+    } finally { await unmount(instance); navigation.destroy(); raw.close() }
+  })
 })
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
@@ -3183,7 +3253,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(host.querySelector('#main-content')?.textContent).toContain('トピック: トピック')
 
     // After backoff elapses, controller retries and both Timeline and TopicList display the resolved Topic name
-    await vi.advanceTimersByTimeAsync(500)
+    await vi.advanceTimersByTimeAsync(1000)
     await settle()
     flushSync()
     expect(summaryCalls).toBe(2)
@@ -3195,7 +3265,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     sessionModel.close()
   })
 
-  it('stops automatic summary retries at terminal error, offers 再試行 only for retryable failures, and restarts on click', async () => {
+  it('retries transient summary failures without a budget, stops ordinary 4xx and supports explicit retry', async () => {
     vi.useFakeTimers()
     let retryableCalls = 0
     let nonRetryableCalls = 0
@@ -3227,9 +3297,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
               },
             })
           }
-          if (topicId === 't-429') {
+          if (topicId === 't-400') {
             nonRetryableCalls++
-            return { ok: false, kind: 'http', status: 429 }
+            return { ok: false, kind: 'http', status: 400 }
           }
           return baseOptions.topicsApi!.getTopicSummary(channelId, topicId)
         },
@@ -3300,26 +3370,26 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
 
-    // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 429 Topic t-429
+    // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 400 Topic t-400
     net.event({
       type: 'message',
       message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一時障害本文', topic_id: 't-503' },
     })
     net.event({
       type: 'message',
-      message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-429' },
+      message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-400' },
     })
     await settle()
     flushSync()
 
-    // Non-retryable 429 stops immediately at 1 request with no retry button
+    // Non-retryable 400 stops immediately at 1 request with no retry button
     expect(nonRetryableCalls).toBe(1)
 
-    // Advance past bounded backoff budget; persistent 503 stops at 5 requests and shows 再試行 on t-503 only
+    // Persistent 503 keeps retrying beyond the former finite budget; ordinary 400 stays stopped.
     await vi.advanceTimersByTimeAsync(120_000)
     await settle()
     flushSync()
-    expect(retryableCalls).toBe(5)
+    expect(retryableCalls).toBeGreaterThan(5)
     expect(nonRetryableCalls).toBe(1)
 
     const mainRetryButtons = queryAll(host, '#main-content button').filter((b) => b.textContent?.trim() === '再試行')
@@ -3327,7 +3397,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(mainRetryButtons).toHaveLength(1)
     expect(panelRetryButtons).toHaveLength(1)
 
-    // Subsequent live traffic re-renders both Timeline and TopicList without triggering any more summary calls
+    // Later traffic leaves the permanent refusal stopped while transient failures keep retrying.
+    const beforeLater = retryableCalls
     net.event({
       type: 'message',
       message: { ...record(4, 'c1'), id: 'm-4', sender: 'other', body: '後続メッセージ', topic_id: null },
@@ -3335,15 +3406,16 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(retryableCalls).toBe(5)
+    expect(retryableCalls).toBeGreaterThan(beforeLater)
     expect(nonRetryableCalls).toBe(1)
 
     // 2. Clicking 再試行 on the summary line restarts and displays the resolved Topic name and count
     allowSuccess = true
+    const beforeManual = retryableCalls
     mainRetryButtons[0]!.click()
     await settle()
     flushSync()
-    expect(retryableCalls).toBe(6)
+    expect(retryableCalls).toBe(beforeManual + 1)
     expect(host.querySelector('#main-content')?.textContent).toContain('トピック: 手動再試行トピック')
     expect(host.querySelector('#main-content')?.textContent).toContain('1件›')
     expect(host.querySelector('#panel-content')?.textContent).toContain('トピック: 手動再試行トピック')

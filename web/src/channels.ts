@@ -1,9 +1,10 @@
+import { createActivityTarget, type Activity } from './activity'
 import type { Channel, ChannelVisibility, CreateChannelRequest, Result } from './api'
 
 export type { Channel, ChannelVisibility }
 
 export type ChannelsApi = {
-  listChannels: () => Promise<Result<{ channels: Channel[] }>>
+  listChannels: (signal?: AbortSignal) => Promise<Result<{ channels: Channel[] }>>
   createChannel: (body: CreateChannelRequest) => Promise<Result<Channel>>
 }
 
@@ -24,7 +25,7 @@ export function channelError(r: Extract<Result<unknown>, { ok: false }>): string
 const sessionEndedError = 'セッションが終了しました。'
 
 /** Channel list, selection and creation. `subscribe` fires after every state change. `close` ends the session's list: later async results are dropped. */
-export function createChannels(api: ChannelsApi, onReselect?: (id: string) => void) {
+export function createChannels(api: ChannelsApi, onReselect?: (id: string) => void, activity?: Activity, onSnapshot?: (channels: Channel[]) => void) {
   let state: ChannelsState = { status: 'loading', channels: [], selectedId: null }
   let generation = 0 // bumped by create(): a load that started earlier is stale
   let loadSeq = 0 // bumped by load(): an earlier load's response is superseded
@@ -36,13 +37,26 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     listeners.forEach((l) => l())
   }
 
+  const target = activity ? createActivityTarget({
+    load: signal => api.listChannels(signal),
+    accept(data) {
+      set({ status: 'ready', channels: data.channels, selectedId: state.selectedId ?? data.channels[0]?.id ?? null })
+      onSnapshot?.(data.channels)
+    },
+    error: () => set({ status: 'error' }),
+    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.error === 'organization_unavailable'),
+  }) : undefined
+  const release = target && activity?.hold('channels', target)
   return {
+    activityTarget: target,
+    revoke(id: string) { generation++; loadSeq++; set({ channels: state.channels.filter(c => c.id !== id) }) },
     get: () => state,
     subscribe(l: () => void) {
       listeners.add(l)
       return () => listeners.delete(l)
     },
     async load() {
+      if (target) return target.refresh()
       const seq = ++loadSeq
       const mine = generation
       set({ status: 'loading' })
@@ -60,6 +74,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     },
     close() {
       closed = true
+      target?.close(); release?.()
       listeners.clear()
     },
     select(id: string) {
@@ -76,7 +91,8 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       if (closed) return { error: sessionEndedError }
       if (!r.ok) return { error: channelError(r) }
       generation++
-      set({ channels: [...state.channels, r.data], selectedId: r.data.id })
+      target?.invalidate('access')
+      set({ channels: [...state.channels.filter(c => c.id !== r.data.id), r.data], selectedId: r.data.id })
       return { channel: r.data }
     },
   }

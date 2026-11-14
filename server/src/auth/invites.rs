@@ -191,6 +191,8 @@ pub async fn accept_invite(
         }
         None
     };
+    let name = name.to_owned();
+    let result = tokio::spawn(async move {
     let (id, name, role, organization_name) = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
         // Order matches Role changes; concurrent acceptances and Owner transitions serialize.
         members::lock_organization(&mut *tx, org).await?;
@@ -248,6 +250,10 @@ pub async fn accept_invite(
                 .await?;
         Ok::<_, ApiError>((id, name, role, organization_name))
     }).await?;
+    state.session_changes.directory_changed(state.pool.clone(), org, id);
+    Ok::<_, ApiError>((id, name, role, organization_name))
+    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    let (id, name, role, organization_name) = result;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(Identity {
