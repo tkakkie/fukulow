@@ -82,6 +82,8 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
+- [realtime](realtime.md): `#204 sections_changed goes only`
 - [messages](messages.md): `#301 author lookup takes at most 100 input ids`
 - [web](web.md): `#300 Invite session 401 offers`, `#300 Sign-in, sign-out and Invite acceptance share`
 
