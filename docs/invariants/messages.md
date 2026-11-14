@@ -81,3 +81,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [deployment](deployment.md): `mention_contract_requires_one_shared_set_and_nonnegative_counts`
 - [realtime](realtime.md): `mention_live_and_replay_follow_current_names_and_never_accept_later_grants`, `mention_lost_channel_live_and_fetched_replay_never_handoff_identities`
 - [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`, `mention_counts_missing_position_suppresses_only_its_channel_without_writes`, `mention_access_loss_removes_counts_and_regrant_never_resurrects_them`
+
+- [web](web.md): `Mention components render accepted tokens highlight the reader and follow authorized non-author renames without resolving rejected tokens`

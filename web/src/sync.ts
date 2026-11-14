@@ -1,3 +1,4 @@
+import { newerMentionResponse, rememberIdentityResponse } from './identity-order'
 import type { ActivityNotice } from './activity'
 import type { DraftStore } from './drafts'
 import * as api from './api'
@@ -245,6 +246,14 @@ export function createSync(options: SyncOptions) {
   }
 
   function dispatch(input: Input): Promise<void> {
+    if (input.type === 'event' && input.event.type === 'message') rememberIdentityResponse(input.event.message)
+    else if (input.type === 'ack') rememberIdentityResponse(input.message)
+    else if (input.type === 'history_result') rememberIdentityResponse(input.page)
+    else if (input.type === 'settle_history') rememberIdentityResponse(input.messages)
+    const incoming = input.type === 'event' && input.event.type === 'message' ? [input.event.message]
+      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : []
+    if (incoming.some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
+      input = { ...input, refreshMentionNames: true }
     const previous = state
     if (input.type === 'stop') {
       for (const [id, draft] of submitted) {

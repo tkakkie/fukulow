@@ -66,7 +66,7 @@ export type Effect =
   | { type: 'wait'; id: number; purpose: 'send_retry'; channel: string; delayMs: number }
   | { type: 'cancel_timer'; id: number }
   | { type: 'sign_in' }
-export type Input =
+export type Input = (
   | { type: 'session_start' | 'session_replaced'; selfId: string }
   | { type: 'stop' | 'organization_unavailable' }
   | { type: 'connection_ready'; connection: number }
@@ -81,6 +81,7 @@ export type Input =
   | { type: 'send_failed'; request: number; status: Failure; retryAfterMs?: number }
   | { type: 'ack'; request: number; message: Message }
   | { type: 'timer_elapsed'; id: number }
+) & { refreshMentionNames?: true }
 
 export function initialState(selfId = ''): State {
   return { selfId, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
@@ -241,7 +242,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         else hi = mid
       }
       const existing = c.messages[lo]
-      if (existing?.seq === m.seq &&
+      if (existing?.seq === m.seq && !input.refreshMentionNames &&
         existing.mentions.length === m.mentions.length && existing.mentions.every((mention, i) =>
           mention.member_id === m.mentions[i].member_id && mention.name === m.mentions[i].name) &&
         sameFields({ ...existing, mentions: m.mentions }, m)) continue

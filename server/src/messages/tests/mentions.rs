@@ -371,10 +371,34 @@ async fn mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic(po
     super::channel(&pool, org, other, sender, false).await;
     let app2 = router(&pool).await;
     let key = Uuid::new_v4();
-    let (a, b) = tokio::join!(
-        send(&app, &author, channel, input(key, &text)),
-        send(&app2, &author, other, input(key, &text))
-    );
+    // Both transactions must allocate and reach INSERT before either can win.
+    // The trigger blocks before unique-key arbitration, independently per Channel.
+    let mut gate = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(152,391)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION gate_duplicate_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(152,391); RETURN NEW; END $$; CREATE TRIGGER gate_duplicate_insert BEFORE INSERT ON messages FOR EACH ROW EXECUTE FUNCTION gate_duplicate_insert()")
+        .execute(&pool).await.unwrap();
+    let sends = tokio::spawn(async move {
+        tokio::join!(
+            send(&app, &author, channel, input(key, &text)),
+            send(&app2, &author, other, input(key, &text))
+        )
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND classid=152 AND objid=391 AND NOT granted")
+                .fetch_one(&pool).await.unwrap();
+            if waiting == 2 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(152,391)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let (a, b) = sends.await.unwrap();
     assert_eq!(
         [a.status(), b.status()]
             .into_iter()
@@ -390,4 +414,26 @@ async fn mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic(po
         1
     );
     assert_eq!(mention_rows(&pool, org).await, 3);
+    let (winner, loser, winner_seq, loser_seq) = if a.status() == StatusCode::CREATED {
+        (channel, other, 3, 0)
+    } else {
+        (other, channel, 1, 2)
+    };
+    for (id, expected) in [(winner, winner_seq), (loser, loser_seq)] {
+        let allocated: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT seq FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2),0)")
+            .bind(org).bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            allocated, expected,
+            "unique-key loser must roll back its allocation"
+        );
+    }
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM messages WHERE organization_id=$1 AND client_message_id=$2",
+    )
+    .bind(org)
+    .bind(key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted, 1);
 }

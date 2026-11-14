@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Member } from './api'
+  import type { MentionName } from './mentions'
   import { onMount, tick, untrack } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
@@ -49,6 +51,9 @@
     organizationUnavailable = false,
     reconnecting = false,
     resolveSenderName,
+    resolveMentionName,
+    members = [],
+    onmentionrequest,
     composerRef = $bindable(null),
     onopenreplies,
     onretrytopicmeta,
@@ -69,6 +74,9 @@
     organizationUnavailable?: boolean
     reconnecting?: boolean
     resolveSenderName?: (senderId: string) => string
+    resolveMentionName?: MentionName
+    members?: readonly Member[]
+    onmentionrequest?: () => void
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     onopenreplies?: (message: Message, opener?: HTMLElement | null) => void
     onretrytopicmeta?: () => void
@@ -582,6 +590,9 @@
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
                 body={m.body}
+                mentions={m.mentions}
+                {resolveMentionName}
+                {selfId}
                 replyCount={replyCounts.get(m.id) ?? 0}
                 focusable
                 rovingTabindex={rovingRowId === m.id ? 0 : -1}
@@ -630,6 +641,8 @@
 
   <div class="topic-view__composer">
     <Composer
+      {members}
+      {onmentionrequest}
       bind:textareaRef={composerRef}
       placeholder="トピックにメッセージを入力"
       value={composerState.draft}

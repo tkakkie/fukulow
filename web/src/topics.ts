@@ -2,6 +2,7 @@ import { createActivityTarget, type Activity } from './activity'
 import * as api from './api'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
+import { completeCountFields } from './unread-counts'
 import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import { selectMainTimeline, selectTopicMessages, type TopicBaseline, type TopicSummaryError } from './topic-selectors'
@@ -209,7 +210,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       } else if (api.isOrganizationUnavailable(r) && session === sessionToken) void sync.unavailable()
     })
     try {
-      const result = withTimeout || signal ? await Promise.race([operation, new Promise<Result<T>>(resolve => {
+      const response = withTimeout || signal ? await Promise.race([operation, new Promise<Result<T>>(resolve => {
         settle = () => resolve({ ok: false, kind: 'network' })
         deadlines.add(settle)
         if (signal) {
@@ -218,6 +219,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         }
         if (withTimeout) timer = setTimeout(settle, options.requestTimeoutMs ?? 30_000)
       })]) : await operation
+      const result: Result<T> = response.ok && !completeCountFields(response.data) ? { ok: false, kind: 'network' } : response
       // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
       if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() && !result.ok && result.kind === 'http' &&
         [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
@@ -238,7 +240,13 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     for (const summary of response.topics) {
       holdSummary(w, summary.id)
       const old = w.baselines.get(summary.id)
-      if (!old || response.as_of_seq > old.asOfSeq || (response.as_of_seq === old.asOfSeq && (summary.read_seq > old.summary.read_seq || (summary.read_seq === old.summary.read_seq && summary.unread_count < old.summary.unread_count)))) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
+      const equal = old && response.as_of_seq === old.asOfSeq && summary.read_seq === old.summary.read_seq
+      if (!old || response.as_of_seq > old.asOfSeq || (response.as_of_seq === old.asOfSeq && summary.read_seq >= old.summary.read_seq)) {
+        w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary: equal
+          ? { ...summary, unread_count: Math.min(summary.unread_count, old.summary.unread_count),
+            mention_unread_count: Math.min(summary.mention_unread_count, old.summary.mention_unread_count) }
+          : summary })
+      }
     }
   }
   function holdSummary(w: Window, topic: string) {

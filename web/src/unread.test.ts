@@ -9,9 +9,9 @@ afterEach(() => vi.useRealTimers())
 
 it('computes independent scope counts with baseline subtraction live overlap own sends and duplicate replay', () => {
   const records = [msg(1), msg(1), msg(2), msg(3, 'T'), msg(4), msg(4), msg(5, null, 'me')]
-  expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2 }, 1, records, main, 'me')).toBe(2)
-  expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2 }, 4, records, main, 'me')).toBe(0)
-  expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2 }, 0, records, main, 'me')).toBe(3)
+  expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2, mentionCount: 0 }, 1, records, main, 'me')).toBe(2)
+  expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2, mentionCount: 0 }, 4, records, main, 'me')).toBe(0)
+  expect(scopeCount({ asOfSeq: 2, readSeq: 0, count: 2, mentionCount: 0 }, 0, records, main, 'me')).toBe(3)
 })
 it('batched Topic snapshots equal independent scope counts with read progress own rows and duplicate replay', async () => {
   const c = unreadClient(); await c.boot()
@@ -25,15 +25,15 @@ it('batched Topic snapshots equal independent scope counts with read progress ow
   expect(snapshot.topics.T.position).toBe(7)
   for (const [topic, readSeq, count] of [['T', 2, 1], ['U', 3, 1], ['V', 0, 0]] as const) {
     const s = snapshot.topics[topic]
-    expect(s.unreadCount, topic).toBe(scopeCount({ asOfSeq: 6, readSeq, count }, s.position!, records, { channel: 'A', topicId: topic }, 'me'))
+    expect(s.unreadCount, topic).toBe(scopeCount({ asOfSeq: 6, readSeq, count, mentionCount: 0 }, s.position!, records, { channel: 'A', topicId: topic }, 'me'))
   }
   expect(Object.fromEntries(Object.entries(snapshot.topics).map(([t, s]) => [t, s.unreadCount]))).toEqual({ T: 0, U: 3, V: 0 })
-  expect(snapshot.main.unreadCount).toBe(scopeCount({ asOfSeq: 3, readSeq: 0, count: 1 }, 0, records, main, 'me'))
+  expect(snapshot.main.unreadCount).toBe(scopeCount({ asOfSeq: 3, readSeq: 0, count: 1, mentionCount: 0 }, 0, records, main, 'me'))
   await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
 it('chooses larger W then larger p0 then smaller counts including aggregate ties', () => {
-  const b = { asOfSeq: 4, readSeq: 1, count: 3 }
-  expect(chooseBaseline(b, { asOfSeq: 3, readSeq: 4, count: 0 })).toBe(b)
+  const b = { asOfSeq: 4, readSeq: 1, count: 3, mentionCount: 0 }
+  expect(chooseBaseline(b, { asOfSeq: 3, readSeq: 4, count: 0, mentionCount: 0 })).toBe(b)
   expect(chooseBaseline(b, { ...b, asOfSeq: 5 }).asOfSeq).toBe(5)
   expect(chooseBaseline(b, { ...b, readSeq: 2, count: 2 }).count).toBe(2)
   expect(chooseBaseline(b, { ...b, count: 2 }).count).toBe(2)

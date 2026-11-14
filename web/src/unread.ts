@@ -5,7 +5,7 @@ import type { Topics } from './topics'
 import type { TopicBaseline } from './topic-selectors'
 import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
 import { backoffCap } from './reconnect'
-import { chooseBaseline, chooseChannelBaseline, coveredThrough, inScope, mainBaseline, recordCoverage,
+import { completeCountFields, chooseBaseline, chooseChannelBaseline, coveredThrough, inScope, mainBaseline, recordCoverage,
   needsUnreadRecord, scopeCount, sequenceToSubmit, topicBaseline, type Coverage, type ScopeBaseline, type UnreadScope, type UnreadRecord } from './unread-counts'
 export type { UnreadScope } from './unread-counts'
 
@@ -114,7 +114,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const old = c.records.get(m.seq)
     if (!needed(c, m) || (old?.id === m.id && old.sender === m.sender && old.topic_id === m.topic_id)) return false
     const { id, seq, channel_id, topic_id, sender } = m
-    c.records.set(m.seq, { id, seq, channel_id, topic_id, sender })
+    const mentions = m.mentions.some(target => target.member_id === sync.get().selfId) ? [{ member_id: sync.get().selfId }] : []
+    c.records.set(m.seq, { id, seq, channel_id, topic_id, sender, mentions })
     return true
   }
   const active = () => !closed && sync.get().running && sync.get().organization === 'available'
@@ -152,10 +153,11 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
     })
     try {
-      return await Promise.race([operation, new Promise<Result<T>>(resolve => {
+      const result = await Promise.race([operation, new Promise<Result<T>>(resolve => {
         timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
         deadlines.set(timer, { channel, cancel: () => resolve({ ok: false, kind: 'network' }) })
       })])
+      return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' } : result
     } finally { if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) } }
   }
   const retryDelay = (attempt: number, r: Result<unknown>) => Math.max(backoffCap(attempt), !r.ok ? r.retryAfterMs ?? 0 : 0)
@@ -207,7 +209,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const aggChanged = prevAgg?.as_of_seq !== c.aggregate?.as_of_seq ||
           prevAgg?.read_seq !== c.aggregate?.read_seq ||
           prevAgg?.unread_count !== c.aggregate?.unread_count ||
-          prevAgg?.main_unread_count !== c.aggregate?.main_unread_count
+          prevAgg?.main_unread_count !== c.aggregate?.main_unread_count ||
+          prevAgg?.mention_unread_count !== c.aggregate?.mention_unread_count ||
+          prevAgg?.main_mention_unread_count !== c.aggregate?.main_mention_unread_count
         if (
           !existing ||
           prevError !== c.error ||
@@ -242,17 +246,18 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   const needsRecovery = (c: Channel, s: Scope) => s.error || (s.baseline !== undefined &&
     (s.baseline.asOfSeq < c.requiredBase || s.baseline.readSeq < s.requiredPosition))
   const listNeedsRecovery = (c: Channel) => needsRecovery(c, c.main) || (c.aggregate !== undefined && c.aggregate.as_of_seq < c.requiredBase)
-  function count(id: string, c: Channel, topic: string | null, records: Iterable<UnreadRecord> = c.records.values()): number | null {
+  function count(id: string, c: Channel, topic: string | null, records: Iterable<UnreadRecord> = c.records.values(), mention = false): number | null {
     const s = getScope(c, topic)
     if (!s.baseline || (s.position > s.baseline.readSeq && s.baseline.readSeq < c.lostThrough) || needsRecovery(c, s) || s.stopped || c.stopped || c.error) return null
-    return scopeCount(s.baseline, s.position, records, { channel: id, topicId: topic }, sync.get().selfId)
+    return scopeCount(s.baseline, s.position, records, { channel: id, topicId: topic }, sync.get().selfId, mention)
   }
-  function aggregateCount(id: string, c: Channel): number | null {
-    const b = c.aggregate, main = count(id, c, null)
+  function aggregateCount(id: string, c: Channel, mention = false): number | null {
+    const b = c.aggregate, main = count(id, c, null, c.records.values(), mention)
     if (!b || c.accepted < c.requiredAggregateAfter || b.as_of_seq < c.requiredBase || main === null) return null
-    let topicPart = b.unread_count - b.main_unread_count
+    let topicPart = mention ? b.mention_unread_count - b.main_mention_unread_count : b.unread_count - b.main_unread_count
     for (const m of c.records.values()) if (m.topic_id !== null && m.sender !== sync.get().selfId && m.seq > b.as_of_seq &&
-      m.seq > (c.heldPositions.get(m.topic_id) ?? c.topics.get(m.topic_id)?.position ?? 0)) topicPart++
+      m.seq > (c.heldPositions.get(m.topic_id) ?? c.topics.get(m.topic_id)?.position ?? 0) &&
+      (!mention || m.mentions.some(target => target.member_id === sync.get().selfId))) topicPart++
     return main + topicPart
   }
   function coverage(scope: UnreadScope): Coverage[] {
@@ -514,13 +519,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         firstUnread: v.firstUnread ?? rows.find(m => m.seq <= through) ?? null,
         needsOlder: !v.firstUnread && v.unreadAtEntry !== null && v.unreadAtEntry > 0 && (rows.length === 0 || through < rows[0].seq) }
     }
-    return { generation: c?.token ?? null, asOfSeq: c?.aggregate?.as_of_seq ?? null, unreadCount: c ? aggregateCount(id, c) : null, main: c ? scopeSnapshot(id, c, null) : { position: null, unreadCount: null, stopped: false, error: false },
+    return { generation: c?.token ?? null, asOfSeq: c?.aggregate?.as_of_seq ?? null, unreadCount: c ? aggregateCount(id, c) : null, mentionUnreadCount: c ? aggregateCount(id, c, true) : null, main: c ? scopeSnapshot(id, c, null) : { position: null, unreadCount: null, mentionUnreadCount: null, stopped: false, error: false },
       topics: Object.fromEntries(c ? [...c.topics.keys()].map(t => [t, scopeSnapshot(id, c, t, topicRecords.get(t) ?? [])]) : []),
       entry, stopped: c?.stopped ?? false, error: c?.error ?? false }
   }
   function scopeSnapshot(id: string, c: Channel, topic: string | null, records?: Iterable<UnreadRecord>) {
     const s = getScope(c, topic)
-    return { position: s.baseline ? s.position : null, unreadCount: count(id, c, topic, records), stopped: s.stopped, error: s.error }
+    return { position: s.baseline ? s.position : null, unreadCount: count(id, c, topic, records), mentionUnreadCount: count(id, c, topic, records, true), stopped: s.stopped, error: s.error }
   }
   function leave(id?: symbol) {
     if (!visit || (id !== undefined && visit.id !== id)) return
@@ -549,12 +554,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   if (active()) { reconcile(); void refresh() }
   return {
     subscribe,
-    activityMainCoverage(id: string) { return channels.get(id)?.aggregate?.read_seq ?? -1 },
+    activityMainCoverage(id: string) { const row = channels.get(id)?.aggregate; return row && completeCountFields(row) ? row.read_seq : -1 },
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
       const ids = new Set(rows.map(r => r.id))
       for (const [id, c] of channels) if (!ids.has(id) && !watched(id)) { fence(id, c); channels.delete(id) }
       for (const row of rows) {
+        if (!completeCountFields(row)) continue
         const c = getChannel(row.id)
         if (c.stopped) continue
         acceptScope(c.main, mainBaseline(row))

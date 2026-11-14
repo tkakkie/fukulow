@@ -1,3 +1,5 @@
+import type { Message, Result } from './api'
+import type { TimelineApi } from './sync'
 import openapiRaw from '../../openapi.json?raw'
 import { describe, expect, it, vi } from 'vitest'
 import { createDraftStore } from './drafts'
@@ -37,9 +39,13 @@ describe('message body validation', () => {
   })
 
   it('keeps draft text and skips HTTP when Composer validation fails, then clears on valid submit', async () => {
-    const sendMessage = vi.fn().mockImplementation(async (_channel, req) => ({
+    const sendMessage = vi.fn<TimelineApi['sendMessage']>().mockImplementation(async (_channel, req) => ({
       ok: true,
       data: {
+        mentions: [],
+        topic_id: null,
+        reply_to: null,
+        reply_root_id: null,
         id: 'm1',
         channel_id: 'A',
         sender: 'me',
@@ -166,7 +172,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
   it('isolates Channel topicDraft and per-Topic drafts, forwards topic_name, and restores on failure', async () => {
     const drafts = createDraftStore()
     let idSeq = 0
-    const sendMessage = vi.fn()
+    const sendMessage = vi.fn<TimelineApi['sendMessage']>()
     const sync = createSync({
       selfId: 'me',
       organizationId: 'org-1',
@@ -208,7 +214,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
     expect(drafts.get({ organizationId: 'org-1', channelId: 'A', topicId: 'topic-1' })).toBe('トピック別下書き')
     expect(a.composer.get().draft).toBe('最初の投稿')
 
-    let resolveTopicSend!: (res: unknown) => void
+    let resolveTopicSend!: (res: Result<Message>) => void
     sendMessage.mockReturnValueOnce(new Promise(r => { resolveTopicSend = r }))
     const submitting = topicT.submit('仕様相談')
     expect(topicT.get().draft).toBe('')
@@ -218,6 +224,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
     resolveTopicSend({
       ok: true,
       data: {
+        mentions: [],
         id: 'm-2',
         channel_id: 'A',
         sender: 'me',

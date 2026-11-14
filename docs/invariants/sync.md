@@ -58,3 +58,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [web](web.md): `releases its controller listener with the last observer`, `an unavailable Channel stays in the session: no sign-out and no automatic retry`, `a REST 401 after a handshake failure ends the Account Session`
 
 - [replies](replies.md): `keeps an unresolved descendant Reply visible and retryable after selecting its root and evicting the parent`
+
+- [unread](unread.md): `Mention suffix requires both watermark and position and deduplicates only within its Channel`, `Mention access generation rejects a previous generation REST response while the new baseline stays visible`

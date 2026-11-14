@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { MentionName } from './mentions'
   import type { TopicsAdapter } from './topics.svelte'
   import type { UnreadAdapter } from './unread.svelte'
   import Button from './ui/Button.svelte'
@@ -9,6 +10,7 @@
 
   let {
     topics,
+    resolveMentionName,
     unread = null,
     activeTopicId = null,
     unavailable = false,
@@ -16,6 +18,7 @@
     onstartnewtopic,
   }: {
     topics: TopicsAdapter
+    resolveMentionName?: MentionName
     unread?: UnreadAdapter | null
     channelId?: string
     activeTopicId?: string | null
@@ -75,6 +78,9 @@
               name={t.baseline?.summary.name ?? 'トピック'}
               messageCount={t.messageCount ?? undefined}
               latestBody={t.latestMessage.body}
+              mentions={t.latestMessage.mentions}
+              {resolveMentionName}
+              mentionUnreadCount={uState?.topics[t.topicId]?.mentionUnreadCount ?? 0}
               unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
               onclick={() => onselecttopic(t.topicId)}
               onretry={!unavailable && !state.unavailable && t.summaryError === 'retryable'

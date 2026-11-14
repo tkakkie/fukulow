@@ -1,3 +1,7 @@
+import Composer from './Composer.svelte'
+import { createAuthors } from './authors'
+import { authorsAdapter } from './authors.svelte'
+import { rememberIdentityResponse } from './identity-order'
 import ReplyPanel from './ReplyPanel.svelte'
 import { replyClient, reply, root } from './reply-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
@@ -375,8 +379,10 @@ class MiniElement extends MiniNode {
   private _value = ''
   defaultValue = ''
   checked = false
+  scrollIntoView() {}
   selectionStart: number | null = 0
   selectionEnd: number | null = 0
+  setSelectionRange(start: number, end: number) { this.selectionStart = start; this.selectionEnd = end }
   scrollTop = 0
   scrollHeight = 0
   clientHeight = 0
@@ -5613,7 +5619,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const t1Latest = { ...record(5, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック1最新' }
     const t2Latest = { ...record(6, 'c1'), sender: 'other', topic_id: 't2', body: 'トピック2最新' }
     const t1Summary = {
-      mention_unread_count: 0,
+      mention_unread_count: 1,
       id: 't1',
       name: '進行中トピック',
       first_seq: 5,
@@ -5712,7 +5718,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // Now resolve the Channel-list baseline: c1 has 2 Unread (from t1), c2 has 4 Unread
     net.unreadListResult = null
     net.unreadChannels.c1 = {
-      mention_unread_count: 0, main_mention_unread_count: 0,
+      mention_unread_count: 1, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
       read_seq: 6,
@@ -5720,7 +5726,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 0,
     }
     net.unreadChannels.c2 = {
-      mention_unread_count: 0, main_mention_unread_count: 0,
+      mention_unread_count: 2, main_mention_unread_count: 2,
       ...channel('c2', 'random'),
       as_of_seq: 4,
       read_seq: 0,
@@ -5751,6 +5757,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(panelBadges).toHaveLength(1)
     expect(panelBadges[0].getAttribute('aria-label')).toBe('未読 2件')
 
+    expect(channelNav.querySelectorAll('.ui-badge--mention').map(b => b.getAttribute('aria-label'))).toEqual(['メンションあり', 'メンションあり', 'メンション 2件'])
+    expect(host.querySelectorAll('#main-content .ui-badge--mention')).toHaveLength(1)
+    expect(host.querySelectorAll('#panel-content .ui-badge--mention')).toHaveLength(1)
     navigation.destroy()
     await unmount(instance)
     sessionModel.close()
@@ -6975,4 +6984,78 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     sessionModel.close()
   })
 
+})
+
+it('Mention components render accepted tokens highlight the reader and follow authorized non-author renames without resolving rejected tokens', async () => {
+  const id = '123e4567-e89b-12d3-a456-426614174000', unknown = '123e4567-e89b-12d3-a456-426614174001'
+  const body = `@{member:${id}} @{member:${id}} @{member:${unknown}} <script>`
+  const props = $state({ mentions: [{ member_id: id, name: '送信時の名前' }], pending: false })
+  rememberIdentityResponse(props.mentions)
+  const authors = createAuthors('org', vi.fn(), vi.fn()), adapter = authorsAdapter(authors)
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const instance = mount(MessageRow, { target: host as unknown as Element, props: {
+    body, selfId: id, get mentions() { return props.mentions },
+    get pendingStatus() { return props.pending ? 'sending' : undefined },
+    resolveMentionName: adapter.mentionName,
+  } })
+  await settle()
+  expect(host.querySelector('.body')?.textContent).toBe(`@送信時の名前 @送信時の名前 @{member:${unknown}} <script>`)
+  expect(host.querySelectorAll('script')).toHaveLength(0)
+  expect(host.querySelectorAll('.ui-message-row--mentioned')).toHaveLength(1)
+  authors.replaceMembers([{ id, name: '新しい名前', role: 'member' }, { id: unknown, name: '後で参加', role: 'member' }])
+  await settle()
+  expect(host.querySelector('.body')?.textContent).toBe(`@新しい名前 @新しい名前 @{member:${unknown}} <script>`)
+  props.mentions = [{ member_id: id, name: '無効化後の名前' }]; rememberIdentityResponse(props.mentions)
+  await settle()
+  expect(host.querySelector('.body')?.textContent).toContain('@無効化後の名前')
+  props.mentions = []; await settle()
+  expect(host.querySelector('.body')?.textContent).toBe(body)
+  expect(host.querySelectorAll('.ui-message-row--mentioned')).toHaveLength(0)
+  props.mentions = [{ member_id: id, name: '未確定' }]; props.pending = true; await settle()
+  expect(host.querySelector('.body')?.textContent).toBe(body)
+  expect(host.querySelectorAll('.ui-message-row--mentioned')).toHaveLength(0)
+  await unmount(instance); authors.close()
+})
+
+it('Mention autocomplete uses only directory candidates with keyboard selection literal tokens IME and Escape safety', async () => {
+  const id = '123e4567-e89b-12d3-a456-426614174000', second = '123e4567-e89b-12d3-a456-426614174001'
+  const props = $state({ body: '', members: [{ id, name: '田中', role: 'member' as const }, { id: second, name: '鈴木', role: 'member' as const }] })
+  const submit = vi.fn(async () => true), request = vi.fn()
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const instance = mount(Composer, { target: host as unknown as Element, props: {
+    get value() { return props.body }, get members() { return props.members },
+    oninput: body => { props.body = body }, onmentionrequest: request, onsubmit: submit,
+  } })
+  await settle()
+  const textarea = host.querySelector('textarea')!
+  function type(text: string) { textarea.value = text; textarea.selectionStart = text.length; textarea.selectionEnd = text.length; textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true })) }
+  function key(key: string, composing = false, shift = false) {
+    const e = new MiniDomEvent('keydown', { bubbles: true, cancelable: true }); e.key = key; e.isComposing = composing; e.shiftKey = shift
+    textarea.dispatchEvent(e); return e
+  }
+  type('@'); await settle()
+  expect(request).toHaveBeenCalledTimes(1)
+  const list = host.querySelector('[role="listbox"]')!
+  expect(list.getAttribute('aria-label')).toBe('メンションするメンバー')
+  expect(textarea.getAttribute('aria-controls')).toBe(list.id)
+  expect(host.querySelectorAll('[role="option"]').map(el => el.textContent)).toEqual(['田中', '鈴木'])
+  key('ArrowDown'); await settle()
+  expect(host.querySelectorAll('[role="option"]')[1].getAttribute('aria-selected')).toBe('true')
+  expect(key('Enter', true).defaultPrevented).toBe(false); await settle()
+  expect(props.body).toBe('@'); expect(submit).not.toHaveBeenCalled()
+  key('Enter'); await settle()
+  expect(props.body).toBe(`@{member:${second}} `)
+  expect(textarea.selectionStart).toBe(props.body.length)
+  expect(host.querySelectorAll('[role="listbox"]')).toHaveLength(0)
+  expect(submit).not.toHaveBeenCalled()
+  type('@田'); await settle()
+  expect(host.querySelectorAll('[role="option"]')).toHaveLength(1)
+  expect(key('Escape').defaultPrevented).toBe(true); await settle()
+  expect(host.querySelectorAll('[role="listbox"]')).toHaveLength(0)
+  type('@'); await settle(); props.members = []; await settle()
+  expect(host.querySelectorAll('[role="option"]')).toHaveLength(0)
+  props.members = [{ id, name: '田中', role: 'member' }]; type('@田'); await settle()
+  expect(key('Enter', false, true).defaultPrevented).toBe(false)
+  expect(submit).not.toHaveBeenCalled()
+  await unmount(instance)
 })
