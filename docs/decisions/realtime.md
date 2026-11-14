@@ -3,6 +3,7 @@
 Real-time delivery, admission, queues and timeouts. Writing rules and the other parts: [index](../decisions.md).
 
 ## Real-time delivery
+- #152 Mention counts inherit P8 baselines/dedup/stale rejection and #307/#151 invalidate-and-refetch/O5, with no Mention event or timer. Reason: unwatched activity and cross-device marks need authoritative REST counts; notices alone never add/subtract counts (spec M4).
 - #195: SIGTERM/SIGINT stop acceptance and reject new requests, broadcast 1001, then drain HTTP, detached sends/notifications and sockets before closing the pool. Count before spawn/upgrade so caller disconnects and task handoffs cannot hide work.
 - #195: retain provisional 60 s drain / 75 s Compose stop_grace_period from measured drains: 2,048-send SIGTERM <=814 ms; idle 10k restart <1 s (measurements.md). These are not guaranteed worst-case times; pre-admission SQL can exceed them. Expiry skips runtime teardown.
 - #195 known limit: on normal exit, Tokio runtime teardown is outside the drain and can run past its 60 s deadline. Retain the current teardown behavior; no larger change now.
@@ -98,6 +99,8 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
+
+- [messages](messages.md): `#152 proposes exact`, `#152 Message and message_mentions`, `#152 locks sorted`, `#152 Mention counts share`
 
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 new sends hold`
