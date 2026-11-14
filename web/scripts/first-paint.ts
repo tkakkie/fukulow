@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomInt, randomUUID, X509Certificate } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { arch, cpus, platform, release, totalmem } from 'node:os'
+import { arch, cpus, platform, release, tmpdir, totalmem } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { connect as tlsConnect, type DetailedPeerCertificate } from 'node:tls'
@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium, request as pwRequest } from '@playwright/test'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
-const outDir = resolve(process.env.FIRST_PAINT_OUT ?? '/private/tmp/fukulow-345')
+const outDir = resolve(process.env.FIRST_PAINT_OUT ?? join(tmpdir(), 'fukulow-345'))
 const project = process.env.FIRST_PAINT_PROJECT ?? 'fukulow-fp345'
 const runsPerCell = Number(process.env.FIRST_PAINT_RUNS ?? '10')
 const warmupRuns = Number(process.env.FIRST_PAINT_WARMUP ?? '12')
@@ -30,6 +30,7 @@ const cdpThrottleProfile = {
   downloadThroughput: 200_000,
   uploadThroughput: 93_750,
 } as const
+const viewport = { width: 1280, height: 800 } as const
 
 type ApiTiming = {
   seq: number
@@ -42,7 +43,7 @@ type ApiTiming = {
   duration: number
   transferBytes: number
   status: number
-  after: string | null
+  latestEndedBefore: string | null
   completedBeforeTimeline: boolean
 }
 
@@ -65,7 +66,7 @@ type RunMetrics = {
   timelineVisibleMs: number
   timelinePaintedMs: number
   apiCalls: ApiTiming[]
-  sequentialChain: string[]
+  timingChain: string[]
 }
 
 type PercentilePair = { p50: number; p95: number }
@@ -94,13 +95,14 @@ type CellSummary = {
       end: PercentilePair
       duration: PercentilePair
       transferBytes: PercentilePair
-      after: string | null
+      latestEndedBefore: string | null
       completedBeforeTimelineCount: number
     }
   >
-  sequentialChain: string[]
+  timingChain: string[]
 }
 
+// Nearest rank: with 10 runs, p95 is the 10th value, i.e. the maximum of the cell.
 function nearestRank(values: number[], percentile: number): number {
   const sorted = [...values].sort((a, b) => a - b)
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1))
@@ -210,7 +212,7 @@ async function measurePageLoad(
           headersEnd: number
           end: number | null
           status: number
-          after: string | null
+          latestEndedBefore: string | null
           done: Promise<void>
         }
         const state = {
@@ -291,7 +293,7 @@ async function measurePageLoad(
             headersEnd: start,
             end: null,
             status: 0,
-            after: latestPrior ? latestPrior.label : null,
+            latestEndedBefore: latestPrior ? latestPrior.label : null,
             done,
           }
           state.apiCalls.push(record)
@@ -418,7 +420,7 @@ async function measurePageLoad(
         headersEnd: number
         end: number | null
         status: number
-        after: string | null
+        latestEndedBefore: string | null
         done: Promise<void>
       }
       const s = (
@@ -482,19 +484,20 @@ async function measurePageLoad(
           duration: Number((end - c.start).toFixed(2)),
           transferBytes,
           status: c.status,
-          after: c.after,
+          latestEndedBefore: c.latestEndedBefore,
           completedBeforeTimeline: end <= s.timelineVisibleMs,
         }
       })
 
-      // Trace sequential chain ending at the timeline request
+      // Time order only: each link is the latest API request that ended before the next one started.
+      // It does not prove that a request waited for that response; actual dependencies come from the source.
       const byLabel = new Map(apiCalls.map((c) => [c.label, c]))
       const timelineCall = apiCalls.find((c) => c.path.endsWith('/timeline'))
       const chain: string[] = []
       let cursor: ApiTiming | undefined = timelineCall
       while (cursor) {
         chain.unshift(cursor.label)
-        cursor = cursor.after ? byLabel.get(cursor.after) : undefined
+        cursor = cursor.latestEndedBefore ? byLabel.get(cursor.latestEndedBefore) : undefined
       }
 
       return {
@@ -516,7 +519,7 @@ async function measurePageLoad(
         timelineVisibleMs: Number(s.timelineVisibleMs.toFixed(2)),
         timelinePaintedMs: Number(s.timelinePaintedMs.toFixed(2)),
         apiCalls,
-        sequentialChain: chain,
+        timingChain: chain,
       }
     }, runNumber)
 
@@ -546,7 +549,7 @@ function summarizeCell(
       end: summarizeNumbers(matching.map((m) => m.end)),
       duration: summarizeNumbers(matching.map((m) => m.duration)),
       transferBytes: summarizeNumbers(matching.map((m) => m.transferBytes)),
-      after: matching[0].after,
+      latestEndedBefore: matching[0].latestEndedBefore,
       completedBeforeTimelineCount: matching.filter((m) => m.completedBeforeTimeline).length,
     }
   }
@@ -568,7 +571,7 @@ function summarizeCell(
     assetsTransferBytes: summarizeNumbers(runs.map((r) => r.assetsTransferBytes)),
     htmlTransferBytes: summarizeNumbers(runs.map((r) => r.htmlTransferBytes)),
     apiByLabel,
-    sequentialChain: runs[0]?.sequentialChain ?? [],
+    timingChain: runs[0]?.timingChain ?? [],
   }
 }
 
@@ -657,7 +660,7 @@ try {
       console.log(`Running ${warmupRuns} warm-up navigations to stabilize PostgreSQL buffer/plan cache...`)
       const warmupMetrics: RunMetrics[] = []
       const warmupCtx = await browser.newContext({
-        viewport: { width: 1280, height: 800 },
+        viewport,
         storageState,
       })
       try {
@@ -679,7 +682,7 @@ try {
 
           for (let i = 1; i <= runsPerCell; i++) {
             const context = await browser.newContext({
-              viewport: { width: 1280, height: 800 },
+              viewport,
               storageState,
             })
             try {
@@ -729,6 +732,7 @@ try {
           membersInOrgA: 10_000,
         },
         cdpThrottleProfile,
+        viewport,
         runsPerCell,
         warmupRuns,
         warmupTimelineDurationsMs: warmupMetrics.map(

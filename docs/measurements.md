@@ -1045,7 +1045,7 @@ Limits: one final controller run; these are retained-store cardinalities, not a 
 
 Purpose: measure where time goes between opening the web app and seeing a usable timeline across cache states, network conditions and entry URLs before choosing among first-paint proposals.
 
-Environment and commit: `c30f79d8177fc0645159a11b98fc5d5abf97f3a5` (`antigravity/first-paint-345`, zero production code changes). Host: Apple M5 (10 CPUs, 32 GiB RAM), macOS 27.0.1 (`darwin 27.0.0`, `arm64`), Docker 29.9.3, Node v26.8.1, Playwright 1.65.0 / Chromium (1440×900). Stack: production multi-stage image served by `docker compose --profile caddy up` (Caddy 2.11.9, HTTPS `tls internal`, HTTP/2, `encode zstd gzip`, `Cache-Control: public, max-age=31536000, immutable` on `/assets/*`), PostgreSQL `18.6 (Debian 18.6-1.pgdg13+2)`.
+Environment and commit: `c30f79d8177fc0645159a11b98fc5d5abf97f3a5` (`antigravity/first-paint-345`, zero production code changes). Host: Apple M5 (10 CPUs, 32 GiB RAM), macOS 27.0.1 (`darwin 27.0.0`, `arm64`), Docker 29.9.3, Node v26.8.1, Playwright 1.65.0 / Chromium (1280×800 viewport, set in the script). Stack: production multi-stage image served by `docker compose --profile caddy up` (Caddy 2.11.9, HTTPS `tls internal`, HTTP/2, `encode zstd gzip`, `Cache-Control: public, max-age=31536000, immutable` on `/assets/*`), PostgreSQL `18.6 (Debian 18.6-1.pgdg13+2)`.
 
 Dataset (`load/hot-plans/seed.sql`, #325 scale): Organization A (`00000000-0000-4000-8000-00000000000a`) with 10,000 Members, 40 public Channels and 10 private Channels. Signed in as Member 2 (`m2@a.invalid`), who is a member of all 50 Channels (50 visible Channels). The first visible and directly opened Channel is `channel-1` (`386df2c5-c664-ee3d-2a08-b1c9f0a0275c`) with 100,000 Messages across 2,000 Topics (50 Messages/Topic); the other 49 Channels hold 2,000 Messages across 50 Topics each. Because `load/hot-plans/seed.sql` inserts non-Argon2 placeholder hashes, the script creates a throwaway account via `POST /api/v1/setup` before running `load/hot-plans/seed.sql` and copies its Argon2 `password_hash` to `m2@a.invalid` (same pattern as `load/signin.ts`), then running `ANALYZE`.
 
@@ -1055,13 +1055,15 @@ Matrix and method: 8 cells × 10 runs (after 12 warm-up navigations to warm OS/P
 - URL: `/` vs direct Channel URL `/o/00000000-0000-4000-8000-00000000000a/c/386df2c5-c664-ee3d-2a08-b1c9f0a0275c`.
 - Instrumentation: injected via Playwright `context.addInitScript` only (Navigation/Resource/Paint Timing, `MutationObserver` on `#app` and `.timeline-list .timeline-list__item`, `window.fetch` and `window.WebSocket` wrappers). Because `index.html` ships an empty `<div id="app"></div>` with external CSS/JS, blank-screen duration equals First Contentful Paint (FCP).
 
-Reproduce (self-contained: builds image, starts `fukulow-fp345` Caddy stack on ephemeral ports, seeds DB, runs 80 navigations, writes `/private/tmp/fukulow-345/results.json`, and tears down `down -v`):
+Reproduce (self-contained: builds image, starts `fukulow-fp345` Caddy stack on ephemeral ports, seeds DB, runs 80 navigations, writes `results.json` to `fukulow-345` under `os.tmpdir()` or to `FIRST_PAINT_OUT`, and tears down `down -v`):
 
 ```bash
 node web/scripts/first-paint.ts
 ```
 
 ### Page-level metrics (ms, `p50 / p95` across 10 runs per cell)
+
+With 10 runs, nearest-rank p95 is the 10th value: every p95 below is the slowest run of its cell and can come from a single run.
 
 | URL | Network | Cache | `index.html` TTFB | JS/CSS End | App Mount | FCP / Blank Screen | WS `subscribed` | Timeline Visible | Asset Transfer (B) |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -1078,35 +1080,42 @@ Static bundle sizes over the wire (compressed by Caddy): `index.html` 756 B, CSS
 
 ### API request waterfall before timeline is visible (ms from `navigationStart`, `p50 / p95`)
 
-Sequential critical-path chain in all 8 cells:
-`GET /api/v1/me` -> `GET /api/v1/orgs/{org}/me` -> `GET /api/v1/orgs/{org}/channels` -> `GET /api/v1/orgs/{org}/channels/{channel}/timeline`.
+The browser shows time order only, not which response a request waited for. The "Latest ended before start" column (`latestEndedBefore` in `results.json`) names the latest API request that finished before this one started; it is not a dependency.
+
+Dependencies read from the source at the measured commit (not measured):
+- `GET /api/v1/me` -> `GET /api/v1/orgs/{org}/me`: `auth.svelte.ts` shows the app after `getMe()`, and `selectOrganization()` then awaits the Organization.
+- `GET /api/v1/orgs/{org}/me` -> `channels`, `members` and the session: `selectOrganization()` opens the session (`session.ts`, which calls `channels.load()`) and starts `members.load()` only after that response.
+- `channels` -> `timeline`: `channels.ts` selects a Channel when the list arrives, and `Workspace.svelte` applies the URL's Channel only once the list is `ready`; the selection then calls `sync.watch()`, which fetches the timeline. This holds for direct Channel URLs too.
+- `channels #2` / `#3` are Unread list refreshes (`unread.ts` `refresh()`). Their triggering response was not traced; `#3` following `#2` is time order only.
+
+The timing in all 8 cells is consistent with the critical path `me` -> `orgs/{org}/me` -> `channels` -> `timeline`.
 
 Representative cells (`/` vs `/o/:org/c/:channel`, Cold cache):
 
-| Cell | Request (in start order) | Runs before timeline | Sequential predecessor (`after`) | Start (ms) | End (ms) | Duration (ms) | Transfer (B) |
+| Cell | Request (in start order) | Runs before timeline | Latest ended before start (time order) | Start (ms) | End (ms) | Duration (ms) | Transfer (B) |
 |---|---|---:|---|---:|---:|---:|---:|
-| `/` Unthrottled Cold | `GET /api/v1/me` | 10/10 | — (after JS mount) | 15.6 / 17.5 | 24.7 / 27.1 | 9.2 / 9.6 | 702 |
+| `/` Unthrottled Cold | `GET /api/v1/me` | 10/10 | — | 15.6 / 17.5 | 24.7 / 27.1 | 9.2 / 9.6 | 702 |
 | | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 24.9 / 27.3 | 26.9 / 29.3 | 1.9 / 2.1 | 709 |
 | | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.3 / 30.8 | 84.4 / 88.2 | 55.5 / 59.3 | 19,715 |
 | | `GET /api/v1/orgs/{org}/members` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.6 / 31.0 | 58.7 / 62.3 | 30.0 / 33.9 | 829,006 |
 | | `GET /api/v1/orgs/{org}/channels #2` | 10/10 | `GET /api/v1/orgs/{org}/me` | 31.2 / 33.8 | 91.4 / 95.7 | 59.9 / 63.9 | 19,715 |
 | | `GET /api/v1/orgs/{org}/channels/{channel}/timeline` | 10/10 | `GET /api/v1/orgs/{org}/channels` | 90.9 / 94.6 | 121.3 / 255.0 | 31.9 / 163.0 | 21,455 |
 | | `GET /api/v1/orgs/{org}/channels #3` | 4/10 | `GET /api/v1/orgs/{org}/channels #2` | 92.2 / 96.6 | 119.6 / 139.7 | 34.9 / 44.7 | 19,715 |
-| `/o/:org/c/:channel` Unthrottled Cold | `GET /api/v1/me` | 10/10 | — (after JS mount) | 15.4 / 16.8 | 24.5 / 26.1 | 9.2 / 9.4 | 702 |
+| `/o/:org/c/:channel` Unthrottled Cold | `GET /api/v1/me` | 10/10 | — | 15.4 / 16.8 | 24.5 / 26.1 | 9.2 / 9.4 | 702 |
 | | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 24.7 / 26.3 | 26.7 / 28.4 | 1.9 / 2.8 | 709 |
 | | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.2 / 29.9 | 78.9 / 82.3 | 50.7 / 53.1 | 19,715 |
 | | `GET /api/v1/orgs/{org}/members` | 10/10 | `GET /api/v1/orgs/{org}/me` | 28.4 / 30.1 | 53.9 / 65.6 | 25.0 / 37.7 | 829,006 |
 | | `GET /api/v1/orgs/{org}/channels #2` | 10/10 | `GET /api/v1/orgs/{org}/me` | 49.1 / 51.5 | 84.8 / 94.5 | 34.4 / 46.0 | 19,715 |
 | | `GET /api/v1/orgs/{org}/channels/{channel}/timeline` | 10/10 | `GET /api/v1/orgs/{org}/channels` | 82.0 / 86.1 | 112.5 / 241.4 | 31.2 / 157.5 | 21,455 |
 | | `GET /api/v1/orgs/{org}/channels #3` | 5/10 | `GET /api/v1/orgs/{org}/channels #2` | 85.7 / 95.4 | 108.6 / 125.5 | 22.0 / 40.6 | 19,715 |
-| `/` Throttled Cold | `GET /api/v1/me` | 10/10 | — (after JS mount) | 804.2 / 817.4 | 970.4 / 985.3 | 166.4 / 171.9 | 702 |
+| `/` Throttled Cold | `GET /api/v1/me` | 10/10 | — | 804.2 / 817.4 | 970.4 / 985.3 | 166.4 / 171.9 | 702 |
 | | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 971.2 / 986.2 | 1133.7 / 1147.9 | 161.3 / 164.5 | 709 |
 | | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 1138.9 / 1152.0 | 1578.6 / 1598.3 | 440.8 / 455.8 | 19,715 |
 | | `GET /api/v1/orgs/{org}/members` | 0/10 (in flight) | `GET /api/v1/orgs/{org}/me` | 1139.5 / 1152.7 | 6106.8 / 6203.7 | 4967.4 / 5060.9 | 829,006 |
 | | `GET /api/v1/orgs/{org}/channels #2` | 10/10 | `GET /api/v1/orgs/{org}/me` | 1146.5 / 1160.4 | 1594.1 / 1611.0 | 450.6 / 466.0 | 19,715 |
 | | `GET /api/v1/orgs/{org}/channels #3` | 10/10 | `GET /api/v1/orgs/{org}/channels #2` | 1596.1 / 1612.4 | 2035.4 / 2051.4 | 439.6 / 443.5 | 19,715 |
 | | `GET /api/v1/orgs/{org}/channels/{channel}/timeline` | 10/10 | `GET /api/v1/orgs/{org}/channels` | 1599.1 / 1618.7 | 2070.7 / 2087.5 | 468.0 / 478.9 | 21,455 |
-| `/o/:org/c/:channel` Throttled Cold | `GET /api/v1/me` | 10/10 | — (after JS mount) | 803.8 / 819.1 | 970.0 / 986.8 | 163.8 / 168.4 | 702 |
+| `/o/:org/c/:channel` Throttled Cold | `GET /api/v1/me` | 10/10 | — | 803.8 / 819.1 | 970.0 / 986.8 | 163.8 / 168.4 | 702 |
 | | `GET /api/v1/orgs/{org}/me` | 10/10 | `GET /api/v1/me` | 970.6 / 987.5 | 1134.6 / 1151.2 | 162.9 / 165.7 | 709 |
 | | `GET /api/v1/orgs/{org}/channels` | 10/10 | `GET /api/v1/orgs/{org}/me` | 1139.4 / 1156.1 | 1575.8 / 1591.0 | 437.9 / 446.3 | 19,715 |
 | | `GET /api/v1/orgs/{org}/members` | 0/10 (in flight) | `GET /api/v1/orgs/{org}/me` | 1140.0 / 1156.7 | 6105.7 / 6120.1 | 4965.5 / 4974.2 | 829,006 |
@@ -1116,8 +1125,8 @@ Representative cells (`/` vs `/o/:org/c/:channel`, Cold cache):
 
 ### Key waterfall findings
 
-1. **Four-step sequential API chain even on direct Channel URLs**: Opening `/o/:org/c/:channel` still runs `GET /api/v1/me` -> `GET /api/v1/orgs/{org}/me` -> `GET /api/v1/orgs/{org}/channels` -> `GET /api/v1/orgs/{org}/channels/{channel}/timeline` strictly one after another (`auth.svelte.ts` awaits `getMe()` before `getOrgMe()`, and `Workspace.svelte` waits for `channels.load()` to set `selectedId` before calling `sync.watch(channelId)`). On the 150 ms RTT / 1.6 Mbps profile, this post-mount serial chain takes ~1,270 ms (`185.9 ms` mount -> `1,457.3 ms` timeline visible on warm cache).
+1. **Four-step sequential API chain even on direct Channel URLs**: Opening `/o/:org/c/:channel` still runs `GET /api/v1/me` -> `GET /api/v1/orgs/{org}/me` -> `GET /api/v1/orgs/{org}/channels` -> `GET /api/v1/orgs/{org}/channels/{channel}/timeline` one after another. The dependencies come from the source (see above); the measurement shows only that each step started after the previous one ended. On the 150 ms RTT / 1.6 Mbps profile, this post-mount serial chain takes ~1,270 ms (`185.9 ms` mount -> `1,457.3 ms` timeline visible on warm cache).
 2. **Duplicate `channels` calls and a 10,000-member download saturate the link and DB during bootstrap**: Every page load fires `GET /api/v1/orgs/{org}/channels` 3–4 times (`channels.load()` in `session.ts` plus 2–3 `unread` refreshes on discovery/scope entry, each 19.7 KB compressed and ~51–60 ms server time for `unread.visible_list` + `unread.list_counts`) and unconditionally starts `GET /api/v1/orgs/{org}/members` (all 10,000 Members = 829 KB compressed, taking 4,967 ms on 1.6 Mbps and competing with `channels` and `timeline` on the downlink).
-3. **Server timeline generic-plan tail (#326) and cold blank screen**: Unthrottled, `GET .../timeline` takes 30.8–31.9 ms at p50 (PostgreSQL Custom plan) and 157.3–163.0 ms at p95 (PostgreSQL Generic plan after 5 executions on a pooled connection, Issue #326), causing the entire p50 -> p95 jump in `timelineVisibleMs` (119–130 ms p50 vs 253–264 ms p95). On cold throttled visits, the screen is blank for 828 ms p50 (836–848 ms p95) until the 84.7 KB JS bundle downloads and mounts `#app`.
+3. **One slow timeline run per unthrottled cell, and cold blank screen**: Unthrottled, `GET .../timeline` takes 30.8–31.9 ms at p50. In each unthrottled cell exactly 1 of 10 runs took 157–163 ms and the other 9 took 28–41 ms, so the p95 (157.3–163.0 ms) is that single run. It accounts for the p50 -> p95 jump in `timelineVisibleMs` (119–130 ms vs 253–264 ms). None of the 40 throttled runs shows such a tail (454–488 ms). This run captured no server plans. That the slow run is #326's generic plan is an estimate from the existing #326 statement-level DB measurements (generic plan about 10x the custom plan), not observed here. On cold throttled visits, the screen is blank for 828 ms p50 (836–848 ms p95) until the 84.7 KB JS bundle downloads and mounts `#app`.
 
-Limits: local loopback Docker stack on a developer Mac (says nothing about VPS network/CPU latency). PR #375 (#326 timeline query fix) is not merged on this base commit, so the PostgreSQL generic-plan timeline query cost is included in `timeline` and `timelineVisibleMs`. Other AI workers and containers may run on the same host. Raw per-run JSON is saved outside the repository at `/private/tmp/fukulow-345/results.json`.
+Limits: local loopback Docker stack on a developer Mac (says nothing about VPS network/CPU latency). PR #375 (#326 timeline query fix) is not merged on this base commit, so any generic-plan timeline cost is included in `timeline` and `timelineVisibleMs`. 10 runs per cell bound only the median; a tail seen in one run per cell is not a stable p95. Other AI workers and containers may run on the same host. This run saved its raw per-run JSON outside the repository at `/private/tmp/fukulow-345/results.json`; the script now defaults to `os.tmpdir()`.
