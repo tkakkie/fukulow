@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Duration};
+use tracing::Instrument;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -121,6 +122,7 @@ pub async fn upgrade(
     };
     // Dropped with the upgrade callback if the handshake never completes.
     let Some(permit) = state.socket_gate.admit(auth.account_id) else {
+        crate::observability::admission(crate::observability::Admission::Socket);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [
@@ -137,10 +139,13 @@ pub async fn upgrade(
             .into_response();
     };
     let socket_work = state.shutdown.sockets.enter();
+    let span = tracing::Span::current();
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
         .read_buffer_size(state.socket_gate.limits().read_buffer)
-        .on_upgrade(move |socket| connected(socket, state, auth, permit, socket_work))
+        .on_upgrade(move |socket| {
+            connected(socket, state, auth, permit, socket_work).instrument(span)
+        })
 }
 
 async fn connected(
@@ -162,6 +167,7 @@ async fn connected_with_lifecycle(
     lifecycle: connection::Lifecycle,
     _work: crate::shutdown::Guard,
 ) {
+    let _observation = crate::observability::Socket::opened();
     let session = tokio::select! {
         biased;
         _ = state.shutdown.cancelled() => { close(&mut socket, 1001).await; return; }
@@ -173,7 +179,8 @@ async fn connected_with_lifecycle(
             close(&mut socket, CLOSE_SESSION_ENDED).await;
             return;
         }
-        Err(_) => {
+        Err(error) => {
+            crate::observability::database_failure(&error);
             close(&mut socket, 1011).await;
             return;
         }
@@ -206,10 +213,13 @@ async fn connected_with_lifecycle(
     };
     if let Some(code) = code {
         close(&mut socket, code).await;
+    } else {
+        crate::observability::socket_closed(None);
     }
 }
 
 async fn close(socket: &mut WebSocket, code: u16) {
+    crate::observability::socket_closed(Some(code));
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         socket.send(Frame::Close(Some(CloseFrame {

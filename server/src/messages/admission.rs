@@ -1,3 +1,4 @@
+use crate::observability::{Admission as Rejection, admission};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -105,16 +106,14 @@ impl Admission {
         let key = (organization, channel);
         let mut queued = self.queued.lock().unwrap_or_else(|e| e.into_inner());
         let scope = if queued.total >= GLOBAL_QUEUE_CAP {
-            Some("global_queue")
+            Some(Rejection::SendGlobalQueue)
         } else if queued.channels.get(&key).copied().unwrap_or(0) >= CHANNEL_QUEUE_CAP {
-            Some("channel_queue")
+            Some(Rejection::SendChannelQueue)
         } else {
             None
         };
         if let Some(scope) = scope {
-            eprintln!(
-                "admission_rejected operation=send scope={scope} organization={organization} channel={channel}"
-            );
+            admission(scope);
             return Err(super::MessageError::AdmissionRejected);
         }
         queued.total += 1;
@@ -165,10 +164,19 @@ impl Admission {
             ADMISSION_WAIT
         };
         let deadline = tokio::time::Instant::now() + wait;
-        let operation = if send { "send" } else { "watermark" };
-        permit.channel = Some(acquire(&semaphore, deadline, operation, "channel", key).await?);
+        let channel_rejection = if send {
+            Rejection::SendChannel
+        } else {
+            Rejection::WatermarkChannel
+        };
+        permit.channel = Some(acquire(&semaphore, deadline, channel_rejection).await?);
         let global = if send { &self.send } else { &self.watermark };
-        permit.global = Some(acquire(global, deadline, operation, "global", key).await?);
+        let global_rejection = if send {
+            Rejection::SendGlobal
+        } else {
+            Rejection::WatermarkGlobal
+        };
+        permit.global = Some(acquire(global, deadline, global_rejection).await?);
         Ok(permit)
     }
 }
@@ -176,17 +184,12 @@ impl Admission {
 async fn acquire(
     semaphore: &Arc<Semaphore>,
     deadline: tokio::time::Instant,
-    operation: &str,
-    scope: &str,
-    key: ChannelKey,
+    rejection: Rejection,
 ) -> Result<OwnedSemaphorePermit, sqlx::Error> {
     match tokio::time::timeout_at(deadline, semaphore.clone().acquire_owned()).await {
         Ok(Ok(permit)) => Ok(permit),
         _ => {
-            eprintln!(
-                "admission_rejected operation={operation} scope={scope} organization={} channel={}",
-                key.0, key.1
-            );
+            admission(rejection);
             Err(sqlx::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "message work admission rejected",

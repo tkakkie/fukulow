@@ -57,6 +57,8 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`
+
 - [auth](auth.md): `deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries`
 
 - [channels](channels.md): `session_cannot_access_another_organization`

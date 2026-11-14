@@ -15,6 +15,8 @@ API contract and generated types. Writing rules and the other parts: [index](../
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [process](process.md): `#198 B: pinned tracing/subscriber`
+
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM list responses`, `#151 DM list base limits`

@@ -65,6 +65,8 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`, `active_socket_guard_releases_on_cancellation_and_normal_exit`
+
 - [auth](auth.md): `deactivation_http_cancellation_still_commits_and_signals_every_session`, `deactivation_self_denials_preserve_all_session_sockets`
 
 - [auth](auth.md): `sign_out_burst_over_1024_keeps_unrelated_sessions_open`, `failed_check_result_cannot_fail_reconnected_epoch`, `latched_membership_at_connect_yields_4003_and_session_end_wins`, `secure_websocket_refuses_legacy_cookie_and_accepts_host_cookie`

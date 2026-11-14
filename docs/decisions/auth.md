@@ -85,6 +85,9 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
+- [process](process.md): `#198 B: pinned tracing/subscriber`
+- [realtime](realtime.md): `#198 B: admission sites only increment`
+
 - [realtime](realtime.md): `#196 B headroom is shared`, `#196 B leaves RLS`
 
 - [load](load.md): `#151 adopts DM performance acceptance`

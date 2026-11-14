@@ -2,6 +2,7 @@ pub mod auth;
 pub mod channels;
 pub mod database;
 pub mod messages;
+pub mod observability;
 pub mod openapi;
 pub mod realtime;
 pub mod shutdown;
@@ -233,6 +234,7 @@ pub fn app(state: AppState) -> Router {
             cookie_secure,
             security_headers,
         ))
+        .layer(middleware::from_fn(observability::request))
         .with_state(state)
 }
 

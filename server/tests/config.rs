@@ -3,6 +3,26 @@
 use std::process::Command;
 
 #[test]
+fn startup_database_diagnostics_never_echo_sensitive_inputs() {
+    for args in [vec![], vec!["migrate"], vec!["migrate", "roles"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+            .env_clear()
+            .args(args)
+            .env("DATABASE_URL", "secret-invalid-database-url")
+            .env("FUKULOW_SETUP_TOKEN", "secret-setup-value")
+            .env("POSTGRES_APP_PASSWORD", "secret-role-value")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(!error.contains("secret-"), "{error}");
+        assert!(error.contains("database_failure"), "{error}");
+        assert!(error.contains("diagnostics suppressed"), "{error}");
+    }
+}
+
+#[test]
 fn roles_command_requires_password_before_connecting_and_rejects_unknown_commands() {
     for password in [None, Some("")] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));

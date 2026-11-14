@@ -599,11 +599,19 @@ async fn persist(
     let _permit = waiter.acquire().await?;
     tokio::time::timeout(
         admission::WORK_TIMEOUT,
-        persist_admitted(pool, delivery, organization_id, sender, channel_id, input, _permit),
+        persist_admitted(
+            pool,
+            delivery,
+            organization_id,
+            sender,
+            channel_id,
+            input,
+            _permit,
+        ),
     )
     .await
     .map_err(|_| {
-        eprintln!("work_deadline_expired operation=send organization={organization_id} channel={channel_id}");
+        tracing::warn!(target: "fukulow", event = "work_deadline_expired", operation = "send");
         MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))
     })?
 }
