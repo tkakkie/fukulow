@@ -1,15 +1,17 @@
+import { createSubscriber } from 'svelte/reactivity'
+import { createAuthOperations } from './auth-operations'
 import { createAccountSecurity } from './account-security'
 import { accountSecurityAdapter } from './account-security.svelte'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
-import { errorMessage, restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
-import { getOrganizationMe, isOrganizationUnavailable, type Identity, type AcceptInviteRequest } from './api'
+import { restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
+import { getOrganizationMe, isOrganizationUnavailable, type Identity } from './api'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createMembers } from './members'
-import { membersAdapter, type inviteAcceptanceAdapter } from './members.svelte'
+import { membersAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
@@ -64,8 +66,6 @@ const sessionEndedNotice = 'セッションが終了しました。もう一度�
 /** Account lifetime owns the 401 fence; each Organization selection owns a separate data generation. */
 export function createAuth(deps: AuthDeps = defaults) {
   let view = $state<AuthState>({ screen: 'loading' })
-  let error = $state('')
-  let busy = $state(false)
   let organization = $state<Identity | null>(null)
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
@@ -89,7 +89,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   }
   async function selectOrganization(id: string) {
     if (view.screen !== 'app') return
-    error = ''
+    operations.clearError()
     closeOrganization()
     selectedOrganizationId = id
     organizationStatus = 'loading'
@@ -121,7 +121,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     accountGeneration++
     selectedOrganizationId = ''
     organizationStatus = 'loading'
-    error = ''
+    operations.clearError()
     view = next
     if (next.screen === 'app') {
       const account = accountGeneration
@@ -132,8 +132,24 @@ export function createAuth(deps: AuthDeps = defaults) {
     }
   }
 
+  const operations = createAuthOperations(deps, {
+    generation: () => accountGeneration,
+    selection: () => selectionGeneration,
+    loading: () => { view = { screen: 'loading' } },
+    show,
+    ended,
+    async accepted(identity) {
+      if (view.screen !== 'app') return
+      const organizations = view.identity.organizations.filter(o => o.organization_id !== identity.organization.organization_id)
+      view = { ...view, identity: { ...view.identity, organizations: [...organizations, identity.organization] } }
+      await selectOrganization(identity.organization.organization_id)
+    },
+  })
+  const subscribe = createSubscriber(update => operations.subscribe(update))
   return {
-    get view() { return view }, get error() { return error }, get busy() { return busy },
+    get view() { return view },
+    get error() { subscribe(); return operations.get().error },
+    get busy() { subscribe(); return operations.get().busy },
     get organization() { return organization },
     get members() { return members },
     get security() { return security },
@@ -142,44 +158,11 @@ export function createAuth(deps: AuthDeps = defaults) {
     get session() { void changes; return session },
     selectOrganization,
     hasUnsavedChanges: () => drafts.hasDrafts() || (session?.sync.hasUnsavedChanges() ?? false),
-    async acceptInvitation(model: ReturnType<typeof inviteAcceptanceAdapter>, input: Omit<AcceptInviteRequest, 'token'>) {
-      const account = accountGeneration
-      const identity = await model.accept(input, () => ended(account))
-      if (!identity || account !== accountGeneration || view.screen !== 'app') return
-      const organizations = view.identity.organizations.filter(o => o.organization_id !== identity.organization.organization_id)
-      view = { ...view, identity: { ...view.identity, organizations: [...organizations, identity.organization] } }
-      await selectOrganization(identity.organization.organization_id)
-    },
-    async load() { view = { screen: 'loading' }; await show(await deps.restore()) },
-    async submitSetup(req: Parameters<typeof setupAndSignIn>[0]): Promise<boolean> {
-      busy = true; error = ''
-      const result = await deps.setupAndSignIn(req)
-      busy = false
-      if ('error' in result) { error = result.error; return false }
-      await show(result.state)
-      return true
-    },
-    async submitSignIn(email: string, password: string): Promise<boolean> {
-      busy = true; error = ''
-      const result = await deps.signIn(email, password)
-      busy = false
-      if (!result.ok) { error = errorMessage(result, 'signin'); return false }
-      await show({ screen: 'app', identity: result.data.identity })
-      return true
-    },
-    async signOut(): Promise<boolean> {
-      const account = accountGeneration, selection = selectionGeneration
-      busy = true; error = ''
-      const ok = await deps.signOut()
-      busy = false
-      if (!ok) {
-        if (account === accountGeneration && selection === selectionGeneration) {
-          error = errorMessage({ ok: false, kind: 'network' }, 'signin')
-        }
-        return false
-      }
-      await show({ screen: 'signin' })
-      return true
-    },
+    acceptInvitation: operations.acceptInvitation,
+    signOutAndContinue: operations.signOutAndContinue,
+    load: operations.load,
+    submitSetup: operations.submitSetup,
+    submitSignIn: operations.submitSignIn,
+    signOut: operations.signOut,
   }
 }

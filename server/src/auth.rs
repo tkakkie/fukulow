@@ -848,7 +848,7 @@ pub async fn organization_me(auth: Auth) -> Result<Response, ApiError> {
 
 #[utoipa::path(delete, path = "/api/v1/session", security(("cookie" = []), ("bearer" = [])),
     responses((status = 204, description = "Session revoked and cookie cleared", headers(("Set-Cookie" = String))),
-    (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
+    (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential; current and legacy cookies cleared without revocation", body = ErrorBody, headers(("Set-Cookie" = String))),
     (status = 500, description = "Database or worker failure while resolving or revoking the session", body = ErrorBody)))]
 pub async fn sign_out(
     State(state): State<AppState>,
@@ -857,7 +857,8 @@ pub async fn sign_out(
     let auth = match auth {
         Ok(auth) => auth,
         Err(error) if error.0 == StatusCode::UNAUTHORIZED => {
-            let mut response = error.into_response();
+            let mut response =
+                ([(header::SET_COOKIE, cookie(&state, "", 0))], error).into_response();
             clear_legacy_cookie(&state, &mut response);
             return Ok(response);
         }
