@@ -99,6 +99,9 @@ States look the same everywhere (board A2-2):
 | After `破棄` | the Message is removed | focus goes to the Composer |
 | New Messages below | `新着 n件 ↓` button | only when not pinned (§8) |
 | Sign in | board A2-3 | an ended Account Session (4001 or 401, S4 and C6) shows `ログインの有効期限が切れました。` |
+| Auth operation pending | sign-in, Invite acceptance and recovery buttons disabled | one shared guard until the request and state transition finish; no queued submissions |
+| Invite acceptance session 401 | error + `ログアウトして続ける` | explicit click only; waits for sign-out 204/401, then clears the error for manual resubmission; keeps the Invite and sign-in route |
+| Invite sign-out failure | `ログアウトできませんでした。通信状況を確認して、もう一度お試しください。` | keeps Invite and the action; no acceptance request |
 
 ## 6. Accessibility baseline
 - WCAG 2.2 AA. Landmarks: rail and チャンネル column are `nav` with labels, main is `main`, the panel is `aside` with a label; one `h1` per view; a skip link `メッセージへ移動` first in the page.
@@ -148,3 +151,4 @@ Keyboard first: every action has a keyboard path; frequent ones have shortcuts a
 - Buttons are verbs: `送信`, `再試行`, `再送する`, `破棄`, `チャンネル一覧へ`.
 - Unread badges use `未読 n件` as their accessible label (`Badge`); the timeline read marker uses `未読` (`ReadMarker`).
 - Terms only from `docs/spec.md`; no synonyms (not スレッド for 返信のつながり, not ワークスペース for 組織).
+- Channel creation: `公開範囲` groups the native radio choices `公開` (default) / `非公開`. The form uses `can_create_channels`; Guests see neither the form nor the choices. Successful creation resets the choices to `公開`; a refusal preserves the selection.

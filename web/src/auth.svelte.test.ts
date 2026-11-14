@@ -9,6 +9,7 @@ import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
+import type { AuthState } from './auth'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -49,6 +50,76 @@ function stack(over: Partial<AuthDeps> = {}) {
   return { auth: createAuth(deps), deps, nets, ended, closes, stores }
 }
 type Stack = ReturnType<typeof stack>
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+it.each(['sign-in', 'restore', 'setup', 'Invite'] as const)('%s releases cookie mutation busy before a delayed Organization lookup, allowing switching and sign-out', async action => {
+  const lookup = deferred<Awaited<ReturnType<AuthDeps['getOrganization']>>>()
+  const s = stack({
+    restore: vi.fn(async () => ({ screen: 'app' as const, identity: identity('owner') })),
+    setupAndSignIn: vi.fn(async () => ({ state: { screen: 'app' as const, identity: identity('owner') } })),
+  })
+  if (action === 'Invite') await signInAs(s, 'owner')
+  vi.mocked(s.deps.getOrganization).mockReturnValueOnce(lookup.promise)
+  const pending = action === 'sign-in' ? s.auth.submitSignIn('owner@example.com', 'pw')
+    : action === 'restore' ? s.auth.load()
+    : action === 'setup' ? s.auth.submitSetup({ organization_name: 'Org', name: 'Owner', email: 'owner@example.com', password: 'test-only password', setup_token: 'test-only' })
+    : s.auth.acceptInvitation(createInviteAcceptance({ organizationId: 'o', token: 'a'.repeat(64) }, async () => ok(member('owner'))), { email: 'owner@example.com', name: 'Owner' })
+  await settle()
+  expect(s.auth.view.screen).toBe('app')
+  expect(s.auth.organizationStatus).toBe('loading')
+  expect(s.auth.busy).toBe(false)
+
+  await s.auth.selectOrganization('other')
+  expect(s.auth.organizationStatus).toBe('ready')
+  expect(s.auth.session).not.toBeNull()
+  expect(await s.auth.signOut()).toBe(true)
+  expect(s.deps.signOut).toHaveBeenCalledOnce()
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.session).toBeNull()
+
+  lookup.resolve(ok(member('owner')))
+  await pending
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.session).toBeNull()
+  expect(s.auth.busy).toBe(false)
+})
+
+it('loading-timeout retry starts another restore while the first read is pending and fences its late result', async () => {
+  const first = deferred<AuthState>()
+  const retry = deferred<AuthState>()
+  const s = stack({ restore: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(retry.promise) })
+  const pending = s.auth.load()
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(s.auth.view.screen).toBe('loading')
+  expect(s.auth.busy).toBe(false)
+  const retried = s.auth.load()
+  expect(s.deps.restore).toHaveBeenCalledTimes(2)
+  first.resolve({ screen: 'app', identity: identity('stale') })
+  await pending
+  expect(s.auth.view.screen).toBe('loading')
+  expect(s.deps.getOrganization).not.toHaveBeenCalled()
+  retry.resolve({ screen: 'signin' })
+  await retried
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.auth.busy).toBe(false)
+})
+
+it('sign-out during a pending restore fences the read without waiting for it', async () => {
+  const restore = deferred<AuthState>()
+  const s = stack({ restore: vi.fn(() => restore.promise) })
+  const pending = s.auth.load()
+  expect(await s.auth.signOut()).toBe(true)
+  expect(s.deps.signOut).toHaveBeenCalledOnce()
+  restore.resolve({ screen: 'app', identity: identity('stale') })
+  await pending
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.deps.getOrganization).not.toHaveBeenCalled()
+})
 
 it('Organization switch cancels a throttled send and returning never revives its timer', async () => {
   const s = stack()
@@ -567,11 +638,53 @@ it('accepting an Invite rechecks Membership in the current Account Session; repl
   let finish!: (result: Awaited<ReturnType<AuthDeps['getOrganization']>>) => void
   const late = inviteAcceptanceAdapter(createInviteAcceptance({ organizationId: 'old', token: 'b'.repeat(64) }, () => new Promise(r => { finish = r })))
   const accepting = s.auth.acceptInvitation(late, { email: 'm1@example.com', name: 'Member', password: null })
-  await signInAs(s, 'm2')
+  expect(await s.auth.submitSignIn('m2@example.com', 'pw')).toBe(false)
+  s.ended.at(-1)!()
   finish(ok(member('m1')))
   await accepting
+  expect(late.state).toMatchObject({ available: true, accepted: false, busy: false })
+  await signInAs(s, 'm2')
   expect(s.auth.organization!.member.id).toBe('m2')
   expect(s.nets).toHaveLength(3)
+})
+
+it('Invite session 401 ends the app but preserves the Invite through explicit sign-out and matching Account sign-in', async () => {
+  const s = stack()
+  await signInAs(s, 'm1')
+  const api = vi.fn()
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 401 })
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'invite_sign_in_required' })
+    .mockResolvedValueOnce(ok(member('m1')))
+  const invitation = inviteAcceptanceAdapter(createInviteAcceptance({ organizationId: 'o', token: 'a'.repeat(64) }, api))
+  const input = { email: 'm1@example.com', name: 'Member', password: null }
+  const observed = await mount(() => invitation.state)
+  await s.auth.acceptInvitation(invitation, input)
+  await settle()
+  expect(s.auth.view.screen).toBe('signin')
+  expect(s.closes[0]).toHaveBeenCalledOnce()
+  expect(observed.last).toMatchObject({ available: true, sessionRejected: true })
+  expect(s.deps.signOut).not.toHaveBeenCalled()
+  vi.mocked(s.deps.signOut).mockResolvedValueOnce(false)
+  await s.auth.signOutAndContinue(invitation)
+  expect(s.auth.error).toBe('')
+  expect(invitation.state.error).toContain('ログアウトできませんでした')
+  expect(invitation.state.sessionRejected).toBe(true)
+  expect(api).toHaveBeenCalledOnce()
+  await s.auth.signOutAndContinue(invitation)
+  await settle()
+  expect(s.deps.signOut).toHaveBeenCalledTimes(2)
+  expect(observed.last).toMatchObject({ available: true, sessionRejected: false, error: '' })
+  expect(api).toHaveBeenCalledOnce()
+  await s.auth.acceptInvitation(invitation, input)
+  expect(invitation.state.error).toContain('このアドレスのアカウントでログイン')
+  expect(invitation.state.sessionRejected).toBe(false)
+  await signInAs(s, 'm1')
+  expect(api).toHaveBeenCalledTimes(2)
+  await s.auth.acceptInvitation(invitation, input)
+  expect(invitation.state.accepted).toBe(true)
+  expect(s.auth.organization!.member.id).toBe('m1')
+  await observed.unmount()
+  await s.auth.signOut()
 })
 
 it('Account Session drafts survive Organization re-selection and A to B to A with the same Channel id', async () => {

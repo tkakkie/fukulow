@@ -39,6 +39,7 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
     await expect(guest.getByText('Acme / 招待ゲスト さん')).toBeVisible()
     await expect(guest.getByRole('heading', { name: 'Members public control' })).toHaveCount(0)
     await expect(guest.getByRole('button', { name: 'チャンネルを作成' })).toHaveCount(0)
+    await expect(guest.getByRole('group', { name: '公開範囲' })).toHaveCount(0)
     await guest.locator('summary').click()
     await expect(guest.getByText('招待ゲスト（ゲスト）')).toBeVisible()
     await expect(guest.getByRole('button', { name: '招待リンクを作成' })).toHaveCount(0)

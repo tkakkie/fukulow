@@ -3955,7 +3955,14 @@
             }
           },
           "401": {
-            "description": "Missing, invalid, expired, or revoked Account Session credential",
+            "description": "Missing, invalid, expired, or revoked Account Session credential; current and legacy cookies cleared without revocation",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
