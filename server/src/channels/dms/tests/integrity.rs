@@ -1,6 +1,6 @@
 use super::*;
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn open_denials_reveal_no_pair_or_positions_and_sql_rejects_foreign_third_or_mutated_pairs(
     pool: PgPool,
 ) {
@@ -58,7 +58,7 @@ async fn open_denials_reveal_no_pair_or_positions_and_sql_rejects_foreign_third_
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn lost_caller_revision_never_borrows_reactivated_authority_or_canonical_body(pool: PgPool) {
     let f = Fixture::new(pool, "guest").await;
     let c = f.dm().await;
@@ -129,7 +129,7 @@ async fn lost_caller_revision_never_borrows_reactivated_authority_or_canonical_b
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn discovery_tables_require_organization_context_and_reject_cross_organization_writes(
     pool: PgPool,
 ) {

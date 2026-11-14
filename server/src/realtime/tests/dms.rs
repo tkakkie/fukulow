@@ -13,7 +13,7 @@ async fn open(f: &Fixture, peer: Uuid) -> Uuid {
     Uuid::parse_str(body(r).await["id"].as_str().unwrap()).unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied(
     pool: PgPool,
 ) {
@@ -65,7 +65,7 @@ async fn dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_d
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access(
     pool: PgPool,
 ) {
@@ -130,7 +130,7 @@ async fn dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does
     assert_eq!(event(&mut fresh).await["message"], live);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message(
     pool: PgPool,
 ) {
@@ -215,7 +215,7 @@ async fn body(r: Response) -> Value {
     serde_json::from_slice(&to_bytes(r.into_body(), 256 * 1024).await.unwrap()).unwrap()
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn denied_dm_mutations_and_canonical_retries_publish_no_message_with_participant_controls(
     pool: PgPool,
 ) {
@@ -273,7 +273,7 @@ async fn denied_dm_mutations_and_canonical_retries_publish_no_message_with_parti
     assert_eq!(event(&mut b).await["message"], guest);
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn dm_stale_revision_cannot_subscribe_replay_or_receive_even_after_explicit_renewal(
     pool: PgPool,
 ) {

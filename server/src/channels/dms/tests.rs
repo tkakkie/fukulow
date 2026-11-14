@@ -93,7 +93,7 @@ impl Fixture {
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn guests_cannot_open_but_participate_and_every_management_and_topic_route_denies(
     pool: PgPool,
 ) {
@@ -206,7 +206,7 @@ async fn guests_cannot_open_but_participate_and_every_management_and_topic_route
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime(
     pool: PgPool,
 ) {
@@ -270,7 +270,7 @@ async fn default_open_resolves_before_peer_eligibility_and_renewal_preserves_cur
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn only_current_pair_participants_read_write_retry_and_discover(pool: PgPool) {
     for peer_role in ["member", "guest"] {
         let f = Fixture::new(pool.clone(), peer_role).await;

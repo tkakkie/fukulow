@@ -9,7 +9,7 @@ async fn changes(f: &Fixture, token: &str, lane: &str, cursor: Option<&str>) -> 
     f.get(token, &suffix).await
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn creation_order_pages_and_id_refresh_authorize_before_cursor_validation(pool: PgPool) {
     let f = Fixture::new(pool, "guest").await;
     let mut expected = HashSet::new();
@@ -85,7 +85,7 @@ async fn creation_order_pages_and_id_refresh_authorize_before_cursor_validation(
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn discovery_coalesces_and_coverage_cannot_skip_hot_rows_or_acknowledge_delta(pool: PgPool) {
     let f = Fixture::new(pool, "guest").await;
     let mut channels = Vec::new();
@@ -155,7 +155,7 @@ async fn discovery_coalesces_and_coverage_cannot_skip_hot_rows_or_acknowledge_de
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delayed_renewal_behind_both_cursors_remains_pending_and_rollback_is_atomic(pool: PgPool) {
     let f = Fixture::new(pool, "member").await;
     let c = f.dm().await;
@@ -214,7 +214,7 @@ async fn large_fixture(f: &Fixture, n: usize) -> Vec<Uuid> {
     channels
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn quiet_500_501_and_9999_pending_dms_drain_in_q_pages_with_independent_coverage(
     pool: PgPool,
 ) {
@@ -265,7 +265,7 @@ async fn quiet_500_501_and_9999_pending_dms_drain_in_q_pages_with_independent_co
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn delayed_empty_creation_is_above_early_counter_and_later_allocation_waits_for_commit(
     pool: PgPool,
 ) {

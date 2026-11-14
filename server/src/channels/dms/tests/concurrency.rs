@@ -11,7 +11,7 @@ pub(super) async fn wait_lock(pool: &PgPool, pattern: &str) {
     }).await.unwrap_or_else(|_|panic!("no matching lock waiter: {pattern}"));
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread(pool: PgPool) {
     let f = Fixture::new(pool, "member").await;
     let (a, b) = tokio::join!(f.open(&f.at, f.b, false), f.open(&f.bt, f.a, false));
@@ -50,7 +50,7 @@ async fn reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread(pool: 
     f.pools.app.close().await;
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions(
     pool: PgPool,
 ) {
@@ -137,7 +137,7 @@ async fn send_first_holds_peer_through_commit_and_deactivation_first_denies_both
     }
 }
 
-#[sqlx::test]
+#[fukulow_test::test]
 async fn admin_demotion_ignores_dms_but_private_last_manager_still_denies(pool: PgPool) {
     let f = Fixture::new(pool, "admin").await;
     let c = f.dm().await;
