@@ -181,3 +181,22 @@ it('O5 fences a delayed continuation without rewinding its accepted boundary or 
   expect(c.state.rows.some(row => row.identity.id === 'stale')).toBe(false)
   expect(c.state.lanes.browse.done).toBe(true)
 })
+
+it('later demand reopens a refused lane without clearing its error budget continuation or backoff', () => {
+  const c = client(); c.discovery([dm('A')])
+  const refused = c.wake(); expect(refused.lane).toBe('held')
+  c.feed({ type: 'failure', request: refused, retryAt: 20_000, terminal: true })
+  c.feed({ type: 'browse' }); c.result(c.wake(), { dms: [], next_cursor: null })
+  expect(c.state.status).toBe('error') // Successful discovery/browsing cannot hide a failed lane.
+  expect(c.state.error).toBe(true)
+  const budget = c.state.budget
+  c.feed({ type: 'demand', boundary: true, replace: [] })
+  expect(c.state.budget).toBe(budget)
+  expect(c.state.lanes.held).toMatchObject({ stopped: false, retryAt: 20_000, attempt: 1 })
+  expect(c.wake()).toBeUndefined()
+  c.feed({ type: 'wake', now: 20_000 })
+  const retried = c.state.request!
+  expect(retried.lane).toBe('held'); expect(retried.ids).toEqual(refused.ids)
+  c.result(retried, { dms: [dm('A')], next_cursor: null })
+  expect(c.state.status).toBe('ready'); expect(c.state.error).toBe(false)
+})

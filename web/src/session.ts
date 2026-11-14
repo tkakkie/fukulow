@@ -148,6 +148,7 @@ export function createSession(options: SessionOptions) {
     open: (body, signal) => observe(dmSource.open(body, signal)),
   }, activity, watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
   baseline: (dm, replace) => unread.activityDmSnapshot(dm, replace),
+  processed: identity => topicComposition.resolveDm(identity.id),
   drop: id => unread.activityRevoke(id),
   select: id => {
     if (closed || unavailable) return

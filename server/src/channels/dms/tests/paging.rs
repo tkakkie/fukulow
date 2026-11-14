@@ -12,15 +12,12 @@ async fn changes(f: &Fixture, token: &str, lane: &str, cursor: Option<&str>) -> 
 #[fukulow_test::test]
 async fn creation_order_pages_and_id_refresh_authorize_before_cursor_validation(pool: PgPool) {
     let f = Fixture::new(pool, "guest").await;
-    let mut expected = HashSet::new();
-    for _ in 0..51 {
-        let peer = Uuid::new_v4();
-        member(&f.pools.admin, f.org, peer, "guest").await;
-        let r = f.open(&f.at, peer, false).await;
-        assert_eq!(r.status(), StatusCode::CREATED);
-        expected.insert(body(r).await["id"].as_str().unwrap().to_owned());
-    }
-    // Equal immutable timestamps exercise UUID tie breaking without modifying DM keys.
+    // Seed equal immutable timestamps at creation to exercise the UUID tie-breaker.
+    let expected = large_fixture(&f, 51)
+        .await
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
     let first = f.get(&f.at, "/api/v1/dms").await;
     assert_eq!(first["dms"].as_array().unwrap().len(), 50);
     let cursor = first["next_cursor"].as_str().unwrap();
@@ -197,6 +194,62 @@ async fn delayed_renewal_behind_both_cursors_remains_pending_and_rollback_is_ato
     assert_eq!(f.snapshot().await, before);
     let quiet = changes(&f, &f.at, "delta", late["next_cursor"].as_str()).await;
     assert_eq!(quiet["dms"], json!([]));
+    f.pools.app.close().await;
+}
+
+#[fukulow_test::test]
+async fn cursors_bind_to_the_issuing_account_session_for_the_same_member_revision(pool: PgPool) {
+    use sha2::{Digest, Sha256};
+
+    let f = Fixture::new(pool, "guest").await;
+    large_fixture(&f, 51).await;
+    let other = format!(
+        "{}.{}{}",
+        f.org,
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    sqlx::query("INSERT INTO account_sessions(token_hash,account_id) SELECT $1,account_id FROM users WHERE organization_id=$2 AND id=$3")
+        .bind(Sha256::digest(other.as_bytes()).to_vec()).bind(f.org).bind(f.a)
+        .execute(&f.pools.admin).await.unwrap();
+    let issuing = extract_auth(f.state.clone(), &f.at).await;
+    let receiving = extract_auth(f.state.clone(), &other).await;
+    assert_eq!(issuing.identity.member.id, receiving.identity.member.id);
+    assert_eq!(issuing.membership_revision, receiving.membership_revision);
+    assert_ne!(issuing.session_scope(), receiving.session_scope());
+    // Both live Sessions have identical authority before a cursor is supplied.
+    for token in [&f.at, &other] {
+        assert_eq!(
+            f.get(token, "/api/v1/dms").await["dms"]
+                .as_array()
+                .unwrap()
+                .len(),
+            50
+        );
+    }
+    let list = f.get(&f.at, "/api/v1/dms").await;
+    let delta = changes(&f, &f.at, "delta", None).await;
+    let coverage = changes(&f, &f.at, "coverage", None).await;
+    let mut rejections = Vec::new();
+    for (prefix, page) in [
+        ("/api/v1/dms?", list),
+        ("/api/v1/dms/changes?lane=delta&", delta),
+        ("/api/v1/dms/changes?lane=coverage&", coverage),
+    ] {
+        let path = format!("{prefix}cursor={}", page["next_cursor"].as_str().unwrap());
+        // Positive control: the issuing Session can still consume its continuation.
+        let accepted = f.get(&f.at, &path).await;
+        assert_eq!(accepted["dms"].as_array().unwrap().len(), 1);
+        let refused = request(&f.app, "GET", &path, &other, Value::Null).await;
+        let status = refused.status();
+        let error = body(refused).await;
+        rejections.push((prefix, status, error));
+    }
+    // Assert every lane after exercising them all, including under the negative mutation.
+    for (lane, status, error) in rejections {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{lane}");
+        assert_eq!(error, json!({"error":"invalid input"}), "{lane}");
+    }
     f.pools.app.close().await;
 }
 

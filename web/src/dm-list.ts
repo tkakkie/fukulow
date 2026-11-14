@@ -2,7 +2,7 @@ import type { Dm, DmChanges, DmDiscovery, DmList } from './api-schema'
 
 export type DmLane = 'delta' | 'coverage' | 'held' | 'browse' | 'recovery'
 export type DmRow = { identity: DmDiscovery; baseline?: Dm; access: number; used: number }
-type Lane = { cursor?: string; pending: boolean; done: boolean; retryAt: number; attempt: number; stopped: boolean }
+type Lane = { cursor?: string; pending: boolean; done: boolean; retryAt: number; attempt: number; stopped: boolean; error: boolean }
 export type DmRequest = { id: number; lane: DmLane; generation: number; cursor?: string; ids?: string[]; access: Record<string, number>; recoveryPeer?: string }
 export type DmListState = {
   rows: DmRow[]; selected: string | null; generation: number; serial: number; clock: number
@@ -13,7 +13,7 @@ export type DmListState = {
   status: 'loading' | 'ready' | 'error'; error: boolean
   sendBlocks: Record<string, 'dm_peer_deactivated' | 'dm_peer_access_lapsed'>
 }
-const lane = (pending = false): Lane => ({ pending, done: false, retryAt: 0, attempt: 0, stopped: false })
+const lane = (pending = false): Lane => ({ pending, done: false, retryAt: 0, attempt: 0, stopped: false, error: false })
 export const dmListState = (): DmListState => ({ rows: [], selected: null, generation: 0, serial: 0, clock: 0,
   lanes: { delta: lane(true), coverage: lane(true), held: lane(), browse: lane(), recovery: lane() },
   round: [], needsRound: true, budget: 5, discoveryUsed: [], sharedUsed: [], rotation: 0,
@@ -75,6 +75,7 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
   const s = structuredClone(state), effects: DmEffect[] = []
   if (s.closed) return { state: s, effects }
   const demand = () => {
+    for (const l of Object.values(s.lanes)) l.stopped = false
     s.lanes.delta.pending = true; s.lanes.coverage.pending = true; s.needsRound = true
     if (s.request) s.queued = true
   }
@@ -104,12 +105,14 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       for (const row of s.rows) if (row.identity.id === input.id) row.used = ++s.clock
       break
     case 'browse':
+      s.lanes.browse.stopped = false
       if (!s.lanes.browse.done) s.lanes.browse.pending = true
       break
     case 'recover':
       if (s.recoveryPeer !== input.peer || s.recovered || s.recoveryAbsent) { s.generation++; s.lanes.recovery = lane(true) }
       s.recoveryPeer = input.peer; s.recovered = undefined; s.recoveryAbsent = false
       s.recoveryRenewed = input.renewed === true
+      s.lanes.recovery.stopped = false
       s.lanes.recovery.pending = true
       break
     case 'opened': {
@@ -156,7 +159,7 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       if (s.request?.id !== input.request.id) break
       s.request = undefined
       const l = s.lanes[input.request.lane]
-      l.retryAt = input.retryAt; l.attempt++; l.stopped = input.terminal
+      l.retryAt = input.retryAt; l.attempt++; l.stopped = input.terminal; l.error = true
       s.status = 'error'; s.error = true
       break
     }
@@ -165,9 +168,9 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       if (s.request?.id !== q.id) break
       s.request = undefined
       const l = s.lanes[q.lane]
-      l.attempt = 0; l.retryAt = 0
       const current = q.generation === s.generation && !s.paused
       if (!current) { s.queued = true; break }
+      l.attempt = 0; l.retryAt = 0; l.error = false
       // Match recovery before LRU eviction, even when the match is well beyond retained rows.
       for (const dm of input.data.dms) {
         if (q.lane === 'recovery' && q.recoveryPeer === s.recoveryPeer && dm.peer.id === s.recoveryPeer) {
@@ -186,7 +189,7 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
           const previous = row.baseline
           row.baseline = chooseDmBaseline(previous, dm)
           if (row.baseline === dm) effects.push({ type: 'baseline', dm, replace: previous === undefined })
-          else { s.needsRound = true; s.error = true }
+          else { s.needsRound = true; l.error = true }
         }
       }
       if (q.lane === 'held') {
@@ -209,6 +212,8 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       break
     }
   }
+  s.error = Object.values(s.lanes).some(l => l.error)
+  if (s.error) s.status = 'error'
   return { state: s, effects }
 
   function trim() {

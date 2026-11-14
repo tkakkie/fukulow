@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { createSession } from './session'
-import type { Dm, Message, ReadPosition, Result } from './api'
+import type { Dm, Message, ReadPosition, Result, TimelinePage } from './api'
 import type { RealtimeHandlers } from './realtime'
 import { dm } from './dm-test-helpers'
 const ok = <T>(data: T): Result<T> => ({ ok: true, data })
@@ -12,7 +12,7 @@ function client() {
   let rows: Dm[] = [dm('D', { as_of_seq: 1, read_seq: 0, main_unread_count: 1, unread_count: 1 })]
   let socket!: RealtimeHandlers
   const listMessages = vi.fn(async () => ok({ messages: [first], has_more: false }))
-  const listTimeline = vi.fn(async (): Promise<Result<never>> => ({ ok: false, kind: 'http', status: 400, error: 'dm_topics_not_allowed' }))
+  const listTimeline = vi.fn(async (): Promise<Result<TimelinePage>> => ok({ as_of_seq: 1, items: [{ kind: 'message', message: first }], has_more: false }))
   const markRead = vi.fn(async (_scope, body) => ok(body))
   const listChannels = vi.fn(async () => ok({ channels: [] }))
   const onEnded = vi.fn(), open = vi.fn(async (): Promise<Result<Dm>> => ok(rows[0]!))
@@ -52,12 +52,26 @@ it('DM discovery neither watches nor marks read and selection bootstraps the fir
   c.session.close()
 })
 
-it('unknown-kind direct links fall back from the authorized DM Topic refusal to ordinary Message history', async () => {
+it('unknown-kind direct links reload common DM history after discovery and keep older Messages pageable', async () => {
   const c = client(); c.rows = []
+  const messages = [1, 2, 3].map(seq => ({ ...c.first, id: String(seq), seq }))
+  c.listTimeline.mockResolvedValue(ok({ as_of_seq: 3, items: messages.slice(1).map(message => ({ kind: 'message' as const, message })), has_more: true }))
+  c.listMessages.mockResolvedValueOnce(ok({ messages: messages.slice(1), has_more: true }))
+    .mockResolvedValueOnce(ok({ messages: messages.slice(0, 1), has_more: false }))
   c.socket.onReady(); c.session.channels.selectHint('D'); await flush()
-  expect(c.listTimeline).toHaveBeenCalledOnce(); expect(c.listMessages).toHaveBeenCalledOnce()
-  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
-  expect(c.session.sync.get().channels.D.messages).toEqual([c.first])
+  expect(c.listTimeline).toHaveBeenCalledOnce()
+  expect(c.session.sync.get().channels.D.messages.map(m => m.seq)).toEqual([3])
+  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 3 }); await flush()
+  c.rows = [dm('D', { as_of_seq: 3 })]
+  c.socket.onEvent({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000)
+  expect(c.listMessages).toHaveBeenCalledOnce()
+  expect(c.session.sync.get().channels.D.messages.map(m => m.seq)).toEqual([2, 3])
+  expect(c.session.sync.getTimeline('D').get().hasOlder).toBe(true)
+  await c.session.sync.getTimeline('D').loadOlder(); await flush()
+  expect(c.listMessages).toHaveBeenLastCalledWith('D', { before_seq: 2 })
+  expect(c.session.sync.get().channels.D.messages.map(m => m.seq)).toEqual([1, 2, 3])
+  expect(c.session.sync.get().channels.D.cursor).toBe(3)
+  expect(c.session.sync.getTimeline('D').get().hasOlder).toBe(false)
   c.session.close()
 })
 
@@ -104,4 +118,23 @@ it('a same-Session late DM 401 ends the Account owner after Organization teardow
     await opening; await flush()
     expect(c.onEnded).toHaveBeenCalledTimes(status === 401 ? 1 : 0)
   }
+})
+
+it('DM discovery during an unknown-kind bootstrap uses common history before establishing the cursor', async () => {
+  const c = client(); c.rows = []
+  const messages = [1, 2, 3].map(seq => ({ ...c.first, id: String(seq), seq }))
+  let resolve!: (value: Result<TimelinePage>) => void
+  c.listTimeline.mockImplementationOnce(() => new Promise(r => { resolve = r }))
+  c.listMessages.mockResolvedValueOnce(ok({ messages: messages.slice(1), has_more: true }))
+  c.socket.onReady(); c.session.channels.selectHint('D'); await flush()
+  expect(c.session.sync.get().channels.D.cursor).toBeNull()
+  c.rows = [dm('D', { as_of_seq: 3 })]
+  c.socket.onEvent({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000)
+  resolve(ok({ as_of_seq: 3, items: messages.map(message => ({ kind: 'message', message })), has_more: false }))
+  await flush()
+  expect(c.listMessages).toHaveBeenCalledOnce()
+  expect(c.session.sync.get().channels.D.messages.map(m => m.seq)).toEqual([2, 3])
+  expect(c.session.sync.get().channels.D.cursor).toBe(3)
+  expect(c.session.sync.getTimeline('D').get().hasOlder).toBe(true)
+  c.session.close()
 })

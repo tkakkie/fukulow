@@ -195,8 +195,9 @@
   const topicSummaryFocus = createTopicSummaryFocusController()
 
   const selectedChannelId = $derived(selected?.id)
+  const selectedKind = $derived(selected?.kind)
   const channelMemberController = $derived.by(() => {
-    if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId || selected?.kind === 'dm') return undefined
+    if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId || selectedKind === 'dm') return undefined
     const open = session.channelMembers
     return untrack(() => {
       void members?.load()

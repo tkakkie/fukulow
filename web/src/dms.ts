@@ -107,7 +107,7 @@ export function createDms(options: {
   }
   plan()
   return {
-    get: () => ({ ...state, busy, message: error }),
+    get: () => ({ ...state, busy, message: error || (state.error ? 'ダイレクトメッセージを確認できませんでした。通信状況を確認して、もう一度お試しください。' : '') }),
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     activityTarget,
     ready() { dispatch({ type: 'resume' }); invalidate('reconcile') },

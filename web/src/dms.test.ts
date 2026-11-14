@@ -185,3 +185,22 @@ it('a frozen held-id batch honors Retry-After without spinning wakeups while O5 
   expect(c.api.list.mock.calls.length).toBeGreaterThan(calls)
   c.close()
 })
+
+it('a refused held-id lane stays visibly failed until refresh notice reconnect or O5 recovers it', async () => {
+  for (const trigger of ['refresh', 'notice', 'reconnect', 'periodic']) {
+    const c = client(); c.rows = [dm('A')]
+    c.api.list.mockResolvedValueOnce({ ok: false, kind: 'http', status: 400, error: 'invalid input' })
+    await c.ready()
+    expect(c.api.list).toHaveBeenCalledOnce()
+    expect(c.dms.get().status).toBe('error')
+    expect(c.dms.get().message).not.toBe('')
+    if (trigger === 'refresh') c.dms.refresh()
+    if (trigger === 'notice') c.activity.notice({ type: 'dm_list_changed' })
+    if (trigger === 'reconnect') { c.activity.disconnected(); c.dms.ready(); c.activity.notice({ type: 'activity_ready' }) }
+    await vi.advanceTimersByTimeAsync(16_000)
+    expect(c.api.list.mock.calls.length).toBeGreaterThan(1)
+    expect(c.dms.get().rows[0]?.baseline).toEqual(dm('A'))
+    expect(c.dms.get().status).toBe('ready')
+    c.close()
+  }
+})
