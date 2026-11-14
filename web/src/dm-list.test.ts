@@ -200,3 +200,39 @@ it('later demand reopens a refused lane without clearing its error budget contin
   c.result(retried, { dms: [dm('A')], next_cursor: null })
   expect(c.state.status).toBe('ready'); expect(c.state.error).toBe(false)
 })
+
+it('transitions preserve frozen prior state and input across retained rows requests and eviction', () => {
+  function freeze(value: unknown) {
+    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return
+    Object.freeze(value)
+    for (const child of Object.values(value)) freeze(child)
+  }
+  let state = dmListState()
+  const feed = (input: DmInput) => {
+    freeze(state); freeze(input)
+    state = stepDmList(state, input).state
+  }
+  for (let i = 0; i < 201; i++) feed({ type: 'opened', generation: state.generation, dm: dm(String(i)) })
+  expect(state.rows).toHaveLength(200)
+  feed({ type: 'peer_refusal', id: '200', error: 'dm_peer_deactivated' })
+  feed({ type: 'select', id: '200' })
+  feed({ type: 'demand', boundary: true, periodic: true, replace: ['200'] })
+  for (let i = 0; i < 3; i++) {
+    feed({ type: 'wake', now: 1000 })
+    const request = state.request!
+    feed({ type: 'result', request, data: request.lane === 'held'
+      ? { dms: request.ids!.slice(1).map(id => dm(id)), next_cursor: null }
+      : changes() })
+  }
+  expect(state.round).toHaveLength(3)
+  feed({ type: 'browse' })
+  feed({ type: 'wake', now: 1000 })
+  feed({ type: 'failure', request: state.request!, retryAt: 2000, terminal: true })
+  feed({ type: 'access', id: '200', revoked: false })
+  feed({ type: 'access', id: '200', revoked: true })
+  expect(state.sendBlocks).toEqual({})
+  feed({ type: 'recover', peer: 'absent' })
+  feed({ type: 'pause' }); feed({ type: 'resume' }); feed({ type: 'close' })
+  feed({ type: 'demand', boundary: true, periodic: true, replace: [] })
+  expect(state.closed).toBe(true)
+})

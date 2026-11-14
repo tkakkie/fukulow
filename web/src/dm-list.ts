@@ -46,7 +46,8 @@ export function chooseDmBaseline(old: Dm | undefined, next: Dm): Dm | undefined 
 const shared: DmLane[] = ['held', 'browse', 'recovery']
 const discovery: DmLane[] = ['delta', 'coverage']
 function freezeRound(s: DmListState) {
-  while (s.round.length && !s.round[0]!.some(id => s.rows.some(r => r.identity.id === id))) s.round.shift()
+  const retained = new Set(s.rows.map(row => row.identity.id))
+  while (s.round.length && !s.round[0]!.some(id => retained.has(id))) s.round.shift()
   if (s.round.length || !s.needsRound) return
   const ids = s.rows.map(r => r.identity.id)
   for (let i = 0; i < ids.length; i += 50) s.round.push(ids.slice(i, i + 50))
@@ -72,7 +73,12 @@ export function dmNextWake(s: DmListState, now: number): number | undefined {
 
 /** Pure bounded list/discovery state. It never receives Message, presentation or mark-read inputs. */
 export function stepDmList(state: DmListState, input: DmInput): { state: DmListState; effects: DmEffect[] } {
-  const s = structuredClone(state), effects: DmEffect[] = []
+  // Copy mutable containers; identities, baselines, requests and frozen id batches are immutable.
+  const s: DmListState = { ...state, rows: state.rows.map(row => ({ ...row })),
+    lanes: { delta: { ...state.lanes.delta }, coverage: { ...state.lanes.coverage }, held: { ...state.lanes.held },
+      browse: { ...state.lanes.browse }, recovery: { ...state.lanes.recovery } },
+    round: [...state.round], discoveryUsed: [...state.discoveryUsed], sharedUsed: [...state.sharedUsed], sendBlocks: { ...state.sendBlocks } }
+  const effects: DmEffect[] = []
   if (s.closed) return { state: s, effects }
   const demand = () => {
     for (const l of Object.values(s.lanes)) l.stopped = false
@@ -145,11 +151,12 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       const name = nextLane(s, input.now)
       if (!name) break
       const l = s.lanes[name]
+      const access = Object.fromEntries(s.rows.map(r => [r.identity.id, r.access]))
       const request: DmRequest = { id: ++s.serial, lane: name, generation: s.generation,
         ...(l.cursor === undefined ? {} : { cursor: l.cursor }),
-        ...(name === 'held' ? { ids: s.round[0]!.filter(id => s.rows.some(r => r.identity.id === id)) } : {}),
+        ...(name === 'held' ? { ids: s.round[0]!.filter(id => Object.hasOwn(access, id)) } : {}),
         ...(name === 'recovery' ? { recoveryPeer: s.recoveryPeer } : {}),
-        access: Object.fromEntries(s.rows.map(r => [r.identity.id, r.access])) }
+        access }
       if (name === 'delta' || name === 'coverage') s.discoveryUsed.push(name)
       else s.sharedUsed.push(name)
       s.budget--; s.request = request; s.queued = false
@@ -171,6 +178,7 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       const current = q.generation === s.generation && !s.paused
       if (!current) { s.queued = true; break }
       l.attempt = 0; l.retryAt = 0; l.error = false
+      const rowsById = new Map(s.rows.map(row => [row.identity.id, row]))
       // Match recovery before LRU eviction, even when the match is well beyond retained rows.
       for (const dm of input.data.dms) {
         if (q.lane === 'recovery' && q.recoveryPeer === s.recoveryPeer && dm.peer.id === s.recoveryPeer) {
@@ -179,10 +187,10 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
           if (s.recoveryRenewed && dm.peer.active) delete s.sendBlocks[dm.id]
           effects.push({ type: 'recovered', id: dm.id })
         }
-        let row = s.rows.find(r => r.identity.id === dm.id)
+        let row = rowsById.get(dm.id)
         if (row && q.access[dm.id] !== row.access) continue
         effects.push({ type: 'processed', identity: dm })
-        if (!row) { row = { identity: dm, access: ++s.serial, used: ++s.clock }; s.rows.push(row); s.needsRound = true }
+        if (!row) { row = { identity: dm, access: ++s.serial, used: ++s.clock }; s.rows.push(row); rowsById.set(dm.id, row); s.needsRound = true }
         row.identity = { id: dm.id, kind: dm.kind, peer: dm.peer }
         if (dm.peer.active && s.sendBlocks[dm.id] === 'dm_peer_deactivated') delete s.sendBlocks[dm.id]
         if ('as_of_seq' in dm) {
@@ -195,7 +203,7 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       if (q.lane === 'held') {
         const returned = new Set(input.data.dms.map(dm => dm.id))
         for (const id of q.ids ?? []) {
-          const row = s.rows.find(r => r.identity.id === id)
+          const row = rowsById.get(id)
           if (!returned.has(id) && row?.access === q.access[id]) remove(id)
         }
         s.round.shift(); l.pending = s.round.length > 0
@@ -217,9 +225,13 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
   return { state: s, effects }
 
   function trim() {
-    while (s.rows.length > 200) {
-      const victim = s.rows.filter(r => r.identity.id !== s.selected).sort((a, b) => a.used - b.used)[0]!
-      remove(victim.identity.id)
+    if (s.rows.length <= 200) return
+    const victims = s.rows.filter(r => r.identity.id !== s.selected).sort((a, b) => a.used - b.used).slice(0, s.rows.length - 200)
+    const removed = new Set(victims.map(row => row.identity.id))
+    s.rows = s.rows.filter(row => !removed.has(row.identity.id))
+    for (const row of victims) {
+      delete s.sendBlocks[row.identity.id]
+      effects.push({ type: 'drop', id: row.identity.id })
     }
   }
 }
