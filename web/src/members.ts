@@ -1,3 +1,4 @@
+import { createActivityTarget } from './activity'
 import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
@@ -28,16 +29,19 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     else if (!closed && isOrganizationUnavailable(r)) onUnavailable()
     set({ error: memberError(r) })
   }
+  const activityTarget = createActivityTarget({
+    load: () => deps.listMembers(organizationId).then(r => { if (!r.ok && r.kind === 'http' && r.status === 401) onEnded(); return r }),
+    accept: data => set({ members: data.members, loading: false, error: '' }),
+    hide: () => set({ members: [], loading: true }),
+    error: r => { failed(r); set({ loading: false }) },
+    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r)),
+  })
   return {
+    activityTarget,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
-    close() { closed = true; state = { ...state, inviteLink: '' }; listeners.clear() },
-    async load() {
-      const r = await deps.listMembers(organizationId)
-      if (!r.ok) failed(r)
-      else set({ members: r.data.members })
-      set({ loading: false })
-    },
+    close() { closed = true; activityTarget.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
+    async load() { await activityTarget.refresh() },
     async invite(email: string, role: Role) {
       if (closed || state.busy) return
       set({ busy: true, error: '', inviteLink: '' })

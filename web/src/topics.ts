@@ -1,3 +1,4 @@
+import { createActivityTarget, type Activity } from './activity'
 import * as api from './api'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
@@ -34,8 +35,9 @@ type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
 
 /** Session-owned projection windows around the existing unfiltered sync controller. No protocol state is copied. */
 // Compose only via createTopicSync, or call replaceSession/close on topics before sync with a test.
-export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
+export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnded?: () => void; requestTimeoutMs?: number; activity?: Activity }) {
   const windows = new Map<string, Window>()
+  const activityTargets = new Map<string, { close(): void; release(): void; target: ReturnType<typeof createActivityTarget> }>()
   const listeners = new Set<(channels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const pendingChannels = new Set<string>()
@@ -113,7 +115,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           (before?.cursor != null && after.cursor === null)
         ) {
           clearWindowTimers(w)
-          windows.delete(id)
+          clearActivity(id); windows.delete(id)
         } else if ((before?.state === 'unavailable' || w.unavailable) && after.state !== 'unavailable') {
           clearWindowTimers(w)
           w.unavailable = false
@@ -187,10 +189,57 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   function mergeBaselines(w: Window, response: Pick<TopicPage, 'as_of_seq' | 'topics'>) {
     for (const summary of response.topics) {
+      holdSummary(w, summary.id)
       clearSummaryRetry(w, summary.id)
       const old = w.baselines.get(summary.id)
-      if (!old || response.as_of_seq > old.asOfSeq) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
+      if (!old || response.as_of_seq > old.asOfSeq || (response.as_of_seq === old.asOfSeq && (summary.read_seq > old.summary.read_seq || (summary.read_seq === old.summary.read_seq && summary.unread_count < old.summary.unread_count)))) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
     }
+  }
+  function holdSummary(w: Window, topic: string) {
+    const channel = [...windows].find(([, value]) => value === w)?.[0]
+    if (!channel || !options.activity) return
+    const key = `topic:${channel}:${topic}`
+    const existing = activityTargets.get(key)
+    if (existing) return existing.target
+    const target = createActivityTarget({
+      load: () => options.api.getTopicSummary(channel, topic),
+      hide: () => { w.reads.delete(`summary:${topic}`) },
+      accept: response => {
+        if (!current(channel, w)) return
+        mergeBaselines(w, { as_of_seq: response.as_of_seq, topics: [response.topic] })
+        notify(channel)
+      },
+      error: r => {
+        if (r.kind === 'http' && r.status === 401) options.onSessionEnded?.()
+        else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
+        else if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && r.error !== 'topic_not_found'))) void sync.channelUnavailable(channel)
+        else { w.summaryRetries.set(topic, { attempt: 0, terminal: r.kind === 'network' || r.status === 429 || r.status >= 500 ? 'retryable' : 'non_retryable' }); notify(channel) }
+      },
+      terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+      timeoutMs: options.requestTimeoutMs,
+    })
+    activityTargets.set(key, { close: target.close, release: options.activity.hold(key, target), target })
+    return target
+  }
+  function holdMain(w: Window) {
+    const channel = [...windows].find(([, value]) => value === w)?.[0]
+    if (!channel || !options.activity) return
+    const key = `main:${channel}`
+    const existing = activityTargets.get(key)
+    if (existing) return existing.target
+    const target = createActivityTarget({
+      load: () => options.api.listTopics(channel),
+      hide: () => { w.reads.delete('list') },
+      accept: response => { if (current(channel, w)) { mergeBaselines(w, response); notify(channel) } },
+      error: r => { if (r.kind === 'http' && r.status === 401) options.onSessionEnded?.(); else if (api.isOrganizationUnavailable(r)) void sync.unavailable(); else if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && r.error !== 'topic_not_found'))) void sync.channelUnavailable(channel) },
+      terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+      timeoutMs: options.requestTimeoutMs,
+    })
+    activityTargets.set(key, { close: target.close, release: options.activity.hold(key, target), target })
+    return target
+  }
+  function clearActivity(channel?: string) {
+    for (const [key, target] of activityTargets) if (channel === undefined || key.startsWith(`topic:${channel}:`) || key === `main:${channel}`) { target.close(); target.release(); activityTargets.delete(key) }
   }
   function applyMain(w: Window, page: TimelinePage) {
     for (const item of page.items) {
@@ -200,6 +249,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         mergeBaselines(w, { as_of_seq: page.as_of_seq, topics: [item.topic] })
       }
     }
+    holdMain(w)
     w.main.asOfSeq = page.as_of_seq
     w.main.before = page.items[0] && (page.items[0].kind === 'message' ? page.items[0].message.seq : page.items[0].topic.last_seq)
     w.main.hasMore = page.has_more
@@ -290,6 +340,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   async function loadSummary(channel: string, topicId: string) {
     const w = getWindow(channel)
+    if (options.activity) { if (current(channel, w)) await holdSummary(w, topicId)?.refresh(); return }
     if (!current(channel, w) || w.summaries.has(topicId)) return
     const hadTerminal = w.summaryRetries.get(topicId)?.terminal !== undefined
     clearSummaryRetry(w, topicId)
@@ -314,6 +365,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   async function ensureSummary(channel: string, topicId: string) {
     const w = getWindow(channel)
+    if (options.activity) { if (current(channel, w) && !w.baselines.has(topicId)) await holdSummary(w, topicId)?.ensure(); return }
     const existingRetry = w.summaryRetries.get(topicId)
     if (
       !current(channel, w) ||
@@ -358,6 +410,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   async function retrySummary(channel: string, topicId: string) {
     const w = getWindow(channel)
+    if (options.activity) { if (current(channel, w)) await holdSummary(w, topicId)?.retryNow(); return }
     if (!current(channel, w)) return
     if (w.summaries.has(topicId)) {
       const entry = w.summaryRetries.get(topicId)
@@ -389,6 +442,25 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   return {
     subscribe,
+    activityAccess(channel: string) {
+      const w = windows.get(channel)
+      if (!w) return
+      w.generation = nextGeneration++; w.reads.clear(); w.baselines.clear(); clearWindowTimers(w)
+      for (const [key, entry] of activityTargets) if (key.startsWith(`topic:${channel}:`) || key === `main:${channel}`) entry.target.invalidate('access')
+      notify(channel)
+    },
+    async activitySummary(channel: string, topic: string, minimumPosition = 0): Promise<Result<TopicSummaryResponse>> {
+      const w = getWindow(channel)
+      if (!current(channel, w)) return { ok: false, kind: 'network' }
+      const target = holdSummary(w, topic)
+      const cached = w.baselines.get(topic)
+      if (cached && cached.summary.read_seq >= minimumPosition) return { ok: true, data: { as_of_seq: cached.asOfSeq, topic: cached.summary } }
+      if (cached) { target?.invalidate(); await target?.refresh() } else await target?.ensure()
+      const failed = target?.failure()
+      if (failed) return failed
+      const baseline = w.baselines.get(topic)
+      return baseline && current(channel, w) ? { ok: true, data: { as_of_seq: baseline.asOfSeq, topic: baseline.summary } } : { ok: false, kind: 'network' }
+    },
     get(channel: string) {
       if (!closed) reconcileSync()
       let value = snapshots.get(channel)
@@ -455,9 +527,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       }
       notify(channel)
     },
-    replaceSession() { sessionToken++; cancelReads(); windows.clear(); notify() },
+    replaceSession() { clearActivity(); sessionToken++; cancelReads(); windows.clear(); notify() },
     close() {
-      closed = true; unsubscribe(); cancelReads(); windows.clear()
+      closed = true; clearActivity(); unsubscribe(); cancelReads(); windows.clear()
       notify(); listeners.clear(); channelListeners.clear()
     },
   }

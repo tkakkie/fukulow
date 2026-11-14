@@ -469,3 +469,16 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     }
   }
 })
+
+it('a committed self notice during a grant mutation fences the list without leaving the action busy', async () => {
+  const c = fixture()
+  await c.controller.load()
+  let release!: (r: api.Result<undefined>) => void
+  c.deps.addChannelMember.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+  const mutation = c.controller.add('target')
+  c.controller.activityTarget.invalidate('access')
+  release({ ok: true, data: undefined })
+  await mutation
+  expect(c.controller.get().busy).toBe(false)
+  c.controller.close()
+})

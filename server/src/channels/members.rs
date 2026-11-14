@@ -124,6 +124,7 @@ pub async fn change_manager(
     .await
 }
 
+#[derive(Clone, Copy)]
 enum Mutation {
     Add,
     Remove,
@@ -186,7 +187,10 @@ async fn mutate_inner(
     mutation: Mutation,
 ) -> Result<Response, ApiError> {
     let org = auth.identity.organization.organization_id;
-    let changed = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
+    let state = state.clone();
+    let auth = auth.clone();
+    tokio::spawn(async move {
+    let (changed, notice) = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
         sqlx::query("SET LOCAL lock_timeout='5s'")
             .execute(&mut *tx)
             .await?;
@@ -202,7 +206,7 @@ async fn mutate_inner(
         auth::members::lock_organization(&mut *tx, org).await?;
         let public: bool=sqlx::query_scalar("SELECT visibility='public' FROM channels WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
             .bind(org).bind(channel).fetch_optional(&mut *tx).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"channel not found",None))?;
-        let actor = auth::members::current_actor(&mut *tx, auth, Action::ReadOrganization).await?;
+        let actor = auth::members::current_actor(&mut *tx, &auth, Action::ReadOrganization).await?;
         // Lock every Member before grants. Defer a missing target's error until the
         // actor has passed authorization, so target validation discloses no access.
         let target_member = auth::members::active_target(&mut *tx, org, target).await;
@@ -253,6 +257,7 @@ async fn mutate_inner(
             resource,
         )?;
         let (member, revision) = target_member?;
+        let notice = state.session_changes.capture_activity(tx, org, target).await?;
         let changed = if let Mutation::Manager(value) = mutation {
             if member.role == Role::Guest {
                 return Err(ApiError(
@@ -271,7 +276,7 @@ async fn mutate_inner(
                 sqlx::query("UPDATE channel_members SET manager=$4 WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                     .bind(org).bind(channel).bind(target).bind(value).execute(&mut *tx).await?;
             }
-            false // The right changes no access, Unread, grant_id or subscription.
+            current != value // The right changes no access, Unread, grant_id or subscription.
         } else if matches!(mutation, Mutation::Add) {
             sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id,membership_revision) VALUES ($1,$2,$3,$4) ON CONFLICT (organization_id,channel_id,member_id) DO UPDATE SET membership_revision=EXCLUDED.membership_revision,grant_id=gen_random_uuid(),manager=false WHERE channel_members.membership_revision<>EXCLUDED.membership_revision")
                 .bind(org).bind(channel).bind(target).bind(revision).execute(&mut *tx).await?.rows_affected() > 0
@@ -283,14 +288,17 @@ async fn mutate_inner(
             sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                 .bind(org).bind(channel).bind(target).execute(&mut *tx).await?.rows_affected() > 0
         };
-        Ok::<_, ApiError>(changed)
+        Ok::<_, ApiError>((changed, notice))
     }).await?;
     if changed {
-        state
-            .session_changes
-            .recheck_subscriptions(&state.pool, auth::SubscriptionScope::Channel(org, channel))
-            .await;
+        if let Some(notice) = notice { notice.committed(state.pool.clone()); }
+        state.session_changes.channel_changed(state.pool.clone(), org, auth::activity::ChannelChange::Members { channel });
+        if !matches!(mutation, Mutation::Manager(_)) {
+            state.session_changes.recheck_subscriptions(&state.pool, auth::SubscriptionScope::Channel(org, channel)).await;
+        }
     }
+    Ok::<_, ApiError>(())
+    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     Ok((
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],

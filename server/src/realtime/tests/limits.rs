@@ -315,7 +315,7 @@ async fn measure_idle_socket_rss_by_read_buffer(pool: PgPool) {
         subscribe(&mut socket, f.channel, 0).await;
         ready(&mut socket, f.channel, 0).await;
         clients.spawn(async move {
-            while let Some(Ok(frame)) = socket.next().await {
+            while let Some(Ok(frame)) = message_next(&mut socket).await {
                 if let tungstenite::Message::Ping(_) = frame {
                     let _ = socket.flush().await;
                 }
@@ -376,7 +376,9 @@ async fn measure_reconnect_flood_subscribe_load(pool: PgPool) {
                         break;
                     }
                     // A Close, a reset or a timeout all end this socket: reconnect.
-                    match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+                    match tokio::time::timeout(Duration::from_secs(5), message_next(&mut socket))
+                        .await
+                    {
                         Ok(Some(Ok(tungstenite::Message::Text(_)))) => subscribes += 1,
                         _ => break,
                     }
@@ -406,7 +408,8 @@ async fn measure_reconnect_flood_subscribe_load(pool: PgPool) {
             };
             let sent = control(&mut socket, unsubscribe).await.is_ok()
                 && control(&mut socket, subscribe).await.is_ok();
-            let answer = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
+            let answer =
+                tokio::time::timeout(Duration::from_secs(1), message_next(&mut socket)).await;
             match answer {
                 Ok(Some(Ok(tungstenite::Message::Text(text))))
                     if sent && text.contains("subscribed") =>

@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // The server's JSON/empty REST responses have a known Content-Length. Use a small
 // HTTP/1.1 client for those responses rather than adding a test-only HTTP dependency.
-pub(super) async fn request(
+pub(in crate::realtime::tests) async fn request(
     address: std::net::SocketAddr,
     method: &str,
     path: impl AsRef<str>,

@@ -4132,6 +4132,34 @@
           }
         }
       },
+      "ActivityReady": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "activity_ready"
+            ]
+          }
+        }
+      },
+      "ActivityReset": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "activity_reset"
+            ]
+          }
+        }
+      },
       "AddChannelMemberRequest": {
         "type": "object",
         "required": [
@@ -4235,6 +4263,25 @@
           }
         }
       },
+      "ChannelAccessGained": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "type"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "channel_access_gained"
+            ]
+          }
+        }
+      },
       "ChannelAccessLost": {
         "type": "object",
         "description": "Effective Channel access loss; the socket and other Channels stay open.",
@@ -4251,6 +4298,50 @@
             "type": "string",
             "enum": [
               "channel_access_lost"
+            ]
+          }
+        }
+      },
+      "ChannelAccessRevoked": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "type"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "channel_access_revoked"
+            ]
+          }
+        }
+      },
+      "ChannelActivity": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "seq",
+          "type"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "channel_activity"
             ]
           }
         }
@@ -4292,6 +4383,20 @@
           }
         }
       },
+      "ChannelListChanged": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "channel_list_changed"
+            ]
+          }
+        }
+      },
       "ChannelMember": {
         "type": "object",
         "required": [
@@ -4327,6 +4432,25 @@
             "items": {
               "$ref": "#/components/schemas/ChannelMember"
             }
+          }
+        }
+      },
+      "ChannelMembersChanged": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "type"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "channel_members_changed"
+            ]
           }
         }
       },
@@ -4584,6 +4708,20 @@
           }
         }
       },
+      "MembersChanged": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "members_changed"
+            ]
+          }
+        }
+      },
       "Message": {
         "type": "object",
         "required": [
@@ -4770,6 +4908,39 @@
           }
         }
       },
+      "ReadPositionChanged": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "topic_id",
+          "read_seq",
+          "type"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "read_seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "topic_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "read_position_changed"
+            ]
+          }
+        }
+      },
       "ReplyChainPage": {
         "type": "object",
         "required": [
@@ -4882,6 +5053,33 @@
       "ServerEvent": {
         "oneOf": [
           {
+            "$ref": "#/components/schemas/ActivityReady"
+          },
+          {
+            "$ref": "#/components/schemas/ActivityReset"
+          },
+          {
+            "$ref": "#/components/schemas/ChannelActivity"
+          },
+          {
+            "$ref": "#/components/schemas/ReadPositionChanged"
+          },
+          {
+            "$ref": "#/components/schemas/ChannelAccessGained"
+          },
+          {
+            "$ref": "#/components/schemas/ChannelAccessRevoked"
+          },
+          {
+            "$ref": "#/components/schemas/ChannelListChanged"
+          },
+          {
+            "$ref": "#/components/schemas/ChannelMembersChanged"
+          },
+          {
+            "$ref": "#/components/schemas/MembersChanged"
+          },
+          {
             "$ref": "#/components/schemas/MessageEvent"
           },
           {
@@ -4898,9 +5096,18 @@
         "discriminator": {
           "propertyName": "type",
           "mapping": {
+            "activity_ready": "#/components/schemas/ActivityReady",
+            "activity_reset": "#/components/schemas/ActivityReset",
+            "channel_access_gained": "#/components/schemas/ChannelAccessGained",
             "channel_access_lost": "#/components/schemas/ChannelAccessLost",
+            "channel_access_revoked": "#/components/schemas/ChannelAccessRevoked",
+            "channel_activity": "#/components/schemas/ChannelActivity",
+            "channel_list_changed": "#/components/schemas/ChannelListChanged",
+            "channel_members_changed": "#/components/schemas/ChannelMembersChanged",
             "error": "#/components/schemas/ErrorEvent",
+            "members_changed": "#/components/schemas/MembersChanged",
             "message": "#/components/schemas/MessageEvent",
+            "read_position_changed": "#/components/schemas/ReadPositionChanged",
             "subscribed": "#/components/schemas/Subscribed"
           }
         }

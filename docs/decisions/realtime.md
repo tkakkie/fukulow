@@ -51,6 +51,9 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #307 only post-access-invalidation lists add Channels; reappearance starts a client access generation; P8 selection stays within it. Directory invalidations fence old responses. Reason: stale snapshots must not restore lost access or visible Members; no exposed grant id is needed.
 - #307 `channel_access_revoked` is Organization-scoped and separate from subscription-scoped `channel_access_lost`. Reason: keeps C9/S4 semantics unchanged while unwatched Channels lose their badge at once.
 
+- #307 one conservative socket epoch plus at most 256 retained authorization lifetimes fences notice publication and handoff; the existing batched fallback checks them. Reason: bounded provenance without one subscription per visible Channel.
+- #307 auth exposes injected mutation hooks implemented by channels; all held REST targets share one refetch controller. Reason: preserve the module DAG and apply identical retry, debounce and generation fences without dependencies.
+
 ## Admission and timeouts
 - #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
 - Connection budget `min(16, pool_max - ceil(pool_max / 5))` keeps at least 20% of the pool outside sends and watermarks. A trial cap of five rejected startup subscriptions; 16 passes the burst (#147).

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) async fn fallback_close(socket: &mut Client, code: u16) {
-    let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
+    let frame = tokio::time::timeout(Duration::from_secs(3), message_next(socket))
         .await
         .unwrap()
         .unwrap()

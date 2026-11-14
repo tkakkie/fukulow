@@ -2,7 +2,7 @@ use super::*;
 
 fn watch_close(clients: &mut tokio::task::JoinSet<()>, mut socket: Client) {
     clients.spawn(async move {
-        while let Some(frame) = socket.next().await {
+        while let Some(frame) = message_next(&mut socket).await {
             match frame.unwrap() {
                 tungstenite::Message::Ping(_) => socket.flush().await.unwrap(),
                 tungstenite::Message::Close(Some(close)) => {
@@ -65,7 +65,7 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     let (cold_events, mut cold_received) = tokio::sync::mpsc::channel(3);
     let cold_reader = tokio::spawn(async move {
         let mut received = 0;
-        while let Some(frame) = cold_socket.next().await {
+        while let Some(frame) = message_next(&mut cold_socket).await {
             match frame.unwrap() {
                 tungstenite::Message::Ping(_) => cold_socket.flush().await.unwrap(),
                 tungstenite::Message::Text(text) => {

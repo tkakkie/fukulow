@@ -33,7 +33,7 @@ pub(super) enum Assertion {
 }
 
 async fn read(client: &mut Client) -> Result<tungstenite::Message, Assertion> {
-    match tokio::time::timeout(Duration::from_secs(5), client.next()).await {
+    match tokio::time::timeout(Duration::from_secs(5), message_next(client)).await {
         Ok(Some(Ok(frame))) => Ok(frame),
         other => {
             eprintln!("contract read failed: {other:?}");
@@ -76,7 +76,7 @@ pub(super) async fn silence(
 ) -> Result<(), Assertion> {
     // Reject an already readable event/close before writing on a possibly closed
     // socket. Absence here proves nothing; only the drain barrier below does.
-    if let Some(frame) = client.next().now_or_never() {
+    if let Some(frame) = message_next(client).now_or_never() {
         eprintln!("unexpected traffic before silence barrier: {frame:?}");
         return match frame {
             Some(Ok(_)) => Err(Assertion::Silence),

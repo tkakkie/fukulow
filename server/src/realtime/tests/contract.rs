@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 mod assertions;
 mod capacity;
-mod http;
+pub(super) mod http;
 mod model;
 mod negative;
 mod replies;
@@ -149,6 +149,19 @@ impl Runner {
 
     async fn step(&mut self, index: usize, step: Step) -> Result<(), Failure> {
         match step {
+            Step::ActivityExpect { socket, mut events } => {
+                for notice in &mut events {
+                    if let Some(channel) = notice.get("channel_id").and_then(Value::as_str) {
+                        notice["channel_id"] = json!(self.channels[channel]);
+                    }
+                }
+                let actual = super::activity::collect(
+                    &self.delivery.channel_access.activity,
+                    self.sockets.get_mut(&socket).unwrap(),
+                )
+                .await;
+                assert_eq!(actual, events);
+            }
             Step::Connect {
                 socket,
                 member,

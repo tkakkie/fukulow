@@ -1,3 +1,4 @@
+import type { ActivityNotice } from './activity'
 import type { DraftStore } from './drafts'
 import * as api from './api'
 import { backoffCap, reconnectDelay } from './reconnect'
@@ -106,6 +107,7 @@ export function createSync(options: SyncOptions) {
   let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
+  const noticeListeners = new Set<(notice: ActivityNotice) => void>()
   const listeners = new Set<(changedChannels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const composerListeners = new Map<string, Set<() => void>>()
@@ -363,6 +365,10 @@ export function createSync(options: SyncOptions) {
           const transport = connect({
             onReady: () => { opened = true; void dispatch({ type: 'connection_ready', connection: effect.id }) },
             onEvent: event => {
+              if (event.type !== 'message' && event.type !== 'subscribed' && event.type !== 'channel_access_lost' && event.type !== 'error') {
+                if (state.connection === effect.id && state.running && state.organization === 'available') noticeListeners.forEach(l => l(event))
+                return
+              }
               const isReply = event.type === 'subscribed' || event.type === 'channel_access_lost' || (event.type === 'error' &&
                 (event.code === 'channel_not_found' || event.code === 'subscription_limit'))
               let subscription: number | undefined
@@ -779,6 +785,7 @@ export function createSync(options: SyncOptions) {
   }
 
   return {
+    onActivity(listener: (notice: ActivityNotice) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
     get: () => state,
     subscribe(listener: (changedChannels: ReadonlySet<string>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),

@@ -1,3 +1,4 @@
+import { createActivityTarget } from './activity'
 import * as api from './api'
 import { memberError } from './members'
 
@@ -29,16 +30,17 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
       timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), 10_000)
     })]) } finally { clearTimeout(timer) }
   }
-  async function load() {
-    if (closed || state.unavailable) return
-    const own = ++generation
-    set({ loading: true, error: '' })
-    const r = await request(() => deps.listChannelMembers(org, channel))
-    if (closed || own !== generation || state.unavailable) return
-    if (r.ok) set({ members: r.data.members, loading: false })
-    else if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && !api.isOrganizationUnavailable(r)))) { onUnavailable(); set({ loading: false, unavailable: true }) }
-    else set({ loading: false, error: channelMemberError(r), retryable: r.kind === 'network' })
-  }
+  const activityTarget = createActivityTarget({
+    load: () => request(() => deps.listChannelMembers(org, channel)),
+    accept: data => { if (!state.unavailable) set({ members: data.members, loading: false, error: '' }) },
+    hide: () => set({ members: [], loading: true }),
+    error: r => {
+      if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && !api.isOrganizationUnavailable(r)))) { onUnavailable(); set({ members: [], loading: false, unavailable: true }) }
+      else set({ loading: false, error: channelMemberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
+    },
+    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+  })
+  const load = () => closed || state.unavailable ? Promise.resolve() : activityTarget.retryNow()
   async function mutate(run: () => Promise<api.Result<undefined>>, refreshChannels = false) {
     if (closed || state.busy || state.unavailable) return
     const own = ++generation
@@ -50,6 +52,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     else await Promise.all([load(), refreshChannels ? onRefreshChannels() : undefined])
   }
   return {
+    activityTarget,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
     load,
@@ -57,7 +60,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     remove: (id: string) => mutate(() => deps.removeChannelMember(org, channel, id)),
     changeManager: (id: string, manager: boolean) => mutate(() => deps.changeChannelManager(org, channel, id, { manager }), true),
     reselect() { if (!closed && state.unavailable) { set({ unavailable: false }); void load() } },
-    unavailable() { generation++; set({ unavailable: true, loading: false, busy: false }) },
-    close() { closed = true; generation++; listeners.clear() },
+    unavailable() { activityTarget.suspend(); generation++; set({ members: [], unavailable: true, loading: false, busy: false }) },
+    close() { activityTarget.close(); closed = true; generation++; listeners.clear() },
   }
 }

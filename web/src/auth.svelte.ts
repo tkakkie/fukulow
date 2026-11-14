@@ -1,3 +1,4 @@
+import type { ActivityTarget } from './activity'
 import { createSubscriber } from 'svelte/reactivity'
 import { createAuthOperations } from './auth-operations'
 import { createAccountSecurity } from './account-security'
@@ -18,7 +19,7 @@ import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
+export type SessionModel = { holdActivity?(key: string, target: ActivityTarget): unknown; navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -27,17 +28,18 @@ export type AuthDeps = {
   getOrganization: typeof getOrganizationMe
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe,
   openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
-  openSession(selfId, onEnded, organizationId, drafts) {
-    const session = createSession({ selfId, onEnded, organizationId, sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity) {
+    const session = createSession({ selfId, onEnded, organizationId, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
     return {
+      holdActivity: session.holdActivity,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       channels: channelsAdapter(session.channels),
       sync: syncAdapter(session.sync),
@@ -104,13 +106,19 @@ export function createAuth(deps: AuthDeps = defaults) {
       return
     }
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope())
+    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
+      if (account !== accountGeneration || selection !== selectionGeneration) return
+      if (identity) organization = identity
+      else if (organization) organization = { ...organization, organization: { ...organization.organization,
+        capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
+    })
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       closeOrganization()
       organizationStatus = 'unavailable'
     }) ?? null
+    if (members) session.holdActivity?.('members', members.activityTarget)
     void members?.load()
     changes++
   }

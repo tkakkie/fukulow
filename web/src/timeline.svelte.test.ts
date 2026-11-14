@@ -2605,7 +2605,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(host.querySelector('#main-content')?.textContent).toContain('トピック: トピック')
 
     // After backoff elapses, controller retries and both Timeline and TopicList display the resolved Topic name
-    await vi.advanceTimersByTimeAsync(500)
+    await vi.advanceTimersByTimeAsync(1000)
     await settle()
     flushSync()
     expect(summaryCalls).toBe(2)
@@ -2617,7 +2617,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     sessionModel.close()
   })
 
-  it('stops automatic summary retries at terminal error, offers 再試行 only for retryable failures, and restarts on click', async () => {
+  it('retries transient summary failures without a budget, stops ordinary 4xx and supports explicit retry', async () => {
     vi.useFakeTimers()
     let retryableCalls = 0
     let nonRetryableCalls = 0
@@ -2649,9 +2649,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
               },
             })
           }
-          if (topicId === 't-429') {
+          if (topicId === 't-400') {
             nonRetryableCalls++
-            return { ok: false, kind: 'http', status: 429 }
+            return { ok: false, kind: 'http', status: 400 }
           }
           return baseOptions.topicsApi!.getTopicSummary(channelId, topicId)
         },
@@ -2722,26 +2722,26 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
 
-    // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 429 Topic t-429
+    // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 400 Topic t-400
     net.event({
       type: 'message',
       message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一時障害本文', topic_id: 't-503' },
     })
     net.event({
       type: 'message',
-      message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-429' },
+      message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-400' },
     })
     await settle()
     flushSync()
 
-    // Non-retryable 429 stops immediately at 1 request with no retry button
+    // Non-retryable 400 stops immediately at 1 request with no retry button
     expect(nonRetryableCalls).toBe(1)
 
-    // Advance past bounded backoff budget; persistent 503 stops at 5 requests and shows 再試行 on t-503 only
+    // Persistent 503 keeps retrying beyond the former finite budget; ordinary 400 stays stopped.
     await vi.advanceTimersByTimeAsync(120_000)
     await settle()
     flushSync()
-    expect(retryableCalls).toBe(5)
+    expect(retryableCalls).toBeGreaterThan(5)
     expect(nonRetryableCalls).toBe(1)
 
     const mainRetryButtons = queryAll(host, '#main-content button').filter((b) => b.textContent?.trim() === '再試行')
@@ -2749,7 +2749,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(mainRetryButtons).toHaveLength(1)
     expect(panelRetryButtons).toHaveLength(1)
 
-    // Subsequent live traffic re-renders both Timeline and TopicList without triggering any more summary calls
+    // Later traffic leaves the permanent refusal stopped while transient failures keep retrying.
+    const beforeLater = retryableCalls
     net.event({
       type: 'message',
       message: { ...record(4, 'c1'), id: 'm-4', sender: 'other', body: '後続メッセージ', topic_id: null },
@@ -2757,15 +2758,16 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(retryableCalls).toBe(5)
+    expect(retryableCalls).toBeGreaterThan(beforeLater)
     expect(nonRetryableCalls).toBe(1)
 
     // 2. Clicking 再試行 on the summary line restarts and displays the resolved Topic name and count
     allowSuccess = true
+    const beforeManual = retryableCalls
     mainRetryButtons[0]!.click()
     await settle()
     flushSync()
-    expect(retryableCalls).toBe(6)
+    expect(retryableCalls).toBe(beforeManual + 1)
     expect(host.querySelector('#main-content')?.textContent).toContain('トピック: 手動再試行トピック')
     expect(host.querySelector('#main-content')?.textContent).toContain('1件›')
     expect(host.querySelector('#panel-content')?.textContent).toContain('トピック: 手動再試行トピック')

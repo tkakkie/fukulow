@@ -62,6 +62,7 @@ impl Entries {
 #[derive(Default, Clone)]
 pub struct AccessChanges {
     entries: Registry,
+    pub(crate) activity: super::activity::Activity,
 }
 struct Entry {
     organization: Uuid,
@@ -157,6 +158,7 @@ impl AccessChanges {
         Ok(Some(result))
     }
     pub(crate) fn observe_loss(&self, organization: Uuid, channel: Uuid, member: (Uuid, i64)) {
+        self.activity.retire(organization, member.0);
         for entry in self
             .entries
             .lock()
@@ -194,7 +196,10 @@ impl auth::SubscriptionRecheck for AccessChanges {
             .into_iter()
             .filter(|e| *e.status.borrow() == 0)
             .collect();
-        Box::pin(async move { check_entries(pool, &entries).await })
+        Box::pin(async move {
+            self.activity.check(pool, scope).await;
+            check_entries(pool, &entries).await
+        })
     }
     fn failed(&self, scope: auth::SubscriptionScope) {
         for entry in self
