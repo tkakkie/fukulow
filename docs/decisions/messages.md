@@ -59,7 +59,16 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #151 POST /dms opens or renews one pair; GET /dms lists only accessible DMs with peer identity and Unread/Mention hooks. Ordinary Channel lists/sections exclude DMs. Reason: a DM has no Channel name or Topic navigation.
 - #151 new sends hold peer eligibility through COMMIT: inactive peer gives 409 dm_peer_deactivated, active lapsed grant gives 409 dm_peer_access_lapsed (2026-11-14). Authorized committed retries resolve first. Reason: sending never renews access or undoes an accepted send.
 - #151 DMs reject Topic intent and member/grant APIs; all management Capabilities deny. Exclude DMs from RoleChangeGuard and last-manager/grant counts. Reason: fixed two-person participation must neither confer management nor block Role changes.
-- Mention gets its own counter, separate from Unread (#148).
+- Mention unread is a separate displayed count derived from existing Channel/Topic read positions, with no separate read state (#148, #152); repeated Mentions of one Member in a Message count once and own Messages never count.
+
+## Mentions (#152, specification for approval)
+
+- #152 proposes exact `@{member:<lower-case UUID>}` tokens and shared Message.mentions [{member_id,name}]. Persist only accepted ids; current names follow renames. Reason: rejected tokens must stay literal after later grants. Exact syntax/identity disclosure needs approval (spec M1/M6).
+- #152 accepts only active same-Organization targets with current Channel access, inside send; private Owner/Admin and public Guests need usable grants. Reason: no token may disclose an inaccessible identity or create a count/Notification. DM peer-send refusals remain #151 B3.
+- #152 Message and message_mentions rows commit/roll back together; authorized retries return original accepted ids before new target checks. Reason: access changes must neither rewrite a committed send nor accept a previously rejected token.
+- #152 locks sorted sender/target Members before any grants, then preserves #142/#135 and #151 discovery order. Hold target authority through COMMIT. Reason: send versus loss must serialize without a Member-after-grant deadlock (spec M2).
+- #152 proposes message_mentions with Organization-scoped Message/Member FKs, unique Message/Member and member/Channel/Message indexes (spec M5); no migration yet. Reason: atomic deduped sets and batched unread-range counts must preserve tenancy and module ownership.
+- #152 Mention counts share Unread scopes/snapshots: Channel main and aggregate, Topic summaries, DM aggregate. Reason: mark-read/access loss must clear both together without a second position or counting Reply/Topic projections twice (spec M3).
 
 ## Topics (#137, #138)
 - Messages owns Topics, nullable messages.topic_id and their atomic send updates; composite FKs bind a Message's Topic to its Organization and Channel. #139 appends its own migration, preserving #137's migration.
@@ -92,6 +101,8 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Burst and refill are operator env settings (maintainer, 2026-11-13) so CI load/e2e can send fast from one Member; defaults stay 10 and 1/s and Compose keeps them. Only the size changes: order, idempotency, caps and 503 fail-closed are fixed. CI numbers are not production-limit measurements.
 
 ## Entries in other parts
+
+- [realtime](realtime.md): `#152 Mention counts inherit`
 
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
