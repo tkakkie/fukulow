@@ -5,9 +5,85 @@ import { flush } from './sync-test-helpers'
 import { deferred, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { createTopics } from './topics'
 import { selectMainTimeline } from './topic-selectors'
+import { windowClient } from './message-window-test-helpers'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
+
+it('bounds repeated stale successful summaries after arrivals checkpoint their evidence', async () => {
+  const c = topicClient()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockResolvedValue(ok({ as_of_seq: 10, topic: summary('T', 10, 3) }))
+    for (let seq = 11; seq <= 1010; seq++) c.event(seq, seq % 2 ? 'T' : 'U')
+    await flush()
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'T')?.messageCount).toBeNull()
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+    for (const [attempt, delay] of [500, 1000, 2000, 4000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1)
+      expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(attempt + 1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(attempt + 2)
+    }
+    expect(c.topics.get('A').topic('T').summaryError).toBe('retryable')
+    for (let round = 0; round < 8; round++) {
+      await c.topics.ensureSummary('A', 'T')
+      await vi.advanceTimersByTimeAsync(10_000)
+    }
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(5)
+    expect(vi.getTimerCount()).toBe(0)
+
+    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 1010, topics: [summary('T', 1009, 503)], has_more: false }))
+    await c.topics.loadList('A')
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 503, summaryError: null })
+    c.event(1011, 'T')
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'T')?.messageCount).toBe(504)
+    expect(c.sync.get().channels.A.cursor).toBe(1011)
+
+    // Restored authority releases the old budget; a later checkpoint starts at 500 ms again.
+    c.topicsApi.getTopicSummary.mockResolvedValue(ok({ as_of_seq: 1010, topic: summary('T', 1009, 503) }))
+    for (let seq = 1012; seq <= 2010; seq++) c.event(seq, seq % 2 ? 'T' : 'U')
+    await flush()
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(6)
+    await vi.advanceTimersByTimeAsync(499)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(6)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(7)
+  } finally { await c.sync.close() }
+})
+
+it('handles a successful active-Topic summary evicted by 400 newer main Messages', async () => {
+  const c = windowClient()
+  try {
+    await c.boot()
+    for (let page = 0; page < 7; page++) await c.topics.loadMain('A')
+    const before = c.topics.get('A').lines
+    expect(before).toHaveLength(400)
+    expect(before[0]).toMatchObject({ message: { seq: 601 } })
+    c.options.listTopicMessages = async () => ok({ messages: [msg(1, 'T')], has_more: false })
+    const getSummary = vi.fn(async () => ok({ as_of_seq: 1000, topic: summary('T', 1, 1) }))
+    c.options.getTopicSummary = getSummary
+    await c.topics.loadTopic('A', 'T')
+    await expect(c.topics.ensureSummary('A', 'T')).resolves.toBeUndefined()
+    expect(c.topics.get('A').lines).toEqual(before)
+    expect(c.topics.get('A').topics).toEqual([])
+    expect(c.topics.get('A').topic('T')).toMatchObject({ messages: [msg(1, 'T')], initialized: true, loading: false })
+    for (let round = 0; round < 8; round++) {
+      await c.topics.ensureSummary('A', 'T')
+      await vi.advanceTimersByTimeAsync(10_000)
+    }
+    expect(getSummary).toHaveBeenCalledTimes(1)
+    expect(c.sync.get().channels.A.cursor).toBe(1000)
+    expect(vi.getTimerCount()).toBe(0)
+    c.topics.releaseTopic('A', 'T')
+    await c.topics.loadMainLatest('A')
+    await c.topics.loadTopic('A', 'T')
+    await c.topics.ensureSummary('A', 'T')
+    expect(getSummary).toHaveBeenCalledTimes(2)
+    expect(c.topics.get('A').topic('T').summaryError).toBeNull()
+    expect(c.topics.get('A').topics[0].baseline?.asOfSeq).toBe(1000)
+  } finally { await c.close() }
+})
 
 it('bootstraps from the first timeline W and pages by its boundary despite posting during paging', async () => {
   const c = topicClient()
@@ -502,7 +578,7 @@ it.each(readKinds)('timed-out %s read cannot overwrite its completed retry', asy
   await c.sync.close()
 })
 
-it('independent read kinds and Topic targets do not supersede each other', async () => {
+it('independent read kinds survive while reselection releases the inactive Topic and fences its read', async () => {
   const c = topicClient()
   await c.boot()
   const first = readKinds.map(kind => deferRead(c, kind))
@@ -514,7 +590,8 @@ it('independent read kinds and Topic targets do not supersede each other', async
   expect(c.topics.get('A').main).toMatchObject({ asOfSeq: 20, before: 2, hasMore: false, loading: false })
   expect(c.topics.get('A').list).toMatchObject({ asOfSeq: 20, before: 2, hasMore: true, loading: false })
   expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 99 })
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2, 10])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([10])
+  expect(c.topics.get('A').topic('T').initialized).toBe(false)
   await c.sync.close()
 })
 
@@ -949,8 +1026,8 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
     main: { asOfSeq: 10, before: 8, hasMore: true, loading: false, error: false },
     list: { asOfSeq: 10, before: 3, hasMore: false, loading: false, error: false },
   })
-  expect(beforeLoss.topic('T')).toMatchObject({ initialized: true, before: 2, hasMore: false, loading: false, error: false })
-  expect(beforeLoss.topic('T').messages.map(m => m.seq)).toEqual([2, 5, 10])
+  expect(beforeLoss.topic('T')).toMatchObject({ initialized: false, loading: false, error: false })
+  expect(beforeLoss.topic('T').messages.map(m => m.seq)).toEqual([10])
   expect(beforeLoss.topic('U')).toMatchObject({ initialized: true, before: 7, hasMore: true })
   expect(beforeLoss.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
     ['V', 3, 1],
@@ -1007,7 +1084,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
 
   expect(session.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 13 })
   const afterReplay = session.topics.get('A')
-  expect(afterReplay.topic('T').messages.map(m => m.seq)).toEqual([2, 5, 10, 11])
+  expect(afterReplay.topic('T').messages.map(m => m.seq)).toEqual([10, 11])
   expect(afterReplay.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
     ['U', 7, 2],
     ['T', 11, 4],
@@ -1025,7 +1102,6 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   ])
 
   // 6. Outgoing paging requests respect retained hasMore, asOfSeq and before cursors
-  await session.topics.loadTopic('A', 'T')
   await session.topics.loadList('A')
   expect(topicsApi.listTopicMessages).not.toHaveBeenCalled()
   expect(topicsApi.listTopics).not.toHaveBeenCalled()

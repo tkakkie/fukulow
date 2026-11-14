@@ -32,8 +32,6 @@ jobs:
       - run: npm --prefix web run check
       - run: npm --prefix web test
       - run: npm --prefix web run build
-      - uses: actions/upload-artifact@v7
-        with: { name: web-dist, path: web/dist, include-hidden-files: true }
   # Linting needs no DB or real SPA: an empty web/dist satisfies rust-embed for clippy, so lint runs alongside `web`.
   lint:
     runs-on: ubuntu-latest
@@ -52,8 +50,8 @@ jobs:
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: load/package-lock.json }
       - run: npm --prefix load ci --ignore-scripts
       - run: npm --prefix load run check && npm --prefix load test
+  # server and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
   server:
-    needs: web
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -70,8 +68,10 @@ jobs:
       DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with: { name: web-dist, path: web/dist }
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm --prefix web ci # also for the invariants check, which imports typescript
+      - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
@@ -79,21 +79,17 @@ jobs:
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
       - run: cargo nextest run --locked --no-fail-fast
       - run: cargo test --locked --doc # nextest does not run doctests
-      - uses: actions/setup-node@v7
-        with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
-      - run: npm --prefix web ci # the invariants check imports typescript
       - run: node web/scripts/check-invariants.ts # reuses the test build of `cargo nextest run --locked` above (no extra cold build); fails if cargo is missing
   checks:
-    needs: web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with: { name: web-dist, path: web/dist }
-      - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
-      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
+      - uses: Swatinem/rust-cache@v2
       - name: Backup publication and disposable restore guards
         run: node --test scripts/backup.test.ts
       - name: Context settings are transaction-local

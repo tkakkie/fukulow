@@ -34,6 +34,13 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Sends re-check Member/revision/private grant after BEGIN and hold a shared Member row lock through COMMIT, so deactivation cannot commit between authorization and persistence. Channel creation keeps the same lock (#146 review).
 - History reads authorization and its page in one read-only REPEATABLE READ transaction without row locks: loss committed before the snapshot denies; an authorized page sees no later Messages (#146).
 
+## Personal sections (#204, specified)
+
+- #204 sections belong to one Member in one Organization, including Guest; Owner/Admin have no override. Reason: personal grouping must neither grant Channel access nor affect another Member's view.
+- #204 access loss hides but retains placement/order; regain restores it. Section/Channel deletion removes placements atomically; hidden Channel cleanup changes no exposed generation or notice. Reason: retain grouping without dangling placements or disclosing deletion after loss.
+- #204 composite Organization/Member/section keys enforce placement ownership; unique Organization/Member/Channel enforces cardinality. Reason: application checks alone cannot prevent cross-owner or cross-Organization data.
+- #204 moves, reorders and deletes serialize per Member; complete reorders use last-committing-writer-wins. Keep Organization -> sorted Channels -> Members -> grants lock order. Reason: atomic orders and delete races must not introduce a deadlock.
+
 ## Topics, Replies and Unread (planned, spec P1-P8)
 - A Topic is created by its first Message (or a Move to a new Topic); empty Topics do not exist. The main-timeline Topic line is a derived display that moves with the Topic's latest activity (maintainer, 2026-11-10, #148).
 - Main-timeline paging correctness (`position_W`, W as page anchor) is fixed in the spec; its cost is a measured feasibility gate in #137 that stops and asks on a miss, not a guarantee (maintainer, 2026-11-11, #148).
@@ -82,5 +89,9 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 
 ## Entries in other parts
 
+- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
+
 - [auth](auth.md): `#314 single-statement hot reads use`
 - [auth](auth.md): `#299 shared raw-text validation`
+
+- [web](web.md): `#308 bounds Topic/Reply/cursor evidence`, `#308 uses 400 main/300 Topic/200 Reply`, `#308 refetches older main pages`

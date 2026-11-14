@@ -4,6 +4,9 @@ Topics, server and web, incl. their real-time delivery tests. Writing rules and 
 
 | Rule | Test |
 |---|---|
+| Stale summary successes retain bounded exponential retries until a retained baseline restores count authority | `web/src/topics.test.ts::bounds repeated stale successful summaries after arrivals checkpoint their evidence` |
+| Evicting an active Topic summary resolves safely without repeated reads or changing main history or the sync cursor | `web/src/topics.test.ts::handles a successful active-Topic summary evicted by 400 newer main Messages`, `web/src/timeline.svelte.test.ts::TopicView handles an active summary evicted by 400 newer main Messages without rejection or a render loop` |
+| Topic-list-only baselines never establish main-page coverage or skip unfetched main Messages | `web/src/message-window-review.test.ts::Topic-list history cannot establish the main continuation or skip unfetched Messages` |
 | Topic names reject empty/NUL/surrounding whitespace, count 1..60 scalars, fold only ASCII per Channel and keep the first display name | `server/src/messages/tests/topics/sends.rs::topic_names_validate_scalars_whitespace_and_channel_scoped_ascii_identity` |
 | Concurrent first Topic posts converge; duplicates/lost ACKs consume one seq/count/publication per Message; changed Topic intent is 409 | `server/src/messages/tests/topics/sends.rs::topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once`, `server/src/messages/tests/topics/sends.rs::topic_retry_identity_rejects_added_removed_changed_and_cross_channel_intent`, `server/src/messages/tests/topics/sends.rs::topic_first_creation_duplicates_lost_ack_and_cross_channel_race_leave_no_empty_topic` |
 | Topic admission/COMMIT rejection changes no Topic, Message, seq, count or publication; same-key retry succeeds canonically | `server/src/messages/tests/topics/atomicity.rs::topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_publication` |
@@ -47,3 +50,6 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [web](web.md): `reselecting the same Channel target never writes History, including an open tab`, `close settles every stalled Topic and Reply load without publishing or Channel denial`, `runs all contract/realtime/client/topic-projections.json scenarios through topicsAdapter`
 
 - [web](web.md): `Guest Workspace resolves isolated older Topic and Reply authors without widening its Member list`
+- [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
+
+- [unread](unread.md): `bounds Topic identities and Unread scope bookkeeping across one-off Topics during the same visit`

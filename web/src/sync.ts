@@ -32,6 +32,7 @@ export type PendingMessageState = {
   topicName?: string
   topicId?: string
   replyTo?: string
+  replyRootId?: string
   status: 'sending' | 'throttled' | 'failed'
   retryable: boolean
 }
@@ -106,7 +107,7 @@ export function createSync(options: SyncOptions) {
   let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
-  const listeners = new Set<(changedChannels: ReadonlySet<string>) => void>()
+  const listeners = new Set<(changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const composerListeners = new Map<string, Set<() => void>>()
   const topicComposerListeners = new Map<string, Set<() => void>>()
@@ -316,7 +317,7 @@ export function createSync(options: SyncOptions) {
         }
       }
     }
-    if (state !== previous) listeners.forEach(l => l(result.changedChannels))
+    if (state !== previous) listeners.forEach(l => l(result.changedChannels, result.records))
     for (const channel of result.changedChannels) {
       channelListeners.get(channel)?.forEach(l => l())
     }
@@ -494,7 +495,7 @@ export function createSync(options: SyncOptions) {
     composerListeners.set(channel, compListeners)
     async function send(
       body: string,
-      target: Pick<SendMessageRequest, 'reply_to' | 'topic_name'> = {},
+      target: Pick<SendMessageRequest, 'reply_to' | 'topic_name'> & { replyRootId?: string } = {},
       restore?: () => void,
       originTopicId?: string,
     ) {
@@ -630,7 +631,7 @@ export function createSync(options: SyncOptions) {
               setReplyExtra(channel, replyRootId, topicId, { draft: text })
             }
           }
-          const accepted = await send(text, { reply_to: replyTo }, restore, topicId ?? undefined)
+          const accepted = await send(text, { reply_to: replyTo, replyRootId }, restore, topicId ?? undefined)
           if (!accepted) restore()
           return accepted
         },
@@ -684,7 +685,7 @@ export function createSync(options: SyncOptions) {
             body: p.body,
             ...(p.topic_name ? { topicName: p.topic_name } : {}),
             ...(pendingTopics.get(p.clientMessageId) ? { topicId: pendingTopics.get(p.clientMessageId) } : {}),
-            ...(p.reply_to ? { replyTo: p.reply_to } : {}),
+            ...(p.reply_to ? { replyTo: p.reply_to, replyRootId: p.replyRootId } : {}),
             status: p.state === 'sending' || p.state === 'throttled' ? p.state : 'failed',
             retryable: p.state !== 'failed',
           })),
@@ -780,7 +781,7 @@ export function createSync(options: SyncOptions) {
 
   return {
     get: () => state,
-    subscribe(listener: (changedChannels: ReadonlySet<string>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    subscribe(listener: (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),
     replaceSession: (selfId: string) => dispatch({ type: 'session_replaced', selfId }),
     watch: (channel: string) => dispatch({ type: 'watch', channel }),

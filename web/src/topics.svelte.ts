@@ -7,8 +7,13 @@ export function topicsAdapter(topics: Topics, channel: string) {
   return {
     get state() { subscribe(); return topics.get(channel) },
     loadMain: () => topics.loadMain(channel),
+    loadMainLatest: () => topics.loadMainLatest(channel),
     loadList: () => topics.loadList(channel),
     loadTopic: (id: string) => topics.loadTopic(channel, id),
+    loadTopicLatest: (id: string) => topics.loadTopicLatest(channel, id),
+    releaseTopic: (id: string) => topics.releaseTopic(channel, id),
+    setMainPinned: (pinned: boolean) => topics.setMainPinned(channel, pinned),
+    setTopicPinned: (id: string, pinned: boolean) => topics.setTopicPinned(channel, id, pinned),
     loadSummary: (id: string) => topics.loadSummary(channel, id),
     ensureSummary: (id: string) => topics.ensureSummary(channel, id),
     retrySummary: (id: string) => topics.retrySummary(channel, id),

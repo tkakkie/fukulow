@@ -130,7 +130,7 @@ async fn rejected_sign_in_skips_account_lookup_for_full_and_expired_admission() 
         };
         for path in ["/api/v1/session", "/api/v1/native/session"] {
             for email in ["owner@example.com", "unknown@example.com"] {
-                let state = AppState::for_test(pool.clone()).await;
+                let state = AppState::with_test_pool(pool.clone());
                 let calls = Arc::new(AtomicUsize::new(0));
                 let app = app_counting_entropy(state.clone(), workers, calls.clone());
                 let start = tokio::time::Instant::now();
@@ -165,7 +165,7 @@ async fn lookup_error_releases_admission_and_throttle_without_token_entropy() {
     pool.close().await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
     for path in ["/api/v1/session", "/api/v1/native/session"] {
-        let state = AppState::for_test(pool.clone()).await;
+        let state = AppState::with_test_pool(pool.clone());
         let calls = Arc::new(AtomicUsize::new(0));
         let response = app_counting_entropy(state.clone(), workers, calls.clone())
             .oneshot(request(path, "owner@example.com", "incorrect password"))
