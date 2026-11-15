@@ -1,5 +1,9 @@
 use super::*;
 
+mod denials;
+mod open_grants;
+mod races;
+
 async fn open(f: &Fixture, peer: Uuid) -> Uuid {
     let r = request(
         &f.app,
@@ -78,7 +82,11 @@ async fn dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does
         .await
         .unwrap();
     let c = open(&f, peer).await;
-    send(&f, &f.token, c, Uuid::new_v4(), "history").await;
+    let history = send(&f, &f.token, c, Uuid::new_v4(), "history").await;
+    let mut active = f.server.connect(&f.token).await;
+    subscribe(&mut active, c, 0).await;
+    assert_eq!(event(&mut active).await["message"], history);
+    ready(&mut active, c, 1).await;
     let mut idle = f.server.connect(&peer_token).await;
     let mut replay = f.server.connect(&peer_token).await;
     let gate = pause(c);
@@ -103,6 +111,9 @@ async fn dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does
     closed(&mut idle, CLOSE_ORGANIZATION_UNAVAILABLE).await;
     closed(&mut replay, CLOSE_ORGANIZATION_UNAVAILABLE).await;
     gate.release.add_permits(1);
+    resubscribe(&mut active, c, 0).await;
+    assert_eq!(event(&mut active).await["message"], history);
+    ready(&mut active, c, 1).await;
     sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2")
         .bind(f.organization)
         .bind(peer)
@@ -128,6 +139,7 @@ async fn dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does
     ready(&mut fresh, c, 1).await;
     let live = send(&f, &peer_token, c, Uuid::new_v4(), "renewed Guest").await;
     assert_eq!(event(&mut fresh).await["message"], live);
+    assert_eq!(event(&mut active).await["message"], live);
 }
 
 #[fukulow_test::test]
@@ -362,7 +374,9 @@ async fn dm_mention_denial_matrix_has_no_identity_rows_counts_or_notifications(p
             f.organization
         };
         let (target, target_token) = member(&pool, target_org).await;
-        let role = if matches!(case, "owner" | "admin" | "guest") {
+        let role = if case == "foreign" {
+            "guest"
+        } else if matches!(case, "owner" | "admin" | "guest") {
             case
         } else {
             "member"

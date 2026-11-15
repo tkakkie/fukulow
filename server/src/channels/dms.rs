@@ -5,7 +5,7 @@ mod cursor;
 pub(crate) mod discovery;
 pub mod reclamation;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub(crate) use cursor::Cursor;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

@@ -5,7 +5,7 @@ use axum::Router;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-mod concurrency;
+pub(crate) mod concurrency;
 mod filtered_paging;
 mod integrity;
 mod paging;
@@ -92,8 +92,14 @@ impl Fixture {
             .unwrap();
     }
     async fn snapshot(&self) -> Value {
-        sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM channels c),(SELECT jsonb_agg(to_jsonb(g) ORDER BY channel_id,member_id) FROM channel_members g),(SELECT jsonb_agg(to_jsonb(p) ORDER BY channel_id,member_id) FROM channel_read_positions p),(SELECT jsonb_agg(to_jsonb(m) ORDER BY channel_id,seq) FROM messages m),(SELECT jsonb_agg(to_jsonb(s) ORDER BY channel_id) FROM channel_message_sequences s),(SELECT jsonb_agg(to_jsonb(d) ORDER BY member_id,membership_revision,channel_id) FROM dm_discovery d),(SELECT jsonb_agg(to_jsonb(c) ORDER BY member_id,membership_revision) FROM dm_discovery_counters c))").fetch_one(&self.pools.admin).await.unwrap()
+        snapshot(&self.pools.admin).await
     }
+}
+
+pub(crate) async fn snapshot<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+) -> Value {
+    sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM channels c),(SELECT jsonb_agg(to_jsonb(g) ORDER BY channel_id,member_id) FROM channel_members g),(SELECT jsonb_agg(to_jsonb(p) ORDER BY channel_id,member_id) FROM channel_read_positions p),(SELECT jsonb_agg(to_jsonb(m) ORDER BY channel_id,seq) FROM messages m),(SELECT jsonb_agg(to_jsonb(s) ORDER BY channel_id) FROM channel_message_sequences s),(SELECT jsonb_agg(to_jsonb(d) ORDER BY member_id,membership_revision,channel_id) FROM dm_discovery d),(SELECT jsonb_agg(to_jsonb(c) ORDER BY member_id,membership_revision) FROM dm_discovery_counters c))").fetch_one(executor).await.unwrap()
 }
 
 #[fukulow_test::test]
