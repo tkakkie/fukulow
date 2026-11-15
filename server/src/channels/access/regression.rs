@@ -359,6 +359,51 @@ async fn bounded_fanout_rechecks_channel_dm_guest_deactivation_and_grant_lifetim
 }
 
 #[fukulow_test::test]
+async fn bounded_fanout_requires_dm_participation_even_with_current_grants(pool: PgPool) {
+    let pools = crate::test_support::TestPools::new(pool).await;
+    let fixture = Fixture::new(&pools.admin, 6).await;
+    let org = fixture.organizations[0];
+    let dm = fixture.channels[2];
+    let participant_grant = fixture.grants[&(org, dm, fixture.members[1])];
+    // Inject a third-party current grant so participation is the only denied
+    // condition. Restore the storage guard before exercising either read path.
+    let mut tx = pools.admin.begin().await.unwrap();
+    sqlx::query("ALTER TABLE channel_members DISABLE TRIGGER channel_members_dm")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let outsider_grant: Uuid = sqlx::query_scalar(
+        "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3) RETURNING grant_id",
+    )
+    .bind(org)
+    .bind(dm)
+    .bind(fixture.members[3])
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE channel_members ENABLE TRIGGER channel_members_dm")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        let app = single(&pools.app, mode).await;
+        assert_access(
+            &app,
+            &fixture,
+            1,
+            0,
+            2,
+            (true, Some(participant_grant), true),
+        )
+        .await;
+        assert_access(&app, &fixture, 3, 0, 2, (false, Some(outsider_grant), true)).await;
+        crate::database::tests::context::clean(&app).await;
+        app.close().await;
+    }
+}
+
+#[fukulow_test::test]
 async fn bounded_candidates_keep_organization_scope_with_account_read_policy(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let fixture = Fixture::new(&pools.admin, 6).await;
@@ -434,6 +479,48 @@ async fn bounded_candidates_keep_organization_scope_with_account_read_policy(poo
         })
         .await
         .unwrap();
+        // Session Account context lets the pool-based one-statement path run
+        // with both permissive policies, rather than only testing member_access_in.
+        sqlx::query("SELECT set_config('fukulow.account_id', $1, false)")
+            .bind(account.to_string())
+            .execute(&app)
+            .await
+            .unwrap();
+        crate::database::organization_read_only(
+            &app,
+            entry.organization,
+            async |tx: &mut sqlx::PgConnection| {
+                let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id=$1")
+                    .bind(entry.member.0)
+                    .fetch_one(tx)
+                    .await?;
+                assert_eq!(visible, 2, "{mode}: overlapping-policy positive control");
+                Ok::<_, sqlx::Error>(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            super::super::member_access(&app, entry.organization, entry.channel, &[entry.member])
+                .await
+                .unwrap(),
+            [(entry.member.0, 0, true)],
+            "{mode}: one-statement candidates must stay Organization-bound"
+        );
+        let own: Vec<Uuid> = sqlx::query_scalar("SELECT organization_id FROM users WHERE id=$1")
+            .bind(entry.member.0)
+            .fetch_all(&app)
+            .await
+            .unwrap();
+        assert_eq!(
+            own,
+            [fixture.organizations[1]],
+            "{mode}: Account-read control"
+        );
+        sqlx::query("RESET fukulow.account_id")
+            .execute(&app)
+            .await
+            .unwrap();
         crate::database::tests::context::clean(&app).await;
         app.close().await;
     }

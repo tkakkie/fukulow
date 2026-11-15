@@ -88,6 +88,7 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 ## Rows in other parts
 
 - [channels](channels.md): `bounded_fanout_batches_preserve_tenants_order_duplicates_and_revisions`, `bounded_fanout_rechecks_channel_dm_guest_deactivation_and_grant_lifetimes`, `bounded_candidates_keep_organization_scope_with_account_read_policy`, `bounded_fanout_cancellation_discards_context_in_both_plan_modes`
+- [channels](channels.md): `bounded_fanout_requires_dm_participation_even_with_current_grants`
 
 - [channels](channels.md): `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
 - [messages](messages.md): `send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions`, `default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime`

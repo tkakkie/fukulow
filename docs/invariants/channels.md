@@ -39,6 +39,7 @@ Channels, membership, Capabilities (server and member UI). Writing rules and the
 | Fast rechecks and failures affect only Organization+Channel or Organization+Member; unrelated subscriptions and tenants stay untouched | `server/src/channels/tests/management.rs::fast_subscription_rechecks_and_failures_are_scoped` |
 | Fan-out keeps Organization scope, input order, duplicates and captured revisions across the 1,000 split in Custom and Generic plans | `server/src/channels/access/regression.rs::bounded_fanout_batches_preserve_tenants_order_duplicates_and_revisions` |
 | Fan-out rechecks Channel/DM grants, Guest Role and activation; re-grant/reactivation never revives old revisions or subscriptions | `server/src/channels/access/regression.rs::bounded_fanout_rechecks_channel_dm_guest_deactivation_and_grant_lifetimes` |
+| Fan-out denies DM non-participants even with active current-revision grants, with participant controls in Custom and Generic plans | `server/src/channels/access/regression.rs::bounded_fanout_requires_dm_participation_even_with_current_grants` |
 | Candidate reads without context deny; Account-read policy never expands an Organization-bound fan-out | `server/src/channels/access/regression.rs::bounded_candidates_keep_organization_scope_with_account_read_policy` |
 | Cancelling fan-out after context setup discards its backend; the next connection has no leaked context, in Custom and Generic plans | `server/src/channels/access/regression.rs::bounded_fanout_cancellation_discards_context_in_both_plan_modes` |
 
