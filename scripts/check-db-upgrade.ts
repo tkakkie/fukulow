@@ -171,7 +171,7 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     const upgradedMessage = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`,
       { body: 'Sent after read-only upgrade and restart', client_message_id: randomUUID() }, session.token, 201)
     const upgradedHistory = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
-    assert.deepEqual(upgradedHistory.messages, [message, upgradedMessage])
+    assert.deepEqual(upgradedHistory.messages, [{ mentions: [], ...message }, upgradedMessage])
     assert.equal(run(['diff', dc('ps', '-q', 'app')]), '')
     for (const statement of [
       'ALTER TABLE users DISABLE TRIGGER protect_member_identity',
