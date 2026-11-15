@@ -19,37 +19,106 @@ function checkRestrictions(service: Record<string, unknown>) {
   assert.deepEqual(service.tmpfs ?? [], [], 'no demonstrated tmpfs exception')
 }
 
-// Guard the shipped, deliberately simple configuration shape. After CI builds the
-// image, check-compose-security.ts exercises errors independently of app headers.
+// This is a restricted grammar, not a general proxy-config interpreter. Compare
+// every token (including scope/delimiters) with the approved deployment shape so
+// new includes, routes, inheritance controls and header operations require review.
+// Keep values/quoting exact; HTTP field names alone are case-insensitive.
+const approvedProxyConfig = {
+  caddy: `(browser_headers) {
+	header >Permissions-Policy "${permissionsPolicy}"
+	header >Cross-Origin-Opener-Policy "same-origin"
+}
+
+{$FUKULOW_DOMAIN:localhost} {
+	import browser_headers
+	@static not path /api /api/*
+	encode @static zstd gzip
+	@hsts {
+		protocol https
+		not host localhost 127.0.0.1 [::1]
+	}
+	header @hsts Strict-Transport-Security "max-age=31536000"
+	respond /api/v1/ready 404
+	reverse_proxy app:8080 {
+		flush_interval -1
+	}
+	handle_errors {
+		import browser_headers
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+}`,
+  nginx: `map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+map $https $hsts { default ""; on "max-age=31536000"; }
+server {
+    listen 80;
+    add_header Strict-Transport-Security $hsts always;
+    proxy_hide_header Permissions-Policy;
+    proxy_hide_header Cross-Origin-Opener-Policy;
+    add_header Permissions-Policy "${permissionsPolicy}" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    gzip on;
+    gzip_vary on;
+    gzip_types text/css text/javascript application/javascript image/svg+xml;
+    gzip_proxied any;
+    location = /api/v1/ready {
+        return 404;
+    }
+    location / {
+        proxy_pass http://app:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}`
+}
+
+function proxyTokens(profile: string, source: string): string[] {
+  assert.doesNotMatch(source, /[^\x09\x0a\x0d\x20-\x7e]/, 'unsupported proxy character')
+  const tokens: string[] = []
+  // Backslash escapes, backticks, arbitrary placeholders and non-ASCII whitespace
+  // are unsupported: never silently reinterpret syntax the proxy may treat differently.
+  const token = /[ \t\r]+|\n|#[^\r\n]*|\{\$FUKULOW_DOMAIN:localhost\}|\{err.status_code\}|"[^"\\\r\n]*"|'[^'\\\r\n]*'|[{};]|[^\s{};"'\\#`]+/gy
+  let position = 0
+  let separated = true
+  let previous = ''
+  while (position < source.length) {
+    token.lastIndex = position
+    const match = token.exec(source)
+    assert.ok(match, 'unsupported proxy syntax')
+    const value = match[0]
+    position = token.lastIndex
+    if (value.startsWith('#')) assert.ok(separated, 'unsupported proxy comment adjacency')
+    if (/^[ \t\r]+$/.test(value) || value.startsWith('#')) {
+      separated = true
+      continue
+    }
+    if (value === '\n') {
+      separated = true
+      // Caddy statements end at newlines; nginx statements end at semicolons.
+      if (profile === 'caddy' && tokens.length && tokens.at(-1) !== '\n') tokens.push(value)
+      continue
+    }
+    // Adjacent quoted/bare words can concatenate in the real parsers; they are
+    // not equivalent to separate arguments. Block openers also require spacing.
+    assert.ok(separated || /^[};]$/.test(value) || /^[{};]$/.test(previous), 'unsupported proxy token adjacency')
+    tokens.push(/^(>?)(permissions-policy|cross-origin-opener-policy)$/i.test(value) ? value.toLowerCase() : value)
+    previous = value
+    separated = false
+  }
+  if (tokens.at(-1) === '\n') tokens.pop()
+  return tokens
+}
+
 function checkProxyHeaders(profile: string, source: string) {
-  if (profile === 'caddy') {
-    assert.match(source, /^\(browser_headers\) \{\n/, 'shared browser policy snippet required')
-    assert.match(source, /\{\$FUKULOW_DOMAIN:localhost\} \{\n\s+import browser_headers\n/, 'normal routes must import browser headers')
-    assert.match(source, /handle_errors \{\n\s+import browser_headers\n\s+respond "\{err.status_code\} \{err.status_text\}" \{err.status_code\}\n\s+\}/, 'upstream errors must import browser headers and preserve status')
-  }
-  const lines = source.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#'))
-  let depth = 0
-  for (const line of lines) {
-    if (profile === 'nginx' && line.startsWith('add_header ')) {
-      assert.equal(depth, 1, 'location add_header discards server headers')
-    }
-    for (const [name, value] of [['Permissions-Policy', permissionsPolicy], ['Cross-Origin-Opener-Policy', 'same-origin']]) {
-      if (line.includes(name)) {
-        assert.equal(depth, 1, `${name} must be unconditional at server scope`)
-        const allowed = profile === 'caddy' ? [`header >${name} "${value}"`] :
-          [`proxy_hide_header ${name};`, `add_header ${name} "${value}" always;`]
-        assert.ok(allowed.includes(line), `${name} must retain its enforced value on errors`)
-      }
-    }
-    // Ignore placeholders (Caddy env / nginx variables) and inline map blocks.
-    if (line.endsWith(' {')) depth++
-    if (line === '}') depth--
-  }
-  for (const [name, value] of [['Permissions-Policy', permissionsPolicy], ['Cross-Origin-Opener-Policy', 'same-origin']]) {
-    const expected = profile === 'caddy' ? `header >${name} "${value}"` : `add_header ${name} "${value}" always;`
-    assert.equal(lines.filter(line => line === expected).length, 1, `${name} must be emitted exactly once`)
-    if (profile === 'nginx') assert.ok(lines.includes(`proxy_hide_header ${name};`), `${name} must replace the upstream header`)
-  }
+  assert.ok(profile === 'caddy' || profile === 'nginx', 'unsupported proxy profile')
+  const approved = approvedProxyConfig[profile]
+  assert.deepEqual(proxyTokens(profile, source), proxyTokens(profile, approved),
+    'unsupported proxy configuration: preserve the approved headers, inheritance and route scopes')
 }
 
 test('deployment and load app and migrate enforce container restrictions with removal and weakening denials', () => {
@@ -93,15 +162,82 @@ test('both proxies enforce browser headers with removal weakening and inheritanc
       }
     }
     if (profile === 'nginx') {
-      assert.throws(() => checkProxyHeaders(profile, source.replace('return 404;', 'add_header X-Test "test";\n        return 404;')), /location add_header/)
+      assert.throws(() => checkProxyHeaders(profile, source.replace('return 404;', 'add_header X-Test "test";\n        return 404;')))
     } else {
       for (const declaration of ['\timport browser_headers\n', '\t\timport browser_headers\n']) {
-        assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, '')), /must import browser headers/)
+        assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, '')))
       }
     }
   }
   const app = readFileSync(new URL('../server/src/lib.rs', import.meta.url), 'utf8')
   assert.ok(app.includes(`const PERMISSIONS_POLICY: &str = "${permissionsPolicy}";`), 'direct app policy must agree with proxies')
+})
+
+test('proxy grammar rejects unprobed scopes, inheritance controls and alternate header syntax', () => {
+  const nginx = readFileSync(new URL('../deploy/nginx.conf', import.meta.url), 'utf8')
+  const caddy = readFileSync(new URL('../deploy/Caddyfile', import.meta.url), 'utf8')
+  const deny = (profile: string, source: string, label: string) =>
+    assert.throws(() => checkProxyHeaders(profile, source), /unsupported proxy/, label)
+  for (const whitespace of [' ', '\t', '  \t ', '\n', '\r\n', '\v', '\f', '\u2003']) {
+    for (const directive of ['add_header Cache-Control "public";', 'add_header_inherit off;']) {
+      const statement = directive.replace(' ', whitespace)
+      deny('nginx', nginx.replace('    location / {', `    location /assets/ { ${statement} return 404; }\n    location / {`),
+        `unprobed inline location: ${JSON.stringify(whitespace)} ${directive}`)
+      deny('nginx', nginx.replace('return 404;', `${statement}\n        return 404;`),
+        `existing location: ${JSON.stringify(whitespace)} ${directive}`)
+    }
+  }
+  for (const directive of ['add_header Cache-Control "public";', 'add_header_inherit off;']) {
+    deny('nginx', nginx.replace('    location / {', `    location /assets/ {\n        ${directive}\n        return 404;\n    }\n    location / {`),
+      `unprobed multiline location: ${directive}`)
+  }
+  for (const block of ['location /assets/', 'if ($request_method = GET)', 'limit_except GET']) {
+    for (const directive of ['add_header X-Test test;', 'add_header_inherit off;', 'add_header_inherit merge;']) {
+      for (const body of [`${block} { ${directive} }`, `${block} {\n ${directive}\n }`]) {
+        deny('nginx', nginx.replace('return 404;', `${body}\n return 404;`), `${block}: ${directive}`)
+      }
+    }
+  }
+  for (const level of ['server {', 'location / {']) {
+    for (const value of ['off', 'on', 'merge']) {
+      deny('nginx', nginx.replace(level, `${level}\n add_header_inherit ${value};`), `${level} inheritance ${value}`)
+    }
+  }
+  for (const [name, value] of [['Cross-Origin-Opener-Policy', 'same-origin'], ['Permissions-Policy', permissionsPolicy]]) {
+    for (const spelling of [name, name.toLowerCase(), name.toUpperCase()]) {
+      for (const added of [value, 'unsafe-none']) {
+        deny('nginx', nginx.replace('server {', `server {\n add_header ${spelling} "${added}" always;`), `duplicate/conflicting nginx ${spelling}`)
+        for (const operation of ['>', '', '+', '-', '?']) {
+          deny('caddy', caddy.replace('(browser_headers) {', `(browser_headers) {\n header ${operation}${spelling} "${added}"`),
+            `duplicate/conflicting Caddy ${operation}${spelling}`)
+        }
+      }
+    }
+    // A single field with alternate capitalization still has the same meaning.
+    checkProxyHeaders('nginx', nginx.replaceAll(name, name.toLowerCase()))
+    checkProxyHeaders('caddy', caddy.replaceAll(name, name.toLowerCase()))
+  }
+  for (const added of [
+    'header {\n cross-origin-opener-policy unsafe-none\n}',
+    'header { cross-origin-opener-policy unsafe-none }',
+    'header /assets/* cross-origin-opener-policy unsafe-none',
+    'route /assets/* {\n header -permissions-policy\n}',
+    'import /tmp/unchecked-headers',
+  ]) deny('caddy', caddy.replace('\timport browser_headers', `\timport browser_headers\n${added}`), added)
+  for (const added of ['include /tmp/unchecked-headers;', 'more_clear_headers Permissions-Policy;', 'add_header "cross-origin-opener-policy" unsafe-none always;']) {
+    deny('nginx', nginx.replace('server {', `server {\n ${added}`), added)
+  }
+  deny('nginx', nginx.replace('add_header Permissions-Policy', 'add_header\\\n Permissions-Policy'), 'unsupported escape')
+  deny('caddy', caddy.replace('header >Permissions-Policy', 'header `>Permissions-Policy`'), 'unsupported quoting')
+  deny('nginx', nginx.replace('"same-origin" always', '"same-origin"always'), 'unsupported concatenated arguments')
+  deny('nginx', nginx.replace('server {', 'server{'), 'unsupported block adjacency')
+  deny('caddy', caddy.replace('import browser_headers', 'import browser_headers#unchecked'), 'unsupported comment adjacency')
+  // Harmless nginx formatting (including multiline statements/inline blocks) and
+  // ordinary Caddy indentation/comments do not change the accepted token stream.
+  const uncommented = nginx.split('\n').filter(line => !line.trim().startsWith('#')).join('\n')
+  checkProxyHeaders('nginx', uncommented.replace(/add_header /g, 'add_header\t\n').replaceAll('\n', '\r\n'))
+  checkProxyHeaders('nginx', nginx.split('\n').filter(line => !line.trim().startsWith('#')).map(line => line.trim()).join(' '))
+  checkProxyHeaders('caddy', caddy.replaceAll('\t', '  ').replaceAll('\n', '\r\n'))
 })
 
 function checkBaseImages(dockerfile: string) {
