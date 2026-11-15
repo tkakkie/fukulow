@@ -14,7 +14,7 @@ const project = `fukulow-upgrade-${randomUUID().slice(0, 8)}`
 const directory = mkdtempSync(join(tmpdir(), project))
 const source = join(directory, 'main')
 mkdirSync(source)
-const oldImage = `${project}-main`
+const oldImage = process.env.CHECK_UPGRADE_OLD_IMAGE || `${project}-main`
 // Override only for rehearsing a post-merge source locally; CI upgrades origin/main.
 const oldRevision = process.env.CHECK_UPGRADE_REVISION || 'origin/main'
 const configOnly = process.argv.includes('--check-config')
@@ -72,9 +72,9 @@ const snapshot = () => JSON.parse(sql(`SELECT json_build_object(
 
 async function check() {
   try {
-    const revision = execFileSync('git', ['rev-parse', oldRevision], { cwd, encoding: 'utf8' }).trim()
-    const archive = execFileSync('git', ['archive', revision], { cwd, maxBuffer: 32 * 1024 * 1024 })
-    execFileSync('tar', ['-x', '-C', source], { input: archive })
+    const revision = execFileSync('git', ['rev-parse', oldRevision], { cwd, env, encoding: 'utf8' }).trim()
+    const archive = execFileSync('git', ['archive', revision], { cwd, env, maxBuffer: 32 * 1024 * 1024 })
+    execFileSync('tar', ['-x', '-C', source], { env, input: archive })
     const oldConfig = JSON.parse(run(['compose', '--env-file', '/dev/null', '-p', project,
       '-f', join(source, 'compose.yml'), 'config', '--format', 'json']))
     const hasMigrate = Object.hasOwn(oldConfig.services, 'migrate')
@@ -95,12 +95,15 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
       return
     }
     console.log(`Upgrade source=${revision} project=${project}`)
-    // CI reuses main's exported layers; buildx needs HOME for the builder and the Actions cache credentials.
-    const cacheFrom = process.env.CHECK_UPGRADE_CACHE_FROM
-    const buildEnv = cacheFrom ? { ...env, HOME: process.env.HOME, ACTIONS_RESULTS_URL: process.env.ACTIONS_RESULTS_URL,
-      ACTIONS_RUNTIME_TOKEN: process.env.ACTIONS_RUNTIME_TOKEN } : env
-    const build = cacheFrom ? ['buildx', 'build', '--load', '--cache-from', cacheFrom] : ['build']
-    execFileSync('docker', [...build, '-q', '-t', oldImage, source], { cwd, env: buildEnv, stdio: 'inherit' })
+    // CI supplies an image built in its credential-scoped action, so this check needs no cache token.
+    if (!process.env.CHECK_UPGRADE_OLD_IMAGE) {
+      const cacheFrom = process.env.ACTIONS_RESULTS_URL && process.env.ACTIONS_RUNTIME_TOKEN
+        ? process.env.CHECK_UPGRADE_CACHE_FROM : undefined
+      const buildEnv = cacheFrom ? { ...env, HOME: process.env.HOME, ACTIONS_RESULTS_URL: process.env.ACTIONS_RESULTS_URL,
+        ACTIONS_RUNTIME_TOKEN: process.env.ACTIONS_RUNTIME_TOKEN } : env
+      const build = cacheFrom ? ['buildx', 'build', '--load', '--cache-from', cacheFrom] : ['build']
+      execFileSync('docker', [...build, '-q', '-t', oldImage, source], { cwd, env: buildEnv, stdio: 'inherit' })
+    }
     if (!process.env.CHECK_COMPOSE_IMAGE) {
       execFileSync('docker', [...current, 'build', 'app'], { cwd, env, stdio: 'inherit' })
     }
@@ -132,8 +135,20 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.deepEqual(snapshot(), before)
     if (hasMigrate) assert.equal(sql(roleQuery), previousRole)
     else assert.match(sql(roleQuery), /^\d+$/)
-    dc('up', '-d', '--no-build', 'app')
+    dc('up', '-d', '--no-build', '--wait', 'app')
     url = await health(current)
+    for (const service of ['app', 'migrate']) {
+      const container = dc('ps', '-aq', service)
+      const [actual] = JSON.parse(run(['inspect', container]))
+      assert.equal(actual.HostConfig.ReadonlyRootfs, true)
+      assert.deepEqual(actual.HostConfig.CapDrop, ['ALL'])
+      assert.deepEqual(actual.HostConfig.SecurityOpt, ['no-new-privileges:true'])
+      assert.deepEqual(actual.Mounts, [], 'upgrade requires no writable-path exception')
+      assert.equal(run(['diff', container]), '')
+      if (service === 'migrate') assert.equal(actual.State.ExitCode, 0)
+      else assert.equal(actual.State.Health.Status, 'healthy')
+    }
+    dc('exec', '-T', 'app', 'fukulow-server', 'probe')
     assert.deepEqual(snapshot(), before)
     await request(url, `/orgs/${organization}/me`, undefined, session.token)
     // An older/newer binary must fail before listening, even with the same row count.
@@ -152,6 +167,12 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     dc('restart', 'app')
     url = await health(current)
     await request(url, `/orgs/${organization}/me`, undefined, session.token)
+    dc('exec', '-T', 'app', 'fukulow-server', 'probe')
+    const upgradedMessage = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`,
+      { body: 'Sent after read-only upgrade and restart', client_message_id: randomUUID() }, session.token, 201)
+    const upgradedHistory = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
+    assert.deepEqual(upgradedHistory.messages, [message, upgradedMessage])
+    assert.equal(run(['diff', dc('ps', '-q', 'app')]), '')
     for (const statement of [
       'ALTER TABLE users DISABLE TRIGGER protect_member_identity',
       'DROP TRIGGER protect_member_identity ON users',
@@ -183,13 +204,13 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.equal(restoredApp('SELECT count(*) FROM messages'), '0')
     assert.equal(restoredApp("WITH context AS MATERIALIZED (SELECT set_config('fukulow.organization_id', " +
       `'${organization}', true) AS id) SELECT count(*) FROM context CROSS JOIN LATERAL ` +
-      '(SELECT 1 FROM messages WHERE context.id IS NOT NULL OFFSET 0) m'), '1')
+      '(SELECT 1 FROM messages WHERE context.id IS NOT NULL OFFSET 0) m'), '2')
     // --no-acl resets function ACLs; the grants step must leave the definer function to fukulow_app only.
     assert.equal(dc('exec', '-T', 'db', 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow_restore', '-Atc',
       "SELECT string_agg(coalesce(nullif(acl.grantee, 0)::regrole::text, 'PUBLIC'), ',' ORDER BY 1) FROM pg_proc p, " +
       "aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl WHERE p.proname = 'fukulow_setup_required' " +
       "AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner"), 'fukulow_app')
-    console.log('PASS existing volume: idempotent roles, identical Organizations/Accounts/Members/Messages/Sessions, old Session, sign-in, history, restart, startup mismatch denial/revert, DDL denials, #198 backup/drill/restored grants, restored RLS and definer ACL')
+    console.log('PASS existing volume: read-only app/migrate without mounts, dropped capabilities, no-new-privileges, probe, idempotent roles, identical Organizations/Accounts/Members/Messages/Sessions, old Session, sign-in, history, restart/send, startup mismatch denial/revert, DDL denials, #198 backup/drill/restored grants, restored RLS and definer ACL')
   } finally {
     if (!configOnly) {
       spawnSync('docker', [...current, 'down', '-v', '--remove-orphans'], { cwd, env, stdio: 'inherit' })

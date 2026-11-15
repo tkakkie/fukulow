@@ -2,7 +2,10 @@
 use super::*;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{Notify, Semaphore};
@@ -73,12 +76,97 @@ struct Proof {
     role: Role,
     grant: Option<Uuid>,
 }
-#[derive(Clone)]
+#[derive(Default)]
+struct Recovery {
+    state: Mutex<RecoveryState>,
+}
+#[derive(Default)]
+struct RecoveryState {
+    live: usize,
+    settled: bool,
+}
+impl Recovery {
+    fn valid(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.settled || state.live != 0
+    }
+}
+struct QueryToken {
+    valid: AtomicBool,
+    recovery: Mutex<Option<Arc<Recovery>>>,
+}
+impl QueryToken {
+    fn new() -> Self {
+        Self {
+            valid: AtomicBool::new(true),
+            recovery: Mutex::new(None),
+        }
+    }
+    fn valid(&self) -> bool {
+        self.valid.load(Ordering::Relaxed)
+    }
+    fn contribute(&self, recovery: &Arc<Recovery>) {
+        // Each recipient query enqueues one contribution. Coalescing attaches its
+        // token once; subsequent merges keep the same recovery accumulator.
+        let mut contribution = self.recovery.lock().unwrap_or_else(|e| e.into_inner());
+        if contribution.is_none() && self.valid() {
+            recovery
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .live += 1;
+            *contribution = Some(recovery.clone());
+        }
+    }
+    fn retire(&self) {
+        let contribution = self.recovery.lock().unwrap_or_else(|e| e.into_inner());
+        if self.valid.swap(false, Ordering::Relaxed)
+            && let Some(recovery) = contribution.as_ref()
+        {
+            recovery
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .live -= 1;
+        }
+    }
+}
+impl Drop for QueryToken {
+    fn drop(&mut self) {
+        if self.valid()
+            && let Some(recovery) = self
+                .recovery
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+        {
+            // No query guard, fallback snapshot or frame can fence this token
+            // after its last owner drops. Retain its reset authority as one bit,
+            // rather than retaining a growing list of completed query tokens.
+            let mut state = recovery.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.settled = true;
+            state.live -= 1;
+        }
+    }
+}
+#[cfg_attr(test, derive(Clone))]
 struct Pending {
     notice: Notice,
     epoch: u64,
     directory_epoch: Option<u64>,
     proof: Option<Proof>,
+    valid: Arc<QueryToken>,
+    recovery: Option<Arc<Recovery>>,
+}
+impl Pending {
+    fn recoverable(&self) -> bool {
+        self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid())
+    }
+}
+struct InFlight {
+    channel: Option<Uuid>,
+    proof: Option<Proof>,
+    valid: Arc<QueryToken>,
 }
 #[derive(Default)]
 struct Buffer {
@@ -87,13 +175,14 @@ struct Buffer {
     pending: VecDeque<Pending>,
     reset: bool,
     proofs: HashMap<Option<Uuid>, Proof>,
-    in_flight: HashMap<Uuid, (Option<Uuid>, Option<Proof>)>,
+    in_flight: HashMap<Uuid, InFlight>,
 }
 struct Authorization {
     entry: Arc<Entry>,
     epoch: u64,
     directory_epoch: Option<u64>,
     id: Uuid,
+    valid: Arc<QueryToken>,
 }
 impl Authorization {
     fn new(
@@ -104,12 +193,20 @@ impl Authorization {
         expected_directory_epoch: Option<u64>,
     ) -> Self {
         let id = Uuid::new_v4();
+        let valid = Arc::new(QueryToken::new());
         let directory_epoch = {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             let directory_epoch =
                 directory.then_some(expected_directory_epoch.unwrap_or(b.directory_epoch));
             if b.epoch == epoch {
-                b.in_flight.insert(id, (channel, None));
+                b.in_flight.insert(
+                    id,
+                    InFlight {
+                        channel,
+                        proof: None,
+                        valid: valid.clone(),
+                    },
+                );
             }
             directory_epoch
         };
@@ -118,6 +215,7 @@ impl Authorization {
             epoch,
             directory_epoch,
             id,
+            valid,
         }
     }
     fn proved(&self, proof: &Option<Proof>) {
@@ -127,9 +225,9 @@ impl Authorization {
                 || self
                     .directory_epoch
                     .is_none_or(|epoch| b.directory_epoch == epoch))
-            && let Some((_, captured)) = b.in_flight.get_mut(&self.id)
+            && let Some(captured) = b.in_flight.get_mut(&self.id)
         {
-            *captured = proof.clone();
+            captured.proof = proof.clone();
         }
     }
 }
@@ -464,6 +562,8 @@ impl Activity {
                         .then_some(authorization.directory_epoch)
                         .flatten(),
                     proof: Some(proof),
+                    valid: authorization.valid.clone(),
+                    recovery: None,
                 },
             );
         }
@@ -496,14 +596,19 @@ impl Activity {
         drop(task);
     }
 }
-fn enqueue(entry: &Entry, pending: Pending) {
+fn enqueue(entry: &Entry, mut pending: Pending) {
     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-    if b.epoch != pending.epoch
+    if !pending.valid.valid()
+        || b.epoch != pending.epoch
         || pending
             .directory_epoch
             .is_some_and(|epoch| b.directory_epoch != epoch)
     {
         return;
+    }
+    b.pending.retain(Pending::recoverable);
+    if b.pending.is_empty() {
+        b.reset = false;
     }
     let channel = if matches!(pending.notice, Notice::ChannelAccessRevoked { .. }) {
         None
@@ -541,14 +646,17 @@ fn enqueue(entry: &Entry, pending: Pending) {
         .iter_mut()
         .find(|p| p.notice.key() == pending.notice.key())
     {
+        let recovery = old.recovery.get_or_insert_with(Default::default).clone();
+        old.valid.contribute(&recovery);
+        pending.valid.contribute(&recovery);
+        pending.recovery = Some(recovery);
         match (&mut old.notice, &pending.notice) {
-            (Notice::ChannelActivity { seq, .. }, Notice::ChannelActivity { seq: new, .. }) => {
-                *seq = (*seq).max(*new)
-            }
+            (Notice::ChannelActivity { seq, .. }, Notice::ChannelActivity { seq: new, .. })
+                if *seq >= *new => {}
             (
                 Notice::ReadPositionChanged { read_seq, .. },
                 Notice::ReadPositionChanged { read_seq: new, .. },
-            ) => *read_seq = (*read_seq).max(*new),
+            ) if *read_seq >= *new => {}
             _ => *old = pending,
         }
     } else if b.pending.len() == 256 {
@@ -565,6 +673,14 @@ impl Registration {
     pub(crate) async fn next(&self) -> Option<NoticeFrame> {
         loop {
             let notified = self.entry.wake.notified();
+            #[cfg(test)]
+            test_pause(
+                self.entry.organization,
+                Uuid::nil(),
+                "dequeue",
+                Some(self.entry.member.0),
+            )
+            .await;
             let pending = {
                 self.entry
                     .buffer
@@ -583,14 +699,18 @@ impl Registration {
                 )
                 .await;
                 let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                if b.epoch != pending.epoch
+                if !pending.recoverable()
+                    || b.epoch != pending.epoch
                     || pending
                         .directory_epoch
                         .is_some_and(|epoch| b.directory_epoch != epoch)
                 {
+                    if b.pending.is_empty() {
+                        b.reset = false;
+                    }
                     continue;
                 }
-                let event = if b.reset {
+                let event = if b.reset || !pending.valid.valid() {
                     b.reset = false;
                     b.pending.clear();
                     Notice::ActivityReset
@@ -602,6 +722,8 @@ impl Registration {
                     epoch: pending.epoch,
                     directory_epoch: pending.directory_epoch,
                     event,
+                    valid: pending.valid,
+                    recovery: pending.recovery,
                 });
             }
             notified.await;
@@ -613,14 +735,29 @@ pub(crate) struct NoticeFrame {
     epoch: u64,
     directory_epoch: Option<u64>,
     pub event: Notice,
+    valid: Arc<QueryToken>,
+    recovery: Option<Arc<Recovery>>,
 }
 impl NoticeFrame {
-    pub(crate) async fn handoff<F: std::future::Future>(&self, future: F) -> Option<F::Output> {
-        let mut future = std::pin::pin!(future);
+    pub(crate) async fn handoff<F: std::future::Future>(
+        &self,
+        write: impl FnOnce(Notice) -> F,
+    ) -> Option<F::Output> {
+        let mut future = std::pin::pin!(async {
+            // This body first runs under the handoff gate. Another contribution
+            // authorizes recovery, never the discarded larger value.
+            let event = if self.valid.valid() {
+                self.event.clone()
+            } else {
+                Notice::ActivityReset
+            };
+            write(event).await
+        });
         let first = std::future::poll_fn(|cx| {
             let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             std::task::Poll::Ready(
-                if b.epoch == self.epoch
+                if (self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid()))
+                    && b.epoch == self.epoch
                     && self
                         .directory_epoch
                         .is_none_or(|epoch| b.directory_epoch == epoch)
@@ -994,7 +1131,9 @@ impl Activity {
         for (authorization, proof) in authorizations.iter().zip(&proofs) {
             authorization.proved(proof);
         }
-        for ((entry, epoch), proof) in captured.iter().zip(proofs) {
+        for (((entry, epoch), authorization), proof) in
+            captured.iter().zip(&authorizations).zip(proofs)
+        {
             if let Some(proof) = proof {
                 enqueue(
                     entry,
@@ -1005,6 +1144,8 @@ impl Activity {
                         epoch: *epoch,
                         directory_epoch: None,
                         proof: Some(proof),
+                        valid: authorization.valid.clone(),
+                        recovery: None,
                     },
                 );
             }
@@ -1032,16 +1173,28 @@ impl Activity {
         let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
         for entry in entries {
             let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            for (channel, proof) in b
+            for (channel, proof, valid) in b
                 .proofs
                 .iter()
-                .map(|(channel, proof)| (*channel, Some(proof.clone())))
-                .chain(b.in_flight.values().cloned())
+                .map(|(channel, proof)| (*channel, Some(proof.clone()), None))
+                .chain(
+                    b.in_flight
+                        .values()
+                        .filter(|authorization| authorization.valid.valid())
+                        .map(|authorization| {
+                            (
+                                authorization.channel,
+                                authorization.proof.clone(),
+                                Some(authorization.valid.clone()),
+                            )
+                        }),
+                )
             {
                 organizations.entry(entry.organization).or_default().push((
                     (entry.clone(), channel),
                     b.epoch,
                     proof,
+                    valid,
                 ));
             }
         }
@@ -1049,7 +1202,7 @@ impl Activity {
             for chunk in rows.chunks(1000) {
                 let selected: Vec<_> = chunk
                     .iter()
-                    .map(|(selected, _, _)| selected.clone())
+                    .map(|(selected, _, _, _)| selected.clone())
                     .collect();
                 #[cfg(test)]
                 for (entry, channel) in &selected {
@@ -1062,7 +1215,7 @@ impl Activity {
                     .await;
                 }
                 let result = authorize_batch(pool, &selected).await;
-                for (index, ((entry, _), epoch, proof)) in chunk.iter().enumerate() {
+                for (index, ((entry, channel), epoch, proof, valid)) in chunk.iter().enumerate() {
                     let current = result.as_ref().ok().and_then(|rows| rows[index].as_ref());
                     // An unproved snapshot cannot establish the in-flight grant's lifetime.
                     if proof.as_ref().is_some_and(|proof| current == Some(proof)) {
@@ -1070,6 +1223,36 @@ impl Activity {
                     }
                     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
                     if b.epoch == *epoch {
+                        // Unknown provenance fences only that query. A current grant
+                        // proves no loss for independently authorized work on this socket.
+                        // Keep the fence through enqueue and first handoff: the query
+                        // may already have completed since this fallback's snapshot.
+                        if proof.is_none()
+                            && current.is_some()
+                            && let Some(valid) = valid
+                        {
+                            let changed = b
+                                .proofs
+                                .get(channel)
+                                .is_some_and(|known| current != Some(known))
+                                || b.in_flight.values().any(|authorization| {
+                                    authorization.channel == *channel
+                                        && authorization
+                                            .proof
+                                            .as_ref()
+                                            .is_some_and(|known| current != Some(known))
+                                });
+                            if !changed {
+                                valid.retire();
+                                for authorization in b.in_flight.values().filter(|authorization| {
+                                    authorization.channel == *channel
+                                        && authorization.proof.is_none()
+                                }) {
+                                    authorization.valid.retire();
+                                }
+                                continue;
+                            }
+                        }
                         b.epoch = b.epoch.wrapping_add(1);
                         b.pending.clear();
                         b.proofs.clear();
@@ -1176,6 +1359,8 @@ mod tests {
                 role: Role::Member,
                 grant: None,
             }),
+            valid: Arc::new(QueryToken::new()),
+            recovery: None,
         }
     }
     #[test]
@@ -1269,18 +1454,270 @@ mod tests {
             epoch: 0,
             directory_epoch: None,
             event: Notice::MembersChanged,
+            valid: Arc::new(QueryToken::new()),
+            recovery: None,
         };
         entry.buffer.lock().unwrap().epoch = 2;
         let polled = std::sync::atomic::AtomicBool::new(false);
         assert_eq!(
             frame
-                .handoff(async {
+                .handoff(|_| async {
                     polled.store(true, std::sync::atomic::Ordering::SeqCst);
                 })
                 .await,
             None
         );
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn retired_query_fences_enqueue_buffer_reset_and_handoff_without_retiring_other_work() {
+        for phase in ["enqueue", "buffer", "reset", "handoff", "coalesce"] {
+            let entry = entry();
+            let channel = Uuid::new_v4();
+            let retired = pending(channel, None);
+            let mut allowed = pending(channel, Some(Uuid::new_v4()));
+            if phase == "coalesce" {
+                allowed.notice = Notice::ReadPositionChanged {
+                    channel_id: channel,
+                    topic_id: None,
+                    read_seq: 5,
+                };
+            }
+            let registration = Registration {
+                id: entry.id,
+                registry: Weak::new(),
+                entry: entry.clone(),
+            };
+            if phase == "reset" {
+                for _ in 0..257 {
+                    let mut contribution = retired.clone();
+                    contribution.notice = Notice::ReadPositionChanged {
+                        channel_id: channel,
+                        topic_id: Some(Uuid::new_v4()),
+                        read_seq: 10,
+                    };
+                    enqueue(&entry, contribution);
+                }
+                assert!(entry.buffer.lock().unwrap().reset);
+            } else if phase != "enqueue" {
+                enqueue(&entry, retired.clone());
+            }
+            let frame = if phase == "handoff" {
+                registration.next().await
+            } else {
+                None
+            };
+            if phase == "buffer" {
+                enqueue(&entry, allowed.clone());
+            }
+            {
+                let _gate = entry.buffer.lock().unwrap();
+                retired.valid.retire();
+            }
+            if phase == "enqueue" {
+                enqueue(&entry, retired);
+                assert!(entry.buffer.lock().unwrap().pending.is_empty());
+            }
+            if let Some(frame) = frame {
+                let polled = AtomicBool::new(false);
+                assert!(
+                    frame
+                        .handoff(|_| async { polled.store(true, Ordering::Relaxed) })
+                        .await
+                        .is_none(),
+                    "phase={phase}"
+                );
+                assert!(!polled.load(Ordering::Relaxed));
+            }
+            if phase != "buffer" {
+                enqueue(&entry, allowed.clone());
+            }
+            let frame = tokio::time::timeout(Duration::from_secs(1), registration.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(frame.event, allowed.notice, "phase={phase}");
+            assert_eq!(frame.handoff(|_| async { true }).await, Some(true));
+            let b = entry.buffer.lock().unwrap();
+            assert_eq!(b.epoch, 0, "phase={phase}");
+            assert!(b.pending.is_empty(), "phase={phase}");
+            assert!(!b.reset, "phase={phase}");
+        }
+    }
+    #[tokio::test]
+    async fn coalesced_query_fence_recovers_at_dequeue_and_first_handoff() {
+        for read_position in [false, true] {
+            for (first, second, fence_first) in [(1, 2, false), (2, 1, true), (2, 2, true)] {
+                for fence in [false, true] {
+                    for handoff in [false, true] {
+                        let entry = entry();
+                        let channel = Uuid::new_v4();
+                        let notice = |value| {
+                            if read_position {
+                                Notice::ReadPositionChanged {
+                                    channel_id: channel,
+                                    topic_id: None,
+                                    read_seq: value,
+                                }
+                            } else {
+                                Notice::ChannelActivity {
+                                    channel_id: channel,
+                                    seq: value,
+                                }
+                            }
+                        };
+                        let mut a = pending(channel, None);
+                        a.notice = notice(first);
+                        let mut b = pending(channel, None);
+                        b.notice = notice(second);
+                        let winner = if fence_first {
+                            a.valid.clone()
+                        } else {
+                            b.valid.clone()
+                        };
+                        let independent = if fence_first {
+                            b.valid.clone()
+                        } else {
+                            a.valid.clone()
+                        };
+                        enqueue(&entry, a);
+                        enqueue(&entry, b);
+                        assert_eq!(entry.buffer.lock().unwrap().pending.len(), 1);
+                        let registration = Registration {
+                            id: entry.id,
+                            registry: Weak::new(),
+                            entry: entry.clone(),
+                        };
+                        let frame = if handoff {
+                            Some(registration.next().await.unwrap())
+                        } else {
+                            None
+                        };
+                        if fence {
+                            let _gate = entry.buffer.lock().unwrap();
+                            winner.retire();
+                        }
+                        assert!(independent.valid());
+                        let frame = match frame {
+                            Some(frame) => frame,
+                            None => registration.next().await.unwrap(),
+                        };
+                        let expected = if fence {
+                            Notice::ActivityReset
+                        } else {
+                            notice(2)
+                        };
+                        assert_eq!(frame.handoff(|event| async { event }).await, Some(expected));
+                        let buffer = entry.buffer.lock().unwrap();
+                        assert_eq!(buffer.epoch, 0);
+                        assert!(buffer.pending.is_empty());
+                        assert!(!buffer.reset);
+                    }
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn coalesced_recovery_requires_a_valid_contribution_and_current_epochs() {
+        for denial in ["all_queries", "socket_epoch", "directory_epoch"] {
+            let entry = entry();
+            let channel = Uuid::new_v4();
+            let mut a = pending(channel, None);
+            let mut b = pending(channel, None);
+            a.directory_epoch = Some(0);
+            b.directory_epoch = Some(0);
+            let first = a.valid.clone();
+            let second = b.valid.clone();
+            enqueue(&entry, a);
+            enqueue(&entry, b);
+            let registration = Registration {
+                id: entry.id,
+                registry: Weak::new(),
+                entry: entry.clone(),
+            };
+            let frame = registration.next().await.unwrap();
+            {
+                let mut buffer = entry.buffer.lock().unwrap();
+                first.retire();
+                match denial {
+                    "all_queries" => second.retire(),
+                    "socket_epoch" => buffer.epoch += 1,
+                    "directory_epoch" => buffer.directory_epoch += 1,
+                    _ => unreachable!(),
+                }
+            }
+            let polled = AtomicBool::new(false);
+            assert_eq!(
+                frame
+                    .handoff(|_| async { polled.store(true, Ordering::Relaxed) })
+                    .await,
+                None,
+                "{denial}"
+            );
+            assert!(!polled.load(Ordering::Relaxed));
+            // A new, independently authorized contribution still works.
+            let mut fresh = pending(channel, None);
+            fresh.epoch = entry.buffer.lock().unwrap().epoch;
+            enqueue(&entry, fresh.clone());
+            let fresh_frame = registration.next().await.unwrap();
+            assert_eq!(
+                fresh_frame.handoff(|event| async { event }).await,
+                Some(fresh.notice)
+            );
+        }
+    }
+    #[tokio::test]
+    async fn coalesced_recovery_compacts_completed_queries_without_retaining_tokens() {
+        let entry = entry();
+        let channel = Uuid::new_v4();
+        let mut first = pending(channel, None);
+        first.notice = Notice::ChannelActivity {
+            channel_id: channel,
+            seq: 1,
+        };
+        let discarded = Arc::downgrade(&first.valid);
+        enqueue(&entry, first);
+        for seq in 2..=4096 {
+            let mut next = pending(channel, None);
+            next.notice = Notice::ChannelActivity {
+                channel_id: channel,
+                seq,
+            };
+            enqueue(&entry, next);
+        }
+        assert!(discarded.upgrade().is_none());
+        {
+            let buffer = entry.buffer.lock().unwrap();
+            assert_eq!(buffer.pending.len(), 1);
+            assert_eq!(buffer.proofs.len(), 1);
+            let pending = buffer.pending.front().unwrap();
+            let recovery = pending.recovery.as_ref().unwrap();
+            let state = recovery.state.lock().unwrap();
+            assert!(state.settled);
+            assert_eq!(state.live, 1);
+            assert_eq!(Arc::strong_count(recovery), 2);
+            drop(state);
+            pending.valid.retire();
+        }
+        // A later smaller value must not hide recovery for an earlier valid
+        // larger contribution after the selected maximum was fenced.
+        let mut smaller = pending(channel, None);
+        smaller.notice = Notice::ChannelActivity {
+            channel_id: channel,
+            seq: 1,
+        };
+        enqueue(&entry, smaller);
+        assert_eq!(entry.buffer.lock().unwrap().pending.len(), 1);
+        let registration = Registration {
+            id: entry.id,
+            registry: Weak::new(),
+            entry,
+        };
+        let frame = registration.next().await.unwrap();
+        assert_eq!(
+            frame.handoff(|event| async { event }).await,
+            Some(Notice::ActivityReset)
+        );
     }
     #[test]
     fn two_sender_maxima_keep_each_recipients_other_sender_seq_in_both_orders() {
