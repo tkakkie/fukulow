@@ -1,6 +1,6 @@
 import { summarize } from './summarize.ts';
-import { supervise, ownedContainer, ownedVolume } from './runtime.ts';
-import { loadManifest, verifyRuntime, resolveImage, verifySession, postgresArguments } from './manifest.ts';
+import { supervise, ownedContainer, ownedVolume, refuseLeftovers, ownershipLabel } from './runtime.ts';
+import { loadManifest, verifyRuntime, resolveImage, verifySession, postgresArguments, runKind, smokeLabel } from './manifest.ts';
 // Run from the repository root with the Node version in .node-version.
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -15,20 +15,24 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 process.chdir(root);
 if (process.version !== `v${readFileSync('.node-version','utf8').trim()}`) throw new Error('Use .node-version exactly');
 const manifest = loadManifest();
+const kind = runKind();
+console.log(kind==='smoke' ? smokeLabel : 'EVALUATION (formal Linux judgement remains separate)');
 const requested = resolve(process.env.SEARCH_RESULT_DIR ?? `/private/tmp/fukulow-search-153-${Date.now()}`);
 const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1) ?? '');
 if (out === root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
 if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
 process.env.SEARCH_RESULT_DIR = out;
-if (await supervise(import.meta.url,out,manifest.sha256,()=>summarize(out))) {
+if (process.env.SEARCH_WORKER!=='1') refuseLeftovers(docker);
+if (await supervise(import.meta.url,out,manifest.sha256,()=>summarize(out,kind))) {
 mkdirSync(out);
 const container = ownedContainer();
 const imageTag = 'fukulow-search-measure-153';
 let image = imageTag;
 const engines = ['trgm','bigm','pgroonga'] as const;
 type Engine = typeof engines[number] | 'none';
-const count = Number(process.env.SEARCH_ROWS ?? 1000000);
-const transactions = Number(process.env.SEARCH_TRANSACTIONS ?? 20);
+const conditions = kind==='smoke' ? {...manifest.frozen.performance,...manifest.frozen.smoke.performance} : manifest.frozen.performance;
+const count = conditions.rows;
+const transactions = conditions.transactions;
 if (!Number.isSafeInteger(count) || count < 1000 || !Number.isSafeInteger(transactions) || transactions < 1) throw new Error('Invalid measurement size');
 const file = (name: string) => readFileSync(`load/search-engines/${name}`,'utf8');
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -43,7 +47,7 @@ function create(db: string) {
   owner('postgres',`CREATE DATABASE ${db};`);
   for (const migration of migrations) owner(db,`BEGIN;\n${readFileSync(`server/migrations/${migration}`,'utf8')}\nCOMMIT;`);
   verifySession(text=>owner(db,text));
-  verifySession(text=>app(db,text));
+  verifySession(text=>app(db,text),'app');
   owner(db,file('schema.sql')); owner(db,grants); owner(db,fixtureSql());
 }
 function seedDb(db: string, rows: number) {
@@ -146,25 +150,27 @@ async function restoreDrill() {
   const imageRecord = resolveImage(docker,imageTag,process.env.SEARCH_SKIP_BUILD==='1');
   image = imageRecord.id;
   save(`${out}/image.json`,imageRecord);
-  docker('volume','create',ownedVolume());
+  docker('volume','create','--label',ownershipLabel,ownedVolume());
   const password = randomUUID();
-  command('docker',['run','-d','--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD','-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,
+  command('docker',['run','-d','--label',ownershipLabel,'--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD','-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,
     ...postgresArguments],undefined,{...process.env,POSTGRES_PASSWORD:password});
   // The password is passed via environment, never a command argument or artifact.
   let ready = false;
   for (let attempt=0;attempt<60;attempt++) {
-    try { if (owner('postgres','SELECT 1;')==='1') { ready=true; break; } } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
+    try { docker('exec',container,'pg_isready','-h','127.0.0.1','-U','fukulow','-d','postgres'); if (owner('postgres','SELECT 1;')==='1') { ready=true; break; } } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
     await new Promise(r=>setTimeout(r,500));
   }
   if (!ready) throw new Error('PostgreSQL startup timed out');
-  verifyRuntime(text=>owner('postgres',text),docker,container);
-  verifySession(text=>owner('postgres',text));
-  save(`${out}/manifest.json`,manifest);
+  owner('postgres','CREATE EXTENSION pgroonga;');
+  const ownerVerification = {runtime:verifyRuntime(text=>owner('postgres',text),docker,container),
+    session:verifySession(text=>owner('postgres',text))};
+  save(`${out}/manifest.json`,{...manifest,runKind:kind});
   owner('postgres',`BEGIN; SET LOCAL fukulow.app_password=${literal(password)};\n${readFileSync('deploy/db-role-settings.sql','utf8')}\n${readFileSync('deploy/db-roles.sql','utf8')}\nCOMMIT;`);
-  verifyRuntime(text=>app('postgres',text),docker,container);
-  verifySession(text=>app('postgres',text));
-  const metadata = {manifestHash:manifest.sha256,at:new Date().toISOString(),node:process.version,cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem(),arch:arch(),
-    os:command('sw_vers',[]),model:command('sysctl',['-n','hw.model']),
+  save(`${out}/verification.json`,{runKind:kind,image:imageRecord,owner:ownerVerification,
+    app:{runtime:verifyRuntime(text=>app('postgres',text),docker,container,text=>owner('postgres',text)),
+      session:verifySession(text=>app('postgres',text),'app')}});
+  const metadata = {manifestHash:manifest.sha256,runKind:kind,at:new Date().toISOString(),node:process.version,cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem(),arch:arch(),
+    os:process.platform,model:cpus()[0]?.model,
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{.NCPU}},"memory":{{.MemTotal}}}')),
     image: imageRecord,source:command('git',['rev-parse','HEAD']),
     hashes:Object.fromEntries([...readdirSync('load/search-engines',{withFileTypes:true}).filter(n=>n.isFile()).map(n=>'load/search-engines/'+n.name),...migrations.map(n=>'server/migrations/'+n)].map(p=>[p,digest(readFileSync(p,'utf8'))])),
@@ -182,7 +188,7 @@ async function restoreDrill() {
   await restoreDrill();
   save(`${out}/dataset.json`,seedDb('base',count)); note(`seeded ${count} Messages`);
   save(`${out}/rls.json`,checkRls('base'));
-  for (let round=0;round<3;round++) {
+  for (let round=0;round<conditions.rounds;round++) {
     const order: Engine[] = round===0 ? ['none',...engines] : round===1 ? ['bigm','pgroonga','none','trgm'] : ['pgroonga','trgm','bigm','none'];
     for (const engine of order) {
       const dest = `${out}/round${round+1}-${engine}`; mkdirSync(dest);
@@ -196,15 +202,15 @@ async function restoreDrill() {
       }
       owner('measured',"SELECT pgroonga_command('status');");
       verifySession(text=>owner('measured',text));
-      verifySession(text=>app('measured',text));
+      verifySession(text=>app('measured',text),'app');
       note(`round ${round+1} ${engine}, index ${Math.round(build.buildMs)} ms`);
-      const row: Record<string,unknown> = {manifestHash:manifest.sha256,image:imageRecord,round:round+1,engine,...build};
+      const row: Record<string,unknown> = {manifestHash:manifest.sha256,runKind:kind,image:imageRecord,round:round+1,engine,...build};
       if (engine!=='none') {
         // Exactly one complete sweep of all queries before latency sampling.
         for (const q of normalized) app('measured',begin()+search(q.value)+'; COMMIT;');
         const latencies = [];
         for (const q of normalized) {
-          const measured = await benchmark(container,'measured',begin()+search(q.value)+';\nCOMMIT;',`${dest}/${q.id}`,transactions);
+          const measured = await benchmark(container,'measured',begin()+search(q.value)+';\nCOMMIT;',`${dest}/${q.id}`,transactions,conditions.clients);
           latencies.push({query:q.id,...measured});
           note(`round ${round+1} ${engine} ${q.id} p95=${measured.p95.toFixed(3)} ms`);
         }
@@ -218,18 +224,18 @@ async function restoreDrill() {
           row.completeness=completeness('measured',`${dest}/completeness.json`);
         }
       }
-      // Warm the insert path equally; measure 1,000 committed inserts with 5 writers.
-      await benchmark(container,'measured',writeSql,`${dest}/write-warm`,10);
+      // Warm the insert path equally; evaluation measures 1,000 inserts with 5 writers.
+      await benchmark(container,'measured',writeSql,`${dest}/write-warm`,conditions.writeWarmTransactions,conditions.clients);
       owner('measured','CHECKPOINT;');
       const walBefore = owner('measured','SELECT pg_current_wal_insert_lsn();');
-      row.write = await benchmark(container,'measured',writeSql,`${dest}/write`,200);
-      row.walBytesPerInsert=Number(owner('measured',`SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),${literal(walBefore)})/1000;`));
+      row.write = await benchmark(container,'measured',writeSql,`${dest}/write`,conditions.writeTransactions,conditions.clients);
+      row.walBytesPerInsert=Number(owner('measured',`SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),${literal(walBefore)})/${conditions.writeTransactions*conditions.clients};`));
       row.endSizeBytes=dbBytes('measured');
       save(`${dest}/result.json`,row); results.push(row); save(`${out}/results.json`,results);
       owner('postgres','DROP DATABASE measured WITH (FORCE);'); note(`round ${round+1} ${engine} complete`);
     }
   }
-  save(`${out}/completed.json`,{manifestHash:manifest.sha256,at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
-  note('All measurements completed; no formal Linux performance judgement.');
+  save(`${out}/completed.json`,{manifestHash:manifest.sha256,runKind:kind,at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
+  note(kind==='smoke' ? smokeLabel+' pipeline completed.' : 'All measurements completed; no formal Linux performance judgement.');
 }
 }

@@ -1473,3 +1473,42 @@ This supersedes the earlier requirement to reproduce the historical local image 
 The recorded 128MB shared_buffers condition is now correctly frozen as 16384 in pg_settings 8kB units (the earlier 8192 meant 64 MiB). Both runners explicitly launch the same recorded settings. The other frozen values were checked in their PostgreSQL units: work_mem 4096 kB, maintenance_work_mem 65536 kB, effective_cache_size 524288 × 8kB, max_wal_size 1024 MB and checkpoint_timeout 300 seconds; random_page_cost 4, max_connections 100, max_worker_processes 16, durability/JIT/WAL/preload settings and UTF8 encoding remain unchanged. Shared memory remains 1 GiB. This corrects the expectation and makes existing defaults explicit; it does not change the recorded measurement conditions.
 
 Quality publication now checks the complete dataset.messages corpus hash and full query-identity hash, including text, against the frozen values before publishing. Cleanup verification uses container ls -aq so stopped owned containers also invalidate cleanup. Regression checks cover unit conversions for both launch paths, a different image ID with matching runtime and recorded reuse, refused runtime drift, edited corpus/query text with unchanged counts/ids, and a stopped-container fake. Frozen source hashes were refreshed; payload SHA-256: c66080bb5ac27575013121e659315807c682b07406c3d74680710c24e1bebeb3. Engines, search semantics, labels, thresholds, datasets, query sets and timing conditions are unchanged. No evaluation or real image/runtime smoke was run; verification used local fake subprocesses and synthetic artifacts.
+
+### Real-Docker smoke (2026-11-15)
+
+Machine: Apple M5 arm64, 10 logical cores, 32 GiB RAM, macOS 27.0.1; Docker client/server 29.9.3, aarch64 VM with 10 CPUs and 8,319,438,848 bytes RAM; Node 26.13.0. Source: b49e3ec plus this repair; frozen payload SHA-256 `0e3279022c828f2c5e50033f466b6e4ca762e17d6d14a7ac6c793bf8996b26eb`.
+
+The earlier failure was backend-local PGroonga GUC registration: helper preloads/configuration were correct, but fresh pg_settings omitted the main library's settings. Verification now initializes that library and reads typed settings in the same owner/app backend; owner verifies the app-hidden preload setting. App psql/pgbench sessions use a frozen, verified 10s statement_timeout; cancellation invalidates the entire run, accepting no latency sample. The pgbench SQL guard is included in latency. SQLSTATE detection checks error syntax; a negative test excludes ordinary throughput digits. Owner setup/seed/index sessions retain timeout 0. Existing gates and formal 1M-row conditions remain.
+
+From the repository root with `PATH=/private/tmp/node-v26.13.0-darwin-arm64/bin:$PATH`, ran:
+
+```sh
+npm --prefix load run check
+node --test load/*.test.ts load/search-engines/*.test.ts load/search-engines/quality/*.test.ts
+git diff --check
+SEARCH_SMOKE=1 SEARCH_QUALITY_DIR=/private/tmp/fukulow-search-fix2-quality-final node load/search-engines/quality/run.ts
+SEARCH_SMOKE=1 SEARCH_RESULT_DIR=/private/tmp/fukulow-search-fix2-performance-final node load/search-engines/run.ts
+node /private/tmp/fukulow-search-fix2-evidence/tamper.ts
+node /private/tmp/fukulow-search-fix2-evidence/smoke-suite.ts
+node /private/tmp/fukulow-search-fix2-evidence/label-orphan.ts
+```
+
+Both normal runs built the image (cache allowed), verified runtime/session/image conditions, seeded, indexed, measured, summarized and cleaned up. Performance smoke uses a fixed 1,000 rows, one round of every engine/query and one client/transaction; quality uses its fixed 2,628-row corpus. Summaries persist `SMOKE / NON-EVALUATION`, `evaluation:false`, `formal:false`; evaluation publication refuses them.
+
+| Check | PASS/FAIL |
+|---|---|
+| Fresh builds and complete verification | PASS |
+| Both clean finishes, finalized SMOKE summaries, no owned resources | PASS |
+| Default evaluation publication refuses smoke artifacts | PASS |
+| SIGINT / SIGTERM during actual app measurement, both runners: invalid, cleaned | PASS |
+| Container kill during measurement: invalid, cleaned | PASS |
+| Real psql / pgbench pg_sleep(0.2) with test-only 50ms SQL timeout: failed, no samples accepted | PASS |
+| Live work_mem mismatch: refused before seeding | PASS |
+| SIGKILL orphan: both runners refuse and list container/volume; explicit cleanup succeeds | PASS |
+| Stopped container and volume owned only by labels: refused; inspection preserves them | PASS |
+| Frozen input / manifest / condition tampering, both runners; formal overrides | PASS |
+| TypeScript, 184 tests, diff check, gitleaks; final resource/tag/worktree removal | PASS |
+
+Startup refuses earlier resources by prefix or label without deleting them. After stopping active workers, inspect with `node load/search-engines/cleanup.ts`; explicit `node load/search-engines/cleanup.ts --remove` removes the listed harness resources and verifies absence. Use exclusive harness access to the Docker daemon. Tamper cases used a disposable detached worktree, removed afterwards. Evidence/drivers: `/private/tmp/fukulow-search-fix2-evidence/`; normal artifacts use the paths above. No harness containers, volumes or image tags remain; build cache/base images remain.
+
+This is **not an evaluation, quality or performance result**. No 1M-row or Linux acceptance run was performed; engine adoption stays on hold. SIGKILL cannot clean itself up; startup refusal and explicit cleanup were tested. Transitive rebuild identity, host-load control and the 900s external deadlines are not established by this smoke.

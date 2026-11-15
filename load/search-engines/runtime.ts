@@ -4,6 +4,25 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+export const ownershipPrefix = 'fukulow-search-153-';
+export const ownershipLabel = 'io.fukulow.search-harness=153';
+export const appStatementTimeoutMs = 10_000;
+export function ownedResources(docker: (...args:string[])=>string) {
+  return (['container','volume'] as const).flatMap(kind=> {
+    const rows = docker(kind,'ls',...(kind==='container'?['-a']:[]),'--format',
+      kind==='container'?'{{.Names}}|{{.Label "io.fukulow.search-harness"}}':'{{.Name}}|{{.Label "io.fukulow.search-harness"}}');
+    return rows.split('\n').filter(Boolean).flatMap(row=> {
+      const [name,label] = row.split('|');
+      return name && (name.startsWith(ownershipPrefix) || label==='153') ? [{kind,name}] : [];
+    });
+  });
+}
+export function refuseLeftovers(docker: (...args:string[])=>string) {
+  const resources = ownedResources(docker);
+  if (resources.length) throw new Error('Invalid run: earlier harness resources exist: '+
+    resources.map(r=>r.kind+' '+r.name).join(', ')+
+    '. Inspect them, then explicitly run: node load/search-engines/cleanup.ts --remove');
+}
 export const timeouts = { docker:120_000, build:900_000, psql:900_000, benchmark:900_000, cleanup:10_000 };
 export const ownedContainer = () => process.env.SEARCH_OWNED_CONTAINER ?? '';
 export const ownedVolume = () => process.env.SEARCH_OWNED_VOLUME ?? '';
@@ -66,6 +85,7 @@ export async function supervise(entry: string, out: string, manifestHash: string
   catch (error) { console.error(String(error)); code=1; }
   const record = () => writeFileSync(`${out}/run-status.json`,JSON.stringify({manifestHash,
     ...(existsSync(`${out}/image.json`) ? {image:JSON.parse(readFileSync(`${out}/image.json`,'utf8'))} : {}),
+    ...(process.env.SEARCH_SMOKE==='1' ? {runKind:'smoke',label:'SMOKE / NON-EVALUATION'} : {}),
     valid:code===0 && !interrupted && cleanupVerified,cleanupVerified,exitCode:interrupted || code})+'\n');
   const discard = () => {
     rmSync(`${out}/finished.json`,{force:true});

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings } from './manifest.ts';
+import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings, appSessionSettings, runKind } from './manifest.ts';
 import { boundedCommand } from './bench.ts';
 
 const frozen = snapshot();
@@ -18,7 +18,7 @@ test('LF attributes cover exactly the frozen inputs and manifest',()=>{
 test('manifest content tampering is refused',()=>{
   assert.throws(()=>verifyManifest({...document,sha256:'changed'}),/content hash mismatch/);
 });
-for (const field of ['generator','sourceHashes','quality','performance','timing','image','sessionPolicy','settings','shmBytes'] as const) {
+for (const field of ['generator','sourceHashes','quality','performance','timing','image','sessionPolicy','settings','shmBytes','smoke'] as const) {
   test(`changed ${field} is refused before a run`,()=>{
     const actual = structuredClone(frozen);
     Object.assign(actual,{[field]:'changed'});
@@ -107,3 +107,44 @@ for (const role of ['owner','app']) {
     assert.throws(()=>verifySession(()=>JSON.stringify({...sessionSettings,row_security:'off'})),/session settings mismatch/);
   });
 }
+
+test('runtime GUC verification loads PGroonga and reads typed values in the same backend',()=>{
+  let initialized = false;
+  verifyRuntime(text=>{
+    if (text.includes('server_version_num')) return '180006';
+    if (text.includes('pg_available_extensions')) return JSON.stringify(extensions);
+    assert.match(text,/DO \$\$ BEGIN PERFORM pgroonga_command\('status'\); END \$\$; SELECT json_object_agg/);
+    initialized = true;
+    return JSON.stringify(settings);
+  },()=>Object.entries(packages).map(p=>p.join('|')).join('\n'),'test');
+  assert.equal(initialized,true);
+});
+test('app sessions require 10s statement_timeout; owner setup keeps no SQL timeout',()=>{
+  assert.equal(appSessionSettings.statement_timeout,'10000');
+  assert.equal(sessionSettings.statement_timeout,'0');
+  verifySession(text=>text.includes('count(*)')?'0':JSON.stringify(appSessionSettings),'app');
+  assert.throws(()=>verifySession(text=>text.includes('count(*)')?'0':JSON.stringify(sessionSettings),'app'),/session settings mismatch/);
+});
+test('smoke mode is explicit, fixed, and cannot authorize formal overrides',t=>{
+  const before = process.env.SEARCH_SMOKE;
+  t.after(()=>{if(before===undefined) delete process.env.SEARCH_SMOKE; else process.env.SEARCH_SMOKE=before;});
+  process.env.SEARCH_SMOKE='1';
+  assert.equal(runKind(),'smoke');
+  assert.equal(snapshot().performance.rows,1_000_000);
+  assert.equal(snapshot().smoke.performance.rows,1000);
+  process.env.SEARCH_SMOKE='0';
+  assert.throws(()=>runKind(),/SEARCH_SMOKE must be/);
+});
+
+test('app runtime verifies hidden server preload settings via owner and still rejects drift',()=>{
+  const visible = {...settings};
+  delete visible.shared_preload_libraries;
+  const sql = (text:string)=>text.includes('server_version_num')?'180006':
+    JSON.stringify(text.includes('pg_available_extensions')?extensions:visible);
+  const docker = ()=>Object.entries(packages).map(p=>p.join('|')).join('\n');
+  verifyRuntime(sql,docker,'test',()=>settings.shared_preload_libraries!);
+  assert.throws(()=>verifyRuntime(sql,docker,'test',()=>''),/preloaded libraries mismatch/);
+  assert.throws(()=>verifyRuntime(sql,docker,'test'),/settings mismatch/);
+  visible['pgroonga.enable_wal_resource_manager']='off';
+  assert.throws(()=>verifyRuntime(sql,docker,'test',()=>settings.shared_preload_libraries!),/settings mismatch/);
+});

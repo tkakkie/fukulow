@@ -153,3 +153,56 @@ process.once('beforeExit',()=>block('before-exit'));`);
     });
   }
 }
+
+for (const mode of ['empty','unrelated','prefix','label','stopped','volume-only']) {
+  test(`startup inventory refuses only harness resources: ${mode}`,async()=>{
+    const { ownedResources, refuseLeftovers } = await import('./runtime.ts');
+    const calls: string[][] = [];
+    const docker = (...args:string[])=>{
+      calls.push(args);
+      if (mode==='empty') return '';
+      if (mode==='unrelated') return 'someone-elses-data|\n';
+      if (mode==='volume-only') return args[0]==='volume' ? 'fukulow-search-153-old-data|' : '';
+      if (mode==='label') return 'different-name|153';
+      return 'fukulow-search-153-old|';
+    };
+    const resources = ownedResources(docker);
+    if (mode==='empty' || mode==='unrelated') {
+      assert.deepEqual(resources,[]);
+      assert.doesNotThrow(()=>refuseLeftovers(docker));
+    } else {
+      assert.throws(()=>refuseLeftovers(docker),/Invalid run: earlier harness resources exist:.*(fukulow-search-153-old|different-name).*cleanup.ts --remove/);
+    }
+    assert.ok(calls.filter(args=>args[0]==='container').every(args=>args.includes('-a')));
+    assert.ok(calls.every(args=>args[1]==='ls'),'inventory never deletes anything');
+  });
+}
+
+test('explicit cleanup inspects first and never removes unrelated resources',async t=>{
+  const { execFileSync } = await import('node:child_process');
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const dir = mkdtempSync(join(tmpdir(),'search-explicit-cleanup-'));
+  t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  writeFileSync(join(dir,'docker'),`#!${process.execPath}
+import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
+const args=process.argv.slice(2);
+appendFileSync(${JSON.stringify(join(dir,'calls'))},JSON.stringify(args)+'\\n');
+if (args[1]==='ls') {
+ console.log('unrelated-resource|');
+ if (!existsSync(${JSON.stringify(join(dir,'removed'))}))
+  console.log(args[0]==='container'?'fukulow-search-153-orphan|':'labelled-volume|153');
+} else if (args[0]==='volume' && args[1]==='rm') writeFileSync(${JSON.stringify(join(dir,'removed'))},'');
+`,{mode:0o755});
+  const env = {...process.env,PATH:dir+':'+process.env.PATH};
+  const entry = fileURLToPath(new URL('./cleanup.ts',import.meta.url));
+  const inspect = execFileSync(process.execPath,[entry],{env,encoding:'utf8'});
+  assert.match(inspect,/Inspection only/);
+  assert.ok(readFileSync(join(dir,'calls'),'utf8').trim().split('\n').map(line=>JSON.parse(line)).every(args=>args[1]==='ls'));
+  const removed = execFileSync(process.execPath,[entry,'--remove'],{env,encoding:'utf8'});
+  assert.match(removed,/Harness cleanup verified/);
+  const calls: string[][] = readFileSync(join(dir,'calls'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  assert.deepEqual(calls.filter(args=>args[0]==='rm' || args[1]==='rm'),[
+    ['rm','-fv','fukulow-search-153-orphan'],['volume','rm','labelled-volume'],
+  ]);
+});

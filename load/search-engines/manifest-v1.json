@@ -1,5 +1,5 @@
 {
-  "sha256": "c66080bb5ac27575013121e659315807c682b07406c3d74680710c24e1bebeb3",
+  "sha256": "0e3279022c828f2c5e50033f466b6e4ca762e17d6d14a7ac6c793bf8996b26eb",
   "frozen": {
     "version": 1,
     "date": "2026-11-15",
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "8521b1d1f6c9d3d476bb7867a25589a8fbb74a78738f3a2d27142a69e71336f7"
+        "sha256": "9010630f61d13a9e154505037515d0ebc7c9048616aa90a11bfc169fb04088bd"
       },
       {
         "path": ".node-version",
@@ -40,15 +40,19 @@
       },
       {
         "path": "load/search-engines/bench.ts",
-        "sha256": "a4b5974eff74ba73e34490d051ac13663324560dca7dcf1a0cf40f562a9e8d02"
+        "sha256": "4ba3d2e9615c828cab100ac05b0b74a0367e5ab822fa3ecdd2485fd4f1bcccf7"
       },
       {
         "path": "load/search-engines/bigm.sql",
         "sha256": "966e24866866a4b76c2feb85a236cc1b655902ffd6c1671d063c2e502c8cbfe8"
       },
       {
+        "path": "load/search-engines/cleanup.ts",
+        "sha256": "9c45fa59ef0dd9bb41f3bb381992083ccee0dd987aaa380952d98312d09c2c0a"
+      },
+      {
         "path": "load/search-engines/manifest.ts",
-        "sha256": "8c26e265b7d7b6e953eca9984832e3f5a4a7b005267cd0ac0f628e841a1b7231"
+        "sha256": "e881298bb62a4c5532dee9811bd2078fe5574bb949165b56a701e27c786a2984"
       },
       {
         "path": "load/search-engines/pgroonga.sql",
@@ -68,11 +72,11 @@
       },
       {
         "path": "load/search-engines/quality/run.ts",
-        "sha256": "80833baf0530a3edd88abd96297d48d80a4ec6d69c9678367e283f0f53a79c41"
+        "sha256": "bd39cc8407ecee46ca271e4efed20026f228569689b0f23d236101db744a9c41"
       },
       {
         "path": "load/search-engines/quality/summarize.ts",
-        "sha256": "8b9af12b5b7e35ab6888a6a1b82368d9d74e891bb060188a5c9430838fa959ec"
+        "sha256": "faf8abf51c59d48f33b5da311b266a6b6414d9e7254b459fd94e8309c9b72e7a"
       },
       {
         "path": "load/search-engines/queries.ts",
@@ -80,11 +84,11 @@
       },
       {
         "path": "load/search-engines/run.ts",
-        "sha256": "3b7ec5b12fe1452ff66d7999d33af29aafb78263042265a4e6684cfed5d29f84"
+        "sha256": "47b0b4ac788aeb38335bcb543afcd8baa348f31863cccb6206a8ad26311765e7"
       },
       {
         "path": "load/search-engines/runtime.ts",
-        "sha256": "2999f860a25ce0f7f6c7d775fad37e34527376d34f2ffa4bad9ba5d4bb933887"
+        "sha256": "4039c956a3e1cb5c78232551fa3bf982120ea6d3086fab1272b3218acdb59d7e"
       },
       {
         "path": "load/search-engines/schema.sql",
@@ -96,7 +100,7 @@
       },
       {
         "path": "load/search-engines/summarize.ts",
-        "sha256": "6c620f35536bc06046112c66d78db5d960b99ef115c71ef546c1f93591d5310a"
+        "sha256": "336f221675f614fa4c36e4630900ea268cdcbd350ce80c02df4bf91ba340d678"
       },
       {
         "path": "load/search-engines/trgm.sql",
@@ -814,6 +818,18 @@
         ]
       ]
     },
+    "smoke": {
+      "label": "SMOKE / NON-EVALUATION",
+      "performance": {
+        "rows": 1000,
+        "clients": 1,
+        "transactions": 1,
+        "rounds": 1,
+        "writeWarmTransactions": 1,
+        "writeTransactions": 1
+      },
+      "quality": "full fixed 2628-row quality fixture"
+    },
     "timing": {
       "timeouts": {
         "docker": 120000,
@@ -870,8 +886,18 @@
         "default_transaction_read_only": "off",
         "default_transaction_isolation": "read committed",
         "client_encoding": "UTF8",
-        "standard_conforming_strings": "on"
-      }
+        "standard_conforming_strings": "on",
+        "statement_timeout": "0"
+      },
+      "appSettings": {
+        "row_security": "on",
+        "default_transaction_read_only": "off",
+        "default_transaction_isolation": "read committed",
+        "client_encoding": "UTF8",
+        "standard_conforming_strings": "on",
+        "statement_timeout": "10000"
+      },
+      "pgbenchGuard": "effective 10s check before each transaction, included in latency"
     },
     "shmBytes": 1073741824
   }

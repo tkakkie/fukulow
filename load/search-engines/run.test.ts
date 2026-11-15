@@ -27,6 +27,9 @@ import { appendFileSync, existsSync, writeFileSync, rmSync } from 'node:fs';
 const args = process.argv.slice(2);
 appendFileSync(process.env.STUB_LOG,JSON.stringify(args)+'\\n');
 const state = process.env.STUB_LOG+'.state';
+if (args[1] === 'ls' && args.includes('--format') && process.env.STUB_MODE.startsWith('orphan-')) {
+ console.log(process.env.STUB_MODE==='orphan-label'?'another-name|153':'fukulow-search-153-old|');
+}
 if (args[0] === 'image') console.log(process.env.STUB_MODE==='invalid-image'?'sha256:changed':${JSON.stringify(imageId)});
 if (args[0] === 'run') {
   if (process.env.STUB_MODE !== 'absent') writeFileSync(state,'owned');
@@ -43,12 +46,14 @@ if (args[0] === 'exec' && process.env.STUB_MODE.startsWith('planner-')) {
     if (input.includes('INSERT INTO messages') || input.includes('COPY messages')) appendFileSync(process.env.STUB_LOG,JSON.stringify(['unexpected-load'])+'\\n');
     if (input.includes('SELECT 1;')) console.log('1');
     else if (input.includes('server_version_num')) console.log('180006');
+    else if (input.includes('SHOW shared_preload_libraries')) console.log(${JSON.stringify(manifest.frozen.settings.shared_preload_libraries)});
     else if (input.includes('pg_available_extensions')) console.log(${JSON.stringify(JSON.stringify(manifest.frozen.image.extensions))});
     else if (input.includes('count(*) FROM pg_settings')) {
       // Model an image PGOPTIONS default or an app-role-specific default.
       const changed=process.env.STUB_MODE==='planner-owner' || args.includes('fukulow_app');
       console.log(changed?'1':'0');
-    } else if (input.includes('pg_settings')) console.log(input.includes("'row_security'")?${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.settings))}:${JSON.stringify(JSON.stringify(manifest.frozen.settings))});
+    } else if (input.includes("'row_security'") && args.includes('fukulow_app')) console.log(${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.appSettings))});
+    else if (input.includes('pg_settings')) console.log(input.includes("'row_security'")?${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.settings))}:${JSON.stringify(JSON.stringify(manifest.frozen.settings))});
   }
 }
 if (args[0] === 'exec' && process.env.STUB_MODE === 'hang') setInterval(()=>{},1000);
@@ -86,10 +91,21 @@ function assertCleanup(calls: string[][]) {
   // The named volume is independently removed and both resources are checked.
   assert.deepEqual(calls.filter(args=>args[0]==='rm'),[['rm','-fv',name]]);
   assert.ok(calls.some(args=>args[0]==='volume' && args[1]==='rm' && args.at(-1)===`${name}-data`));
-  assert.equal(calls.filter(args=>args[1]==='ls').length,2);
+  assert.equal(calls.filter(args=>args[1]==='ls' && args.includes('--filter')).length,2);
 }
 
 for (const runner of runners) {
+  for (const mode of ['orphan-prefix','orphan-label']) {
+    test(`${runner}: ${mode} refuses startup and lists resources without deleting`,{timeout:10000},async t=>{
+      const run = start(t,runner,mode);
+      assert.deepEqual(await run.closed,[1,null]);
+      assert.match(run.stderr(),/Invalid run: earlier harness resources exist:/);
+      assert.match(run.stderr(),mode==='orphan-label'?/another-name/:/fukulow-search-153-old/);
+      assert.match(run.stderr(),/cleanup.ts --remove/);
+      assert.ok(run.calls().every(args=>args[1]==='ls'));
+      assert.equal(existsSync(run.out),false);
+    });
+  }
   for (const mode of ['partial','absent','leak','mismatch']) {
     test(`${runner}: startup failure cleans up once, including ${mode} container`,{timeout:10000},async t=>{
       const run = start(t,runner,mode);

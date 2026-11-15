@@ -5,7 +5,7 @@ import { corpus, classes, queries as qualityQueries } from './quality/dataset.ts
 import { modes } from './quality/modes.ts';
 import { queries } from './queries.ts';
 import { seed, epoch } from './seed.ts';
-import { timeouts } from './runtime.ts';
+import { timeouts, appStatementTimeoutMs } from './runtime.ts';
 const sourceRoot = new URL('../../',import.meta.url);
 const readSource = (path: string) => readFileSync(new URL(path,sourceRoot),'utf8');
 
@@ -29,7 +29,13 @@ export const packages = {
   'postgresql-server-dev-18':'18.6-1.pgdg13+2','postgresql-18-pgdg-pgroonga':'4.1.0-1','libgroonga0':'16.1.3-1',
 };
 export const sessionSettings = {row_security:'on',default_transaction_read_only:'off',
-  default_transaction_isolation:'read committed',client_encoding:'UTF8',standard_conforming_strings:'on'};
+  default_transaction_isolation:'read committed',client_encoding:'UTF8',standard_conforming_strings:'on',statement_timeout:'0'};
+export const appSessionSettings = {...sessionSettings,statement_timeout:String(appStatementTimeoutMs)};
+export function runKind() {
+  if (process.env.SEARCH_SMOKE!==undefined && process.env.SEARCH_SMOKE!=='1') throw new Error('SEARCH_SMOKE must be 1 or unset');
+  return process.env.SEARCH_SMOKE==='1' ? 'smoke' : 'evaluation';
+}
+export const smokeLabel = 'SMOKE / NON-EVALUATION';
 export function snapshot() {
   const files = ['.gitattributes','.node-version','load/package-lock.json',
     ...['load/search-engines','load/search-engines/quality','server/migrations'].flatMap(dir=>
@@ -48,9 +54,10 @@ export function snapshot() {
     performance:{querySet:queries,rows:1_000_000,restoreRows:1000,queryHash:jsonHash(queries),queries:queries.length,
       clients:5,transactions:20,rounds:3,warmupSweeps:1,writeWarmTransactions:10,writeTransactions:200,
       order:[['none','trgm','bigm','pgroonga'],['bigm','pgroonga','none','trgm'],['pgroonga','trgm','bigm','none']]},
+    smoke:{label:smokeLabel,performance:{rows:1000,clients:1,transactions:1,rounds:1,writeWarmTransactions:1,writeTransactions:1},quality:'full fixed 2628-row quality fixture'},
     timing:{timeouts,startupAttempts:60,startupPollMs:500,rangeDays:180,qualityTimed:false},
     image:{historicalId:'sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77',base:readSource('load/search-engines/Dockerfile').split('\n')[0].slice(5),
-      packages,extensions,pgBigmRelease:'v1.2-20250903'},settings,sessionPolicy:{planner:'Query Tuning settings must equal image boot_val',settings:sessionSettings},shmBytes:1073741824};
+      packages,extensions,pgBigmRelease:'v1.2-20250903'},settings,sessionPolicy:{planner:'Query Tuning settings must equal image boot_val',settings:sessionSettings,appSettings:appSessionSettings,pgbenchGuard:'effective 10s check before each transaction, included in latency'},shmBytes:1073741824};
 }
 export function verifyManifest(document: {sha256:string; frozen:ReturnType<typeof snapshot>}, actual = snapshot()) {
   assert.equal(jsonHash(document.frozen),document.sha256,'Frozen manifest content hash mismatch');
@@ -65,15 +72,26 @@ export function loadManifest() {
   const doc = JSON.parse(readSource('load/search-engines/manifest-v1.json'));
   return {sha256:verifyManifest(doc),frozen:doc.frozen as ReturnType<typeof snapshot>};
 }
-export function verifyRuntime(sql: (text:string)=>string, docker: (...args:string[])=>string, container: string) {
+export function verifyRuntime(sql: (text:string)=>string, docker: (...args:string[])=>string, container: string, ownerSql?: (text:string)=>string) {
   assert.equal(sql('SHOW server_version_num;'),'180006','Frozen PostgreSQL version mismatch');
   const actualExtensions = JSON.parse(sql("SELECT json_object_agg(name,default_version) FROM pg_available_extensions WHERE name IN ('pg_trgm','pg_bigm','pgroonga');"));
   assert.deepEqual(actualExtensions,extensions,'Frozen extension versions mismatch');
-  const actualSettings = JSON.parse(sql(`SELECT json_object_agg(name,setting) FROM pg_settings WHERE name IN (${Object.keys(settings).map(n=>`'${n}'`).join(',')});`));
+  // The preload modules do not register the main library's GUCs in a fresh
+  // backend. Initialize it here, then read typed, effective settings in that
+  // SAME session (including non-superuser verification), never placeholders.
+  const actualSettings = JSON.parse(sql(`DO $$ BEGIN PERFORM pgroonga_command('status'); END $$; SELECT json_object_agg(name,setting) FROM pg_settings WHERE name IN (${Object.keys(settings).map(n=>`'${n}'`).join(',')});`));
+  // PostgreSQL hides shared_preload_libraries from the app role. Verify that
+  // server-only value through the owner, without granting the app extra rights.
+  if (ownerSql) {
+    const preload = ownerSql('SHOW shared_preload_libraries;');
+    assert.equal(preload,settings.shared_preload_libraries,'Frozen preloaded libraries mismatch');
+    actualSettings.shared_preload_libraries ??= preload;
+  }
   assert.deepEqual(actualSettings,settings,'Frozen PostgreSQL settings mismatch');
   const actualPackages = Object.fromEntries(docker('exec',container,'dpkg-query','-W','-f=${Package}|${Version}\\n',...Object.keys(packages))
     .split('\n').map(line=>line.split('|')));
   assert.deepEqual(actualPackages,packages,'Frozen package versions mismatch');
+  return {settings:actualSettings,extensions:actualExtensions,packages:actualPackages};
 }
 
 // Resolve once and launch by immutable ID; runtime verification gates data loading.
@@ -82,11 +100,12 @@ export function resolveImage(docker: (...args:string[])=>string, image: string, 
   assert.match(id,/^sha256:[a-f0-9]{64}$/,'Invalid image identity');
   return {id,reused};
 }
-export function verifySession(sql: (text:string)=>string) {
-  const session = sessionSettings;
+export function verifySession(sql: (text:string)=>string, role: 'owner'|'app' = 'owner') {
+  const session = role==='app' ? appSessionSettings : sessionSettings;
   const actual = JSON.parse(sql(`SELECT json_object_agg(name,setting) FROM pg_settings WHERE name IN (${Object.keys(session).map(n=>`'${n}'`).join(',')});`));
   assert.deepEqual(actual,session,'Frozen session settings mismatch');
   // The pinned image defines boot_val; detect every planner default override,
   // including new PG settings, role/database defaults and inherited PGOPTIONS.
   assert.equal(sql("SELECT count(*) FROM pg_settings WHERE category LIKE 'Query Tuning%' AND setting IS DISTINCT FROM boot_val;"),'0','Frozen planner defaults mismatch');
+  return {settings:actual,plannerOverrides:0};
 }

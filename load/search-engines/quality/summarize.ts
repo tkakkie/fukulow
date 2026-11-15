@@ -1,17 +1,20 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync, renameSync } from 'node:fs';
+import { readFileSync, renameSync, writeFileSync, rmSync } from 'node:fs';
 import type { snapshot } from '../manifest.ts';
 
 // Separate from the runner so publication can be verified without starting a run.
-export function finalizeQuality(root: string) {
+export function finalizeQuality(root: string, publication: 'evaluation'|'smoke' = 'evaluation') {
   const read = (name: string) => JSON.parse(readFileSync(`${root}/${name}.json`,'utf8'));
-  const manifest: {sha256:string;frozen:ReturnType<typeof snapshot>} = read('manifest');
+  const manifest: {sha256:string;runKind?:string;frozen:ReturnType<typeof snapshot>} = read('manifest');
   const manifestHash = createHash('sha256').update(JSON.stringify(manifest.frozen)).digest('hex');
   assert.equal(manifestHash,manifest.sha256,'Manifest payload hash mismatch');
+  const kind = manifest.runKind ?? 'evaluation';
+  assert.equal(kind,publication,'SMOKE / NON-EVALUATION cannot be published as evaluation (or vice versa)');
   const expected = manifest.frozen.quality;
   for (const name of ['completed','finished','run-status']) {
     const record = read(name);
+    assert.equal(record.runKind ?? 'evaluation',kind,'Completion run kind mismatch');
     assert.equal(record.manifestHash,manifestHash,'Completion manifest hash mismatch');
     if (name==='run-status') {
       assert.equal(record.valid,true);
@@ -37,8 +40,12 @@ export function finalizeQuality(root: string) {
   const results = read('pending-summary');
   assert.deepEqual(results.map((r: {mode:string})=>r.mode),expected.modes.map(m=>m.id),'Summary modes mismatch');
   for (const result of results) {
+    assert.equal(result.runKind ?? 'evaluation',kind,'Result run kind mismatch');
     assert.equal(result.manifestHash,manifestHash,'Result manifest hash mismatch');
     assert.deepEqual(result.queries.map((q: {query:string})=>q.query),queryIds,'Summary queries mismatch');
   }
-  renameSync(`${root}/pending-summary.json`,`${root}/summary.json`);
+  if (kind==='smoke') {
+    writeFileSync(`${root}/summary.json`,JSON.stringify({runKind:'smoke',label:'SMOKE / NON-EVALUATION',evaluation:false,formal:false,results},null,2)+'\n');
+    rmSync(`${root}/pending-summary.json`);
+  } else renameSync(`${root}/pending-summary.json`,`${root}/summary.json`);
 }
