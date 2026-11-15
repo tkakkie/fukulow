@@ -79,7 +79,7 @@ Cloud session (no Codex or Antigravity): a Claude Code cloud session does Issues
 - Copilot auto-review is OFF (credits). Request once per PR, by hand, when CI is green and the work is done: `gh pr edit <n> --add-reviewer @copilot`. Only for `risk:needs-review` or large code PRs. An AI requests another only within the 2 AI review rounds above and only when clearly needed (state why in the PR); changing the reviewing AI does not reset the cap.
 - Copilot findings in code the PR does not change become a new Issue and do not block the PR, except: security, data loss or corruption, cross-Organization information leak, a serious defect caused by this PR, or an unmet Done when (#275).
 - `status:human-review` only with CI green on the current head, required reviews and fixes completed, and the Copilot review (if requested) finished.
-- Every AI review comment puts `Verdict: round=<1|2> blocking=<n> nonblocking=<n>` directly above the signature line (#452); a review without it counts as missing, never as 0.
+- Every AI review comment, including the orchestrator's own round-2 check, puts `Verdict: round=<1|2> blocking=<n> nonblocking=<n>` directly above the signature line (#452); round 2 counts only findings still open or new; a review without it counts as missing, never as 0.
 - Every Issue comment, review and PR body ends with `AI: <name> / model: <id> / effort: <level>`. Everything on GitHub is in English.
 
 ## 6. Conflicts and CI
