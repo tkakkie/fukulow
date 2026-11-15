@@ -1,10 +1,24 @@
+import { timeouts } from './runtime.ts';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 
-export const command = (file: string, args: string[], input?: string, env = process.env) => execFileSync(file,args,{
-  input, env, encoding:'utf8', maxBuffer:256*1024*1024, stdio:['pipe','pipe','pipe'],
-}).replace(/[\r\n]+$/,'');
+export const command = (file: string, args: string[], input?: string, env = process.env) => {
+  const timeout = args[0]==='build' ? timeouts.build : args.includes('psql') ? timeouts.psql : timeouts.docker;
+  return boundedCommand(file,args,timeout,input,env);
+};
+export class CommandTimeoutError extends Error {}
+export function boundedCommand(file: string,args: string[],timeout: number,input?: string,env=process.env) {
+  try {
+    return execFileSync(file,args,{
+      timeout, killSignal:'SIGKILL', input, env, encoding:'utf8', maxBuffer:256*1024*1024, stdio:['pipe','pipe','pipe'],
+    }).replace(/[\r\n]+$/,'');
+  } catch (error) {
+    const timedOut = (error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
+    const message = `${file} ${args.includes('psql') ? 'psql' : args[0] ?? ''} ${timedOut ? 'timed out' : 'failed'} (${timeout} ms limit)`;
+    throw timedOut ? new CommandTimeoutError(message) : new Error(message);
+  }
+};
 
 export const docker = (...args: string[]) => command('docker',args);
 export const sql = (container: string, db: string, text: string, role = 'fukulow') =>
@@ -26,8 +40,10 @@ export async function benchmark(container: string, db: string, script: string, d
   const start = performance.now();
   const output = await new Promise<string>((resolve,reject)=>{
     const child = spawn('docker',args); let result = '';
+    const timer = setTimeout(()=>{ child.kill('SIGKILL'); reject(new Error('docker pgbench timed out')); },timeouts.benchmark);
     child.stdout.on('data',b=>{result+=String(b);});child.stderr.on('data',b=>{result+=String(b);});
-    child.on('error',reject); child.on('exit',code=>code===0 ? resolve(result) : reject(new Error(result)));
+    child.on('error',error=>{clearTimeout(timer);reject(error);});
+    child.on('close',code=>{clearTimeout(timer);code===0 ? resolve(result) : reject(new Error('docker pgbench failed'));});
   });
   writeFileSync(`${dest}.txt`,output);
   const wallMs = performance.now()-start;

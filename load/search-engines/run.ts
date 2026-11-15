@@ -1,21 +1,27 @@
+import { supervise, ownedContainer, ownedVolume } from './runtime.ts';
+import { loadManifest, verifyRuntime } from './manifest.ts';
 // Run from the repository root with the Node version in .node-version.
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { arch, cpus, totalmem } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmark, command, docker, save, sql } from './bench.ts';
+import { benchmark, CommandTimeoutError, command, docker, save, sql } from './bench.ts';
 import { channel, copySql, finishSql, fixtureSql, generate, literal, member, org } from './seed.ts';
 import { begin, normalizedQuery, pattern, queries, search, visibility, writeSql } from './queries.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 process.chdir(root);
 if (process.version !== `v${readFileSync('.node-version','utf8').trim()}`) throw new Error('Use .node-version exactly');
-const out = resolve(process.env.SEARCH_RESULT_DIR ?? `/private/tmp/fukulow-search-153-${Date.now()}`);
+const manifest = loadManifest();
+const requested = resolve(process.env.SEARCH_RESULT_DIR ?? `/private/tmp/fukulow-search-153-${Date.now()}`);
+const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1) ?? '');
 if (out === root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
+if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
+process.env.SEARCH_RESULT_DIR = out;
+await supervise(import.meta.url,out);
 mkdirSync(out);
-const container = `fukulow-search-153-${randomUUID().slice(0,8)}`;
+const container = ownedContainer();
 const image = 'fukulow-search-measure-153';
 const engines = ['trgm','bigm','pgroonga'] as const;
 type Engine = typeof engines[number] | 'none';
@@ -127,44 +133,35 @@ async function restoreDrill() {
   owner('postgres','DROP DATABASE small;'); save(`${out}/restore.json`,report);
 }
 
-let cleaned = false;
-function cleanup() {
-  if (cleaned) return;
-  cleaned = true;
-  // Docker can create the container and its anonymous volume before run fails.
-  const result = spawnSync('docker',['rm','-fv',container],{encoding:'utf8'});
-  if (result.error || (result.status !== 0 && !result.stderr.includes('No such container'))) {
-    console.error('Container/volume cleanup failed:',result.error ?? result.stderr);
-    process.exitCode = 1;
-  }
-}
-process.on('exit',cleanup);
-process.on('SIGINT',()=>{ cleanup(); process.exit(130); });
-process.on('SIGTERM',()=>{ cleanup(); process.exit(143); });
-try {
+{
   note(`Artifacts: ${out}`);
   if (process.env.SEARCH_SKIP_BUILD !== '1') {
     // Build completes before any timing. No server image/dependency is changed.
     const log = command('docker',['build','-t',image,'load/search-engines']); writeFileSync(`${out}/build.txt`,log);
   }
+  docker('volume','create',ownedVolume());
   const password = randomUUID();
-  command('docker',['run','-d','--name',container,'--shm-size=1g','-e','POSTGRES_PASSWORD','-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,
+  command('docker',['run','-d','--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD','-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,
     'postgres','-c','shared_buffers=128MB','-c','work_mem=4MB','-c','maintenance_work_mem=64MB',
     '-c','max_connections=100','-c','jit=on','-c','fsync=on','-c','synchronous_commit=on',
     '-c','shared_preload_libraries=pgroonga_wal_resource_manager,pgroonga_crash_safer',
     '-c','pgroonga.enable_wal_resource_manager=on','-c','pgroonga.enable_crash_safe=on',
     '-c','max_worker_processes=16'],undefined,{...process.env,POSTGRES_PASSWORD:password});
   // The password is passed via environment, never a command argument or artifact.
+  let ready = false;
   for (let attempt=0;attempt<60;attempt++) {
-    try { if (owner('postgres','SELECT 1;')==='1') break; } catch { /* initdb */ }
+    try { if (owner('postgres','SELECT 1;')==='1') { ready=true; break; } } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
     await new Promise(r=>setTimeout(r,500));
   }
+  if (!ready) throw new Error('PostgreSQL startup timed out');
+  verifyRuntime(text=>owner('postgres',text),docker,container);
+  save(`${out}/manifest.json`,manifest);
   owner('postgres',`BEGIN; SET LOCAL fukulow.app_password=${literal(password)};\n${readFileSync('deploy/db-role-settings.sql','utf8')}\n${readFileSync('deploy/db-roles.sql','utf8')}\nCOMMIT;`);
-  const metadata = {at:new Date().toISOString(),node:process.version,cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem(),arch:arch(),
+  const metadata = {manifestHash:manifest.sha256,at:new Date().toISOString(),node:process.version,cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem(),arch:arch(),
     os:command('sw_vers',[]),model:command('sysctl',['-n','hw.model']),
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{.NCPU}},"memory":{{.MemTotal}}}')),
     image:docker('image','inspect',image,'--format','{{.Id}}'),source:command('git',['rev-parse','HEAD']),
-    hashes:Object.fromEntries([...readdirSync('load/search-engines').map(n=>'load/search-engines/'+n),...migrations.map(n=>'server/migrations/'+n)].map(p=>[p,digest(readFileSync(p,'utf8'))])),
+    hashes:Object.fromEntries([...readdirSync('load/search-engines',{withFileTypes:true}).filter(n=>n.isFile()).map(n=>'load/search-engines/'+n.name),...migrations.map(n=>'server/migrations/'+n)].map(p=>[p,digest(readFileSync(p,'utf8'))])),
     versions:owner('postgres','SELECT version(); SELECT name,default_version FROM pg_available_extensions WHERE name IN (\'pg_trgm\',\'pg_bigm\',\'pgroonga\');'),
     packages:docker('exec',container,'dpkg-query','-W','postgresql-18','postgresql-client-18','postgresql-server-dev-18','postgresql-18-pgdg-pgroonga','libgroonga0'),
     settings:owner('postgres',"SELECT name,setting,unit FROM pg_settings WHERE name IN ('shared_buffers','work_mem','maintenance_work_mem','effective_cache_size','random_page_cost','jit','fsync','synchronous_commit','max_connections','wal_level','max_wal_size','checkpoint_timeout','lc_collate','server_encoding','shared_preload_libraries','max_worker_processes') OR name LIKE 'pgroonga.%';"),
@@ -188,12 +185,12 @@ try {
       docker('restart',container);
       // A successful SELECT establishes readiness after each restart.
       for (let attempt=0;attempt<60;attempt++) {
-        try { if (owner('measured','SELECT 1;')==='1') break; } catch { /* restart */ }
+        try { if (owner('measured','SELECT 1;')==='1') break; } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
         await new Promise(r=>setTimeout(r,500));
       }
       owner('measured',"SELECT pgroonga_command('status');");
       note(`round ${round+1} ${engine}, index ${Math.round(build.buildMs)} ms`);
-      const row: Record<string,unknown> = {round:round+1,engine,...build};
+      const row: Record<string,unknown> = {manifestHash:manifest.sha256,round:round+1,engine,...build};
       if (engine!=='none') {
         // Exactly one complete sweep of all queries before latency sampling.
         for (const q of normalized) app('measured',begin()+search(q.value)+'; COMMIT;');
@@ -224,9 +221,7 @@ try {
       owner('postgres','DROP DATABASE measured WITH (FORCE);'); note(`round ${round+1} ${engine} complete`);
     }
   }
-  save(`${out}/finished.json`,{at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
+  save(`${out}/finished.json`,{manifestHash:manifest.sha256,at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
   command(process.execPath,['load/search-engines/summarize.ts',out]);
   note('All measurements completed; no formal Linux performance judgement.');
-} finally {
-  cleanup();
 }

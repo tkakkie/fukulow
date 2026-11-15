@@ -19,17 +19,23 @@ function start(t: TestContext, runnerPath: string, mode: string, existing = fals
   const log = join(dir,'docker.jsonl');
   const out = join(dir,'results');
   writeFileSync(join(dir,'docker'),`#!${process.execPath}
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync, rmSync } from 'node:fs';
 const args = process.argv.slice(2);
 appendFileSync(process.env.STUB_LOG,JSON.stringify(args)+'\\n');
-if (args[0] === 'run' && process.env.STUB_MODE !== 'signal') {
-  console.error('stub startup failure');
-  process.exit(42);
+const state = process.env.STUB_LOG+'.state';
+if (args[0] === 'run') {
+  if (process.env.STUB_MODE !== 'absent') writeFileSync(state,'owned');
+  if (!['signal','hang','mismatch'].includes(process.env.STUB_MODE)) process.exit(42);
 }
-if (args[0] === 'rm' && process.env.STUB_MODE === 'absent') {
-  console.error('Error response from daemon: No such container: '+args.at(-1));
-  process.exit(1);
+if (args[0] === 'exec' && process.env.STUB_MODE === 'mismatch' && args.includes('psql')) {
+  let input='';for await (const chunk of process.stdin) input+=chunk;
+  console.log(input.includes('server_version_num')?'180005':'1');
 }
+if (args[0] === 'exec' && process.env.STUB_MODE === 'hang') setInterval(()=>{},1000);
+if (args[0] === 'rm') {
+  if (process.env.STUB_MODE !== 'leak') rmSync(state,{force:true});
+}
+if (args[0] === 'container' && args[1] === 'ls' && existsSync(state)) console.log('owned');
 `,{mode:0o755});
   if (existing) {
     // A retained artifact must survive refusal byte-for-byte.
@@ -57,25 +63,30 @@ function assertCleanup(calls: string[][]) {
   assert.ok(run,'container creation was attempted');
   const name = run[run.indexOf('--name')+1];
   assert.match(name,/^fukulow-search-153-/);
-  // -v removes the anonymous PostgreSQL volume as well as the container.
+  // The named volume is independently removed and both resources are checked.
   assert.deepEqual(calls.filter(args=>args[0]==='rm'),[['rm','-fv',name]]);
+  assert.ok(calls.some(args=>args[0]==='volume' && args[1]==='rm' && args.at(-1)===`${name}-data`));
+  assert.equal(calls.filter(args=>args[1]==='ls').length,2);
 }
 
 for (const runner of runners) {
-  for (const mode of ['partial','absent']) {
+  for (const mode of ['partial','absent','leak','mismatch']) {
     test(`${runner}: startup failure cleans up once, including ${mode} container`,{timeout:10000},async t=>{
       const run = start(t,runner,mode);
       assert.deepEqual(await run.closed,[1,null]);
-      assert.match(run.stderr(),/stub startup failure/);
-      assert.doesNotMatch(run.stderr(),/Container\/volume cleanup failed/);
+      assert.match(run.stderr(),mode==='mismatch'?/Frozen PostgreSQL version mismatch/:/docker run failed/);
+      if (mode==='leak') assert.match(run.stderr(),/cleanup verification found/);
       assertCleanup(run.calls());
+      const status = JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8'));
+      assert.equal(status.valid,false);
+      assert.equal(status.cleanupVerified,mode!=='leak');
     });
   }
 
   for (const [signal,code] of [['SIGINT',130],['SIGTERM',143]] as const) {
     test(`${runner}: ${signal} cleans up and exits ${code}`,{timeout:10000},async t=>{
-      const run = start(t,runner,'signal');
-      // SELECT returns no readiness value, yielding in the real startup loop.
+      const run = start(t,runner,'hang');
+      // The fake Docker client hangs inside a synchronous readiness call.
       while (!run.calls().some(args=>args[0]==='exec')) {
         t.signal.throwIfAborted();
         assert.equal(run.child.exitCode,null,run.stderr());
@@ -84,6 +95,7 @@ for (const runner of runners) {
       assert.equal(run.child.kill(signal),true);
       assert.deepEqual(await run.closed,[code,null]);
       assertCleanup(run.calls());
+      assert.deepEqual(JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8')),{valid:false,cleanupVerified:true,exitCode:code});
     });
   }
 

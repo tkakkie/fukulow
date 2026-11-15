@@ -3,17 +3,19 @@ import { resolve } from 'node:path';
 import { percentile, save } from './bench.ts';
 
 type Latency = {query:string,n:number,p50:number,p95:number,p99:number,tps:number};
-type Run = {round:number,engine:string,buildMs:number,relationBytes:number,physicalDeltaBytes:number,
+type Run = {manifestHash:string,round:number,engine:string,buildMs:number,relationBytes:number,physicalDeltaBytes:number,
   write:Latency,walBytesPerInsert:number,latencies?:Latency[]};
 const root = resolve(process.argv[2] ?? '');
 const runs: Run[] = JSON.parse(readFileSync(`${root}/results.json`,'utf8'));
+const manifestHash = JSON.parse(readFileSync(`${root}/manifest.json`,'utf8')).sha256;
+if (!manifestHash || runs.some(r=>r.manifestHash!==manifestHash)) throw new Error('Result manifest hash mismatch');
 if (runs.length!==12) throw new Error('Expected all 12 interleaved runs');
 const stats = (xs: number[]) => ({median:percentile(xs,.5),min:Math.min(...xs),max:Math.max(...xs)});
 const summary = ['none','trgm','bigm','pgroonga'].map(engine=>{
   const group = runs.filter(r=>r.engine===engine);
   if (group.length!==3) throw new Error('Expected three repetitions');
   const baseline = runs.filter(r=>r.engine==='none');
-  return {engine,buildMs:stats(group.map(r=>r.buildMs)),relationBytes:stats(group.map(r=>r.relationBytes)),
+  return {manifestHash,engine,buildMs:stats(group.map(r=>r.buildMs)),relationBytes:stats(group.map(r=>r.relationBytes)),
     physicalDeltaBytes:stats(group.map(r=>r.physicalDeltaBytes)),
     write:Object.fromEntries(['p50','p95','p99','tps'].map(key=>[key,stats(group.map(r=>r.write[key as 'p50'|'p95'|'p99'|'tps']))])),
     walBytesPerInsert:stats(group.map(r=>r.walBytesPerInsert)),
