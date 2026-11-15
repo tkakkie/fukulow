@@ -53,16 +53,23 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 | Web Topic sends reject P7 reply_to+topic_name, keep topic_name on C6 retry, validate 1..60 OpenAPI scalars, and scope topic_not_found to that Topic | `web/src/messages-body.test.ts::matches openapi.json SendMessageRequest.topic_name rules`, `web/src/messages-body.test.ts::protocol rejects reply_to combined with topic_name (P7) and preserves topic_name on C6 retry`, `web/src/topics.test.ts::records notFound per Topic on 404 topic_not_found for summary and Topic history reads` |
 | Web preserves 429 ErrorBody and Retry-After; invalid/missing whole seconds >= 1 falls back to 1 s | `web/src/api.test.ts::preserves 429 ErrorBody and Retry-After with a safe one-second fallback`, `web/src/api.test.ts::retains the 429 delay even when ErrorBody is malformed` |
 
+| DM sends hold peer eligibility through COMMIT in both directions; deactivation-first refuses without persistence; mark-read stays available | `server/src/channels/dms/tests/concurrency.rs::send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions` |
+| DM canonical retries resolve before peer eligibility; default open never renews a peer; explicit renewal preserves current grants and Unread | `server/src/channels/dms/tests.rs::default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime` |
 | Mention tokens are exact lower-case UUIDs; persisted sorted sets alone resolve current names on every shared Message read | `server/src/messages/tests/mentions.rs::mention_exact_syntax_deduplicates_sorts_and_preserves_plain_text`, `server/src/messages/tests/mentions.rs::mention_shared_surfaces_keep_sets_and_follow_non_author_rename` |
 | Mention targets need active same-Organization Channel access; denied tokens disclose no identity, row or count and do not refuse ordinary sends | `server/src/messages/tests/mentions/denials.rs::mention_denies_private_owner_without_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_private_admin_without_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_private_member_without_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_guest_without_public_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_guest_without_private_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_foreign_target`, `server/src/messages/tests/mentions/denials.rs::mention_denies_nonexistent_target`, `server/src/messages/tests/mentions/denials.rs::mention_denies_inactive_target`, `server/src/messages/tests/mentions/denials.rs::mention_denies_stale_private_grant`, `server/src/messages/tests/mentions/denials.rs::mention_denies_stale_guest_public_grant` |
 | Message, Mention set, Topic and seq are atomic; matching retries retain original acceptance after target loss and recover unknown COMMIT | `server/src/messages/tests/mentions.rs::mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic`, `server/src/messages/tests/mentions/ordering.rs::mention_send_before_revoke_or_deactivate_holds_authority_through_commit` |
 | Sends lock sorted Members before grants, retain target authority through COMMIT, and recheck concurrent loss before accepting Mentions | `server/src/messages/tests/mentions/ordering.rs::mention_waiting_acceptance_rechecks_committed_role_revision_revocation_and_activity`, `server/src/messages/tests/mentions/ordering.rs::mention_reciprocal_reversed_targets_and_database_duplicates_do_not_deadlock`, `server/src/messages/tests/mentions/ordering.rs::mention_revoke_or_deactivate_before_acceptance_is_silently_omitted` |
 | Mention migration accepts no historical tokens; scoped FKs and one row per Message/Member enforce integrity; Message deletion cascades | `server/src/messages/tests/mentions.rs::mention_migration_has_no_backfill_and_enforces_scoped_keys_and_cascade` |
 
+| DM Mentions accept only current pair participants; every Role uses its grant; Replies, mark-read and renewal share batched counts | `server/src/messages/tests/mentions/dms.rs::dm_mentions_participant_roles_replies_mark_read_and_renewal_share_batched_counts` |
+| DM targets outside the pair disclose no Mention identity, row or count, including Member, Owner/Admin, Guest, foreign and inactive targets | `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_nonparticipant_member`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_nonparticipant_owner`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_nonparticipant_admin`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_guest_without_grant`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_other_organization`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_inactive_member` |
+| Inactive or lapsed DM peers refuse new sends without Mention writes; canonical retries keep accepted sets and renewal starts at zero Mention unread | `server/src/messages/tests/mentions/dms.rs::dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [channels](channels.md): `reclamation_and_open_renew_send_complete_in_both_lock_orders`
 - [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`
 
 - [auth](auth.md): `deactivation_send_first_commits_authorship_and_deactivation_first_denies_retries`
@@ -85,3 +92,10 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`, `mention_counts_missing_position_suppresses_only_its_channel_without_writes`, `mention_access_loss_removes_counts_and_regrant_never_resurrects_them`
 
 - [web](web.md): `Mention components render accepted tokens highlight the reader and follow authorized non-author renames without resolving rejected tokens`
+
+- [realtime](realtime.md): `dm_mention_denial_matrix_has_no_identity_rows_counts_or_notifications`, `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`
+- [web](web.md): `DM Mention counts converge across live duplicate replay reconnect marks and access loss`
+
+- [unread](unread.md): `main_unread_count_uses_covering_range_without_message_heap`
+
+- [deployment](deployment.md): `dm_open_list_and_discovery_use_one_measured_checkout_each`

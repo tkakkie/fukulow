@@ -4,6 +4,7 @@ import { createServer as createSecureServer, type ServerOptions } from 'node:htt
 import { networkInterfaces } from 'node:os'
 import { day, checksum, sha256, type BackupBucket, type ObjectInfo } from './backup-r2-model.ts'
 import type { Request, Response, Runner } from './backup-r2.ts'
+import { runLockKey } from './backup-r2-list.ts'
 
 export type Fault = 'lost-response' | 'truncated' | 'bad-checksum' | '5xx'
 export class FakeBucket implements BackupBucket {
@@ -11,7 +12,7 @@ export class FakeBucket implements BackupBucket {
   calls: string[] = []
   now: () => number
   constructor(now: () => number) { this.now = now }
-  async list() { this.calls.push('LIST'); return [...this.objects.keys()].map(key => this.info(key)!) }
+  async list() { this.calls.push('LIST'); return [...this.objects.keys()].filter(key => key !== runLockKey).map(key => this.info(key)!) }
   info(key: string): ObjectInfo | null {
     const o = this.objects.get(key)
     return o ? { key, size: o.body.length, checksum: checksum(sha256(o.body)), uploaded: o.uploaded } : null
@@ -25,7 +26,7 @@ export class FakeBucket implements BackupBucket {
   }
   locked(key: string) {
     const o = this.objects.get(key)
-    return o && this.now() - o.uploaded < (key.startsWith('restore-verified/') ? 40 : 35) * day
+    return o && key !== runLockKey && this.now() - o.uploaded < (key.startsWith('restore-verified/') ? 40 : 35) * day
   }
   async put(key: string, body: Buffer) {
     if (this.locked(key)) throw new Error('Locked')
@@ -44,7 +45,9 @@ export async function fakeS3(now: () => number, tls?: ServerOptions) {
   const faults: { method: string; fault: Fault; remaining: number }[] = []
   const accesses: string[] = []
   const handler: RequestListener = async (req, res) => {
-    const [bucketName, ...parts] = decodeURIComponent(req.url!.slice(1)).split('/')
+    const [pathname, query = ''] = req.url!.slice(1).split('?')
+    const parameters = new URLSearchParams(query)
+    const [bucketName, ...parts] = pathname.split('/').map(decodeURIComponent)
     const role = req.headers['x-test-role']
     accesses.push(`${role}:${bucketName}:${req.method}`)
     if (!['backups', 'images'].includes(bucketName) || role !== bucketName) { res.writeHead(403).end(); return }
@@ -58,13 +61,23 @@ export async function fakeS3(now: () => number, tls?: ServerOptions) {
         for await (const chunk of req) chunks.push(chunk)
         const body = Buffer.concat(chunks), hash = sha256(body)
         if (req.headers['x-amz-content-sha256'] !== hash || req.headers['x-amz-checksum-sha256'] !== checksum(hash)) { res.writeHead(400).end(); return }
+        if (req.headers['if-none-match'] === '*' && bucket.objects.has(key)) { res.writeHead(412).end(); return }
         await bucket.put(key, body)
         if (injected?.fault === 'lost-response') { req.socket.destroy(); return }
         res.writeHead(200).end()
       } else if (req.method === 'DELETE') {
         await bucket.delete(key); res.writeHead(204).end()
       } else if (!key && req.method === 'GET') {
-        res.end(JSON.stringify(await bucket.list()))
+        if (parameters.get('list-type') !== '2') { res.writeHead(400).end(); return }
+        const all = [...bucket.objects.keys()].sort(), token = parameters.get('continuation-token')
+        const start = token ? all.indexOf(token) + 1 : 0
+        if (token && start === 0) { res.writeHead(400).end(); return }
+        const page = all.slice(start, start + 2), truncated = start + page.length < all.length
+        const escape = (s: string) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+        res.end(`<ListBucketResult><KeyCount>${page.length}</KeyCount><IsTruncated>${truncated}</IsTruncated>${truncated ? `<NextContinuationToken>${escape(page.at(-1)!)}</NextContinuationToken>` : ''}${page.map(key => {
+          const info = bucket.info(key)!
+          return `<Contents><Key>${escape(key)}</Key><Size>${info.size}</Size><LastModified>${new Date(info.uploaded).toISOString()}</LastModified></Contents>`
+        }).join('')}</ListBucketResult>`)
       } else {
         const info = await bucket.head(key)
         if (!info) { res.writeHead(404).end(); return }
@@ -89,7 +102,8 @@ export async function fakeS3(now: () => number, tls?: ServerOptions) {
   if (!address || typeof address === 'string') throw new Error('Local server unavailable')
   const base = new URL(`${tls ? 'https' : 'http'}://${address.address}:${address.port}`)
   const runner = (role: keyof typeof buckets, bucketName: keyof typeof buckets = role): Runner => async (request: Request): Promise<Response> => {
-    const url = new URL(`/${bucketName}/${request.key}`, base)
+    const url = new URL(`/${bucketName}/${request.key.split('/').map(encodeURIComponent).join('/')}`, base)
+    if (request.query) url.search = new URLSearchParams(request.query).toString()
     const r = await fetch(url, { method: request.method, headers: { ...request.headers, 'x-test-role': role }, body: request.body ? new Uint8Array(request.body) : undefined })
     if (request.digestOnly && r.body) {
       const hash = createHash('sha256'); let size = 0

@@ -11,6 +11,7 @@ import { getOrganizationMe, isOrganizationUnavailable, type Identity } from './a
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
+import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess } from './members'
 import { membersAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
@@ -19,7 +20,7 @@ import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { holdActivity?(key: string, target: ActivityTarget): unknown; navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; onMemberListRefresh?(listener: () => void): () => void; close(): void }
+export type SessionModel = { holdActivity?(key: string, target: ActivityTarget): unknown; dms?: DmsAdapter; navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; onMemberListRefresh?(listener: () => void): () => void; close(): void }
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -43,6 +44,7 @@ const defaults: AuthDeps = {
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
+      dms: dmsAdapter(session.dms),
       sync: syncAdapter(session.sync),
       topics(id: string) {
         let adapter = topicAdapters.get(id)

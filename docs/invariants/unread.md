@@ -46,7 +46,13 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 | Mention notices refetch both count fields without local arithmetic; Topic coverage never covers aggregate; shared periodic work recovers lost notices | `web/src/mention-activity.test.ts::Mention notices only refetch both fields coalesce duplicates and keep Topic coverage independent from aggregate`, `web/src/mention-activity.test.ts::Mention lost notices and uncertain commits converge through the existing periodic schedule without another mutation`, `web/src/mention-activity.test.ts::Mention activity coverage never accepts an Unread-only response or suppresses its retry`, `web/src/mention-unread.test.ts::Mention coverage rejects an Unread-only Topic response and recovers both fields` |
 | Evicted Mention evidence stays bounded and counts unresolved until refreshed; retained Unread evidence contains no names or bodies | `web/src/mention-unread.test.ts::Mention eviction stays unresolved until sufficient baselines and retains no names or bodies` |
 
+| Exact main Unread and Mention counts use a covering Message range after VACUUM; the range excludes own sends without Message heap fetches | `server/src/messages/tests/unread/measurement.rs::main_unread_count_uses_covering_range_without_message_heap` |
+
 ## Rows in other parts
+
+- [channels](channels.md): `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
+- [messages](messages.md): `send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions`, `default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime`
+- [realtime](realtime.md): `dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied`, `dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access`, `dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message`
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
@@ -60,3 +66,11 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [sync](sync.md): `bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8`, `preserves Topic counts and latest activity after body eviction and duplicate replay with old W pages`, `bounds Topic and Reply stores with independent continuations and releases inactive Topic history`
 
 - [sync](sync.md): `caps disjoint cursor evidence and refetches its forgotten final sequence without advancing across a gap`
+
+- [realtime](realtime.md): `dm_notice_denies_nonparticipant_owner_with_participant_control`, `dm_notices_reach_both_participants_and_only_other_senders_and_own_read_sessions`, `dm_peer_deactivation_reactivation_and_rename_invalidate_only_current_viewers_and_renewal_gains_only_lapsed_participant`, `dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival`
+
+- [sync](sync.md): `DM access generations discard pending marks and a late old mark cannot replace the renewed baseline`, `P8 accepts one atomic winning tuple and rejects contradictory equal-position counts`, `DM discovery neither watches nor marks read and selection bootstraps the first Message through common sync`
+
+- [messages](messages.md): `dm_mentions_participant_roles_replies_mark_read_and_renewal_share_batched_counts`, `dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set`
+- [web](web.md): `DM Mention counts converge across live duplicate replay reconnect marks and access loss`, `Unread-only DM responses cannot cover Mention invalidations and retry through the shared schedule`, `DM access loss hides both retained baseline badges until a renewed controller baseline arrives`
+- [realtime](realtime.md): `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`

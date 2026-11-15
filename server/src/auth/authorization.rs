@@ -21,6 +21,7 @@ pub enum Action {
     Account,
     ReadOrganization,
     CreateChannel,
+    OpenDm,
     Invite(Role),
     ChangeRole,
     DeactivateMember,
@@ -34,6 +35,9 @@ pub enum Action {
 #[derive(Clone, Copy)]
 pub enum Resource {
     Global,
+    Dm {
+        organization: Uuid,
+    },
     Organization(Uuid),
     Member {
         organization: Uuid,
@@ -66,7 +70,9 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
             Resource::Organization(target),
         ) if organization == target => match action {
             Action::ReadOrganization => true,
-            Action::CreateChannel => matches!(role, Role::Owner | Role::Admin | Role::Member),
+            Action::CreateChannel | Action::OpenDm => {
+                matches!(role, Role::Owner | Role::Admin | Role::Member)
+            }
             Action::Invite(target_role) => {
                 matches!(role, Role::Owner)
                     || (matches!(role, Role::Admin) && !matches!(target_role, Role::Owner))
@@ -115,11 +121,36 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
                 _ => false,
             }
         }
+        (
+            Actor::Member {
+                organization,
+                channel_member,
+                ..
+            },
+            action,
+            Resource::Dm {
+                organization: target,
+            },
+        ) if organization == target => channel_member && matches!(action, Action::ReadChannel),
         _ => false,
     };
     Capability {
         allowed,
-        reason: (!allowed).then(|| "forbidden".into()),
+        reason: (!allowed).then(|| {
+            if matches!(resource, Resource::Dm { .. })
+                && matches!(
+                    action,
+                    Action::AddChannelMembers
+                        | Action::RemoveChannelMembers
+                        | Action::ManageChannelManagers
+                        | Action::LeaveChannel
+                )
+            {
+                "dm_membership_fixed".into()
+            } else {
+                "forbidden".into()
+            }
+        }),
     }
 }
 

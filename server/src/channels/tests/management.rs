@@ -582,7 +582,7 @@ async fn mutation_locks_channel_before_actor_member(pool: PgPool) {
         };
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT visibility=%FOR NO KEY UPDATE')")
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT COALESCE(visibility=%FOR NO KEY UPDATE')")
                     .fetch_one(&pool).await.unwrap();
                 if waiting { break; }
                 tokio::task::yield_now().await;

@@ -1,12 +1,12 @@
 import * as api from './api'
-import type { ChannelList, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
+import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
 import type { createSync } from './sync'
 import type { Topics } from './topics'
 import type { TopicBaseline } from './topic-selectors'
 import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
 import { backoffCap } from './reconnect'
 import { completeCountFields, chooseBaseline, chooseChannelBaseline, coveredThrough, inScope, mainBaseline, recordCoverage,
-  needsUnreadRecord, scopeCount, sequenceToSubmit, topicBaseline, type Coverage, type ScopeBaseline, type UnreadScope, type UnreadRecord } from './unread-counts'
+  needsUnreadRecord, scopeCount, sequenceToSubmit, topicBaseline, type AggregateBaseline, type Coverage, type ScopeBaseline, type UnreadScope, type UnreadRecord } from './unread-counts'
 export type { UnreadScope } from './unread-counts'
 
 type Sync = ReturnType<typeof createSync>
@@ -26,7 +26,7 @@ type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: num
   operation?: symbol; intent?: MarkReadRequest; queued?: MarkReadRequest; timer?: ReturnType<typeof setTimeout>; attempt: number }
 const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
-  records: new Map<number, UnreadRecord>(), lostThrough: 0, aggregate: undefined as UnreadChannel | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
+  records: new Map<number, UnreadRecord>(), lostThrough: 0, aggregate: undefined as AggregateBaseline | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
   heldPositions: new Map<string, number>(), stopped: false, error: false,
   summaryReads: new Map<string, symbol>(), queuedSummaries: new Set<string>(), ignoredBaselines: new WeakSet<TopicBaseline>(), observedBaselines: new WeakSet<TopicBaseline>(),
   summaryTimers: new Map<string, ReturnType<typeof setTimeout>>(), summaryAttempts: new Map<string, number>() })
@@ -35,7 +35,7 @@ type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAt
 type Deadline = { channel?: string; cancel(): void }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
-export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void> }) {
+export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshDms?(): void; isDm?(id: string): boolean }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -175,6 +175,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   async function refresh(retryTokens?: Map<string, symbol>) {
     if (!active()) return
+    options.refreshDms?.()
     if (options.refreshList) return options.refreshList()
     // Before discovery there are no Channel generations to scope a list retry to.
     const discovering = channels.size === 0
@@ -558,7 +559,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
       const ids = new Set(rows.map(r => r.id))
-      for (const [id, c] of channels) if (!ids.has(id) && !watched(id)) { fence(id, c); channels.delete(id) }
+      for (const [id, c] of channels) if (!ids.has(id) && !watched(id) && !options.isDm?.(id)) { fence(id, c); channels.delete(id) }
       for (const row of rows) {
         if (!completeCountFields(row)) continue
         const c = getChannel(row.id)
@@ -567,6 +568,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         c.aggregate = chooseChannelBaseline(c.aggregate, row); c.error = false; c.heldPositions.clear(); prune(c)
       }
       resolveBoundary(); notify()
+    },
+    activityDmSnapshot(row: Dm, replace: boolean) {
+      if (!active() || !completeCountFields(row) || sync.get().channels[row.id]?.state === 'unavailable') return
+      let c = getChannel(row.id)
+      if (c.stopped) return
+      if (replace) { fence(row.id, c); channels.set(row.id, c = channelState()) }
+      // The DM controller has already selected one atomic count/position tuple under its access fence.
+      const baseline = { ...row, main_mention_unread_count: row.mention_unread_count }
+      c.aggregate = baseline; acceptScope(c.main, mainBaseline(baseline))
+      c.error = false; c.heldPositions.clear(); prune(c); collect(row.id, c)
+      resolveBoundary(); notify(row.id)
     },
     activityReconcile() {
       for (const [id, c] of channels) if (!watched(id)) { fence(id, c); channels.set(id, channelState()) }

@@ -8,6 +8,7 @@ import { FakeBucket, fakeS3 } from './backup-r2-fake.ts'
 import { checksum, day, inventory, sha256, verifiedGeneration, type Manifest } from './backup-r2-model.ts'
 import { curlRunner, objectTransport, publish, recheckNewest, runBackup } from './backup-r2.ts'
 import { checkBackups } from './backup-r2-checker.ts'
+import { memoryRunLock } from './backup-safety.ts'
 
 const epoch = Date.UTC(2026, 10, 14, 12)
 function manifest(capture = epoch, bytes = Buffer.from('encrypted-test-data')): Manifest {
@@ -24,7 +25,7 @@ async function seed(bucket: FakeBucket, capture: number, size = 100, restored = 
 }
 function checker(bucket: FakeBucket, now = epoch) {
   const events: string[] = [], images = new FakeBucket(() => now), state = {}
-  const options = { backups: bucket, images, now: () => now, notify: async (event: string) => { events.push(event) }, state, operations: { classA: 0, classB: 0 } }
+  const options = { backups: bucket, images, now: () => now, notify: async (event: string) => { events.push(event) }, state, lock: memoryRunLock(), usage: { read: async () => ({ classA: 0, classB: 0 }) } }
   return { events, images, options, run: () => checkBackups(options) }
 }
 
@@ -170,7 +171,7 @@ test('capacity operations plausibility overdue drill and daily alive alerts', as
   await seed(bucket, epoch - 40 * day, 100, true)
   const c = checker(bucket)
   c.options.images = { list: async () => [{ key: 'image', size: 9_000_000_000, checksum: '', uploaded: epoch }] } as FakeBucket
-  c.options.operations = { classA: 700_000, classB: 7_000_000 }
+  c.options.usage = { read: async () => ({ classA: 700_000, classB: 7_000_000 }) }
   const result = await c.run()
   for (const alert of ['capacity-70', 'capacity-90', 'class-a-70', 'class-b-70', 'implausible-size', 'drill-overdue']) assert.ok(result.alerts.includes(alert), alert)
   await c.run()
@@ -201,7 +202,7 @@ test('dump encryption upload and verification failures alert without exposing di
     await seed(bucket, epoch - day)
     if (stage === 'upload') bucket.put = async () => { throw new Error('sensitive diagnostics') }
     if (stage === 'verify') bucket.get = async () => Buffer.from('wrong')
-    await assert.rejects(runBackup({ directory: root, recipient: 'test-public-recipient', bucket, now: () => epoch,
+    await assert.rejects(runBackup({ lock: memoryRunLock(), directory: root, recipient: 'test-public-recipient', bucket, now: () => epoch,
       notify: async e => { events.push(e) }, dump: (_directory, capture) => { if (stage === 'dump') throw new Error('sensitive diagnostics'); capture(); return source },
       encrypt: (_s, target) => { if (stage === 'encrypt') throw new Error('sensitive diagnostics'); writeFileSync(target, 'ciphertext') },
     }), { message: 'Backup failed (diagnostics suppressed)' })
@@ -236,7 +237,7 @@ test('age throwaway key roundtrip rejects wrong key and tampering', async t => {
   const source = join(root, 'source'); writeFileSync(source, 'dump')
   const fake = await fakeS3(() => epoch); t.after(fake.close)
   const bucket = { ...objectTransport(fake.runner('backups')), list: () => fake.buckets.backups.list(), delete: (key: string) => fake.buckets.backups.delete(key) }
-  await runBackup({ directory: root, recipient, bucket, now: () => epoch, notify: async () => assert.fail('unexpected alert'), dump: (_directory, capture) => { capture(); return source } })
+  await runBackup({ lock: memoryRunLock(), directory: root, recipient, bucket, now: () => epoch, notify: async () => assert.fail('unexpected alert'), dump: (_directory, capture) => { capture(); return source } })
   const newest = await recheckNewest(bucket, epoch), downloaded = join(root, 'downloaded')
   writeFileSync(downloaded, await bucket.get(newest.prefix + 'archive.dump.age'))
   const restored = spawnSync('age', ['-d', '-i', key, downloaded])
@@ -267,7 +268,7 @@ test('normal mock flow preserves local dump and daily recheck hashes newest ciph
   const source = join(root, 'source'); writeFileSync(source, 'dump')
   const bucket = new FakeBucket(() => epoch), events: string[] = []
   await seed(bucket, epoch - day)
-  const prefix = await dailyBackup({ directory: root, recipient: 'test-public-recipient', bucket,
+  const prefix = await dailyBackup({ lock: memoryRunLock(), directory: root, recipient: 'test-public-recipient', bucket,
     now: () => epoch, notify: async event => { events.push(event) }, dump: (_directory, capture) => { capture(); return source },
     encrypt: (_source, target) => writeFileSync(target, 'mock encrypted data') })
   assert.equal(events.length, 0)
@@ -276,7 +277,7 @@ test('normal mock flow preserves local dump and daily recheck hashes newest ciph
   const get = bucket.get.bind(bucket)
   bucket.get = async key => key.endsWith('archive.dump.age') ? Buffer.alloc(19, 3) : get(key)
   await assert.rejects(recheckNewest(bucket, epoch), /Daily integrity check failed/)
-  await assert.rejects(runBackup({ directory: root, recipient: '', bucket, now: () => epoch,
+  await assert.rejects(runBackup({ lock: memoryRunLock(), directory: root, recipient: '', bucket, now: () => epoch,
     notify: async event => { events.push(event) }, dump: () => assert.fail('dump must not run without recipient') }))
   assert.deepEqual(events, ['backup-failed'])
 })

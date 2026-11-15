@@ -34,7 +34,7 @@ async function fixture(
     if (path === '/api/v1/orgs/o/channels') {
       return json({
         channels: options.withChannel
-          ? [{ id: 'c1', name: 'general', visibility: 'public', created_at: '2026-01-01T00:00:00Z' }]
+          ? [{ id: 'c1', kind: 'channel', name: 'general', visibility: 'public', created_at: '2026-01-01T00:00:00Z' }]
           : [],
       })
     }

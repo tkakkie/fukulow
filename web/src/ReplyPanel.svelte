@@ -40,6 +40,7 @@
     replyTargetStatus = 'idle',
     selfId = '',
     organizationUnavailable = false,
+    sendDisabled = false,
     composerRef = $bindable(null),
     resolveSenderName,
     resolveMentionName,
@@ -59,6 +60,7 @@
     replyTargetStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
     selfId?: string
     organizationUnavailable?: boolean
+    sendDisabled?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     resolveSenderName?: (senderId: string) => string
     resolveMentionName?: MentionName
@@ -460,9 +462,10 @@
             body={p.body}
             pendingStatus={p.status}
             retryable={p.retryable}
+            failedReason={p.failureCode === 'dm_peer_deactivated' ? 'このメンバーは無効化されています。履歴は引き続き閲覧できます。' : p.failureCode === 'dm_peer_access_lapsed' ? 'このダイレクトメッセージには現在送信できません。' : undefined}
             {targetUnavailable}
             onretry={() => void rc.retry(p.clientMessageId).catch(console.error)}
-            onrestore={() => handleRestoreRequest(p.clientMessageId)}
+            onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
         {/snippet}
@@ -499,7 +502,7 @@
       placeholder="返信を入力"
       value={composerState.draft}
       error={composerState.composerError}
-      disabled={targetUnavailable}
+      disabled={targetUnavailable || sendDisabled}
       submitDisabled={!canSendReply}
       oninput={(b) => rc.setDraft(b)}
       onsubmit={handleSubmit}

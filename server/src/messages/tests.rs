@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 mod admission;
 pub(super) mod authors;
+mod dms_pool;
 mod mentions;
 mod text_input;
 pub(super) mod unread;
@@ -909,6 +910,7 @@ async fn send_route_accepts_the_largest_valid_body_and_still_caps_the_request(po
 
 fn scoped_path(path: &str, token: &str) -> String {
     if path.starts_with("/api/v1/channels")
+        || path.starts_with("/api/v1/dms")
         || path.starts_with("/api/v1/ws")
         || path == "/api/v1/message-authors"
     {
@@ -935,3 +937,9 @@ pub(super) mod removal;
 mod context;
 mod limit;
 mod rls_statements;
+
+// Historical migrations are tested before schema upgrades; current handlers
+// must only run after all later migrations have been applied.
+async fn migrate_after(pool: &PgPool, version: &str) {
+    apply_migrations_after(pool, version).await;
+}

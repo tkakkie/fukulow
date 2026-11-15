@@ -384,6 +384,7 @@ async fn unread_access_migration_repairs_guest_rows_and_backfills_without_resett
         topic_positions(&pool, org, missing, owner_id).await,
         vec![1]
     );
+    crate::messages::tests::migrate_after(&pool, "202611110201_unread_access.sql").await;
     assert_positions_match_visibility(&pool).await;
 }
 

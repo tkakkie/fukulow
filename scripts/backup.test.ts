@@ -24,8 +24,10 @@ if (args[0] === 'compose') {
   if (args[1] !== '-f' || args[2] !== process.env.TEST_COMPOSE_FILE ||
       fs.realpathSync(process.cwd()) !== fs.realpathSync(require('node:path').dirname(args[2]))) process.exit(93);
   const files = fs.readdirSync(process.env.TEST_DIRECTORY);
-  if (files.some(name => name !== 'previous.dump' && !name.startsWith('.partial-'))) process.exit(92);
+  if (!process.env.TEST_ALLOW_FINAL && files.some(name => name !== 'previous.dump' && name !== '.backup-run.lock' && !name.startsWith('.partial-'))) process.exit(92);
 }
+if (args[0] === 'run' && process.env.TEST_FAIL === 'start') { console.error('SECRET_SENTINEL'); process.exit(1); }
+if (args[0] === 'rm' && process.env.TEST_FAIL === 'cleanup') { console.error('SECRET_SENTINEL'); process.exit(1); }
 if (args.includes('--version')) {
   console.log('pg_dump (PostgreSQL) ' + (process.env.TEST_FAIL === 'version' ? '17.6' : '18.6'));
 } else if (args.includes('pg_dump')) {
@@ -44,13 +46,13 @@ else if ((args.includes('psql') && process.env.TEST_FAIL === 'sessions') ||
   console.error('SECRET_SENTINEL'); process.exit(1);
 }
 `, { mode: 0o700 })
-  const run = (script: string, destination: string, fail = '') => spawnSync(process.execPath,
+  const run = (script: string, destination: string, fail = '', extraEnv: Record<string, string> = {}) => spawnSync(process.execPath,
     [fileURLToPath(new URL(script, import.meta.url)), destination], {
       encoding: 'utf8',
       cwd: root,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_LOG: log, TEST_FAIL: fail,
         TEST_DIRECTORY: destination, TEST_COMPOSE_FILE: join(repositoryRoot, 'compose.yml'),
-        DATABASE_URL: 'postgres://SECRET_SENTINEL@invalid/secret' },
+        DATABASE_URL: 'postgres://SECRET_SENTINEL@invalid/secret', ...extraEnv },
     })
   const calls = (): string[][] => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
   return { root, log, run, calls }
@@ -64,7 +66,8 @@ test('backup from another directory uses the repository Compose file and publish
   writeFileSync(join(root, 'compose.yml'), 'invalid caller Compose file')
   const result = run('./backup.ts', directory)
   assert.equal(result.status, 0, result.stderr)
-  const artifact = result.stdout.trim()
+  assert.equal(result.stdout.trim(), 'Backup passed.')
+  const artifact = join(directory, readdirSync(directory).find(name => name.startsWith('fukulow-'))!)
   assert.match(artifact, /fukulow-.*\.dump$/)
   assert.equal(statSync(artifact).mode & 0o777, 0o600)
   assert.equal(statSync(directory).mode & 0o777, 0o700)
@@ -101,6 +104,8 @@ for (const failure of ['version', 'dump', 'signal', 'list']) {
     const result = run('./backup.ts', directory, failure)
     assert.equal(result.status, 1)
     assert.doesNotMatch(result.stdout + result.stderr, /SECRET_SENTINEL/)
+    assert.match(result.stderr, new RegExp(`stage=${failure === 'signal' ? 'dump' : failure} category=operation`))
+    assert.ok(!result.stdout.includes(directory) && !result.stderr.includes(directory))
     assert.deepEqual(readdirSync(directory), ['previous.dump'])
     assert.equal(readFileSync(join(directory, 'previous.dump'), 'utf8'), 'previous')
   })
@@ -119,7 +124,7 @@ test('backup refuses permissive directories and symlinks', t => {
   assert.deepEqual(readdirSync(directory), [])
 })
 
-for (const failure of ['', 'list', 'restore', 'sessions', 'integrity']) {
+for (const failure of ['', 'start', 'list', 'restore', 'sessions', 'integrity', 'cleanup']) {
   test(`restore drill isolates its target and cleans up on ${failure || 'success'}`, t => {
     const { root, run, calls } = fixture(t)
     const archive = join(root, 'backup.dump')
@@ -127,6 +132,11 @@ for (const failure of ['', 'list', 'restore', 'sessions', 'integrity']) {
     const result = run('./restore-drill.ts', archive, failure)
     assert.equal(result.status, failure ? 1 : 0, result.stderr)
     assert.doesNotMatch(result.stdout + result.stderr, /SECRET_SENTINEL/)
+    if (failure) assert.match(result.stderr, new RegExp(`stage=${failure} category=operation`))
+    if (failure === 'start') {
+      assert.equal(calls().length, 1)
+      return
+    }
     const commands = calls()
     const create = commands[0]
     const name = create[create.indexOf('--name') + 1]
@@ -140,3 +150,41 @@ for (const failure of ['', 'list', 'restore', 'sessions', 'integrity']) {
     assert.equal(readFileSync(archive, 'utf8'), 'archive')
   })
 }
+
+test('directory fsync follows rename and its failure preserves previous and newly renamed archives', t => {
+  const { root, run } = fixture(t), directory = join(root, 'backups')
+  mkdirSync(directory, { mode: 0o700 })
+  writeFileSync(join(directory, 'previous.dump'), 'previous')
+  const script = join(root, 'sync-test.ts')
+  writeFileSync(script, `import { backup } from ${JSON.stringify(new URL('./backup.ts', import.meta.url).href)};
+import { readdirSync } from 'node:fs';
+import { diagnostic } from ${JSON.stringify(new URL('./backup-safety.ts', import.meta.url).href)};
+try { backup(process.argv[2], undefined, { syncDirectory: directory => {
+  if (!readdirSync(directory).some(name => name.startsWith('fukulow-') && name.endsWith('.dump'))) throw new Error('rename must precede sync');
+  throw Object.assign(new Error('SECRET_SENTINEL'), {code:'EIO'});
+} }); process.exitCode=2; } catch (error) { console.error(diagnostic(error)); process.exitCode=1; }
+`)
+  const result = run(script, directory)
+  assert.equal(result.status, 1)
+  assert.equal(result.stderr.trim(), 'stage=directory-sync category=io')
+  assert.equal(readFileSync(join(directory, 'previous.dump'), 'utf8'), 'previous')
+  const final = readdirSync(directory).filter(name => name.startsWith('fukulow-'))
+  assert.equal(final.length, 1)
+  assert.equal(readFileSync(join(directory, final[0]), 'utf8'), 'archive-data')
+  assert.ok(!readdirSync(directory).some(name => name.startsWith('.partial-')))
+})
+
+test('backup sweeps crash remnants after locking and refuses an overlapping or stale owner', t => {
+  const { root, run } = fixture(t), directory = join(root, 'backups')
+  mkdirSync(directory, { mode: 0o700 })
+  const partial = join(directory, '.partial-Ab1234')
+  mkdirSync(partial, { mode: 0o700 }); writeFileSync(join(partial, 'archive'), 'incomplete')
+  writeFileSync(join(directory, '.backup-run.lock'), '', { mode: 0o600 })
+  const refused = run('./backup.ts', directory)
+  assert.equal(refused.status, 1)
+  assert.match(refused.stderr, /stage=lock category=busy/)
+  assert.equal(readFileSync(join(partial, 'archive'), 'utf8'), 'incomplete')
+  rmSync(join(directory, '.backup-run.lock'))
+  assert.equal(run('./backup.ts', directory).status, 0)
+  assert.ok(!readdirSync(directory).includes('.partial-Ab1234'))
+})

@@ -1,8 +1,8 @@
 import type { Result, ServerEvent } from './api'
 
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
-export type Invalidation = 'notice' | 'access' | 'reconcile'
-export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; suspend?(): void; close(): void }
+export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
+export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; disconnected?(): void; suspend?(): void; close(): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
@@ -13,6 +13,9 @@ export function createActivityTarget<T>(options: {
   terminal?(result: Result<T>): boolean
   random?: () => number
   timeoutMs?: number
+  /** A bounded multi-lane target owns retry admission; deadlines remain shared here. */
+  manualRetry?: boolean
+  settled?(): void
 }) {
   const random = options.random ?? Math.random
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0
@@ -49,7 +52,7 @@ export function createActivityTarget<T>(options: {
     inFlight = false
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
-    if (result.ok) {
+    try { if (result.ok) {
       if (own !== generation) { if (dirty && !retry) schedule(200); return }
       failure = undefined; stopped = false; options.accept(result.data); attempt = 0
       dirty = queued
@@ -57,13 +60,14 @@ export function createActivityTarget<T>(options: {
     } else {
       if (own === generation) { failure = result; options.error?.(result) }
       if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; stopped = true; return }
+      if (options.manualRetry) { dirty = false; queued = false; return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
         retry = true
         const cap = Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5))
         schedule(Math.max(result.retryAfterMs ?? 0, cap / 2 + random() * cap / 2))
       } else if (own !== generation) { if (dirty) schedule(200) }
       else { dirty = false; queued = false; stopped = true }
-    }
+    } } finally { options.settled?.() }
   }
   return {
     invalidate(reason: Invalidation = 'notice', delay = 200) {
@@ -74,6 +78,8 @@ export function createActivityTarget<T>(options: {
       }
       stopped = false; failure = undefined; dirty = true
       if (inFlight) { queued = true; return }
+      // Multi-lane admission may make other work eligible before a retained retry deadline.
+      if (options.manualRetry && timer !== undefined && Date.now() + delay < due) { clearTimeout(timer); timer = undefined }
       schedule(delay)
     },
     failure: () => failure,
@@ -92,6 +98,7 @@ export function createActivity(options: {
   revoke?(channel: string): void
   access?(channel: string): void
   reconcile?(): void
+  kind?(channel: string): 'dm' | 'channel' | undefined
   random?: () => number
   periodMs?: number
 }) {
@@ -101,16 +108,21 @@ export function createActivity(options: {
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
   const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200) => targets.get(key)?.invalidate(reason, delay)
   const directories = (delay = 200) => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access', delay) }
-  function all(delay: number) {
+  function all(delay: number, reason: Invalidation = 'reconcile') {
     options.reconcile?.()
-    for (const target of targets.values()) target.invalidate('reconcile', delay)
+    for (const target of targets.values()) target.invalidate(reason, delay)
   }
   function periodic(own: number, first: boolean) {
     timer = setTimeout(() => {
       if (closed || generation !== own) return
-      all(200)
+      all(200, 'periodic')
       periodic(own, false)
-    }, first ? random() * period : period + random() * 2000)
+    }, first ? random() * period : period + (random() * 2 - 1) * period / 10)
+  }
+  const lists = (channel: string, reason: Invalidation = 'notice') => {
+    const kind = options.kind?.(channel)
+    if (kind !== 'dm') invalidate('channels', reason)
+    if (kind !== 'channel') invalidate('dms', reason)
   }
   return {
     hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
@@ -121,10 +133,12 @@ export function createActivity(options: {
           clearTimeout(timer); periodic(++generation, true); all(200); break
         case 'activity_reset': all(random() * 2000); break
         case 'channel_activity':
-          if (!options.watched(event.channel_id) && !options.covered?.(event, 'channels')) invalidate('channels')
+          if (options.kind && options.kind(event.channel_id) === undefined) lists(event.channel_id)
+          else if (!options.watched(event.channel_id) && !options.covered?.(event, options.kind?.(event.channel_id) === 'dm' ? 'dms' : 'channels')) lists(event.channel_id)
           break
         case 'read_position_changed':
-          if (!options.covered?.(event, 'channels')) invalidate('channels')
+          if (options.kind && options.kind(event.channel_id) === undefined) lists(event.channel_id)
+          else if (!options.covered?.(event, options.kind?.(event.channel_id) === 'dm' ? 'dms' : 'channels')) lists(event.channel_id)
           if (options.watched(event.channel_id)) {
             const key = event.topic_id === null ? `main:${event.channel_id}` : `topic:${event.channel_id}:${event.topic_id}`
             if (!options.covered?.(event, key)) invalidate(key)
@@ -132,14 +146,15 @@ export function createActivity(options: {
           break
         case 'channel_access_revoked':
           options.revoke?.(event.channel_id); retire(targets.get(`channel-members:${event.channel_id}`)); targets.delete(`channel-members:${event.channel_id}`)
-          invalidate('channels', 'access'); directories(); break
-        case 'channel_access_gained': options.access?.(event.channel_id); invalidate('channels', 'access'); directories(); break
+          lists(event.channel_id, 'access'); directories(); break
+        case 'channel_access_gained': options.access?.(event.channel_id); lists(event.channel_id, 'access'); directories(); break
+        case 'dm_list_changed': invalidate('dms', 'access'); break
         case 'channel_list_changed': invalidate('channels', 'access'); break
         case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
         case 'members_changed': directories(); invalidate('capabilities', 'access'); break
       }
     },
-    disconnected() { clearTimeout(timer); generation++ },
+    disconnected() { clearTimeout(timer); generation++; targets.forEach(target => target.disconnected?.()) },
     close() { closed = true; clearTimeout(timer); generation++; targets.forEach(target => target.close()); targets.clear() },
   }
 }

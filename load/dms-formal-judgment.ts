@@ -1,0 +1,88 @@
+import { deferredNames, type Scenario } from './dms-formal-scenarios.ts';
+export type Verdict = 'PASS' | 'FAIL' | 'NOT EVALUATED';
+export type Evidence = Record<string, number | undefined | null>;
+// Values are the adopted spec/dms.md budgets; absent evidence can never pass.
+export const budgets: Record<string, number> = {
+  'open.p95':150, 'open.p99':300, 'page.p95':100, 'page.p99':250, 'ack.p95':100, 'ack.p99':250,
+  'peer.p95':200, 'peer.p99':500, 'fiveAttemptRound.p95':1000, 'fiveAttemptRound.p99':2000,
+  'quiet500.runs':10, 'quiet500.seconds':332, 'sql.open':16, 'sql.list':8, 'sql.send':16,
+  'plan.candidates':51, 'plan.currentRows':50, 'plan.grantLookups':100, 'plan.unreadRange':500000,
+  'plan.offset':0, 'plan.wholeListSort':0, 'plan.perRowOrSocketSql':0, 'plan.aggregationBeforeLimit':0, 'plan.missingScopedRangeIndex':0,
+  'plan.fullyReadMessageRanges':0, 'plan.deltaMessageRows':0, 'plan.forbiddenScans':0,
+  'pool.connectionsPerOperation':1, 'pool.retainedPerSocket':0, 'pool.retainedBetweenPages':0,
+  'pool.p95':10, 'pool.p99':50, 'pool.activeP95':24, 'pool.peak':32, 'pool.timeouts':0,
+  'app.cpuMean':6, 'app.cpuP99':8, 'db.cpuMean':6, 'db.cpuP99':8,
+  'app.rssKiB':2097152, 'app.idleKiBPerConnection':128, 'app.idleCpu':1, 'app.rssGrowthPercent':5,
+  'client.rows':200, 'client.inFlight':1, 'client.queued':1, 'client.attempts':5, 'client.unboundedCursors':0,
+  'send.uncommittedPercent':1, 'send.undrained':0, 'ledger.missing':0, 'ledger.duplicates':0, 'ledger.unexpected':0,
+  'errors':0, 'dropped':0, 'generatorFailures':0, 'peer.missing':0, 'duplicates':0,
+  'send.bodyByteFailures':0, 'sampleDeficit':0, 'fixtureMismatches':0, 'mix.missing':0, 'connections.deficit':0, 'offered.deficit':0,
+  'poolOverhead.cpuRegressionPercent':10, 'poolOverhead.p95RegressionPercent':10, 'poolOverhead.p99RegressionPercent':10, 'poolOverhead.rssRegressionPercent':10,
+  'preDm.p95RegressionPercent':10, 'preDm.p99RegressionPercent':10, 'preDm.cpuRegressionPercent':10,
+  'exactCounts.failures':0, 'discovery.failures':0, 'storage.failures':0, 'restore.failures':0,
+};
+export function judge(evidence: Evidence, mode: 'formal' | 'smoke', scenario: Scenario = 'main', latency?: ReturnType<typeof judgeLatencies>) {
+  const rows = Object.entries(budgets).map(([budget, limit]) => {
+    const value = evidence[budget];
+    const base: Verdict = value == null || !Number.isFinite(value) ? 'NOT EVALUATED' : value <= limit ? 'PASS' : 'FAIL';
+    const latencyStatuses=latency?.rows.filter(row=>`${row.budget}.${row.percentile}`===budget).map(row=>row.status) ?? [];
+    const status = combineVerdicts(latencyStatuses.length?latencyStatuses:[base]);
+    return { budget, limit, value: value ?? null, status };
+  });
+  return { scenario, label: mode === 'smoke' ? 'NON-ACCEPTANCE' : 'FORMAL (partial scenario coverage)', acceptance: mode === 'formal' && rows.every(row => row.status === 'PASS'), rows };
+}
+export const aggregateMinimum=10000;
+// Maintainer Q3, 2026-11-15; the ten-Organization aggregate still needs 10,000.
+export const organizationMinimum=1000;
+export const latencyClasses = {
+  resolve:['open','dm_latency_ms:resolve'],create:['open','dm_latency_ms:create'],renew:['open','dm_latency_ms:renew'],
+  refresh:['page','dm_latency_ms:refresh'],delta:['page','dm_latency_ms:delta'],coverage:['page','dm_latency_ms:coverage'],
+  send:['ack','dm_latency_ms:send'],peer:['peer','dm_receipt_ms'],fiveAttemptRound:['fiveAttemptRound','dm_round_ms:attempts=5'],
+} as const;
+export type Latencies = Record<string,{samples:number;p95:number;p99:number} | undefined>;
+export const combineVerdicts=(statuses:Verdict[]):Verdict=>statuses.includes('FAIL')?'FAIL':statuses.includes('NOT EVALUATED')?'NOT EVALUATED':'PASS';
+export const browsingClasses={first:['page','dm_latency_ms:first'],deep:['page','dm_latency_ms:deep']} as const;
+export type BrowsingEvidence={latencies:Latencies;window:{from:number;to:number};core:{from:number;to:number};fullMixedLoad:boolean;reasons:string[]};
+export function judgeLatencies(aggregate:Latencies, organizations:Latencies[], browsing?:BrowsingEvidence) {
+  const populations=[{organization:'aggregate',latencies:aggregate,minimum:aggregateMinimum},...Array.from({length:10},(_,i)=>({organization:String(i),latencies:organizations[i] ?? {},minimum:organizationMinimum}))];
+  const rows=populations.flatMap(({organization,latencies,minimum})=>Object.entries(latencyClasses).flatMap(([shape,[budget,key]])=>{
+    const latency=latencies[key],samples=latency?.samples ?? 0;
+    return (['p95','p99'] as const).map(percentile=>{
+      const value=latency?.[percentile],limit=budgets[`${budget}.${percentile}`];
+      const insufficient=!Number.isSafeInteger(samples) || samples<minimum;
+      const status:Verdict=insufficient || value==null || !Number.isFinite(value)?'NOT EVALUATED':value>limit?'FAIL':'PASS';
+      return {organization,shape,budget,percentile,minimum,samples,value:value ?? null,limit,status,additionalMeasurement:status!=='PASS',reason:insufficient?'Insufficient samples; additional measurement required':status==='FAIL'?'Budget miss; cause investigation required':status==='NOT EVALUATED'?'Missing percentile evidence':null};
+    });
+  }));
+  const browsingReasons=[...(browsing?.reasons ?? ['Missing separate browsing Organization evidence'])];
+  if(browsing && (!Number.isFinite(browsing.window.from) || !Number.isFinite(browsing.window.to) || browsing.window.to<=browsing.window.from || browsing.window.from<browsing.core.from || browsing.window.to>browsing.core.to))browsingReasons.push('Browsing window outside judged mixed-load core');
+  if(browsing && !browsing.fullMixedLoad)browsingReasons.push('Concurrent full mixed load not established (connections, sends, opens or O5)');
+  const browsingRows=Object.entries(browsingClasses).flatMap(([shape,[budget,key]])=>(['p95','p99'] as const).map(percentile=>{
+    const latency=browsing?.latencies[key],samples=latency?.samples ?? 0,value=latency?.[percentile],limit=budgets[budget+'.'+percentile];
+    const reason=browsingReasons.length?browsingReasons.join('; '):!Number.isSafeInteger(samples)||samples<aggregateMinimum?'Insufficient browsing samples; additional measurement required':value==null||!Number.isFinite(value)?'Missing browsing percentile':value>limit?'Budget miss; cause investigation required':null;
+    const status:Verdict=browsingReasons.length || !Number.isSafeInteger(samples) || samples<aggregateMinimum || value==null || !Number.isFinite(value)?'NOT EVALUATED':value>limit?'FAIL':'PASS';
+    return {organization:'browsing',shape,budget,percentile,minimum:aggregateMinimum,samples,value:value ?? null,limit,status,additionalMeasurement:status!=='PASS',reason};
+  }));
+  rows.push(...browsingRows);
+  return {aggregateMinimum,organizationMinimum,minimumNeedsMaintainerConfirmation:false,status:combineVerdicts(rows.map(row=>row.status)),rows,browsingRows,browsingReasons,mixedPopulationNote:'First/deep browsing is judged only on the separate browsing Organization under the full core mixed load; the 100-DM fixture cannot supply deep continuations.'};
+}
+export function commonWindow(starts: number[], mode: 'formal' | 'smoke') {
+  if (starts.length !== 11 || starts.some(start => !Number.isFinite(start))) throw new Error('All eleven generator start timestamps required');
+  const from = Math.max(...starts) + (mode === 'formal' ? 600_000 : 60_000);
+  const to = Math.min(...starts) + (mode === 'formal' ? 2_400_000 : 120_000);
+  // A shared absolute start is required; shrinking windows hides offered work.
+  if (to-from !== (mode === 'formal' ? 1_800_000 : 60_000)) throw new Error('Generators did not share the exact scheduled epoch');
+  return { from, to };
+}
+export type LedgerRow = { organization: string; member: string; channel: string; client_message_id: string; id?: string; seq?: number };
+const key = (r: LedgerRow) => [r.organization,r.member,r.channel,r.client_message_id].join('/');
+export function reconcile(issued: LedgerRow[], durable: LedgerRow[]) {
+  const expected = new Map(issued.map(row => [key(row),row]));
+  const seen = new Set<string>(), ids = new Set<string>(), seqs = new Set<string>(); let duplicates = issued.length-expected.size, missing = 0, unexpected = 0;
+  for (const row of durable) { const k = key(row), sent = expected.get(k); const repeated=seen.has(k); if (repeated) duplicates++; seen.add(k);
+    const id=`${row.organization}/${row.id}`, seq=`${row.organization}/${row.channel}/${row.seq}`;
+    if(!repeated && ((row.id && ids.has(id)) || (row.seq!=null && seqs.has(seq))))duplicates++;if(row.id)ids.add(id);if(row.seq!=null)seqs.add(seq); if (!sent) unexpected++; else if ((sent.id && sent.id !== row.id) || (sent.seq != null && sent.seq !== row.seq)) missing++; }
+  for (const k of expected.keys()) if (!seen.has(k)) missing++;
+  return { missing, duplicates, unexpected };
+}
+export const deferredScenarios = deferredNames.map(scenario => ({ scenario, status: 'NOT EVALUATED' }));

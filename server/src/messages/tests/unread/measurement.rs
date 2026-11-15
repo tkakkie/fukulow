@@ -16,6 +16,153 @@ SELECT p.channel_id, p.read_seq,
  GROUP BY p.channel_id, p.read_seq
 "#;
 
+// Pool executors release connections asynchronously, including protocol drain,
+// rollback and ping. Prove both quiescence and visibility before inspecting plans.
+async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<(), String> {
+    const ATTEMPTS: usize = 20;
+    let mut diagnostic = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let transactions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() \
+             AND pid<>pg_backend_pid() AND (backend_xid IS NOT NULL OR backend_xmin IS NOT NULL)",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM(ANALYZE) messages")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let (visible, total): (i32, i32) = sqlx::query_as(
+            "SELECT relallvisible,relpages FROM pg_class WHERE oid='messages'::regclass",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        if transactions == 0 && visible == total {
+            return Ok(());
+        }
+        diagnostic = format!(
+            "messages VACUUM exhausted {attempt} attempts: {visible}/{total} visible/total pages; \
+             {transactions} other same-database transactions"
+        );
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    Err(diagnostic)
+}
+
+#[fukulow_test::test]
+async fn main_unread_count_uses_covering_range_without_message_heap(pool: PgPool) {
+    // No Router or restricted pool is needed during SQL-only fixture setup.
+    let org = organization(&pool).await;
+    let sender = Uuid::new_v4();
+    member(&pool, org, sender).await;
+    let channel = Uuid::new_v4();
+    super::super::channel(&pool, org, channel, sender, false).await;
+    let viewer = Uuid::new_v4();
+    member(&pool, org, viewer).await;
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,CASE WHEN n%2=0 THEN $3 ELSE $4 END,gen_random_uuid(),repeat('x',1024) FROM generate_series(1,10000) n")
+        .bind(org).bind(channel).bind(sender).bind(viewer).execute(&mut *connection).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,10000)",
+    )
+    .bind(org)
+    .bind(channel)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO message_mentions SELECT organization_id,channel_id,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq%10=0")
+        .bind(org).bind(channel).bind(viewer).execute(&mut *connection).await.unwrap();
+    vacuum_messages_visible(&mut connection).await.unwrap();
+    drop(connection);
+    let app = crate::test_app_pool(pool.clone()).await;
+    let mut tx = app.begin().await.unwrap();
+    crate::database::set_organization(&mut tx, org)
+        .await
+        .unwrap();
+    sqlx::query("SET LOCAL plan_cache_mode=force_generic_plan")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let row = sqlx::query(crate::messages::unread::LIST_COUNTS_SQL)
+        .bind(org)
+        .bind(viewer)
+        .bind(0_i64)
+        .bind([channel])
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("unread_count"), 5_000);
+    assert_eq!(row.get::<i64, _>("mention_unread_count"), 1_000);
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {}",
+        crate::messages::unread::LIST_COUNTS_SQL
+    ))
+    .bind(org)
+    .bind(viewer)
+    .bind(0_i64)
+    .bind([channel])
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    fn covering(node: &Value) -> Option<&Value> {
+        if node["Index Name"] == "messages_main_unread_covering" {
+            return Some(node);
+        }
+        node["Plans"].as_array()?.iter().find_map(covering)
+    }
+    let scan = covering(&plan[0]["Plan"]).expect("covering main-scope index range");
+    assert_eq!(scan["Node Type"], "Index Only Scan");
+    assert_eq!(scan["Heap Fetches"], 0);
+    assert_eq!(scan["Actual Rows"].as_f64().unwrap(), 5_000.0);
+    assert_eq!(scan["Rows Removed by Filter"].as_f64().unwrap(), 5_000.0);
+    tx.rollback().await.unwrap();
+    app.close().await;
+}
+
+#[fukulow_test::test]
+async fn covering_range_vacuum_reports_held_same_database_transaction(pool: PgPool) {
+    let org = organization(&pool).await;
+    let sender = Uuid::new_v4();
+    member(&pool, org, sender).await;
+    let channel = Uuid::new_v4();
+    super::super::channel(&pool, org, channel, sender, false).await;
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("SELECT txid_current(), count(*) FROM messages")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),repeat('x',1024) FROM generate_series(1,100) n")
+        .bind(org).bind(channel).bind(sender).execute(&mut *connection).await.unwrap();
+    let diagnostic = vacuum_messages_visible(&mut connection).await.unwrap_err();
+    assert!(diagnostic.contains("exhausted 20 attempts"), "{diagnostic}");
+    assert!(diagnostic.contains("visible/total pages"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("1 other same-database transactions"),
+        "{diagnostic}"
+    );
+    let (visible, total): (i32, i32) = sqlx::query_as(
+        "SELECT relallvisible,relpages FROM pg_class WHERE oid='messages'::regclass",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert!(
+        visible < total,
+        "held snapshot must prevent full visibility"
+    );
+    held.rollback().await.unwrap();
+    vacuum_messages_visible(&mut connection).await.unwrap();
+}
+
 #[fukulow_test::test]
 #[ignore = "manual before/after release query measurement; run without other builds/tests"]
 async fn measure_unread_list_read_position_ranges(pool: PgPool) {

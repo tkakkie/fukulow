@@ -382,6 +382,7 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
   const { net, session } = open()
   const privateChannel = (allowed: boolean): api.Channel => ({
     id: 'A',
+    kind: 'channel',
     name: 'A',
     visibility: 'private',
     capabilities: {
@@ -502,6 +503,7 @@ it('composes unread, replies and topics over a single sync instance and fences r
     net.unreadChannels.A = {
       mention_unread_count: 0, main_mention_unread_count: 0,
       id: 'A',
+      kind: 'channel',
       name: 'A',
       visibility: 'public',
       capabilities: {
