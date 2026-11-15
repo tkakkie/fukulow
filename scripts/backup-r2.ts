@@ -132,7 +132,11 @@ export async function runBackup(options: {
   now: () => number; notify: (event: string) => Promise<void>
   dump?: (directory: string, capture: () => void) => string; encrypt?: (source: string, target: string, recipient: string) => void
 }) {
-  return options.lock(() => runBackupLocked(options))
+  try { return await options.lock(() => runBackupLocked(options)) }
+  catch {
+    try { await options.notify('backup-failed') } catch { /* Keep notification diagnostics private. */ }
+    throw new Error('Backup failed (diagnostics suppressed)')
+  }
 }
 async function runBackupLocked(options: Parameters<typeof runBackup>[0]) {
   let temporary: string | undefined
@@ -157,9 +161,6 @@ async function runBackupLocked(options: Parameters<typeof runBackup>[0]) {
     const manifest: Manifest = { formatVersion: 1, captureTime, postgresMajor: 18,
       plaintext: await fileDigest(source), ciphertext: await fileDigest(target), recipientFingerprint: sha256(options.recipient) }
     return await publish({ bucket: options.bucket, ciphertext: await readFile(target), manifest, now: options.now })
-  } catch {
-    try { await options.notify('backup-failed') } catch { /* Notification failure must not expose transport diagnostics. */ }
-    throw new Error('Backup failed (diagnostics suppressed)')
   } finally {
     try {
       if (temporary) await rm(temporary, { recursive: true, force: true })
@@ -182,12 +183,17 @@ export async function recheckNewest(bucket: BackupBucket & UploadBucket, now: nu
 // Schedule contract only: activation and host/Worker wiring remain a maintainer gate.
 export const backupSchedule = { dailyUTC: '*-*-* 02:15:00 UTC', checkerCron: '0 * * * *', persistent: true } as const
 export async function dailyBackup(options: Parameters<typeof runBackup>[0] & { bucket: BackupBucket }) {
-  return options.lock(async () => {
-    try { await recheckNewest(options.bucket, options.now()) } catch {
-      try { await options.notify('daily-readback-failed') } catch { /* Still take the next backup if notification is unavailable. */ }
-    }
-    return runBackupLocked(options)
-  })
+  try {
+    return await options.lock(async () => {
+      try { await recheckNewest(options.bucket, options.now()) } catch {
+        try { await options.notify('daily-readback-failed') } catch { /* Still take the next backup if notification is unavailable. */ }
+      }
+      return runBackupLocked(options)
+    })
+  } catch {
+    try { await options.notify('backup-failed') } catch { /* Keep notification diagnostics private. */ }
+    throw new Error('Backup failed (diagnostics suppressed)')
+  }
 }
 
 // Every host uses this same key, outside the retention-locked prefixes. An
@@ -205,6 +211,13 @@ export function bucketRunLock(run: Runner): RunLock {
     if (response.status < 200 || response.status >= 300) throw new SafeFailure('lock', response.status === 412 || response.status === 409 ? 'busy' : 'operation')
     try { return await work() } finally {
       try {
+        // Conditional DELETE is not assumed portable. Check the acquired version
+        // and token immediately before deleting; recovery must still quiesce all
+        // owners because this GET/DELETE pair cannot fence a concurrent recovery.
+        const etag = response.headers.etag
+        if (!etag || /[\r\n]/.test(etag)) throw new Error('Missing lock version')
+        const current = await run({ method: 'GET', key: runLockKey, headers: { 'if-match': etag } })
+        if (current.status !== 200 || current.headers.etag !== etag || !current.body.equals(body)) throw new Error('Lock owner changed')
         const release = await run({ method: 'DELETE', key: runLockKey, headers: {} })
         if (release.status !== 204 && release.status !== 200) throw new Error('Release failed')
       } catch { throw new SafeFailure('lock', 'operation') }

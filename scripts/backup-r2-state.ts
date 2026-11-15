@@ -22,7 +22,7 @@ export function fileStateStore(path: string, sync = syncDirectory): StateStore {
     async load() {
       privateDirectory(directory)
       try {
-        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
         try {
           const info = await handle.stat()
           if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600 || info.size > 16_384) throw new Error('Invalid state file')

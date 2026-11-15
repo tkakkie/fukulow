@@ -28,7 +28,7 @@ const classB = new Set(['HeadBucket', 'HeadObject', 'GetBucketCors', 'GetBucketL
 const free = new Set(['DeleteObject', 'DeleteObjects', 'DeleteBucket', 'AbortMultipartUpload'])
 const query = `query Operations($account: String!, $start: Time!, $end: Time!) {
   viewer { accounts(filter: {accountTag: $account}) {
-    r2OperationsAdaptiveGroups(limit: 1000, filter: {datetime_geq: $start, datetime_lt: $end}) {
+    r2OperationsAdaptiveGroups(limit: 1000, groupBy: [actionType], filter: {datetime_geq: $start, datetime_lt: $end}) {
       dimensions { actionType } sum { requests }
     }
   } }

@@ -51,6 +51,13 @@ export async function listObjects(run: Runner, maxPages = 10_000): Promise<Objec
     } })
     if (response.status !== 200) throw new Error('Listing failed')
     const root = xml(response.body), truncated = field(root, 'IsTruncated'), next = field(root, 'NextContinuationToken', true)
+    // This request enumerates all keys, without offsets, grouping or encoding.
+    // Validate every page before accepting any inventory, even after continuation.
+    for (const name of ['Prefix', 'StartAfter', 'Delimiter']) {
+      const value = field(root, name, true)
+      if (value !== undefined && value !== '') throw new Error('Inconsistent listing scope')
+    }
+    if (root.children.some(child => child.name === 'CommonPrefixes') || field(root, 'EncodingType', true) !== undefined) throw new Error('Inconsistent listing scope')
     const echo = field(root, 'ContinuationToken', true)
     if ((truncated !== 'true' && truncated !== 'false') || (echo !== undefined && echo !== continuation)) throw new Error('Inconsistent listing')
     const contents = root.children.filter(child => child.name === 'Contents'), count = field(root, 'KeyCount')
