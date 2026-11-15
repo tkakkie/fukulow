@@ -143,5 +143,6 @@ async fn dm_open_and_grant_denials_preserve_snapshot_and_publish_nothing(pool: P
             (StatusCode::BAD_REQUEST, "dm_membership_fixed"),
         )
         .await;
+        assert_no_publication(&f, &mut b).await;
     }
 }
