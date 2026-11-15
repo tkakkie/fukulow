@@ -1,15 +1,15 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream, writeFileSync } from 'node:fs';
 import { currentGroup, stopGroups } from './dms-formal-groups.ts';
-export type Command = { program: string; args: string[]; input?: string; timeout?: number; log?: string; signal?: AbortSignal };
+export type Command = { program: string; args: string[]; input?: string; timeout?: number; log?: string; signal?: AbortSignal; env?:NodeJS.ProcessEnv };
 export type Result = { code: number; stdout: string };
 export type Executor = (command: Command) => Promise<Result>;
 // The outer executor owns the group; nested executors inherit it, including
 // seed/reduction workers. A nested timeout cancels the entire owning group.
-export const execute: Executor = async ({ program, args, input, timeout = 120_000, log, signal }) => new Promise((resolveRun, reject) => {
+export const execute: Executor = async ({ program, args, input, timeout = 120_000, log, signal, env }) => new Promise((resolveRun, reject) => {
   const nested=!!process.env.DM_FORMAL_OWNED_GROUP;
   const owner=nested?currentGroup():undefined;
-  const child = spawn(nested?program:'sh', nested?args:['-c','export DM_FORMAL_OWNED_GROUP=$$; exec "$@"','dm-command',program,...args], { detached:!nested, stdio:['pipe','pipe','pipe'] });
+  const child = spawn(nested?program:'sh', nested?args:['-c','export DM_FORMAL_OWNED_GROUP=$$; exec "$@"','dm-command',program,...args], { env, detached:!nested, stdio:['pipe','pipe','pipe'] });
   const stream = log ? createWriteStream(log,{mode:0o600}) : undefined;
   let bytes=0,flushed=false;
   const startedAt=Date.now();

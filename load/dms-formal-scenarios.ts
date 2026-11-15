@@ -3,7 +3,7 @@ import { regularPairs } from './dms-workload.ts';
 export const requiredScenarios = ['main', 'held200'] as const;
 export type MixedScenario = typeof requiredScenarios[number];
 export const deferredNames = ['ten-sockets-per-Member','single-Organization-10000','scale-and-cold-cache','history-and-Mention-shapes','hot-DM','fault-and-backlog-recovery','storage-1M-10M','backup-restore','pre-DM-regression','pool-overhead'] as const;
-export type Scenario = MixedScenario | typeof deferredNames[number];
+export type Scenario = 'smoke' | MixedScenario | typeof deferredNames[number];
 export const isMixedScenario = (scenario: Scenario): scenario is MixedScenario => requiredScenarios.some(name=>name===scenario);
 export function fixturePairs(scenario: MixedScenario) {
   const historical = regularPairs(1000,100);
@@ -24,4 +24,20 @@ export function scenarioAcceptance(attempts: {scenario:Scenario;acceptance:boole
     const runs=attempts.filter(row=>row.scenario===scenario);
     return runs.length>=3 && runs.every((row,index)=>row.mode==='formal' && row.acceptance && row.attempt===index+1);
   }) && deferredNames.every(scenario=>deferred.some(row=>row.scenario===scenario && row.status==='PASS'));
+}
+
+// Preserve sender/peer pairs, Guest proportion, subscription parity and the
+// four ordinary held-target lanes while thinning the socket cohort.
+export function scaledSocketMember(index:number,sockets:number,senders:number) {
+  return index<senders?index:Math.floor(index*1000/sockets/4)*4+index%4;
+}
+
+// k6 requires integral rate. Supported scales have denominator dividing fifty;
+// milliseconds express their fractional per-second rates without rounding.
+export function arrivalRate(value:number) {
+  if(Number.isInteger(value))return {rate:value,timeUnit:'1s'};
+  const units=1000000;let rate=Math.round(value*units),ms=units*1000;
+  const gcd=(a:number,b:number):number=>b?gcd(b,a%b):a;
+  const divisor=gcd(rate,ms);rate/=divisor;ms/=divisor;
+  return {rate,timeUnit:`${ms}ms`};
 }

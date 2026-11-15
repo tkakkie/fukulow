@@ -11,8 +11,8 @@ export const poolOverheadDesign={scenario:'pool-overhead',status:'NOT EVALUATED'
   baseline:'Same formal DM SHA + load/pool-overhead-baseline.patch, reviewed before measurement',
   procedure:'Three pairs B/C, C/B, B/C; identical main fixture snapshot restored before every arm; 300 s ramp, 300 s warm-up, 300 s judged core. Dedicated formal Linux hosts and fixed resources. Raw logs retained.',
   comparison:'Each pair regression and mean of three pair regressions <=10%; baseline max/min-1 >10% is NOT EVALUATED for that metric. Invalid evidence makes the whole check NOT EVALUATED. Full formal attempts remain required.'};
-export type OverheadArm={arm:'B'|'C';metrics:Record<string,number>;samples:Record<string,number>;conditions:Record<string,unknown>;imageDigest:string;reasons:string[]};
-export const overheadConditionKeys=['sha','patchSha256','hosts','limits','snapshot','generator','toolchains'] as const;
+export type OverheadArm={label?:string;acceptance?:boolean;load?:unknown;arm:'B'|'C';metrics:Record<string,number>;samples:Record<string,number>;conditions:Record<string,unknown>;imageDigest:string;reasons:string[]};
+export const overheadConditionKeys=['loadScale','target','label','sha','patchSha256','hosts','limits','snapshot','generator','toolchains'] as const;
 const same=(a:unknown,b:unknown)=>JSON.stringify(a)===JSON.stringify(b);
 const spread=(values:number[])=>({min:Math.min(...values),max:Math.max(...values),range:Math.max(...values)-Math.min(...values)});
 // Compare decimal evidence exactly: no epsilon can silently relax the 10% gate.
@@ -27,7 +27,7 @@ function regression(baseline:number,candidate:number) {
   return {n:100n*(cn*bd-bn*cd),d:cd*bn,valid:true};
 }
 export function judgeOverhead(arms:OverheadArm[]) {
-  arms=arms.map(a=>({arm:a.arm,metrics:a.metrics ?? {},samples:a.samples ?? {},conditions:a.conditions ?? {},imageDigest:a.imageDigest ?? '',reasons:a.reasons ?? ['Missing arm evidence']}));
+  arms=arms.map(a=>({...a,arm:a.arm,metrics:a.metrics ?? {},samples:a.samples ?? {},conditions:a.conditions ?? {},imageDigest:a.imageDigest ?? '',reasons:a.reasons ?? ['Missing arm evidence']}));
   const reasons:string[]=[];
   if(arms.length!==6 || arms.some((a,i)=>a.arm!==overheadOrder[i]))reasons.push('Missing arms or wrong B/C, C/B, B/C order');
   const first=arms[0];
@@ -56,5 +56,5 @@ export function judgeOverhead(arms:OverheadArm[]) {
     return {metric,pairs,meanPercent,pairsPassed,meanPassed,baselineSpread:spread(baselines),candidateSpread:spread(candidates),regressionSpread:spread(deltas),baselineSpreadPercent:100*(Math.max(...baselines)/Math.min(...baselines)-1),status,reason:noisy?'Baseline spread exceeds 10%':null};
   });
   const status:Verdict=reasons.length?'NOT EVALUATED':rows.some(r=>r.status==='FAIL')?'FAIL':rows.some(r=>r.status==='NOT EVALUATED')?'NOT EVALUATED':'PASS';
-  return {scenario:'pool-overhead',status,acceptance:status==='PASS',reasons:[...new Set(reasons)],rows,arms};
+  return {scenario:'pool-overhead',label:first?.label ?? first?.conditions.label ?? 'FORMAL',status,acceptance:first?.conditions.target==='local'?false:status==='PASS',reasons:[...new Set(reasons)],rows,arms};
 }

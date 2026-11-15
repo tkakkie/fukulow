@@ -8,9 +8,9 @@ export async function removeCopy(exec:Executor,name:string) {
   await checked(exec,{program:'docker',args:['wait',name],timeout:15000});
   await checked(exec,{program:'docker',args:['rm','-f',name],timeout:15000});
 }
-export async function copyVolume(exec:Executor,id:string,attempt:number,from:string,to:string,image:string,reset:boolean) {
+export async function copyVolume(exec:Executor,id:string,attempt:number,from:string,to:string,image:string,reset:boolean,pullNever=false) {
   const name=`${id}-copy-${attempt}`;
   try {
-    await checked(exec,{program:'docker',args:['run','--name',name,'--label',`dm-formal=${id}`,'-v',`${from}:/from:ro`,'-v',`${to}:/to`,image,'sh','-ec',(reset?'find /to -mindepth 1 -maxdepth 1 -exec rm -rf {} +; ':'')+'cp -a /from/. /to/'],timeout:7200000});
+    await checked(exec,{program:'docker',args:['run',...(pullNever?['--pull=never']:[]),'--name',name,'--label',`dm-formal=${id}`,'-v',`${from}:/from:ro`,'-v',`${to}:/to`,image,'sh','-ec',(reset?'find /to -mindepth 1 -maxdepth 1 -exec rm -rf {} +; ':'')+'cp -a /from/. /to/'],timeout:7200000});
   } finally { await removeCopy(exec,name); }
 }
