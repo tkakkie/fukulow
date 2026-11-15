@@ -15,6 +15,8 @@ Load testing and measurement rules. Writing rules and the other parts: [index](.
 
 - #151: keep main at exactly 100 DMs/Member; measure held200 separately under full mixed load. Samples sum over ten Organizations; judge each Organization too. Reason: preserve fixture comparability and prevent aggregate tails from hiding an Organization failure.
 
+- #151 absolute budgets are judged on hourly-rented Linux servers after the first deploy (#431); the developer Mac is only for same-machine comparisons (#426, #153, #196). Reason: on a Mac the generator shares the CPU and a VM is added (2026-11-15).
+
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.
