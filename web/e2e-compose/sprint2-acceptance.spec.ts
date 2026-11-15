@@ -1,4 +1,3 @@
-import { setTimeout } from 'node:timers/promises'
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import type { ClientMessage, ServerEvent } from '../src/api-schema.d.ts'
 import {
@@ -12,7 +11,7 @@ import {
   type Message,
   releasePageSockets,
   secretSafe,
-  sendApiMessage,
+  sendFixtureMessage,
   type TimelinePage,
   type TopicPage,
   type TopicSummaryResponse,
@@ -25,14 +24,6 @@ const topicNameInput = (page: Page) =>
   page.locator('#main-content').getByRole('textbox', { name: 'トピック名', exact: true })
 const replyComposer = (page: Page) =>
   page.locator('#panel-content').getByRole('textbox', { name: 'メッセージ', exact: true })
-
-async function sendFixtureMessage(...args: Parameters<typeof sendApiMessage>): Promise<Message> {
-  // S6: burst 10, refill 1/s per Member across Channels and sessions. Earlier UI
-  // sends may have spent the burst, so allow one token to refill before every POST.
-  // Include a small timer margin; sendApiMessage still asserts 201 without retries.
-  await setTimeout(1_010)
-  return sendApiMessage(...args)
-}
 
 async function expectVirtualTotal(container: Locator, total: number): Promise<void> {
   await expect(container.locator('[aria-posinset]').first()).toHaveAttribute('aria-setsize', String(total))
