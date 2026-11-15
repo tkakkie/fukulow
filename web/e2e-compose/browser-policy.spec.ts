@@ -1,12 +1,18 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { createChannelApi, ensureOwnerAndSignIn, inviteAndSignInPeerViaUi } from './helpers.ts'
+
+function watchPolicyViolations(violations: string[]): (page: Page) => void {
+  return page => {
+    page.on('console', message => {
+      if (/permissions.policy.*(violation|violat|blocked)|violat.*permissions.policy/i.test(message.text())) violations.push(message.text())
+    })
+    page.on('pageerror', error => violations.push(error.message))
+  }
+}
 
 test('browser policy headers retain ordinary composer editing and trusted keyboard paste', async ({ page }) => {
   const violations: string[] = []
-  page.on('console', message => {
-    if (/permissions.policy.*(violation|violat|blocked)|violat.*permissions.policy/i.test(message.text())) violations.push(message.text())
-  })
-  page.on('pageerror', error => violations.push(error.message))
+  watchPolicyViolations(violations)(page)
   for (const [path, status] of [['/', 200], ['/api/v1/missing', 404], ['/api/v1/ready', 404]] as const) {
     const response = (await page.goto(path))!
     expect(response.status()).toBe(status)
@@ -57,14 +63,17 @@ test('browser policy headers retain ordinary composer editing and trusted keyboa
 test('browser policy retains Reply chains and live Unread presentation', async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true })
   let peerContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
+  const violations: string[] = []
+  const watch = watchPolicyViolations(violations)
   try {
     const page = await context.newPage()
+    watch(page)
     const org = await ensureOwnerAndSignIn(page)
     const suffix = crypto.randomUUID().slice(0, 8)
     const target = await createChannelApi(page.request, org, `policy-reply-${suffix}`)
     const lobby = await createChannelApi(page.request, org, `policy-lobby-${suffix}`)
     await page.reload()
-    const peer = await inviteAndSignInPeerViaUi(page, browser, baseURL!, 'member', suffix)
+    const peer = await inviteAndSignInPeerViaUi(page, browser, baseURL!, 'member', suffix, watch)
     peerContext = peer.context
     await page.goto(`/o/${org}/c/${target.id}`)
     await peer.page.goto(`/o/${org}/c/${lobby.id}`)
@@ -85,6 +94,7 @@ test('browser policy retains Reply chains and live Unread presentation', async (
     await page.locator('#panel-content').getByRole('textbox', { name: 'メッセージ', exact: true }).fill(reply)
     await page.locator('#panel-content').getByRole('button', { name: '送信', exact: true }).click()
     for (const current of [page, peer.page]) await expect(current.locator('#panel-content .ui-message-row').filter({ hasText: reply })).toHaveCount(1)
+    expect(violations).toEqual([])
   } finally {
     await peerContext?.close()
     await context.close()

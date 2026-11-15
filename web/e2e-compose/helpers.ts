@@ -225,6 +225,7 @@ export async function inviteAndSignInPeerViaUi(
   baseURL: string,
   role: Role,
   suffix: string,
+  watchPage?: (page: Page) => void,
 ): Promise<{
   context: BrowserContext
   page: Page
@@ -256,6 +257,7 @@ export async function inviteAndSignInPeerViaUi(
 
   const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true })
   const page = await context.newPage()
+  watchPage?.(page)
   await page.setViewportSize({ width: 1280, height: 800 })
   await secretSafe(() => page.goto(link))
 
