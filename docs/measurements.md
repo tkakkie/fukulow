@@ -1692,6 +1692,77 @@ Limits: one small synthetic vocabulary, author-defined binary relevance and one 
 
 Proposal for the maintainer: **pg_bigm GIN remains the proposed engine for the current-spec implementation**, with two-character queries retained subject to the unresolved RLS-safe/Linux performance gate. Quality is identical across current-spec engines; PGroonga's strongest native mode improves intent recall to 0.847 versus literal 0.528, but changes normalization, punctuation, token boundaries and ordering, and still misses notation variants. #416's Mac evidence favors pg_bigm's selective two-character owner lookup and smaller index/lower write overhead over PGroonga; its app/RLS path did not demonstrate search-index use, so those advantages are not a production speed claim. PGroonga is the stronger built-in future-feature candidate if the maintainer prioritizes width/kana/query syntax enough to accept its operational cost and the measured tradeoffs. This is a **proposal for the maintainer**, not a formal engine decision or implementation-gate pass: **Linux performance is still unverified**, and **changing current-spec semantics is a separate decision**.
 
+## Search evaluation freeze and lifecycle procedure (#153, 2026-11-15 JST)
+
+Follow-ups to the preliminary #416/#420 records: `load/search-engines/manifest-v1.json` freezes the next evaluation before execution. Its SHA-256 covers the versioned payload: generator version/seed and frozen clock; source hashes for the generators, harness, modes, metrics, migrations and role/grant SQL; corpus/query/relevance hashes, explicit query texts and relevant fixture keys with class policies; 2,457 visible quality Messages / 2,628 total rows, 33 queries, 14 classes and 72 relevant pairs; the 1,000,000-Message performance dataset, 28 queries, engine order, concurrency, repetitions, warm-ups and transaction counts; pinned base-image digest and PostgreSQL/extension package versions; PostgreSQL settings, shared memory, range and lifecycle deadlines. Source/query/label/condition changes require a reviewed new manifest version before another run; neither runner rewrites the manifest. Existing size/transaction overrides that differ from the freeze are refused. Node must match the frozen version. After startup, actual PostgreSQL, available extension versions, packages and selected settings must match before data loading or scoring/timing. `SEARCH_SKIP_BUILD=1` still performs these checks. Results and summaries record the manifest hash; the exact manifest is copied beside artifacts.
+
+Both entrypoints now run their synchronous SQL work under a signal-responsive supervisor. It owns a unique container and explicitly named data volume before creation is attempted, kills the worker/client process group on SIGINT/SIGTERM, and removes and verifies both resources after success, exceptions or deadlines. Docker calls are bounded at 120 seconds, builds/psql/pgbench at 900 seconds, and each cleanup/removal/verification call at 10 seconds. A psql deadline escapes startup retries immediately. Command failures omit raw command input/output. `run-status.json` records whether cleanup was verified and whether the run is valid; a failed cleanup or verification cannot produce a valid run. Retained external results are artifacts, not temporary scratch directories; SQL and pgbench scratch files inside the container disappear with its data volume. The reusable measurement image/build cache remain.
+
+No evaluation was run for this change; verification uses small local fake-process tests, including interrupted hung clients, manifest/runtime mismatches and failed cleanup verification. The freeze does not retroactively validate old results, provide bit-identical rebuilds of unpinned transitive build packages, control host/VM load or certify Linux performance. An unavailable Docker daemon, SIGKILL of the supervisor or host failure can prevent physical removal; failed or unverifiable cleanup is reported, never treated as valid. The current-spec semantics and every quality/performance threshold remain unchanged; pg_bigm and PGroonga adoption remain on hold.
+
+### Freeze/lifecycle correction (#153, 2026-11-15 JST)
+
+The freeze now requires the recorded measurement image ID (`sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77`) before container creation and launches by that immutable ID. A rebuilt or reused tag with another ID is refused, even if package/version strings match; adopting another image requires a reviewed freeze update. Both owner and app-role sessions must match the frozen server/session settings and every Query Tuning setting must equal the pinned image's `boot_val`, including `enable_bitmapscan`. Database sessions are rechecked before loading and measurement; intentional per-mode transaction settings remain unchanged. This supersedes the earlier selected-settings-only reuse check, without claiming reproducible transitive builds or a new runtime smoke.
+
+Cleanup subprocesses are asynchronous with the same individual deadlines, so SIGINT/SIGTERM during removal or verification invalidates the run and preserves its interruption exit code. Worker completion remains `completed.json` evidence; `finished.json` and final summaries are published by the supervisor after verified cleanup. The authoritative `run-status.json` includes the manifest hash. Summary generation recomputes the copied payload hash and requires matching successful completion and cleanup records; incomplete or invalid evidence cannot be summarized as valid results.
+
+The CI manifest failure was reproduced in a fresh local clone: npm runs tests from `load/`, while the earlier direct Node verification ran from the repository root. Manifest source reads now resolve from the module URL, paths use code-point sorting, and Git attributes require LF for frozen text inputs; hashes remain strict over their checked-out content. Source hashes are an ordered array of `{path, sha256}` records to avoid secret-scanner false positives from path-shaped JSON keys. The payload hash changed accordingly. No engine choice, search semantics or thresholds changed, and no evaluation or real-container smoke was performed.
+
+### Completion/publication correction (#153, 2026-11-15 JST)
+
+Signal handling now stays active through completion verification, status writing, finalization, publication and natural process exit. Event-loop checkpoints dispatch signals queued by synchronous artifact work; interruption invalidates status, preserves its nonzero exit code and removes finished markers and final summaries, including already published files. Quality publication independently recomputes the copied manifest payload hash and validates summary hashes, matching completion/finalization/status records, frozen mode/query identities and dataset row counts before renaming the pending summary.
+
+LF attributes now enumerate exactly the frozen input paths and the manifest itself. The frozen source set adds the separately testable quality finalizer, and lifecycle/runner/attribute source hashes changed; the updated payload SHA-256 is e6aaf6f8f70de8f8df62e26190655bd10eb975b5d67b788c507f3f401864339c. All other frozen payload fields remain identical: engines, query semantics, labels, thresholds, image identity, PostgreSQL settings, measurement conditions and deadlines are unchanged. Regression evidence uses local fake subprocesses and synthetic artifacts; no evaluation or real image/runtime smoke was performed.
+
+### Runtime/settings and publication correction (#153, 2026-11-15 JST)
+
+This supersedes the earlier requirement to reproduce the historical local image ID. Fresh builds use the committed pinned base digest, PostgreSQL/extension package versions and pg_bigm archive checksum; the old image ID is retained only as historical reference. Both newly built and SEARCH_SKIP_BUILD images launch by their resolved immutable ID and must pass the same server/package/extension, PostgreSQL setting and owner/app planner/session checks before data loading. The actual image ID and whether it was reused are recorded in image.json, run-status.json, metadata and individual results. Transitive build packages remain outside the bit-identical rebuild claim.
+
+The recorded 128MB shared_buffers condition is now correctly frozen as 16384 in pg_settings 8kB units (the earlier 8192 meant 64 MiB). Both runners explicitly launch the same recorded settings. The other frozen values were checked in their PostgreSQL units: work_mem 4096 kB, maintenance_work_mem 65536 kB, effective_cache_size 524288 × 8kB, max_wal_size 1024 MB and checkpoint_timeout 300 seconds; random_page_cost 4, max_connections 100, max_worker_processes 16, durability/JIT/WAL/preload settings and UTF8 encoding remain unchanged. Shared memory remains 1 GiB. This corrects the expectation and makes existing defaults explicit; it does not change the recorded measurement conditions.
+
+Quality publication now checks the complete dataset.messages corpus hash and full query-identity hash, including text, against the frozen values before publishing. Cleanup verification uses container ls -aq so stopped owned containers also invalidate cleanup. Regression checks cover unit conversions for both launch paths, a different image ID with matching runtime and recorded reuse, refused runtime drift, edited corpus/query text with unchanged counts/ids, and a stopped-container fake. Frozen source hashes were refreshed; payload SHA-256: c66080bb5ac27575013121e659315807c682b07406c3d74680710c24e1bebeb3. Engines, search semantics, labels, thresholds, datasets, query sets and timing conditions are unchanged. No evaluation or real image/runtime smoke was run; verification used local fake subprocesses and synthetic artifacts.
+
+### Real-Docker smoke (2026-11-15)
+
+Machine: Apple M5 arm64, 10 logical cores, 32 GiB RAM, macOS 27.0.1; Docker client/server 29.9.3, aarch64 VM with 10 CPUs and 8,319,438,848 bytes RAM; Node 26.13.0. Source: b49e3ec plus this repair; frozen payload SHA-256 `0e3279022c828f2c5e50033f466b6e4ca762e17d6d14a7ac6c793bf8996b26eb`.
+
+The earlier failure was backend-local PGroonga GUC registration: helper preloads/configuration were correct, but fresh pg_settings omitted the main library's settings. Verification now initializes that library and reads typed settings in the same owner/app backend; owner verifies the app-hidden preload setting. App psql/pgbench sessions use a frozen, verified 10s statement_timeout; cancellation invalidates the entire run, accepting no latency sample. The pgbench SQL guard is included in latency. SQLSTATE detection checks error syntax; a negative test excludes ordinary throughput digits. Owner setup/seed/index sessions retain timeout 0. Existing gates and formal 1M-row conditions remain.
+
+From the repository root with `PATH=/private/tmp/node-v26.13.0-darwin-arm64/bin:$PATH`, ran:
+
+```sh
+npm --prefix load run check
+node --test load/*.test.ts load/search-engines/*.test.ts load/search-engines/quality/*.test.ts
+git diff --check
+SEARCH_SMOKE=1 SEARCH_QUALITY_DIR=/private/tmp/fukulow-search-fix2-quality-final node load/search-engines/quality/run.ts
+SEARCH_SMOKE=1 SEARCH_RESULT_DIR=/private/tmp/fukulow-search-fix2-performance-final node load/search-engines/run.ts
+node /private/tmp/fukulow-search-fix2-evidence/tamper.ts
+node /private/tmp/fukulow-search-fix2-evidence/smoke-suite.ts
+node /private/tmp/fukulow-search-fix2-evidence/label-orphan.ts
+```
+
+Both normal runs built the image (cache allowed), verified runtime/session/image conditions, seeded, indexed, measured, summarized and cleaned up. Performance smoke uses a fixed 1,000 rows, one round of every engine/query and one client/transaction; quality uses its fixed 2,628-row corpus. Summaries persist `SMOKE / NON-EVALUATION`, `evaluation:false`, `formal:false`; evaluation publication refuses them.
+
+| Check | PASS/FAIL |
+|---|---|
+| Fresh builds and complete verification | PASS |
+| Both clean finishes, finalized SMOKE summaries, no owned resources | PASS |
+| Default evaluation publication refuses smoke artifacts | PASS |
+| SIGINT / SIGTERM during actual app measurement, both runners: invalid, cleaned | PASS |
+| Container kill during measurement: invalid, cleaned | PASS |
+| Real psql / pgbench pg_sleep(0.2) with test-only 50ms SQL timeout: failed, no samples accepted | PASS |
+| Live work_mem mismatch: refused before seeding | PASS |
+| SIGKILL orphan: both runners refuse and list container/volume; explicit cleanup succeeds | PASS |
+| Stopped container and volume owned only by labels: refused; inspection preserves them | PASS |
+| Frozen input / manifest / condition tampering, both runners; formal overrides | PASS |
+| TypeScript, 184 tests, diff check, gitleaks; final resource/tag/worktree removal | PASS |
+
+Startup refuses earlier resources by prefix or label without deleting them. After stopping active workers, inspect with `node load/search-engines/cleanup.ts`; explicit `node load/search-engines/cleanup.ts --remove` removes the listed harness resources and verifies absence. Use exclusive harness access to the Docker daemon. Tamper cases used a disposable detached worktree, removed afterwards. Evidence/drivers: `/private/tmp/fukulow-search-fix2-evidence/`; normal artifacts use the paths above. No harness containers, volumes or image tags remain; build cache/base images remain.
+
+This is **not an evaluation, quality or performance result**. No 1M-row or Linux acceptance run was performed; engine adoption stays on hold. SIGKILL cannot clean itself up; startup refusal and explicit cleanup were tested. Transitive rebuild identity, host-load control and the 900s external deadlines are not established by this smoke.
+
+After merging main (DM migrations 0370, 0386, 0387, 0389, 0390, which the harness applies), the manifest was re-frozen; the only change is those migration hashes and their LF attributes, payload SHA-256 `c7ce2aaba5fa7eaf74fff83f93eeff06eb3739d1ea1e4b347301d38597846537`. Both SEARCH_SMOKE runs were repeated on the merged source: quality and performance exited 0, valid, cleanup verified, no owned resources left. Lifecycle, timeout and tamper cases do not depend on the schema and were not repeated.
+
 ## DM Q4 concurrent offered-work evidence (#151, 2026-11-15)
 
 Procedure clarification, superseding whole-core totals/cardinality as Q4 concurrency evidence; no formal measurement was performed. Retain fixed 60-second buckets aligned to the common core, with exact boundaries, connection intervals, actual offered sends and opens separately by resolve/create/renew, and browsing offers separately by first/deep. Each of the ten Organizations must maintain 1,000 connections and offer 200 sends/s plus 2 opens/s (half resolve, quarter create, quarter renew); the separate browsing Organization offers 100 reads/s (half first, half deep). Every bucket overlapping the browsing sample window must qualify; the runner conservatively checks the entire fixed core, which supplies those samples. Historical artifacts without this evidence are NOT EVALUATED with an explicit reason.

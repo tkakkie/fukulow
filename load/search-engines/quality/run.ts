@@ -1,51 +1,51 @@
+import { supervise, ownedContainer, ownedVolume, refuseLeftovers, ownershipLabel } from '../runtime.ts';
+import { loadManifest, verifyRuntime, resolveImage, verifySession, postgresArguments, runKind, smokeLabel } from '../manifest.ts';
 // Quality only: full result sets, no timers or performance measurements.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { command, docker, save, sql } from '../bench.ts';
+import { CommandTimeoutError, command, docker, save, sql } from '../bench.ts';
 import { channel, fixtureSql, literal, member, org, trimQuery, uuid } from '../seed.ts';
 import { begin, normalizedQuery } from '../queries.ts';
 import { classes, corpus, queries } from './dataset.ts';
 import { aggregate, score } from './metrics.ts';
 import { modes, querySql } from './modes.ts';
+import { finalizeQuality } from './summarize.ts';
 
 const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)),'../../..'));
 process.chdir(root);
 if (process.version !== `v${readFileSync('.node-version','utf8').trim()}`) throw new Error('Use .node-version exactly');
+const manifest = loadManifest();
+const kind = runKind();
+console.log(kind==='smoke' ? smokeLabel : 'EVALUATION (formal Linux judgement remains separate)');
 const requested = resolve(process.env.SEARCH_QUALITY_DIR ?? `/private/tmp/fukulow-search-quality-153-${Date.now()}`);
 const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1) ?? '');
 if (out===root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
-mkdirSync(out); // Refuse retained artifacts before Docker or any writes.
-const container = `fukulow-search-153-quality-${randomUUID().slice(0,8)}`;
-const image = 'fukulow-search-measure-153';
+if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
+process.env.SEARCH_QUALITY_DIR = out;
+if (process.env.SEARCH_WORKER!=='1') refuseLeftovers(docker);
+if (await supervise(import.meta.url,out,manifest.sha256,()=>finalizeQuality(out,kind))) {
+mkdirSync(out);
+const container = ownedContainer();
+const imageTag = 'fukulow-search-measure-153';
+let image = imageTag;
 const owner = (db: string,text: string)=>sql(container,db,text);
 const app = (db: string,text: string)=>sql(container,db,text,'fukulow_app');
 const read = (p: string)=>readFileSync(p,'utf8');
 const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
-let cleaned = false;
-function cleanup() {
-  if (cleaned) return;
-  cleaned = true;
-  const r = spawnSync('docker',['rm','-fv',container],{encoding:'utf8'});
-  if (r.error || (r.status!==0 && !r.stderr.includes('No such container'))) {
-    console.error('Container/volume cleanup failed:',r.error ?? r.stderr); process.exitCode=1;
-  }
-}
-process.on('exit',cleanup);
-process.on('SIGINT',()=>{cleanup();process.exit(130);});
-process.on('SIGTERM',()=>{cleanup();process.exit(143);});
-try {
+{
   console.log(`Quality artifacts: ${out}`);
   if (process.env.SEARCH_SKIP_BUILD!=='1') writeFileSync(`${out}/build.txt`,docker('build','-t',image,'load/search-engines'));
+  const imageRecord = resolveImage(docker,imageTag,process.env.SEARCH_SKIP_BUILD==='1');
+  image = imageRecord.id;
+  save(`${out}/image.json`,imageRecord);
+  docker('volume','create','--label',ownershipLabel,ownedVolume());
   const password = randomUUID();
-  command('docker',['run','-d','--name',container,'--shm-size=1g','-e','POSTGRES_PASSWORD',
-    '-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,'postgres',
-    '-c','shared_preload_libraries=pgroonga_wal_resource_manager,pgroonga_crash_safer',
-    '-c','pgroonga.enable_wal_resource_manager=on','-c','pgroonga.enable_crash_safe=on','-c','max_worker_processes=16'],
+  command('docker',['run','-d','--label',ownershipLabel,'--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD',
+    '-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,...postgresArguments],
     undefined,{...process.env,POSTGRES_PASSWORD:password});
   let ready = false;
   for (let i=0;i<60;i++) {
@@ -54,15 +54,24 @@ try {
       // readiness waits for the final server rather than racing that shutdown.
       docker('exec',container,'pg_isready','-h','127.0.0.1','-U','fukulow','-d','postgres');
       if (owner('postgres','SELECT 1;')==='1') { ready=true; break; }
-    } catch { /* initdb */ }
+    } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
     await new Promise(r=>setTimeout(r,500));
   }
   assert.ok(ready,'PostgreSQL startup timed out');
+  owner('postgres','CREATE EXTENSION pgroonga;');
+  const ownerVerification = {runtime:verifyRuntime(text=>owner('postgres',text),docker,container),
+    session:verifySession(text=>owner('postgres',text))};
+  save(`${out}/manifest.json`,{...manifest,runKind:kind});
   owner('postgres',`BEGIN; SET LOCAL fukulow.app_password=${literal(password)};
     ${read('deploy/db-role-settings.sql')}\n${read('deploy/db-roles.sql')}\nCOMMIT; CREATE DATABASE quality_base;`);
+  save(`${out}/verification.json`,{runKind:kind,image:imageRecord,owner:ownerVerification,
+    app:{runtime:verifyRuntime(text=>app('postgres',text),docker,container,text=>owner('postgres',text)),
+      session:verifySession(text=>app('postgres',text),'app')}});
   const migrations = readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).sort();
   for (const p of migrations) owner('quality_base',`BEGIN; ${read(`server/migrations/${p}`)} COMMIT;`);
   owner('quality_base',read('load/search-engines/schema.sql')+read('deploy/db-grants.sql')+fixtureSql());
+  verifySession(text=>owner('quality_base',text));
+  verifySession(text=>app('quality_base',text),'app');
   const data = corpus();
   const rows: string[] = [];
   let i = 0;
@@ -81,8 +90,8 @@ try {
   const allowedIds = new Set(data.map(m=>m.id));
   const evaluated = queries.map(q=>({...q,trimmed:trimQuery(q.text),normalized:owner('quality_base',`SELECT ${normalizedQuery(q.text)};`)}));
   save(`${out}/dataset.json`,{classes,messages:data,queries:evaluated,totalRows:i,scope:'Org1, Member2, public Channel0, recent; other fixtures denied'});
-  save(`${out}/metadata.json`,{at:new Date().toISOString(),node:process.version,os:platform(),arch:arch(),cpu:cpus()[0]?.model,
-    source:command('git',['rev-parse','HEAD']),image:docker('image','inspect',image,'--format','{{.Id}}'),
+  save(`${out}/metadata.json`,{manifestHash:manifest.sha256,runKind:kind,at:new Date().toISOString(),node:process.version,os:platform(),arch:arch(),cpu:cpus()[0]?.model,
+    source:command('git',['rev-parse','HEAD']),image: imageRecord,
     versions:owner('quality_base','SELECT version(); SELECT extname,extversion FROM pg_extension;'),
     packages:docker('exec',container,'dpkg-query','-W','postgresql-18','postgresql-18-pgdg-pgroonga','libgroonga0'),
     hashes:Object.fromEntries([...migrations.map(n=>`server/migrations/${n}`),
@@ -93,6 +102,8 @@ try {
   for (const mode of modes) {
     owner('postgres','CREATE DATABASE quality_mode TEMPLATE quality_base;');
     owner('quality_mode',"CREATE EXTENSION pgroonga; SELECT pgroonga_command('status');"+mode.ddl+' ANALYZE;');
+    verifySession(text=>owner('quality_mode',text));
+    verifySession(text=>app('quality_mode',text),'app');
     const facts = app('quality_mode',"SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user; SELECT count(*) FROM messages;");
     assert.equal(facts,'fukulow_app|f|f\n0');
     const runQuery = (q: typeof evaluated[number],actor = 2)=>{
@@ -117,12 +128,13 @@ try {
       PERFORM similarity('a','a'),bigm_similarity('a','a'),pgroonga_command('status');
       END $$; BEGIN; ${mode.settings}
       SELECT name,setting FROM pg_settings WHERE name LIKE 'pg_trgm.%' OR name LIKE 'pg_bigm.%' OR name LIKE 'pgroonga.%'; COMMIT;`);
-    const result = {mode:mode.id,engine:mode.engine,ddl:mode.ddl,settings,
+    const result = {manifestHash:manifest.sha256,runKind:kind,image:imageRecord,mode:mode.id,engine:mode.engine,ddl:mode.ddl,settings,
       extensions:owner('quality_mode','SELECT extname,extversion FROM pg_extension ORDER BY extname;'),ranked:mode.ranked,rls:facts,
       overall:aggregate(scored),classes:Object.fromEntries(Object.keys(classes).map(c=>[c,aggregate(scored.filter(r=>r.class===c))])),queries:scored};
-    results.push(result); save(`${out}/summary.json`,results);
+    results.push(result); save(`${out}/pending-summary.json`,results);
     console.log(`${mode.id}: micro F1 ${result.overall.micro.f1.toFixed(4)}, macro F1 ${result.overall.macro.f1.toFixed(4)}`);
     owner('postgres','DROP DATABASE quality_mode WITH (FORCE);');
   }
-  save(`${out}/finished.json`,{modes:results.length,queries:queries.length,rows:i});
-} finally { cleanup(); }
+  save(`${out}/completed.json`,{manifestHash:manifest.sha256,runKind:kind,modes:results.length,queries:queries.length,rows:i});
+}
+}
