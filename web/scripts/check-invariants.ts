@@ -36,6 +36,8 @@
 //     conditional declarations and unsupported test APIs make the whole file unverifiable.
 //     Across all smoke-directory files, modifier access/binding and aliases are refused conservatively.
 //     Focus, aliases and unsafe helpers refuse all smoke references; other spec modifiers stay file-local.
+//     Runtime imports must stay inside web/e2e (or be @playwright/test / node:*); type-only imports are erased.
+//     Any other import, dynamic import() or require refuses all smoke references (helpers elsewhere are unscanned).
 // A test title that is defined twice in one file counts only if no definition of it is skipped.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -477,8 +479,20 @@ function playwrightConfig(root: string): string | null {
   return null
 }
 
+/** True when the declaration is erased at runtime (`import type`, or only `type` specifiers). */
+function typeOnlyImport(node: ts.ImportDeclaration | ts.ExportDeclaration): boolean {
+  if (ts.isExportDeclaration(node))
+    return node.isTypeOnly || (!!node.exportClause && ts.isNamedExports(node.exportClause)
+      && node.exportClause.elements.length > 0 && node.exportClause.elements.every(e => e.isTypeOnly))
+  const c = node.importClause
+  if (!c) return false
+  if (c.isTypeOnly) return true
+  return !c.name && !!c.namedBindings && ts.isNamedImports(c.namedBindings)
+    && c.namedBindings.elements.length > 0 && c.namedBindings.elements.every(e => e.isTypeOnly)
+}
+
 /** Receiver-independent checks: helper effects and escaped test values cannot be confined to one spec. */
-function playwrightSafety(sf: ts.SourceFile): { reason: string; suiteWide: boolean } | undefined {
+function playwrightSafety(sf: ts.SourceFile, smokeDir?: string): { reason: string; suiteWide: boolean } | undefined {
   const modifiers = new Set(['skip', 'fixme', 'fail', 'only', 'configure', 'slow'])
   let refusal: { reason: string; suiteWide: boolean } | undefined
   const refuse = (reason: string, suiteWide: boolean) => {
@@ -496,6 +510,18 @@ function playwrightSafety(sf: ts.SourceFile): { reason: string; suiteWide: boole
     else if (ts.isShorthandPropertyAssignment(node) || ts.isPropertyAssignment(node)) name = nameOf(node.name)
     if (name && modifiers.has(name))
       refuse(`unsupported Playwright .${name} access or binding`, name === 'only')
+    // Runtime code outside web/e2e is not scanned, so a helper there could skip at runtime (#440).
+    // Checked in the suite-wide scan (smokeDir given), which covers every smoke file.
+    if (smokeDir && (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier
+      && ts.isStringLiteral(node.moduleSpecifier) && !typeOnlyImport(node)) {
+      const spec = node.moduleSpecifier.text
+      const inside = spec.startsWith('.') && resolve(sf.fileName, '..', spec).startsWith(smokeDir + sep)
+      if (spec !== '@playwright/test' && !spec.startsWith('node:') && !inside)
+        refuse(`runtime import of ${spec} from outside web/e2e cannot be verified`, true)
+    }
+    if (smokeDir && ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+      || (ts.isIdentifier(node.expression) && node.expression.text === 'require')))
+      refuse('dynamic import or require cannot be verified', true)
     if (isPlaywrightImport(node)) {
       const clause = node.importClause
       if (!clause || clause.name || !clause.namedBindings || !ts.isNamedImports(clause.namedBindings)
@@ -543,7 +569,7 @@ export function collectKnownTests(root: string): Known {
       unsafeSmoke ??= 'environment file in web/e2e makes the entire smoke suite unverifiable'
       continue
     }
-    const safety = playwrightSafety(ts.createSourceFile(f, readFileSync(f, 'utf8'), ts.ScriptTarget.Latest, true))
+    const safety = playwrightSafety(ts.createSourceFile(f, readFileSync(f, 'utf8'), ts.ScriptTarget.Latest, true), smokeDir)
     if (safety && (safety.suiteWide || !/\.(test|spec)\.ts$/.test(f)))
       unsafeSmoke ??= `${safety.reason} in ${rel(f)} makes the entire smoke suite unverifiable`
   }

@@ -866,6 +866,32 @@ describe('Playwright invariant PR CI coverage', () => {
     }
   }))
 
+  it.each([
+    ["import { gate } from '../src/helper.ts'", 'web/src/helper.ts'],
+    ["import * as h from '../src/helper.ts'", 'web/src/helper.ts'],
+    ["import { gate } from '../../scripts/gate.ts'", 'scripts/gate.ts'],
+    ["import { gate } from 'some-package'", ''],
+    ["export { gate } from '../src/helper.ts'", 'web/src/helper.ts'],
+    ["const { gate } = await import('./local.ts')", ''],
+    ["const { gate } = require('./local.ts')", ''],
+  ])('refuses runtime dependencies outside web/e2e: %s', (line, helper) => fixture((root, put) => {
+    // The helper skips at runtime; it is outside the scanned smoke directory.
+    if (helper) put(helper, "import { test } from '@playwright/test'\nexport function gate() { test.skip(true) }\n")
+    put('web/e2e/x.spec.ts', `import { test } from '@playwright/test'\n${line}\ntest('runs', async () => {})\n`)
+    expect(check(root)[0]).toContain('cannot be verified')
+    // Also refused when only a smoke helper imports it.
+    put('web/e2e/x.spec.ts', "import { test } from '@playwright/test'\nimport { local } from './local.ts'\ntest('runs', async () => { local() })\n")
+    put('web/e2e/local.ts', `${line}\nexport function local() {}\n`)
+    expect(check(root)[0]).toContain('cannot be verified')
+  }))
+
+  it('accepts type-only imports, node builtins and smoke-local helpers', () => fixture((root, put) => {
+    put('web/src/api-schema.d.ts', 'export type components = {}\n')
+    put('web/e2e/helpers.ts', "import type { components } from '../src/api-schema.d.ts'\nimport { type components as C } from '../src/api-schema.d.ts'\nexport type { components }\nexport const h = (_: C | components) => 1\n")
+    put('web/e2e/x.spec.ts', "import { test } from '@playwright/test'\nimport { randomUUID } from 'node:crypto'\nimport { h } from './helpers.ts'\ntest('runs', async () => { h({}); randomUUID() })\n")
+    expect(check(root)).toEqual([])
+  }))
+
   it('refuses even an unused second callback parameter', () => fixture((root, put) => {
     put('web/e2e/x.spec.ts', plain.replace('async ()', 'async ({ page }, unused)'))
     expect(check(root)[0]).toContain('at most one parameter')
