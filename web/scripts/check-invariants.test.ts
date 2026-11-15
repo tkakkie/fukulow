@@ -862,7 +862,7 @@ describe('Playwright invariant PR CI coverage', () => {
       `async ({ page }, info) => { const { ${method}: annotate } = info; annotate(true) }`,
     ]) {
       put('web/e2e/x.spec.ts', `import { test } from '@playwright/test'\ntest('runs', ${callback})`)
-      expect(check(root)[0]).toContain('at most one parameter')
+      expect(check(root)[0]).toMatch(/at most one parameter|may receive TestInfo/)
     }
   }))
 
@@ -894,7 +894,7 @@ describe('Playwright invariant PR CI coverage', () => {
 
   it('refuses even an unused second callback parameter', () => fixture((root, put) => {
     put('web/e2e/x.spec.ts', plain.replace('async ()', 'async ({ page }, unused)'))
-    expect(check(root)[0]).toContain('at most one parameter')
+    expect(check(root)[0]).toMatch(/at most one parameter|may receive TestInfo/)
   }))
 
   it.each([
@@ -904,9 +904,9 @@ describe('Playwright invariant PR CI coverage', () => {
     "{ tag: '@slow' }",
   ])('refuses three-argument test and describe details: %s', details => fixture((root, put) => {
     put('web/e2e/x.spec.ts', plain.replace("'runs',", `'runs', ${details},`))
-    expect(check(root)[0]).toContain('literal title and inline callback')
+    expect(check(root)[0]).toMatch(/literal title and inline callback|details or options/)
     put('web/e2e/x.spec.ts', `import { test } from '@playwright/test'\ntest.describe('suite', ${details}, () => { test('runs', () => {}) })`)
-    expect(check(root)[0]).toContain('literal title and inline callback')
+    expect(check(root)[0]).toMatch(/literal title and inline callback|details or options/)
   }))
 
   it.each([
@@ -952,10 +952,38 @@ describe('Playwright invariant PR CI coverage', () => {
     }
   }))
 
+  it.each([
+    // TestInfo reached without test.info() (#440 review, round 2).
+    "export const f = () => expect.getState().currentTestInfo[('sk' + 'ip') as 'skip'](true)",
+    "export const f = () => { (expect as any)['get' + 'State']() }",
+    "test.beforeEach(async ({ page }, info) => { info[('sk' + 'ip') as 'skip'](true) })",
+    "test.afterAll(async ({}, info) => { info.expectedStatus = 'skipped' })",
+    "test.use({ page: async ({ page }, use, info) => { await use(page) } })",
+    "const opts = { locale: 'ja-JP' }; test.use(opts)",
+    "export const f = () => test.step('s', async step => { step[('sk' + 'ip') as 'skip']() })",
+    "test.describe('suite', { annotation: { type: 'skip' } }, () => {})",
+    "test('helper', { tag: '@slow' }, async () => {})",
+    "const e = expect; e.poll(() => 1)",
+    "expect.extend({})",
+    "const o = { get skip() { return 1 } }",
+    "const o = { skip() {} }",
+    "import { createRequire } from 'node:module'\ncreateRequire(import.meta.url)('@playwright/test')",
+    "import vm from 'node:vm'\nvm.runInThisContext('1')",
+  ])('refuses TestInfo handles, unsafe callbacks and loaders: %s', code => fixture((root, put) => {
+    for (const file of ['web/e2e/x.spec.ts', 'web/e2e/helpers.ts']) {
+      put(file, "import { expect, test } from '@playwright/test'\ntest('runs', async () => {})\n" + code + '\n')
+      // A modifier-named method in a spec refuses that file; in a helper, the whole suite.
+      expect(check(root)[0], `${file}: ${code}`).toMatch(/entire smoke suite unverifiable|unsupported Playwright \.skip/)
+      put(file, plain)
+    }
+  }))
+
   it('accepts the listed test members and literal keys in a helper', () => fixture((root, put) => {
     // A helper is checked by the suite-wide scan only (spec files also go through tsTests, which is stricter).
-    put('web/e2e/helpers.ts', "import { test } from '@playwright/test'\n" + [
+    put('web/e2e/helpers.ts', "import { expect, test } from '@playwright/test'\nimport { readFile } from 'node:fs/promises'\n" + [
       "test.describe('suite', () => {})",
+      'test.beforeEach(async ({ page }) => { await page.goto("/") })',
+      "export const poll = async () => { await expect.poll(() => readFile('x')).toBeTruthy(); expect(1).toBe(1) }",
       'test.beforeEach(async () => {})', 'test.afterEach(async () => {})',
       'test.beforeAll(async () => {})', 'test.afterAll(async () => {})',
       "test.use({ locale: 'ja-JP' })", 'test.setTimeout(60_000)',

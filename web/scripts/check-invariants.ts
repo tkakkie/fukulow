@@ -497,6 +497,17 @@ function playwrightSafety(sf: ts.SourceFile, smokeDir?: string): { reason: strin
   // Allowlist: any other member (info, extend, describe.serial, ...) could skip or filter at runtime.
   const testMembers = new Set(['describe', 'beforeEach', 'afterEach', 'beforeAll', 'afterAll', 'setTimeout', 'use', 'step'])
   const describeMembers = new Set<string>()
+  const expectMembers = new Set(['poll', 'soft', 'not', 'any', 'anything', 'objectContaining', 'arrayContaining', 'stringContaining', 'stringMatching', 'closeTo'])
+  const testInfoNames = new Set(['getState', 'currentTestInfo', 'expectedStatus', '_testInfo'])
+  // node:module (createRequire), node:vm and similar can load or run unscanned code.
+  const nodeModules = new Set(['node:crypto', 'node:fs', 'node:fs/promises', 'node:http', 'node:https', 'node:net', 'node:path', 'node:url', 'node:os', 'node:util', 'node:buffer', 'node:events', 'node:timers/promises'])
+  const plainData = (e: ts.Expression): boolean =>
+    ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e)
+    || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword || e.kind === ts.SyntaxKind.NullKeyword
+    || (ts.isPrefixUnaryExpression(e) && ts.isNumericLiteral(e.operand))
+    || (ts.isArrayLiteralExpression(e) && e.elements.every(plainData))
+    || (ts.isObjectLiteralExpression(e) && e.properties.every(p => ts.isPropertyAssignment(p)
+      && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) && plainData(p.initializer)))
   let refusal: { reason: string; suiteWide: boolean } | undefined
   const refuse = (reason: string, suiteWide: boolean) => {
     if (!refusal || suiteWide) refusal = { reason, suiteWide }
@@ -510,16 +521,19 @@ function playwrightSafety(sf: ts.SourceFile, smokeDir?: string): { reason: strin
     if (ts.isPropertyAccessExpression(node)) name = node.name.text
     else if (ts.isElementAccessExpression(node)) name = nameOf(node.argumentExpression)
     else if (ts.isBindingElement(node)) name = nameOf(node.propertyName ?? node.name)
-    else if (ts.isShorthandPropertyAssignment(node) || ts.isPropertyAssignment(node)) name = nameOf(node.name)
+    else if (ts.isShorthandPropertyAssignment(node) || ts.isPropertyAssignment(node) || ts.isMethodDeclaration(node)
+      || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) name = nameOf(node.name)
     if (name && modifiers.has(name))
       refuse(`unsupported Playwright .${name} access or binding`, name === 'only')
+    // Handles that reach the running TestInfo without test.info() (#440 review).
+    if (name && testInfoNames.has(name)) refuse(`Playwright TestInfo handle .${name} cannot be verified`, true)
     // Runtime code outside web/e2e is not scanned, so a helper there could skip at runtime (#440).
     // Checked in the suite-wide scan (smokeDir given), which covers every smoke file.
     if (smokeDir && (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier
       && ts.isStringLiteral(node.moduleSpecifier) && !typeOnlyImport(node)) {
       const spec = node.moduleSpecifier.text
       const inside = spec.startsWith('.') && resolve(sf.fileName, '..', spec).startsWith(smokeDir + sep)
-      if (spec !== '@playwright/test' && !spec.startsWith('node:') && !inside)
+      if (spec !== '@playwright/test' && !nodeModules.has(spec) && !inside)
         refuse(`runtime import of ${spec} from outside web/e2e cannot be verified`, true)
     }
     if (smokeDir && ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
@@ -538,23 +552,38 @@ function playwrightSafety(sf: ts.SourceFile, smokeDir?: string): { reason: strin
       for (const e of node.importClause.namedBindings.elements)
         if (!e.isTypeOnly && !['test', 'expect'].includes(e.name.text))
           refuse(`Playwright value import ${e.name.text} cannot be verified`, true)
-    if (ts.isIdentifier(node) && node.text === 'test') {
+    if (ts.isIdentifier(node) && (node.text === 'test' || node.text === 'expect')) {
+      const root = node.text
       const p = node.parent
       let target: ts.Node = node
+      const members: string[] = []
       while ((ts.isPropertyAccessExpression(target.parent) || ts.isElementAccessExpression(target.parent)) && target.parent.expression === target) {
         const access = target.parent
         // A computed key can spell skip/only at runtime (#440): only literal, listed members pass.
         const member = ts.isPropertyAccessExpression(access) ? access.name.text
           : ts.isStringLiteral(access.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(access.argumentExpression)
             ? access.argumentExpression.text : undefined
-        if (member === undefined) refuse('dynamic property access on Playwright test cannot be verified', true)
-        else if (!modifiers.has(member) && !(target === node ? testMembers : describeMembers).has(member))
-          refuse(`unsupported Playwright test member ${member}`, true)
+        if (member === undefined) refuse(`dynamic property access on Playwright ${root} cannot be verified`, true)
+        else if (!modifiers.has(member) && !(root === 'expect' ? expectMembers : target === node ? testMembers : describeMembers).has(member))
+          refuse(`unsupported Playwright ${root} member ${member}`, true)
+        else members.push(member)
         target = access
       }
       const direct = ts.isCallExpression(target.parent) && target.parent.expression === target
       const imported = ts.isImportSpecifier(p) && !p.propertyName && p.name === node
-      if (!direct && !imported) refuse('Playwright test used as a value cannot be verified', true)
+      if (!direct && !imported) refuse(`Playwright ${root} used as a value cannot be verified`, true)
+      if (direct && root === 'test') {
+        const call = target.parent as ts.CallExpression
+        const member = members[0]
+        // Hook, fixture and step callbacks receive TestInfo/TestStepInfo in later parameters.
+        const maxParams = member === 'step' ? 0 : 1
+        if (call.arguments.length > 2) refuse('Playwright test call with details or options cannot be verified', true)
+        for (const a of call.arguments)
+          if ((ts.isArrowFunction(a) || ts.isFunctionExpression(a)) && a.parameters.length > maxParams)
+            refuse(`Playwright ${member ?? 'test'} callback may receive TestInfo`, true)
+        if (member === 'use' && !call.arguments.every(plainData))
+          refuse('test.use accepts only literal option values (fixtures receive TestInfo)', true)
+      }
     }
     ts.forEachChild(node, visit)
   }
