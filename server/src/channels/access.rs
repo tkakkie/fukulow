@@ -306,16 +306,18 @@ async fn access_rows(
     Ok(rows)
 }
 
+// OFFSET 0 retains the correlated candidate bounds even when the statement
+// context makes RLS estimates tiny under a cached Generic plan.
 fn access_rows_sql() -> String {
     let public_roles = auth::authorization::channel_roles_sql(false);
     let explicit_roles = auth::authorization::channel_roles_sql(true);
     format!("SELECT COALESCE((c.kind='channel' AND c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL AND (c.kind='channel' OR u.id IN(c.lower_member_id,c.higher_member_id))), false),
         CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END, u.id IS NOT NULL, r.n
         FROM unnest($2::uuid[], $3::bigint[], $4::uuid[]) WITH ORDINALITY r(member_id,revision,channel_id,n)
-        LEFT JOIN ({}) u ON u.organization_id=$1 AND u.id=r.member_id AND u.membership_revision=r.revision
+        LEFT JOIN LATERAL ({} OFFSET 0) u ON true
         LEFT JOIN channels c ON c.organization_id=$1 AND c.id=r.channel_id AND u.id IS NOT NULL
-        LEFT JOIN channel_members cm ON cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision
-        ORDER BY r.n", auth::members::ACTIVE_SCOPED_MEMBERS_SQL)
+        LEFT JOIN LATERAL (SELECT grant_id FROM channel_members WHERE organization_id=$1 AND channel_id=r.channel_id AND member_id=r.member_id AND membership_revision=r.revision AND u.id IS NOT NULL AND c.id IS NOT NULL OFFSET 0) cm ON true
+        ORDER BY r.n", auth::candidate_member_sql("r.member_id", "r.revision"))
 }
 
 async fn access_rows_in(
@@ -361,8 +363,36 @@ pub(crate) async fn access_row_for_test(
 }
 
 #[cfg(test)]
+mod regression;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    // Export builders, rather than maintain another SQL copy in the plan harness.
+    #[test]
+    #[ignore = "used by load/hot-plans/fanout.ts on a throwaway dataset"]
+    fn export_fanout_plan_sql() {
+        let directory = std::path::PathBuf::from(std::env::var_os("FANOUT_SQL_DIR").unwrap());
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, sql) in [
+            ("access_rows_batch", access_rows_sql()),
+            (
+                "access_rows_single",
+                format!(
+                    "{} ORDER BY n",
+                    crate::database::organization_statement_sql(&access_rows_sql())
+                ),
+            ),
+            (
+                "member_access",
+                crate::database::organization_statement_sql(&super::super::member_access_sql()),
+            ),
+            ("member_access_batch", super::super::member_access_in_sql()),
+        ] {
+            std::fs::write(directory.join(format!("{name}.sql")), sql).unwrap();
+        }
+    }
     #[tokio::test]
     async fn observed_loss_blocks_new_frame_handoff_but_allows_only_the_inflight_frame() {
         let entry = Arc::new(Entry {

@@ -1,4 +1,6 @@
 -- #314 EXPLAIN (ANALYZE, BUFFERS) of the hot queries, copied from the server SQL
+-- Historical fan-out copies below predate grouped/context-wrapped production SQL.
+-- Use fanout.ts for #354 production-equivalent fan-out plans in both modes.
 -- at the measured commit. Run as fukulow_app on the seed.sql dataset; writes are
 -- rolled back. Run twice and keep the second (warm) output. `-v generic=1`
 -- forces generic plans. Without it, the auto.* sections run timeline and Unread
