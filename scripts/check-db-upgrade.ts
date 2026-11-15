@@ -14,7 +14,7 @@ const project = `fukulow-upgrade-${randomUUID().slice(0, 8)}`
 const directory = mkdtempSync(join(tmpdir(), project))
 const source = join(directory, 'main')
 mkdirSync(source)
-const oldImage = `${project}-main`
+const oldImage = process.env.CHECK_UPGRADE_OLD_IMAGE || `${project}-main`
 // Override only for rehearsing a post-merge source locally; CI upgrades origin/main.
 const oldRevision = process.env.CHECK_UPGRADE_REVISION || 'origin/main'
 const configOnly = process.argv.includes('--check-config')
@@ -72,9 +72,9 @@ const snapshot = () => JSON.parse(sql(`SELECT json_build_object(
 
 async function check() {
   try {
-    const revision = execFileSync('git', ['rev-parse', oldRevision], { cwd, encoding: 'utf8' }).trim()
-    const archive = execFileSync('git', ['archive', revision], { cwd, maxBuffer: 32 * 1024 * 1024 })
-    execFileSync('tar', ['-x', '-C', source], { input: archive })
+    const revision = execFileSync('git', ['rev-parse', oldRevision], { cwd, env, encoding: 'utf8' }).trim()
+    const archive = execFileSync('git', ['archive', revision], { cwd, env, maxBuffer: 32 * 1024 * 1024 })
+    execFileSync('tar', ['-x', '-C', source], { env, input: archive })
     const oldConfig = JSON.parse(run(['compose', '--env-file', '/dev/null', '-p', project,
       '-f', join(source, 'compose.yml'), 'config', '--format', 'json']))
     const hasMigrate = Object.hasOwn(oldConfig.services, 'migrate')
@@ -95,12 +95,15 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
       return
     }
     console.log(`Upgrade source=${revision} project=${project}`)
-    // CI reuses main's exported layers; buildx needs HOME for the builder and the Actions cache credentials.
-    const cacheFrom = process.env.CHECK_UPGRADE_CACHE_FROM
-    const buildEnv = cacheFrom ? { ...env, HOME: process.env.HOME, ACTIONS_RESULTS_URL: process.env.ACTIONS_RESULTS_URL,
-      ACTIONS_RUNTIME_TOKEN: process.env.ACTIONS_RUNTIME_TOKEN } : env
-    const build = cacheFrom ? ['buildx', 'build', '--load', '--cache-from', cacheFrom] : ['build']
-    execFileSync('docker', [...build, '-q', '-t', oldImage, source], { cwd, env: buildEnv, stdio: 'inherit' })
+    // CI supplies an image built in its credential-scoped action, so this check needs no cache token.
+    if (!process.env.CHECK_UPGRADE_OLD_IMAGE) {
+      const cacheFrom = process.env.ACTIONS_RESULTS_URL && process.env.ACTIONS_RUNTIME_TOKEN
+        ? process.env.CHECK_UPGRADE_CACHE_FROM : undefined
+      const buildEnv = cacheFrom ? { ...env, HOME: process.env.HOME, ACTIONS_RESULTS_URL: process.env.ACTIONS_RESULTS_URL,
+        ACTIONS_RUNTIME_TOKEN: process.env.ACTIONS_RUNTIME_TOKEN } : env
+      const build = cacheFrom ? ['buildx', 'build', '--load', '--cache-from', cacheFrom] : ['build']
+      execFileSync('docker', [...build, '-q', '-t', oldImage, source], { cwd, env: buildEnv, stdio: 'inherit' })
+    }
     if (!process.env.CHECK_COMPOSE_IMAGE) {
       execFileSync('docker', [...current, 'build', 'app'], { cwd, env, stdio: 'inherit' })
     }
