@@ -1,5 +1,6 @@
 // Run from the repository root with the Node version in .node-version.
 import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { arch, cpus, totalmem } from 'node:os';
 import { resolve, dirname } from 'node:path';
@@ -13,7 +14,7 @@ process.chdir(root);
 if (process.version !== `v${readFileSync('.node-version','utf8').trim()}`) throw new Error('Use .node-version exactly');
 const out = resolve(process.env.SEARCH_RESULT_DIR ?? `/private/tmp/fukulow-search-153-${Date.now()}`);
 if (out === root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
-mkdirSync(out,{recursive:true});
+mkdirSync(out);
 const container = `fukulow-search-153-${randomUUID().slice(0,8)}`;
 const image = 'fukulow-search-measure-153';
 const engines = ['trgm','bigm','pgroonga'] as const;
@@ -126,7 +127,20 @@ async function restoreDrill() {
   owner('postgres','DROP DATABASE small;'); save(`${out}/restore.json`,report);
 }
 
-let started = false;
+let cleaned = false;
+function cleanup() {
+  if (cleaned) return;
+  cleaned = true;
+  // Docker can create the container and its anonymous volume before run fails.
+  const result = spawnSync('docker',['rm','-fv',container],{encoding:'utf8'});
+  if (result.error || (result.status !== 0 && !result.stderr.includes('No such container'))) {
+    console.error('Container/volume cleanup failed:',result.error ?? result.stderr);
+    process.exitCode = 1;
+  }
+}
+process.on('exit',cleanup);
+process.on('SIGINT',()=>{ cleanup(); process.exit(130); });
+process.on('SIGTERM',()=>{ cleanup(); process.exit(143); });
 try {
   note(`Artifacts: ${out}`);
   if (process.env.SEARCH_SKIP_BUILD !== '1') {
@@ -140,7 +154,6 @@ try {
     '-c','shared_preload_libraries=pgroonga_wal_resource_manager,pgroonga_crash_safer',
     '-c','pgroonga.enable_wal_resource_manager=on','-c','pgroonga.enable_crash_safe=on',
     '-c','max_worker_processes=16'],undefined,{...process.env,POSTGRES_PASSWORD:password});
-  started = true;
   // The password is passed via environment, never a command argument or artifact.
   for (let attempt=0;attempt<60;attempt++) {
     try { if (owner('postgres','SELECT 1;')==='1') break; } catch { /* initdb */ }
@@ -215,5 +228,5 @@ try {
   command(process.execPath,['load/search-engines/summarize.ts',out]);
   note('All measurements completed; no formal Linux performance judgement.');
 } finally {
-  if (started) docker('rm','-fv',container);
+  cleanup();
 }
