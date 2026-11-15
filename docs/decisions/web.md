@@ -28,6 +28,7 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 - Sprint 1 web acceptance: `npm --prefix web run e2e:compose` against `docker compose --profile caddy up` from an empty database (#19).
 - #211: Compose browser acceptance runs on main pushes and manual dispatch, never PRs, keeping image/browser costs off PR feedback. #150 Sprint 2 requires a successful manual dispatch on the release candidate. Use Caddy for HTTPS/WSS; ci.yml covers both proxies.
 - #211/#254: upload only allowlisted report.json on failure (3 days). No traces, ARIA snapshots or raw requests; screenshots can expose the setup token, and unfiltered sqlx errors prevent certifying Compose logs as secret-free.
+- #266: the Unread reconnect and equal-baseline fixtures stay proposed, run only by the reference merge; the web controller serializes Channel-list fetches, tested separately. Reason: the fixtures keep concurrent requests with reverse responses, which production never issues.
 
 ## Entries in other parts
 

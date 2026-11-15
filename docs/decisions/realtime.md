@@ -57,6 +57,10 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #151 DM list base limits: 50-row pages, 200 retained rows, five total attempts/O5 run incl. retries/continuations; two discovery slots, three fairly shared by held-id refresh/browsing/recovery (2026-11-14). Reason: bound work without starving any lane; preserve independent keys.
 - #151 B4 adopts Option A durable discovery, rejects Option B (2026-11-14). Reason: no still-accessible DM may be missed after lost notices/delayed COMMITs; first-page or descending mutable-key recovery cannot guarantee it. Protocol: spec/dms.md P-D1-P-D7.
 - #151 coalesces discovery by Organization/Member/revision/DM; independent rolling delta and frozen-birth coverage each get one O5 slot (2026-11-14). Reason: with no changes, ≤500 pending after saved delta cursor drain in ≤10 runs/≤332 s regardless of coverage; fixed keys prevent hot-row starvation.
+- #159: S2 promises no omissions while the client stays connected or reconnects, not a recovery-latency bound. Reason: database waits, scheduling, replay limits and slow subscribers would break any bound; latency stays a measured target.
+- #307 O4: a sender's own other sockets get no channel_activity. Reason: own Messages never change a count (P8). Revisit if the Channel list gains a latest-activity order.
+- #151 discovery rows coalesce per DM: latest positions only move forward, birth keys never change. Reason: pending rows and storage are O(DMs), not O(events); finite coverage passes over immutable keys also prevent hot-row starvation.
+- #151 bootstrap: a zero coverage cursor enumerates current DM rows by birth position; delta starts independently at zero; browsing/recovery keep separate creation keys. Reason: old DMs stay discoverable without replay proportional to past events.
 
 ## Personal section notices (#204, specified)
 

@@ -61,6 +61,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #151 DMs reject Topic intent and member/grant APIs; all management Capabilities deny. Exclude DMs from RoleChangeGuard and last-manager/grant counts. Reason: fixed two-person participation must neither confer management nor block Role changes.
 - #151 reclaim only discovery revisions below the Member's committed revision: revisions never reset. Lock one old counter (SKIP LOCKED), then delete at most 1,000 index rows and its empty counter; never lock Members/grants, so cleanup cannot reverse the writer order or truncate a usable feed.
 - Mention unread is a separate displayed count derived from existing Channel/Topic read positions, with no separate read state (#148, #152); repeated Mentions of one Member in a Message count once and own Messages never count.
+- #142/#143 client baseline selection (larger as_of_seq, then read_seq, then smaller counts, within one access generation) needs no server change. Reason: positions only advance within a generation, so counts at equal as_of_seq never rise with read progress.
 
 ## Mentions (#152, specification for approval)
 
