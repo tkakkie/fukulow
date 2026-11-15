@@ -20,7 +20,7 @@ const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1)
 if (out === root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
 if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
 process.env.SEARCH_RESULT_DIR = out;
-await supervise(import.meta.url,out,manifest.sha256,()=>summarize(out));
+if (await supervise(import.meta.url,out,manifest.sha256,()=>summarize(out))) {
 mkdirSync(out);
 const container = ownedContainer();
 const imageTag = 'fukulow-search-measure-153';
@@ -233,4 +233,5 @@ async function restoreDrill() {
   }
   save(`${out}/completed.json`,{manifestHash:manifest.sha256,at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
   note('All measurements completed; no formal Linux performance judgement.');
+}
 }

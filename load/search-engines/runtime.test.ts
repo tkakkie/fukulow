@@ -38,11 +38,11 @@ if (${JSON.stringify(mode)}==='cleanup-error') process.exit(1);
     const fixture = join(dir,'fixture.mjs');
     writeFileSync(fixture,`import { supervise } from ${JSON.stringify(new URL('./runtime.ts',import.meta.url).href)};
 import { existsSync, writeFileSync } from 'node:fs';
-await supervise(import.meta.url,${JSON.stringify(dir)},'test-manifest',()=>{
+if (await supervise(import.meta.url,${JSON.stringify(dir)},'test-manifest',()=>{
   if (!existsSync(${JSON.stringify(join(dir,'verified'))})) throw Error('cleanup not finished');
   if (${JSON.stringify(mode)}==='finalize-error') throw Error('finalization failed');
   writeFileSync(${JSON.stringify(join(dir,'summary.json'))},'final');
-});
+}))
 writeFileSync(${JSON.stringify(join(dir,'completed.json'))},JSON.stringify({manifestHash:'test-manifest'}));`);
     const child = spawn(process.execPath,[fixture],{env:{...process.env,PATH:dir+':'+process.env.PATH},stdio:'ignore'});
     assert.deepEqual(await once(child,'close'),[mode==='success'?0:1,null]);
@@ -75,7 +75,7 @@ if (phase===${JSON.stringify(phase)}) {
       const fixture = join(dir,'fixture.mjs');
       writeFileSync(fixture,`import { supervise } from ${JSON.stringify(new URL('./runtime.ts',import.meta.url).href)};
 import { writeFileSync } from 'node:fs';
-await supervise(import.meta.url,${JSON.stringify(dir)},'test-manifest',()=>writeFileSync(${JSON.stringify(join(dir,'summary.json'))},'final'));
+if (await supervise(import.meta.url,${JSON.stringify(dir)},'test-manifest',()=>writeFileSync(${JSON.stringify(join(dir,'summary.json'))},'final')))
 writeFileSync(${JSON.stringify(join(dir,'completed.json'))},JSON.stringify({manifestHash:'test-manifest'}));`);
       const child = spawn(process.execPath,[fixture],{env:{...process.env,PATH:dir+':'+process.env.PATH},stdio:'ignore'});
       const closed = once(child,'close');
@@ -90,6 +90,63 @@ writeFileSync(${JSON.stringify(join(dir,'completed.json'))},JSON.stringify({mani
       assert.equal(existsSync(join(dir,'finished.json')),false);
       assert.equal(existsSync(join(dir,'summary.json')),false);
       assert.deepEqual(readFileSync(join(dir,'calls'),'utf8').trim().split('\n'),['rm','volume-rm','container-ls','volume-ls']);
+    });
+  }
+}
+
+for (const phase of ['completion-read','status-write','finished-write','finalize','summary-write','final-status-write','after-supervise','before-exit']) {
+  for (const [signal,code] of [['SIGINT',130],['SIGTERM',143]] as const) {
+    test(`${signal} during synchronous ${phase} revokes publication`,{timeout:10000},async t=>{
+      const { spawn } = await import('node:child_process');
+      const { once } = await import('node:events');
+      const { existsSync, readFileSync } = await import('node:fs');
+      const { setTimeout: pause } = await import('node:timers/promises');
+      const dir = mkdtempSync(join(tmpdir(),'search-publication-signal-'));
+      t.after(()=>rmSync(dir,{recursive:true,force:true}));
+      writeFileSync(join(dir,'docker'),`#!${process.execPath}\nprocess.exit(0);\n`,{mode:0o755});
+      const fixture = join(dir,'fixture.mjs');
+      writeFileSync(fixture,`import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { supervise } from ${JSON.stringify(new URL('./runtime.ts',import.meta.url).href)};
+const dir=${JSON.stringify(dir)}, phase=${JSON.stringify(phase)};
+const read=fs.readFileSync, write=fs.writeFileSync;
+let statusWrites=0;
+function block(at) {
+  if (process.env.SEARCH_WORKER==='1' || at!==phase) return;
+  write(dir+'/paused','');
+  while (!fs.existsSync(dir+'/release')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+}
+fs.readFileSync=function(path,...args) {
+  if (String(path)===dir+'/completed.json') block('completion-read');
+  return read(path,...args);
+};
+fs.writeFileSync=function(path,...args) {
+  const result=write(path,...args);
+  if (String(path)===dir+'/run-status.json') block(++statusWrites===1?'status-write':'final-status-write');
+  if (String(path)===dir+'/finished.json') block('finished-write');
+  if (String(path)===dir+'/summary.json') block('summary-write');
+  return result;
+};
+syncBuiltinESMExports();
+if (await supervise(import.meta.url,dir,'test-manifest',()=>{
+  block('finalize');
+  fs.writeFileSync(dir+'/summary.json','final');
+}))
+fs.writeFileSync(dir+'/completed.json',JSON.stringify({manifestHash:'test-manifest'}));
+block('after-supervise');
+process.once('beforeExit',()=>block('before-exit'));`);
+      const child = spawn(process.execPath,[fixture],{env:{...process.env,PATH:dir+':'+process.env.PATH},stdio:'ignore'});
+      const closed = once(child,'close');
+      t.after(()=>{if(child.exitCode===null)child.kill('SIGKILL');});
+      while (!existsSync(join(dir,'paused'))) { t.signal.throwIfAborted(); assert.equal(child.exitCode,null); await pause(10); }
+      assert.equal(child.kill(signal),true);
+      await pause(50);
+      writeFileSync(join(dir,'release'),'');
+      assert.deepEqual(await closed,[code,null]);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir,'run-status.json'),'utf8')),
+        {manifestHash:'test-manifest',valid:false,cleanupVerified:true,exitCode:code});
+      assert.equal(existsSync(join(dir,'finished.json')),false);
+      assert.equal(existsSync(join(dir,'summary.json')),false);
     });
   }
 }

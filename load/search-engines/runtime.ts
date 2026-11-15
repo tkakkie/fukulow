@@ -35,18 +35,24 @@ export async function cleanup(container: string, volume: string, timeout = timeo
 }
 
 export async function supervise(entry: string, out: string, manifestHash: string, finalize?: () => void) {
-  if (process.env.SEARCH_WORKER === '1') return;
+  if (process.env.SEARCH_WORKER === '1') return true;
   const token = randomUUID();
   const container = `fukulow-search-153-${token}`;
   const volume = `${container}-data`;
   let interrupted = 0;
   let workerClosed = false;
+  let terminal = false;
   const child = spawn(process.execPath,[fileURLToPath(entry)],{stdio:'inherit',detached:true,
     env:{...process.env,SEARCH_WORKER:'1',SEARCH_OWNED_CONTAINER:container,SEARCH_OWNED_VOLUME:volume}});
   const stop = (code: number) => {
     interrupted = code;
     // Kill the worker and its Docker CLI descendants before removing resources.
     if (!workerClosed && child.pid) { try { process.kill(-child.pid,'SIGKILL'); } catch { /* already exited */ } }
+    if (terminal) {
+      discard();
+      record();
+      process.exitCode = interrupted;
+    }
   };
   const sigint = () => stop(130), sigterm = () => stop(143);
   process.on('SIGINT',sigint); process.on('SIGTERM',sigterm);
@@ -58,25 +64,40 @@ export async function supervise(entry: string, out: string, manifestHash: string
   let cleanupVerified = false;
   try { await cleanup(container,volume); cleanupVerified=true; }
   catch (error) { console.error(String(error)); code=1; }
-  // Dispatch signals queued at the end of verification before finalization.
-  await new Promise<void>(resolve=>setImmediate(resolve));
   const record = () => writeFileSync(`${out}/run-status.json`,JSON.stringify({manifestHash,
     valid:code===0 && !interrupted && cleanupVerified,cleanupVerified,exitCode:interrupted || code})+'\n');
+  const discard = () => {
+    rmSync(`${out}/finished.json`,{force:true});
+    rmSync(`${out}/summary.json`,{force:true});
+  };
+  const checkpoint = async () => {
+    // Poll for signals queued during synchronous reads, writes or finalization.
+    await new Promise<void>(resolve=>setTimeout(resolve,0));
+    if (interrupted) throw new Error('Run interrupted');
+  };
   try {
+    await checkpoint();
     if (code===0 && !interrupted && finalize) {
       const completion = JSON.parse(readFileSync(`${out}/completed.json`,'utf8'));
       if (completion.manifestHash!==manifestHash) throw new Error('Completion manifest hash mismatch');
+      await checkpoint();
       record();
+      await checkpoint();
       writeFileSync(`${out}/finished.json`,JSON.stringify(completion)+'\n');
+      await checkpoint();
       finalize();
+      await checkpoint();
     }
     record();
+    await checkpoint();
   } catch {
     console.error('Could not finalize run'); code=1;
-    rmSync(`${out}/finished.json`,{force:true});
-    rmSync(`${out}/summary.json`,{force:true});
+    discard();
     record();
   }
-  process.removeListener('SIGINT',sigint); process.removeListener('SIGTERM',sigterm);
-  process.exit(interrupted || code);
+  terminal = true;
+  process.exitCode = interrupted || code;
+  // Leave handlers installed and let Node drain queued signals before natural exit.
+  process.once('beforeExit',()=>{ setTimeout(()=>{},0); });
+  return false;
 }

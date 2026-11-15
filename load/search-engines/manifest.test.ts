@@ -9,6 +9,12 @@ const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 test('checked-in manifest matches the evaluation inputs',()=>{
   assert.equal(verifyManifest(JSON.parse(readFileSync(new URL('./manifest-v1.json',import.meta.url),'utf8'))),document.sha256);
 });
+test('LF attributes cover exactly the frozen inputs and manifest',()=>{
+  const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
+    .split('\n').filter(line=>line && !line.startsWith('#'));
+  assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),'load/search-engines/manifest-v1.json']
+    .sort().map(path=>`/${path} text eol=lf`));
+});
 test('manifest content tampering is refused',()=>{
   assert.throws(()=>verifyManifest({...document,sha256:'changed'}),/content hash mismatch/);
 });

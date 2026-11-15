@@ -3,7 +3,7 @@ import { loadManifest, verifyRuntime, verifyImage, verifySession } from '../mani
 // Quality only: full result sets, no timers or performance measurements.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,7 @@ import { begin, normalizedQuery } from '../queries.ts';
 import { classes, corpus, queries } from './dataset.ts';
 import { aggregate, score } from './metrics.ts';
 import { modes, querySql } from './modes.ts';
+import { finalizeQuality } from './summarize.ts';
 
 const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)),'../../..'));
 process.chdir(root);
@@ -23,7 +24,7 @@ const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1)
 if (out===root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
 if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
 process.env.SEARCH_QUALITY_DIR = out;
-await supervise(import.meta.url,out,manifest.sha256,()=>{ renameSync(`${out}/pending-summary.json`,`${out}/summary.json`); });
+if (await supervise(import.meta.url,out,manifest.sha256,()=>finalizeQuality(out))) {
 mkdirSync(out);
 const container = ownedContainer();
 const imageTag = 'fukulow-search-measure-153';
@@ -130,4 +131,5 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
     owner('postgres','DROP DATABASE quality_mode WITH (FORCE);');
   }
   save(`${out}/completed.json`,{manifestHash:manifest.sha256,modes:results.length,queries:queries.length,rows:i});
+}
 }
