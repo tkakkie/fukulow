@@ -87,7 +87,7 @@ pub async fn open(
     ApiJson(input): ApiJson<OpenDmRequest>,
 ) -> Result<Response, ApiError> {
     // The transaction survives HTTP cancellation, including renewal and baselines.
-    let result = tokio::spawn(async move {
+    let work = async move {
         let (dm, created, notice) = crate::database::organization(
             &state.pool,
             auth.identity.organization.organization_id,
@@ -116,9 +116,12 @@ pub async fn open(
             notice.committed(state.pool.clone());
         }
         Ok::<_, ApiError>((dm, created))
-    })
-    .await
-    .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    };
+    #[cfg(test)]
+    let work = crate::database::test_inherit_acquisitions(work);
+    let result = tokio::spawn(work)
+        .await
+        .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     Ok((
         if result.1 {
             StatusCode::CREATED

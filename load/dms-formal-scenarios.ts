@@ -2,7 +2,7 @@ import { regularPairs } from './dms-workload.ts';
 
 export const requiredScenarios = ['main', 'held200'] as const;
 export type MixedScenario = typeof requiredScenarios[number];
-export const deferredNames = ['ten-sockets-per-Member','single-Organization-10000','scale-and-cold-cache','history-and-Mention-shapes','hot-DM','fault-and-backlog-recovery','storage-1M-10M','backup-restore','pre-DM-regression'] as const;
+export const deferredNames = ['ten-sockets-per-Member','single-Organization-10000','scale-and-cold-cache','history-and-Mention-shapes','hot-DM','fault-and-backlog-recovery','storage-1M-10M','backup-restore','pre-DM-regression','pool-overhead'] as const;
 export type Scenario = MixedScenario | typeof deferredNames[number];
 export const isMixedScenario = (scenario: Scenario): scenario is MixedScenario => requiredScenarios.some(name=>name===scenario);
 export function fixturePairs(scenario: MixedScenario) {

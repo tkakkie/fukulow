@@ -41,6 +41,7 @@ export async function setup() {
 }
 const browserOnly = __ENV.DM_BROWSER_ONLY === '1';
 const browseRate = Number(__ENV.DM_BROWSE_RATE || (browserOnly ? 100 : 25)), openRate = Number(__ENV.DM_OPEN_RATE || 5);
+const offered = new Counter('dm_offered');
 const errors = new Counter('dm_errors'), calls = new Counter('dm_calls'), accepted = new Counter('dm_accepted');
 const connected = new Gauge('dm_connections'), readyMetric = new Counter('dm_ready');
 const subscribed = new Counter('dm_subscribed'), expectedPeer = new Counter('dm_expected_peer'), receivedPeer = new Counter('dm_received_peer'), duplicates = new Counter('dm_duplicate_frames');
@@ -209,6 +210,7 @@ export function send() {
   if (execution.scenario.iterationInTest === 0) console.log(JSON.stringify({ phase: 'send_window', start: execution.scenario.startTime, seconds: seconds-5 }));
   const i = __ENV.DM_SENDERS ? senderFor(execution.scenario.iterationInTest, Number(__ENV.DM_SENDERS)) : senderIndex(execution.scenario.iterationInTest, shard, members.length), member = members[i];
   const started = Date.now();
+  offered.add(1,{shape:'send'});
   const body: SendMessageRequest = { client_message_id: 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const n = Math.floor(Math.random()*16); return (c === 'x' ? n : (n&3)|8).toString(16); }), body: JSON.stringify({ sent: started, phase: 'mixed', text: 'x'.repeat(976) }) };
   const response = http.post(`${org}/channels/${member.channel}/messages`, JSON.stringify(body), { headers: headers(member.token), timeout: '10s', tags: { name: 'send' } });
   calls.add(1, { shape: 'send' }); latency.add(Date.now()-started, { shape: 'send' });
@@ -238,6 +240,7 @@ export function openDm() {
   const member = members[renewal ? renewal.caller : created ? created[0] : members.length >= 10000 ? 2000+shard*500+i%500 : 500+(i%4 === 2 ? Math.floor(i/4)%400 : i%400)];
   const peer = renewal ? members[renewal.peer].id : create ? members[created ? created[1] : members.length >= 10000 ? 4000+shard*1000+Math.floor(i/4)%1000 : Math.floor(i/1600)%400].id : member.peer;
   const shape = create ? 'create' : renew ? 'renew' : 'resolve', started = Date.now();
+  offered.add(1,{shape});
   const response = http.post(`${org}/dms`, JSON.stringify({ member_id: peer, renew }), { headers: headers(member.token), timeout: '10s', tags: { name: shape } });
   calls.add(1, { shape }); latency.add(Date.now()-started, { shape });
   if (response.status !== (create ? 201 : 200)) errors.add(1, { shape, status: String(response.status) });

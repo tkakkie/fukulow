@@ -11,6 +11,7 @@ import { quote } from './dms-formal-config.ts';
 import { statSync, renameSync } from 'node:fs';
 import { copyVolume, removeCopy } from './dms-formal-copy.ts';
 import { requireHeadroom, directoryBytes, GiB, summaryLimit } from './dms-formal-storage.ts';
+import { captureAppLogs } from './dms-formal-logs.ts';
 import { histogramsSql } from './dms-formal-histograms.ts';
 import { reportAttempt } from './dms-formal-results.ts';
 export type HostState = { id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
@@ -158,22 +159,24 @@ async function restore(s: HostState, attempt: number) {
 async function observe(s: HostState, attempt: number, until: number) {
   const directory = `${root}/attempt-${attempt}`; mkdirSync(directory,{recursive:true,mode:0o700});
   const name = `${s.id}-${s.role}-1`;
-  let previous: { at:number; usage:number } | undefined;
-  let next = Date.now();
-  while (Date.now()<until) {
-    const start = Date.now();
-    try {
-      const raw = await docker(['exec',name,'sh','-c','cat /sys/fs/cgroup/cpu.stat /proc/1/status']);
-      const usage = Number(raw.match(/usage_usec (\d+)/)?.[1]), rss = Number(raw.match(/VmRSS:\s+(\d+)/)?.[1]);
-      const row = { at:start, intervalMs:previous ? start-previous.at : null, cpu:previous ? (usage-previous.usage)/((start-previous.at)*1000) : null, rssKiB:Number.isFinite(rss) ? rss : null };
-      appendFileSync(`${directory}/resources-${s.role}.jsonl`,JSON.stringify(row)+'\n',{mode:0o600});
-      previous = {at:start,usage};
-      if(s.role==='db') appendFileSync(`${directory}/db-activity.jsonl`, JSON.stringify({at:start,activity:JSON.parse(await sql(s,"SELECT json_build_object('connections',count(*),'active',count(*) FILTER(WHERE state='active'),'lockWaiters',count(*) FILTER(WHERE wait_event_type='Lock')) FROM pg_stat_activity WHERE usename='fukulow_app';"))})+'\n',{mode:0o600});
-    } catch { appendFileSync(`${directory}/resource-errors-${s.role}.jsonl`,JSON.stringify({at:start})+'\n',{mode:0o600}); }
-    next += 1000; await delay(Math.max(0,next-Date.now()));
-  }
-  if (s.role === 'app') save(`${directory}/app.log`,await docker(['logs','--timestamps',`${s.id}-app-1`],undefined,120000));
-  else save(`${directory}/sql-after.json`,await sql(s,"SELECT coalesce(json_agg(t),'[]') FROM (SELECT query,toplevel,calls,total_exec_time,rows FROM pg_stat_statements ORDER BY calls DESC) t;"));
+  const stopLogs=s.role==='app' ? captureAppLogs(directory,['logs','--follow','--timestamps','--since',await docker(['inspect','--format','{{.State.StartedAt}}',name]),name]) : undefined;
+  try {
+    let previous: { at:number; usage:number } | undefined;
+    let next = Date.now();
+    while (Date.now()<until) {
+      const start = Date.now();
+      try {
+        const raw = await docker(['exec',name,'sh','-c','cat /sys/fs/cgroup/cpu.stat /proc/1/status']);
+        const usage = Number(raw.match(/usage_usec (\d+)/)?.[1]), rss = Number(raw.match(/VmRSS:\s+(\d+)/)?.[1]);
+        const row = { at:start, intervalMs:previous ? start-previous.at : null, cpu:previous ? (usage-previous.usage)/((start-previous.at)*1000) : null, rssKiB:Number.isFinite(rss) ? rss : null };
+        appendFileSync(`${directory}/resources-${s.role}.jsonl`,JSON.stringify(row)+'\n',{mode:0o600});
+        previous = {at:start,usage};
+        if(s.role==='db') appendFileSync(`${directory}/db-activity.jsonl`, JSON.stringify({at:start,activity:JSON.parse(await sql(s,"SELECT json_build_object('connections',count(*),'active',count(*) FILTER(WHERE state='active'),'lockWaiters',count(*) FILTER(WHERE wait_event_type='Lock')) FROM pg_stat_activity WHERE usename='fukulow_app';"))})+'\n',{mode:0o600});
+      } catch { appendFileSync(`${directory}/resource-errors-${s.role}.jsonl`,JSON.stringify({at:start})+'\n',{mode:0o600}); }
+      next += 1000; await delay(Math.max(0,next-Date.now()));
+    }
+  } finally { if(stopLogs)await stopLogs(); }
+  if (s.role === 'db') save(`${directory}/sql-after.json`,await sql(s,"SELECT coalesce(json_agg(t),'[]') FROM (SELECT query,toplevel,calls,total_exec_time,rows FROM pg_stat_statements ORDER BY calls DESC) t;"));
 }
 async function generators(s: HostState, attempt: number, epoch: number) {
   const directory = `${root}/attempt-${attempt}`; mkdirSync(directory,{recursive:true,mode:0o700});

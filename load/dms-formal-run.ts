@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { readConfig, quote, type Config } from './dms-formal-config.ts';
 import { execute, checked, transferImage, type Executor } from './dms-formal-exec.ts';
 import { requireHeadroom, GiB, summaryLimit } from './dms-formal-storage.ts';
+import { poolOverheadDesign } from './dms-formal-overhead.ts';
 import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
@@ -15,7 +16,7 @@ export const canStartAttempt=(config:Config,now=Date.now())=>config.deadline===u
 export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   if(!isMixedScenario(config.scenario)) {
     mkdirSync(config.output,{mode:0o700});
-    const summary={scenario:config.scenario,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',status:'NOT EVALUATED',acceptance:false,reason:'Deferred scenario; not implemented.'};
+    const summary={scenario:config.scenario,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',status:'NOT EVALUATED',acceptance:false,reason:'Deferred scenario; not implemented.',...(config.scenario==='pool-overhead'?{design:poolOverheadDesign}:{})};
     writeFileSync(`${config.output}/summary.json`,JSON.stringify(summary,null,2),{mode:0o600});
     return {...summary,infrastructureFailure:false,attempts:[]};
   }

@@ -97,3 +97,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [web](web.md): `DM Mention counts converge across live duplicate replay reconnect marks and access loss`
 
 - [unread](unread.md): `main_unread_count_uses_covering_range_without_message_heap`
+
+- [deployment](deployment.md): `dm_open_list_and_discovery_use_one_measured_checkout_each`

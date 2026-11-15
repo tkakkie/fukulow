@@ -115,6 +115,7 @@ test('common-window report retains outside-window errors and reconciles the full
   assert.equal(report.acceptance,false);assert.equal(report.label,'NON-ACCEPTANCE');
   assert.equal(report.scenario,'held200');
   assert.equal(JSON.parse(readFileSync(`${directory}/combined.json`,'utf8')).scenario,'held200');
+  for(const organization of [...report.organizations,...report.organizationsCore])assert.equal((organization as {scenario:string}).scenario,'held200');
   assert.deepEqual(report.reconciliation,{missing:0,duplicates:0,unexpected:0});
   assert.equal(report.evidence.errors,1);assert.equal(report.evidence.dropped,1);
   assert.equal(report.evidence['ack.p99'],10);
@@ -126,10 +127,10 @@ test('deadline kills descendants holding inherited pipes and reaps leader',async
   await assert.rejects(execute({program:process.execPath,args:['-e',`require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});setInterval(()=>{},1000)`],timeout:100}),/timeout/);
   assert.ok(Date.now()-start<1000);
 });
-test('pool #426 placeholder rejects instrumented and malformed lines',async()=>{
+test('production pool parser rejects instrumented and malformed lines',async()=>{
   const {parseProductionPoolLine,productionPoolEvidence}=await import('./dms-formal-pool.ts');
   for(const line of ['','{}','event=measure_pool us=1 active=0 size=32 error=false','event=measure_hold op=x wait_us=1 hold_us=1 active=0 waiting=0 http=0 acquired=true'])assert.equal(parseProductionPoolLine(line),undefined);
-  assert.deepEqual(productionPoolEvidence(['{}'],0,1000),{});
+  assert.match(productionPoolEvidence(['{}'],0,1000,{complete:true,startedAt:0,endedAt:1000}).reasons.join(),/Missing pool_stats/);
 });
 test('restore failure after daemon creation stops, awaits and removes its own copy',async()=>{
   const {copyVolume}=await import('./dms-formal-copy.ts');const events:string[][]=[];
@@ -226,7 +227,7 @@ test('reportAttempt judges slow extension on the population supplying samples, s
     const dest=command.args.at(-1)!;
     const extended=command.args.some(arg=>arg==='DM_WINDOW_TO='+String(epoch+2640000));
     const latencies=Object.fromEntries([...['resolve','create','renew','refresh','delta','coverage','send','first','deep'].map(s=>'dm_latency_ms:'+s),'dm_receipt_ms','dm_round_ms:attempts=5'].map(key=>[key,{samples:extended?10200:9000,p95:extended?500:10,p99:extended?700:10}]));
-    writeFileSync(dest+'/combined.json',JSON.stringify({latencies,mix:{},peerMissing:0,pool:{samples:0},fullIntervals:[]}));
+    writeFileSync(dest+'/combined.json',JSON.stringify({window:{from:epoch+600000,to:epoch+2400000},latencies,mix:{},peerMissing:0,pool:{samples:0},fullIntervals:[]}));
     return {code:0,stdout:''};
   };
   const report=await reportAttempt(path,'formal',reducer);
@@ -316,7 +317,7 @@ test('unverified owned-process cleanup prevents retention and another restore',a
 
 test('scenario config selects main, held200 and explicit deferred stubs',t=>{
   const path=temporary(t),file=path+'/private.env';
-  for(const scenario of ['main','held200','hot-DM']) {
+  for(const scenario of ['main','held200','hot-DM','pool-overhead']) {
     writeFileSync(file,env(path,`DM_FORMAL_SCENARIO=${scenario}\n`),{mode:0o600});
     assert.equal(readConfig(file,checkout).scenario,scenario);
   }
@@ -329,4 +330,46 @@ test('deferred selection records its scenario as NOT EVALUATED without contactin
   assert.equal(result.acceptance,false);
   const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
   assert.equal(summary.scenario,'hot-DM');assert.equal(summary.status,'NOT EVALUATED');
+});
+
+test('Q4 reduction checks concurrent connection/send/open/O5 evidence and keeps browsing separate',async t=>{
+  const {reportAttempt}=await import('./dms-formal-results.ts');
+  const epoch=1000000,from=epoch+600000,to=epoch+2400000;
+  for(const fault of ['none','connections','send-rate','open-rate','O5','outside-core']) {
+    const path=temporary(t);
+    writeFileSync(path+'/window-starts.json',JSON.stringify(Array(11).fill(epoch)));
+    writeFileSync(path+'/exits.json',JSON.stringify(Array.from({length:11},(_,shard)=>({shard,code:0}))));
+    writeFileSync(path+'/durable.jsonl','');
+    for(let shard=0;shard<11;shard++) {
+      const dir=path+'/shard-'+shard;mkdirSync(dir);
+      for(const file of ['run.log','metrics.json'])writeFileSync(dir+'/'+file,'');
+      writeFileSync(dir+'/summary.json',JSON.stringify({state:{testRunDurationMs:2700000},metrics:{dm_errors:{values:{count:0}},dm_duplicate_frames:{values:{count:0}},iterations:{values:{count:1}}}}));
+    }
+    const reducer:Runtime['exec']=async command=>{
+      const dest=command.args.at(-1)!,browser=dest.endsWith('/browsing-organization');
+      const latencies=Object.fromEntries([...['resolve','create','renew','refresh','delta','coverage','send','first','deep'].map(s=>'dm_latency_ms:'+s),'dm_receipt_ms','dm_round_ms:attempts=5'].map(key=>[key,{samples:10000,p95:1,p99:2}]));
+      const mixMembers=Object.fromEntries([0,50].flatMap(held=>['delta','coverage','browse','recovery','held','completed5'].map(lane=>[held+':'+lane,fault==='O5'?0:500])));
+      const counters={'dm_offered:send':fault==='send-rate'?359999:360000,'dm_offered:resolve':fault==='open-rate'?3599:3600};
+      writeFileSync(dest+'/combined.json',JSON.stringify({scenario:'main',window:{from:browser && fault==='outside-core'?from-1:from,to},latencies,mixMembers,counters,peerMissing:0,fullIntervals:fault==='connections'?[]:[{start:from,end:to}]}));
+      return {code:0,stdout:''};
+    };
+    const report=await reportAttempt(path,'formal',reducer);
+    assert.ok('browsingLoad' in report,JSON.stringify(report));
+    assert.equal(report.browsingLoad.fullMixedLoad,!['connections','send-rate','open-rate','O5'].includes(fault));
+    assert.ok(report.latencyJudgment.browsingRows.every(row=>row.status===(fault==='none'?'PASS':'NOT EVALUATED')),fault);
+    assert.ok(report.latencyJudgment.rows.filter(row=>row.organization!=='browsing').every(row=>!['first','deep'].includes(row.shape)));
+    assert.equal(report.acceptance,false);
+    assert.match(readFileSync(path+'/judgment.md','utf8'),/Separate browsing Organization/);
+  }
+});
+test('pool overhead selection records incompatible baseline and alternative without contacting hosts',async t=>{
+  const path=temporary(t);
+  const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',scenario:'pool-overhead',attempts:3,mode:'formal'};
+  const unused=()=>{throw new Error('Overhead design contacted a host');};
+  const result=await run(config,{exec:unused,transfer:unused,on:unused,off:unused});
+  assert.equal(result.acceptance,false);
+  const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
+  assert.equal(summary.status,'NOT EVALUATED');assert.equal(summary.design.limitPercent,10);
+  assert.match(summary.design.reason,/no DM implementation/);
+  assert.match(summary.design.alternative,/same formal DM SHA/);
 });

@@ -42,11 +42,15 @@ async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: 
   for (let i=0;i<(mode === 'smoke' ? 1 : 10);i++) {
     const per = `${directory}/organization-${i}`; mkdirSync(per,{mode:0o700});
     symlinkSync(`${directory}/shard-${i}`,`${per}/shard-0`,'dir');
-    await checked(exec,{program:'env',args:[`DM_FORMAL_MODE=${mode}`,'DM_SHARDS=1',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${mode==='formal'?to+240000:to}`,`DM_SOCKETS=${mode === 'smoke' ? 20 : 1000}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),per],timeout:600000,log:`${per}/summary.log`});
+    await checked(exec,{program:'env',args:[`DM_FORMAL_SCENARIO=${scenario}`,`DM_FORMAL_MODE=${mode}`,'DM_SHARDS=1',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${mode==='formal'?to+240000:to}`,`DM_SOCKETS=${mode === 'smoke' ? 20 : 1000}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),per],timeout:600000,log:`${per}/summary.log`});
     organizations.push(JSON.parse(readFileSync(`${per}/combined.json`,'utf8')));
-    await checked(exec,{program:'env',args:[`DM_FORMAL_MODE=${mode}`,'DM_SHARDS=1',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,`DM_SOCKETS=${mode==='smoke'?20:1000}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),per],timeout:600000,log:`${per}/core-summary.log`});
+    await checked(exec,{program:'env',args:[`DM_FORMAL_SCENARIO=${scenario}`,`DM_FORMAL_MODE=${mode}`,'DM_SHARDS=1',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,`DM_SOCKETS=${mode==='smoke'?20:1000}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),per],timeout:600000,log:`${per}/core-summary.log`});
     organizationsCore.push(JSON.parse(readFileSync(`${per}/combined.json`,'utf8')));
   }
+  const browsingDirectory=directory+'/browsing-organization';mkdirSync(browsingDirectory,{mode:0o700});
+  symlinkSync(directory+'/shard-10',browsingDirectory+'/shard-0','dir');
+  await checked(exec,{program:'env',args:[`DM_FORMAL_SCENARIO=${scenario}`,`DM_FORMAL_MODE=${mode}`,'DM_SHARDS=1',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),browsingDirectory],timeout:600000,log:browsingDirectory+'/summary.log'});
+  const browsingOrganization=JSON.parse(readFileSync(browsingDirectory+'/combined.json','utf8'));
   const evidence: Evidence = {};
   evidence.generatorFailures = exits.filter(row=>row.code!==0).length;
   let errors = 0, dropped = 0, duplicateFrames = 0, byteFailures = 0, offered = 0, accepted = 0, issuedTimed = 0;
@@ -92,15 +96,28 @@ async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: 
   }
   offered = (mode === 'smoke' ? 2 : 2000)*(to-from)/1000;
   Object.assign(evidence,{'errors':errors,'dropped':dropped,'send.bodyByteFailures':byteFailures,'offered.deficit':Math.max(0,offered-issuedTimed),'send.uncommittedPercent':100*(1-accepted/offered),'send.undrained':missing+Math.max(0,offered-issuedTimed),'ledger.missing':missing,'ledger.duplicates':duplicates,'ledger.unexpected':unexpected,'peer.missing':combined.peerMissing == null ? null : Math.abs(combined.peerMissing),'duplicates':duplicateFrames});
-  const latencyJudgment=judgeLatencies(aggregateTen.latencies,(organizations as typeof combined[]).map(org=>org.latencies));
+  const mixedReasons:string[]=[];
+  if(mode!=='formal')mixedReasons.push('Smoke cannot establish formal browsing load');
+  if(!combined.fullIntervals.some((interval:{start:number;end:number})=>interval.start<=from && interval.end>=to))mixedReasons.push('Missing 10,000 connections throughout core');
+  for(const [index,org] of (organizationsCore as typeof combined[]).entries()) {
+    const counters=org.counters ?? {}, seconds=(to-from)/1000;
+    if((counters['dm_offered:send'] ?? 0)<200*seconds)mixedReasons.push('Organization '+index+': sends below 200/s');
+    if(['resolve','create','renew'].reduce((n,key)=>n+(counters['dm_offered:'+key] ?? 0),0)<2*seconds)mixedReasons.push('Organization '+index+': opens below 2/s');
+  }
+  const browsing={latencies:browsingOrganization.latencies,window:browsingOrganization.window ?? {from:NaN,to:NaN},core:{from,to},fullMixedLoad:false,reasons:mixedReasons};
+  evidence['mix.missing']=(organizationsCore as typeof combined[]).reduce((sum,org)=>sum+heldCohorts(scenario).reduce((n,held)=>n+['delta','coverage','browse','recovery',...(held?['held']:[]),'completed5'].filter(lane=>(org.mixMembers?.[held+':'+lane]??0)<Array.from({length:mode==='smoke'?20:1000},(_,i)=>retainedAssignment(i,scenario)).filter(value=>value===held).length).length,0),0);
+  if(evidence['mix.missing']!==0)browsing.reasons.push('Missing per-Member O5 mix in core');
+  browsing.fullMixedLoad=browsing.reasons.length===0;
+  const latencyJudgment=judgeLatencies(aggregateTen.latencies,(organizations as typeof combined[]).map(org=>org.latencies),browsing);
   for(const budget of ['open','page','ack','peer','fiveAttemptRound'])for(const p of ['p95','p99']) {
     const rows=latencyJudgment.rows.filter(row=>row.budget===budget && row.percentile===p);
     const values=rows.map(row=>row.value).filter((value):value is number=>value!==null && Number.isFinite(value));
     evidence[budget+'.'+p]=values.length?Math.max(...values):null;
   }
   evidence.sampleDeficit=latencyJudgment.rows.filter(row=>row.organization==='aggregate' && row.percentile==='p95').reduce((sum,row)=>sum+Math.max(0,row.minimum-row.samples),0);
-  evidence['mix.missing']=(organizationsCore as typeof combined[]).reduce((sum,org)=>sum+heldCohorts(scenario).reduce((n,held)=>n+['delta','coverage','browse','recovery',...(held?['held']:[]),'completed5'].filter(lane=>(org.mixMembers?.[held+':'+lane]??0)<Array.from({length:mode==='smoke'?20:1000},(_,i)=>retainedAssignment(i,scenario)).filter(value=>value===held).length).length,0),0);
-  Object.assign(evidence,productionPoolEvidence(existsSync(`${directory}/app.log`)?readFileSync(`${directory}/app.log`,'utf8').split('\n'):[],from,to));
+  const pool=productionPoolEvidence(existsSync(`${directory}/app.log`)?readFileSync(`${directory}/app.log`,'utf8').split('\n'):[],from,to,
+    existsSync(`${directory}/app-log-retention.json`)?JSON.parse(readFileSync(`${directory}/app-log-retention.json`,'utf8')):{complete:false,startedAt:0,endedAt:0,reason:'Missing app log retention manifest'});
+  Object.assign(evidence,pool.evidence);
   evidence['connections.deficit']=combined.fullIntervals.some((interval:{start:number;end:number})=>interval.start<=from && interval.end>=to) ? 0 : 1;
   for(const role of ['app','db']) {
     const path=`${directory}/resources-${role}.jsonl`;
@@ -120,9 +137,9 @@ async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: 
     }
   }
   const judgment=judge(evidence,mode,scenario,latencyJudgment);
-  const report={...judgment,latencyJudgment,window:{from,to},offered,issuedTimed,acceptedInWindow:accepted,drain:existsSync(`${directory}/drain.json`) ? JSON.parse(readFileSync(`${directory}/drain.json`,'utf8')) : null,reconciliation:{missing,duplicates,unexpected},evidence,organizations,organizationsCore,core:combined,sampleExtension:mode==='formal'?{from,to:to+240000,latencies:sampleSummary.latencies,aggregateTen:aggregateTen.latencies}:null,limitations:['Per-Organization minimum 10,000/class conservatively awaits maintainer confirmation. Insufficient samples require additional measurement.','First/deep browser samples belong to a separate Organization; absent first/deep samples in the ten mixed-load Organizations remain NOT EVALUATED.','Missing pool acquisition telemetry is NOT EVALUATED for an unmodified production image.','Plan/SQL qualification and deferred scenarios require separate evidence; raw probes are not an automatic plan PASS.','Counts and latency judgments use the same extended population; fixed core retained separately. RSS needs 99% distinct one-second bins and growth needs 297 bins in each five-minute endpoint.']};
+  const report={...judgment,pool,latencyJudgment,browsingOrganization,browsingLoad:browsing,window:{from,to},offered,issuedTimed,acceptedInWindow:accepted,drain:existsSync(`${directory}/drain.json`) ? JSON.parse(readFileSync(`${directory}/drain.json`,'utf8')) : null,reconciliation:{missing,duplicates,unexpected},evidence,organizations,organizationsCore,core:combined,sampleExtension:mode==='formal'?{from,to:to+240000,latencies:sampleSummary.latencies,aggregateTen:aggregateTen.latencies}:null,limitations:['Q3: each mixed-load Organization needs 1,000/class; the ten-Organization aggregate needs 10,000/class. Insufficiency or a budget miss requires additional measurement or cause investigation.',latencyJudgment.mixedPopulationNote,'Pool statistics require complete production log coverage; see pool.reasons. Instrumentation overhead remains deferred NOT EVALUATED.','Plan/SQL qualification and deferred scenarios require separate evidence; raw probes are not an automatic plan PASS.','Counts and latency judgments use the same extended population; fixed core retained separately. RSS needs 99% distinct one-second bins and growth needs 297 bins in each five-minute endpoint.']};
   writeFileSync(`${directory}/judgment.json`,JSON.stringify(report,null,2),{mode:0o600});
-  writeFileSync(`${directory}/judgment.md`,`${judgment.label} — scenario: ${scenario}\n\nAcceptance: ${judgment.acceptance ? 'PASSED' : 'NOT PASSED'}\n\n| Budget | Limit | Observed | Judgment |\n|---|---:|---:|---|\n${judgment.rows.map(row=>`| ${row.budget} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} |`).join('\n')}\n\n| Organization | Class | Percentile | Samples | Minimum | Limit | Observed | Judgment | Additional measurement |\n|---|---|---|---:|---:|---:|---:|---|---|\n${latencyJudgment.rows.map(row=>`| ${row.organization} | ${row.shape} | ${row.percentile} | ${row.samples} | ${row.minimum} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} | ${row.additionalMeasurement ? 'required' : ''} |`).join('\n')}\n`,{mode:0o600});
+  writeFileSync(`${directory}/judgment.md`,`${judgment.label} — scenario: ${scenario}\n\nAcceptance: ${judgment.acceptance ? 'PASSED' : 'NOT PASSED'}\n\nPool evidence: ${pool.reasons.length?pool.reasons.join('; '):'evaluated from production pool_stats v1'}\n\nPool outcome deltas: ${Object.entries(pool.evidence).filter(([key])=>key.startsWith('pool.acquire_')).map(([key,value])=>key+'='+value).join(', ') || 'NOT EVALUATED'}\n\n| Budget | Limit | Observed | Judgment |\n|---|---:|---:|---|\n${judgment.rows.map(row=>`| ${row.budget} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} |`).join('\n')}\n\n| Organization | Class | Percentile | Samples | Minimum | Limit | Observed | Judgment | Additional measurement |\n|---|---|---|---:|---:|---:|---:|---|---|\n${latencyJudgment.rows.filter(row=>row.organization!=='browsing').map(row=>`| ${row.organization} | ${row.shape} | ${row.percentile} | ${row.samples} | ${row.minimum} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} | ${row.reason ?? ''} |`).join('\n')}\n\n${latencyJudgment.mixedPopulationNote}\n\nSeparate browsing Organization (core window only): ${latencyJudgment.browsingReasons.join('; ') || 'full mixed load established'}\n\n| Class | Percentile | Samples | Minimum | Limit | Observed | Judgment | Reason |\n|---|---|---:|---:|---:|---:|---|---|\n${latencyJudgment.browsingRows.map(row=>`| ${row.shape} | ${row.percentile} | ${row.samples} | ${row.minimum} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} | ${row.reason ?? ''} |`).join('\n')}\n`,{mode:0o600});
   return report;
 }
 export async function reportAttempt(directory:string,mode:'formal'|'smoke',exec:Executor,scenario:MixedScenario='main') {

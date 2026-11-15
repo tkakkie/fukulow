@@ -17,6 +17,7 @@ export const budgets: Record<string, number> = {
   'send.uncommittedPercent':1, 'send.undrained':0, 'ledger.missing':0, 'ledger.duplicates':0, 'ledger.unexpected':0,
   'errors':0, 'dropped':0, 'generatorFailures':0, 'peer.missing':0, 'duplicates':0,
   'send.bodyByteFailures':0, 'sampleDeficit':0, 'fixtureMismatches':0, 'mix.missing':0, 'connections.deficit':0, 'offered.deficit':0,
+  'poolOverhead.cpuRegressionPercent':10, 'poolOverhead.p95RegressionPercent':10, 'poolOverhead.p99RegressionPercent':10, 'poolOverhead.rssRegressionPercent':10,
   'preDm.p95RegressionPercent':10, 'preDm.p99RegressionPercent':10, 'preDm.cpuRegressionPercent':10,
   'exactCounts.failures':0, 'discovery.failures':0, 'storage.failures':0, 'restore.failures':0,
 };
@@ -31,16 +32,18 @@ export function judge(evidence: Evidence, mode: 'formal' | 'smoke', scenario: Sc
   return { scenario, label: mode === 'smoke' ? 'NON-ACCEPTANCE' : 'FORMAL (partial scenario coverage)', acceptance: mode === 'formal' && rows.every(row => row.status === 'PASS'), rows };
 }
 export const aggregateMinimum=10000;
-// No per-Organization minimum was adopted. Conservative rule, pending maintainer confirmation.
-export const organizationMinimum=10000;
+// Maintainer Q3, 2026-11-15; the ten-Organization aggregate still needs 10,000.
+export const organizationMinimum=1000;
 export const latencyClasses = {
   resolve:['open','dm_latency_ms:resolve'],create:['open','dm_latency_ms:create'],renew:['open','dm_latency_ms:renew'],
-  refresh:['page','dm_latency_ms:refresh'],delta:['page','dm_latency_ms:delta'],coverage:['page','dm_latency_ms:coverage'],first:['page','dm_latency_ms:first'],deep:['page','dm_latency_ms:deep'],
+  refresh:['page','dm_latency_ms:refresh'],delta:['page','dm_latency_ms:delta'],coverage:['page','dm_latency_ms:coverage'],
   send:['ack','dm_latency_ms:send'],peer:['peer','dm_receipt_ms'],fiveAttemptRound:['fiveAttemptRound','dm_round_ms:attempts=5'],
 } as const;
 export type Latencies = Record<string,{samples:number;p95:number;p99:number} | undefined>;
 export const combineVerdicts=(statuses:Verdict[]):Verdict=>statuses.includes('FAIL')?'FAIL':statuses.includes('NOT EVALUATED')?'NOT EVALUATED':'PASS';
-export function judgeLatencies(aggregate:Latencies, organizations:Latencies[]) {
+export const browsingClasses={first:['page','dm_latency_ms:first'],deep:['page','dm_latency_ms:deep']} as const;
+export type BrowsingEvidence={latencies:Latencies;window:{from:number;to:number};core:{from:number;to:number};fullMixedLoad:boolean;reasons:string[]};
+export function judgeLatencies(aggregate:Latencies, organizations:Latencies[], browsing?:BrowsingEvidence) {
   const populations=[{organization:'aggregate',latencies:aggregate,minimum:aggregateMinimum},...Array.from({length:10},(_,i)=>({organization:String(i),latencies:organizations[i] ?? {},minimum:organizationMinimum}))];
   const rows=populations.flatMap(({organization,latencies,minimum})=>Object.entries(latencyClasses).flatMap(([shape,[budget,key]])=>{
     const latency=latencies[key],samples=latency?.samples ?? 0;
@@ -48,10 +51,20 @@ export function judgeLatencies(aggregate:Latencies, organizations:Latencies[]) {
       const value=latency?.[percentile],limit=budgets[`${budget}.${percentile}`];
       const insufficient=!Number.isSafeInteger(samples) || samples<minimum;
       const status:Verdict=insufficient || value==null || !Number.isFinite(value)?'NOT EVALUATED':value>limit?'FAIL':'PASS';
-      return {organization,shape,budget,percentile,minimum,samples,value:value ?? null,limit,status,additionalMeasurement:insufficient};
+      return {organization,shape,budget,percentile,minimum,samples,value:value ?? null,limit,status,additionalMeasurement:status!=='PASS',reason:insufficient?'Insufficient samples; additional measurement required':status==='FAIL'?'Budget miss; cause investigation required':status==='NOT EVALUATED'?'Missing percentile evidence':null};
     });
   }));
-  return {aggregateMinimum,organizationMinimum,minimumNeedsMaintainerConfirmation:true,status:combineVerdicts(rows.map(row=>row.status)),rows};
+  const browsingReasons=[...(browsing?.reasons ?? ['Missing separate browsing Organization evidence'])];
+  if(browsing && (!Number.isFinite(browsing.window.from) || !Number.isFinite(browsing.window.to) || browsing.window.to<=browsing.window.from || browsing.window.from<browsing.core.from || browsing.window.to>browsing.core.to))browsingReasons.push('Browsing window outside judged mixed-load core');
+  if(browsing && !browsing.fullMixedLoad)browsingReasons.push('Concurrent full mixed load not established (connections, sends, opens or O5)');
+  const browsingRows=Object.entries(browsingClasses).flatMap(([shape,[budget,key]])=>(['p95','p99'] as const).map(percentile=>{
+    const latency=browsing?.latencies[key],samples=latency?.samples ?? 0,value=latency?.[percentile],limit=budgets[budget+'.'+percentile];
+    const reason=browsingReasons.length?browsingReasons.join('; '):!Number.isSafeInteger(samples)||samples<aggregateMinimum?'Insufficient browsing samples; additional measurement required':value==null||!Number.isFinite(value)?'Missing browsing percentile':value>limit?'Budget miss; cause investigation required':null;
+    const status:Verdict=browsingReasons.length || !Number.isSafeInteger(samples) || samples<aggregateMinimum || value==null || !Number.isFinite(value)?'NOT EVALUATED':value>limit?'FAIL':'PASS';
+    return {organization:'browsing',shape,budget,percentile,minimum:aggregateMinimum,samples,value:value ?? null,limit,status,additionalMeasurement:status!=='PASS',reason};
+  }));
+  rows.push(...browsingRows);
+  return {aggregateMinimum,organizationMinimum,minimumNeedsMaintainerConfirmation:false,status:combineVerdicts(rows.map(row=>row.status)),rows,browsingRows,browsingReasons,mixedPopulationNote:'First/deep browsing is judged only on the separate browsing Organization under the full core mixed load; the 100-DM fixture cannot supply deep continuations.'};
 }
 export function commonWindow(starts: number[], mode: 'formal' | 'smoke') {
   if (starts.length !== 11 || starts.some(start => !Number.isFinite(start))) throw new Error('All eleven generator start timestamps required');

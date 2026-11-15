@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 mod admission;
 pub(super) mod authors;
+mod dms_pool;
 mod mentions;
 mod text_input;
 pub(super) mod unread;

@@ -24,6 +24,7 @@ for (let shard = 0; shard < shards; shard++) {
     const sampleAt = sentAt && ['dm_expected_peer','dm_received_peer','dm_receipt_ms'].includes(metric) ? Number(sentAt) : Date.parse(data.time);
     if (sampleAt < from || sampleAt >= to) continue;
     if(metric==='dm_mix') {const key=data.tags.retained+':'+data.tags.lane;mix[key]=(mix[key]||0)+data.value;if(data.value>0 && data.tags.member!==undefined){if(!mixMembers.has(key))mixMembers.set(key,new Set());mixMembers.get(key)!.add(data.tags.member);}}
+    if(metric==='dm_offered') {const key=metric+':'+data.tags.shape;counters[key]=(counters[key]||0)+data.value;}
     if (metric === 'dm_errors' && data.tags.shape === 'close') closeCodes[data.tags.code || 'unknown'] = (closeCodes[data.tags.code || 'unknown'] || 0) + data.value;
     if (metric === 'dm_errors' || metric === 'dropped_iterations') { const key = metric+':'+(data.tags.shape || data.tags.scenario || '')+':'+(data.tags.status || ''); counters[key] = (counters[key] || 0)+data.value; }
     else if (['dm_accepted','dm_ready','dm_subscribed','dm_expected_peer','dm_received_peer','dm_duplicate_frames','dm_pending_rounds'].includes(metric)) counters[metric] = (counters[metric] || 0)+data.value;

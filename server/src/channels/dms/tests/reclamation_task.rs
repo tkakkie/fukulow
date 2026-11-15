@@ -185,3 +185,19 @@ async fn periodic_reclamation_runs_only_one_bounded_batch_per_tick(pool: PgPool)
     assert_eq!(batch(&f.pools.app, f.org).await.unwrap(), (1, 1));
     f.pools.app.close().await;
 }
+
+#[fukulow_test::test]
+async fn dm_maintenance_enumerator_and_reclamation_checkouts_are_counted(pool: PgPool) {
+    let f = Fixture::new(pool, "member").await;
+    let (result, count) = crate::database::test_acquisitions(
+        crate::auth::members::next_maintenance_organization(&f.pools.app, None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Some(f.org));
+    assert_eq!(count, 1);
+    let (result, count) =
+        crate::database::test_acquisitions(super::super::reclamation::batch(&f.pools.app, f.org))
+            .await;
+    assert_eq!(result.unwrap(), (0, 0));
+    assert_eq!(count, 1);
+}

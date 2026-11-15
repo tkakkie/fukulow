@@ -94,3 +94,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [messages](messages.md): `dm_mentions_participant_roles_replies_mark_read_and_renewal_share_batched_counts`, `dm_mention_denies_nonparticipant_member`, `dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set`
 - [realtime](realtime.md): `dm_mention_denial_matrix_has_no_identity_rows_counts_or_notifications`, `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`
+
+- [deployment](deployment.md): `dm_open_list_and_discovery_use_one_measured_checkout_each`
