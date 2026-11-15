@@ -3,9 +3,10 @@ import { resolve } from 'node:path';
 import { checked, type Executor } from './dms-formal-exec.ts';
 import { concurrentBrowsingReasons } from './dms-formal-concurrency.ts';
 import { productionPoolEvidence } from './dms-formal-pool.ts';
+import { scaledLoad } from './dms-formal-local.ts';
 import { overheadClasses, type OverheadArm } from './dms-formal-overhead.ts';
 
-function retainedLog(path:string,manifest:{bytes?:number;complete?:boolean}) {
+export function retainedLog(path:string,manifest:{bytes?:number;complete?:boolean}) {
   try {
     const file=lstatSync(path);
     return manifest.complete===true && typeof manifest.bytes==='number' && Number.isSafeInteger(manifest.bytes) && manifest.bytes>0 && file.isFile() && file.size===manifest.bytes;
@@ -23,10 +24,12 @@ export function overheadResources(rows:Resource[],from:number,to:number) {
   if(!rows.length || rows.some(r=>!r.identity || JSON.stringify(r.identity)!==JSON.stringify(rows[0]?.identity)))reasons.push('Container restart, changed start time or conditions');
   return {reasons,metrics:{'app.cpuMean':cpu.reduce((n,r)=>n+r.cpu,0)/cpu.length,'app.rssKiB':rss.length?Math.max(...rss.map(r=>r.rssKiB)):NaN}};
 }
-export async function reportOverheadArm(directory:string,exec:Executor) {
+export async function reportOverheadArm(directory:string,exec:Executor,label='FORMAL') {
   const read=(name:string)=>JSON.parse(readFileSync(directory+'/'+name,'utf8'));
   try {
-    const context=read('overhead-context.json'),{from,to}=context.window;
+    const context=read('overhead-context.json'),{from,to}=context.window,load=scaledLoad(context.loadScale);
+    if(context.pilot)throw new Error('Pilot is never comparison evidence');
+    if(context.target==='local' && (context.label!=='MAC-RELATIVE'||JSON.stringify(context.load)!==JSON.stringify(load)))throw new Error('Missing/mismatched local load conditions');
     const reasons:string[]=[];
     if(!/^[a-f0-9]{40}$/.test(context.sha) || !/^[a-f0-9]{64}$/.test(context.patchSha256) || context.toolchains?.sha!==context.sha)reasons.push('Missing/mismatched source provenance');
     if(!Number.isFinite(context.epoch) || from!==context.epoch+600000 || to!==from+300000)throw new Error('Invalid shortened ramp/warm/core window');
@@ -34,7 +37,8 @@ export async function reportOverheadArm(directory:string,exec:Executor) {
     const configurations=context.generator?.configurations;
     if(!Array.isArray(configurations) || configurations.length!==11)throw new Error('Missing generator configuration');
     configurations.forEach((config:Record<string,string>,i:number)=>{
-      const expected={DM_FORMAL:'1',DM_FORMAL_SCENARIO:'main',DM_EPOCH:String(context.epoch),DM_SECONDS:'605',DM_SEND_START:'300',DM_CONNECT_INTERVAL_MS:'30000',DM_SOCKETS:'1000',DM_SENDERS:'200',DM_RATE:i===10?'0':'200',DM_OPEN_RATE:i===10?'0':'2',DM_BROWSE_RATE:i===10?'100':'0',DM_BROWSER_ONLY:i===10?'1':'0',DM_LEDGER:'1',DM_SMOKE:'0'};
+      const expected={DM_FORMAL:'1',DM_FORMAL_SCENARIO:'main',DM_EPOCH:String(context.epoch),DM_SECONDS:'605',DM_SEND_START:'300',DM_CONNECT_INTERVAL_MS:'30000',DM_SOCKETS:String(load.socketsPerOrganization),DM_SENDERS:String(load.sendersPerOrganization),DM_RATE:i===10?'0':String(load.sendsPerOrganization),DM_OPEN_RATE:i===10?'0':String(load.opensPerOrganization),DM_BROWSE_RATE:i===10?String(load.browsing):'0',DM_BROWSER_ONLY:i===10?'1':'0',DM_LEDGER:'1',DM_SMOKE:'0'};
+      if(context.target==='local' && config.DM_LOAD_SCALE!==load.factor)reasons.push('Mismatched generator scale');
       if(Object.entries(expected).some(([key,value])=>config[key]!==value))reasons.push('Mismatched generator configuration');
     });
     const generatorLimits:unknown[]=[];
@@ -43,7 +47,7 @@ export async function reportOverheadArm(directory:string,exec:Executor) {
       for(const file of ['metrics.json','run.log','summary.json'])if(!existsSync(`${directory}/shard-${shard}/${file}`))throw new Error('Missing generator log');
       if(!retainedLog(`${directory}/shard-${shard}/run.log`,read(`shard-${shard}/run.log-retention.json`)))throw new Error('Missing/incomplete generator logs');
       const dir=directory+'/overhead-'+shard;mkdirSync(dir,{mode:0o700});symlinkSync(`${directory}/shard-${shard}`,dir+'/shard-0','dir');
-      await checked(exec,{program:'env',args:['DM_FORMAL_MODE=formal','DM_FORMAL_SCENARIO=main','DM_SHARDS=1',`DM_SOCKETS=${shard===10?10000:1000}`,`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),dir],timeout:600000});
+      await checked(exec,{program:'env',args:[...(context.target==='local'?['DM_FORMAL_TARGET=local']:[]),'DM_FORMAL_MODE=formal','DM_FORMAL_SCENARIO=main','DM_SHARDS=1',`DM_SOCKETS=${shard===10?10000:load.socketsPerOrganization}`,`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),dir],timeout:600000});
       summaries.push(JSON.parse(readFileSync(dir+'/combined.json','utf8')));
       const container=read(`shard-${shard}/container.json`);
       if(!container.limits)reasons.push('Missing generator resource limits');
@@ -58,7 +62,7 @@ export async function reportOverheadArm(directory:string,exec:Executor) {
     }
     const exits=read('exits.json');
     if(exits.length!==11 || new Set(exits.map((r:{shard:number})=>r.shard)).size!==11 || Array.from({length:11},(_,i)=>i).some(i=>!exits.some((r:{shard:number;code:number})=>r.shard===i && r.code===0)))reasons.push('Missing/failed generator');
-    reasons.push(...concurrentBrowsingReasons({from,to},summaries.slice(0,10),summaries[10],'main'));
+    reasons.push(...concurrentBrowsingReasons({from,to},summaries.slice(0,10),summaries[10],'main',load));
     const dbLog=read('db-log-retention.json');
     if(!retainedLog(directory+'/db.log',dbLog) || !Number.isFinite(dbLog.startedAt) || !Number.isFinite(dbLog.endedAt) || dbLog.startedAt>from || dbLog.endedAt<to)reasons.push('Missing/incomplete DB logs');
     const appLog=read('app-log-retention.json');
@@ -78,7 +82,7 @@ export async function reportOverheadArm(directory:string,exec:Executor) {
     // Keep each request class and its population; no mixing with separate browsing Organization.
     const aggregate=directory+'/overhead-aggregate';mkdirSync(aggregate,{mode:0o700});
     for(let i=0;i<10;i++)symlinkSync(`${directory}/shard-${i}`,aggregate+'/shard-'+i,'dir');
-    await checked(exec,{program:'env',args:['DM_FORMAL_MODE=formal','DM_FORMAL_SCENARIO=main','DM_SHARDS=10',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),aggregate],timeout:600000});
+    await checked(exec,{program:'env',args:[...(context.target==='local'?['DM_FORMAL_TARGET=local']:[]),'DM_FORMAL_MODE=formal','DM_FORMAL_SCENARIO=main','DM_SHARDS=10',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),aggregate],timeout:600000});
     const aggregateLatencies=JSON.parse(readFileSync(aggregate+'/combined.json','utf8')).latencies;
     for(const [shape,[,key]] of Object.entries(overheadClasses)) {
       const populations=(shape==='first'||shape==='deep'?[summaries[10]]:summaries.slice(0,10)).map(s=>s.latencies[key]);
@@ -88,14 +92,14 @@ export async function reportOverheadArm(directory:string,exec:Executor) {
       for(const p of ['p95','p99'])metrics[shape+'.'+p]=latency?.[p];
       if(populations.some(p=>!p || p.samples<=0))reasons.push('Missing request class population '+shape);
     }
-    const conditions={sha:context.sha,patchSha256:context.patchSha256,hosts:[appObservation.before.host,dbObservation.before.host,context.generator.host],limits:[appObservation.before.limits,dbObservation.before.limits,generatorLimits],snapshot:fixture.snapshot,generator:{...context.generator,configurations:configurations.map(({DM_EPOCH,...rest}:Record<string,string>)=>rest)},toolchains:[appObservation.before.toolchains,dbObservation.before.toolchains,context.toolchains]};
+    const conditions={loadScale:load.factor,target:context.target ?? 'ssh',label:context.label ?? 'FORMAL',sha:context.sha,patchSha256:context.patchSha256,hosts:[appObservation.before.host,dbObservation.before.host,context.generator.host],limits:[appObservation.before.limits,dbObservation.before.limits,generatorLimits],snapshot:fixture.snapshot,generator:{...context.generator,configurations:configurations.map(({DM_EPOCH,...rest}:Record<string,string>)=>rest)},toolchains:[appObservation.before.toolchains,dbObservation.before.toolchains,context.toolchains]};
     for(const obs of [appObservation,dbObservation])if(obs.before.sha!==context.sha)reasons.push('Source SHA mismatch');
     if(appObservation.before.revision!==context.sha)reasons.push('Image SHA mismatch');
     if(appObservation.before.image!==context.expectedImage)reasons.push('Image digest mismatch');
-    const report:OverheadArm={arm:context.arm,metrics,samples,conditions,imageDigest:appObservation.before.image,reasons};
+    const report:OverheadArm={label:context.label ?? 'FORMAL',acceptance:false,load,arm:context.arm,metrics,samples,conditions,imageDigest:appObservation.before.image,reasons};
     writeFileSync(directory+'/judgment.json',JSON.stringify(report,null,2),{mode:0o600});return report;
   } catch(error) {
-    const report:OverheadArm={arm:'B',metrics:{},samples:{},conditions:{},imageDigest:'',reasons:[error instanceof Error?error.message:'Missing overhead evidence']};
+    const report:OverheadArm={label,acceptance:false,arm:'B',metrics:{},samples:{},conditions:{},imageDigest:'',reasons:[error instanceof Error?error.message:'Missing overhead evidence']};
     writeFileSync(directory+'/judgment.json',JSON.stringify(report),{mode:0o600});return report;
   }
 }

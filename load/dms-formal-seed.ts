@@ -18,7 +18,7 @@ if(scenario!=='main' && scenario!=='held200')throw new Error('Seed requires main
 const {historical:pairs,supplemental:extraPairs}=fixturePairs(scenario);
 const smoke = process.env.DM_FORMAL_SMOKE === '1';
 const history = smoke ? 1 : 100;
-for (let o = 0; o < (smoke ? 1 : 10); o++) {
+for (let o = 0; o < (Number(process.env.DM_FORMAL_SEED_ORGS || 0) || (smoke ? 1 : 10)); o++) {
   const org = uuid(`org:${o}`), ordinary = uuid(`ordinary:${o}`), topic = uuid(`topic:${o}`);
   const channelId = (a: number, b: number) => uuid(`pair:${o}:${Math.min(a,b)}:${Math.max(a,b)}`);
   const members = Array.from({ length: 1000 }, (_, i) => ({ id: uuid(`member:${o}:${i}`), token: randomBytes(32).toString('hex'), channel: channelId(i,i^1), peer: uuid(`member:${o}:${i^1}`), extraToken: i%10 === 0 ? randomBytes(32).toString('hex') : undefined }));
@@ -42,12 +42,14 @@ for (let o = 0; o < (smoke ? 1 : 10); o++) {
   }
   const renewals = pairs.filter(([a,b]) => a < 900 && (a^1) !== b).slice(0,10000).map(([a,b]) => ({ caller: a, peer: b, channel: channelId(a,b) }));
   for (let start = 0; start < renewals.length; start += 100) sql('BEGIN;\n'+renewals.slice(start,start+100).map(r => `UPDATE channel_members SET membership_revision=0 WHERE organization_id='${org}' AND channel_id='${r.channel}' AND member_id='${members[r.peer].id}';`).join('\n')+'\nCOMMIT;');
+  // Each newly inserted Organization is absent from stale planner statistics.
+  // Refresh before the cleanup join; provisioning is outside every timed arm.
+  sql('ANALYZE channel_members; ANALYZE channel_read_positions;');
   sql(`DELETE FROM channel_read_positions p USING channel_members cm WHERE cm.organization_id='${org}' AND cm.membership_revision=0 AND p.organization_id=cm.organization_id AND p.channel_id=cm.channel_id AND p.member_id=cm.member_id;
 INSERT INTO channel_members(organization_id,channel_id,member_id,membership_revision) SELECT '${org}','${ordinary}',id,1 FROM users WHERE organization_id='${org}' AND (role='guest' OR id='${members[0].id}');
 INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT '${org}',id,1,10300 FROM users WHERE organization_id='${org}';
 INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) SELECT organization_id,member_id,1,channel_id,grant_id,row_number() OVER(PARTITION BY member_id ORDER BY channel_id),10000+row_number() OVER(PARTITION BY member_id ORDER BY channel_id) FROM channel_members WHERE organization_id='${org}' AND dm_created_at IS NOT NULL AND membership_revision=1;
-INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${org}',id,0 FROM channels WHERE organization_id='${org}' AND kind='dm';`);
-  sql(`UPDATE channel_message_sequences SET seq=${history} WHERE organization_id='${org}' AND channel_id=ANY(ARRAY[${pairs.map(([a,b])=>"'"+channelId(a,b)+"'::uuid").join(',')}]);`);
+INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${org}',id,${history} FROM channels WHERE organization_id='${org}' AND id=ANY(ARRAY[${pairs.map(([a,b])=>"'"+channelId(a,b)+"'::uuid").join(',')}]);`);
   for (let start = 0; start < pairs.length; start += 250) {
     const ids = pairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
     sql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);`);
