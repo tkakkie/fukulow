@@ -742,6 +742,12 @@ pub(crate) fn candidate_members_sql() -> String {
     format!("{ACTIVE_MEMBERS_SQL} AND id = ANY($3)")
 }
 
+// A correlated fan-out candidate keeps the Organization/Member index bound
+// inside the LATERAL read, before RLS and revision filtering.
+pub(crate) fn candidate_member_sql(id: &str, revision: &str) -> String {
+    format!("{ACTIVE_MEMBERS_SQL} AND id = {id} AND membership_revision = {revision}")
+}
+
 /// Internal fixture/maintenance helper taking an Account id; HTTP administration uses
 /// members::deactivate with actor authorization and Channel manager protection.
 pub async fn deactivate_member(

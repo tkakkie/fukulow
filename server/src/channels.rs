@@ -504,10 +504,7 @@ pub(crate) async fn member_access(
     members: &[(Uuid, i64)],
 ) -> Result<Vec<(Uuid, i64, bool)>, sqlx::Error> {
     let (ids, revisions): (Vec<_>, Vec<_>) = members.iter().copied().unzip();
-    let sql = format!(
-        "SELECT v.id,v.membership_revision,v.visible FROM ({}) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision",
-        visibility_sql(&auth::candidate_members_sql(), "$2")
-    );
+    let sql = member_access_sql();
     crate::database::organization_statement(
         pool,
         &sql,
@@ -531,10 +528,7 @@ pub(crate) async fn member_access_in(
     members: &[(Uuid, i64)],
 ) -> Result<Vec<(Uuid, i64, bool)>, sqlx::Error> {
     let (ids, revisions): (Vec<_>, Vec<_>) = members.iter().copied().unzip();
-    let sql = format!(
-        "SELECT v.id,v.membership_revision,v.visible FROM ({}) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision",
-        visibility_sql(&auth::candidate_members_sql(), "$2")
-    );
+    let sql = member_access_in_sql();
     sqlx::query_as(&sql)
         .bind(organization)
         .bind(channel)
@@ -542,6 +536,26 @@ pub(crate) async fn member_access_in(
         .bind(revisions)
         .fetch_all(connection)
         .await
+}
+
+fn member_access_sql() -> String {
+    format!(
+        "SELECT v.id,v.membership_revision,v.visible FROM UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) \
+         CROSS JOIN LATERAL ({} OFFSET 0) v",
+        visibility_sql(
+            &auth::candidate_member_sql("candidate.id", "candidate.revision"),
+            "$2"
+        )
+    )
+}
+
+// Context is already set before planning in this snapshot. Its bounded bulk
+// scan avoids the extra index probes of the one-statement candidate path (#354).
+fn member_access_in_sql() -> String {
+    format!(
+        "SELECT v.id,v.membership_revision,v.visible FROM ({}) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision",
+        visibility_sql(&auth::candidate_members_sql(), "$2")
+    )
 }
 #[cfg(test)]
 pub(crate) mod tests;
