@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { checked, type Executor } from './dms-formal-exec.ts';
 import { commonWindow, judge, judgeLatencies, reconcile, type LedgerRow, type Evidence } from './dms-formal-judgment.ts';
 import { percentile } from './dms-workload.ts';
+import { concurrentBrowsingReasons } from './dms-formal-concurrency.ts';
 import { productionPoolEvidence } from './dms-formal-pool.ts';
 import { heldCohorts, type MixedScenario } from './dms-formal-scenarios.ts';
 import { retainedAssignment } from './dms-formal-mix.ts';
@@ -96,7 +97,7 @@ async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: 
   }
   offered = (mode === 'smoke' ? 2 : 2000)*(to-from)/1000;
   Object.assign(evidence,{'errors':errors,'dropped':dropped,'send.bodyByteFailures':byteFailures,'offered.deficit':Math.max(0,offered-issuedTimed),'send.uncommittedPercent':100*(1-accepted/offered),'send.undrained':missing+Math.max(0,offered-issuedTimed),'ledger.missing':missing,'ledger.duplicates':duplicates,'ledger.unexpected':unexpected,'peer.missing':combined.peerMissing == null ? null : Math.abs(combined.peerMissing),'duplicates':duplicateFrames});
-  const mixedReasons:string[]=[];
+  const mixedReasons:string[]=concurrentBrowsingReasons({from,to},organizationsCore as typeof combined[],browsingOrganization,scenario);
   if(mode!=='formal')mixedReasons.push('Smoke cannot establish formal browsing load');
   if(!combined.fullIntervals.some((interval:{start:number;end:number})=>interval.start<=from && interval.end>=to))mixedReasons.push('Missing 10,000 connections throughout core');
   for(const [index,org] of (organizationsCore as typeof combined[]).entries()) {

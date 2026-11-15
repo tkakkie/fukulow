@@ -42,6 +42,8 @@ export async function setup() {
 const browserOnly = __ENV.DM_BROWSER_ONLY === '1';
 const browseRate = Number(__ENV.DM_BROWSE_RATE || (browserOnly ? 100 : 25)), openRate = Number(__ENV.DM_OPEN_RATE || 5);
 const offered = new Counter('dm_offered');
+// Timestamp values retain round identity without a high-cardinality round tag.
+const o5Offered = new Gauge('dm_o5_round_start_ms');
 const errors = new Counter('dm_errors'), calls = new Counter('dm_calls'), accepted = new Counter('dm_accepted');
 const connected = new Gauge('dm_connections'), readyMetric = new Counter('dm_ready');
 const subscribed = new Counter('dm_subscribed'), expectedPeer = new Counter('dm_expected_peer'), receivedPeer = new Counter('dm_received_peer'), duplicates = new Counter('dm_duplicate_frames');
@@ -136,6 +138,8 @@ export async function sockets() {
             await prepare();
             if(formal)state=demandFormalMix(state,member.id);
             const start = Date.now(), ownEpoch = epoch; let used = 0, failures=0;
+            const roundTags={member:String(index),retained:String(retained)};
+            if(formal)o5Offered.add(start,{...roundTags,lane:'start'});
             const lanes=new Set<string>();
             for (;;) {
               state = stepDmList(state, { type: 'wake', now: Date.now() }).state;
@@ -143,6 +147,7 @@ export async function sockets() {
               if (!request) break;
               if(formal)assertFormalCohort(state,retained);
               used++; lanes.add(request.lane);
+              if(formal)o5Offered.add(start,{...roundTags,lane:request.lane});
               try {
                 const discovery = request.lane === 'delta' || request.lane === 'coverage';
                 const path = discovery ? `/dms/changes?lane=${request.lane}${request.cursor ? `&cursor=${encodeURIComponent(request.cursor)}` : ''}`
@@ -229,6 +234,7 @@ export async function browse() {
   if(formal && browserOnly && execution.scenario.iterationInTest===0)console.log('DM_SCHEDULE '+JSON.stringify({epoch,actual:execution.scenario.startTime,kind:'browser'}));
   const deep = execution.scenario.iterationInTest%2 === 1;
   if (deep && !seed.deep) throw new Error('Deep browsing requires a prepared 5,000-row continuation');
+  offered.add(1,{shape:deep?'deep':'first'});
   await get('/dms' + (deep ? '?cursor='+encodeURIComponent(seed.deep!) : ''), members[members.length-1].token, deep ? 'deep' : 'first');
 }
 export function openDm() {
