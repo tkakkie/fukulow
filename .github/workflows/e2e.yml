@@ -61,6 +61,8 @@ jobs:
             --workdir "$GITHUB_WORKSPACE/web" \
             --entrypoint "$(command -v node)" \
             "$PLAYWRIGHT_IMAGE" node_modules/@playwright/test/cli.js test
+      - name: Verify named E2E invariants passed
+        run: node web/scripts/check-e2e-invariants.ts
       - name: Upload restricted E2E failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v7

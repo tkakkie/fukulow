@@ -4,6 +4,7 @@ Web UI shell: sign-in/session UI, navigation, tokens, timeline, a11y, setup. Wri
 
 | Rule | Test |
 |---|---|
+| The server serves the built web app at / with title fukulow and a successful /api/v1/health response | `web/e2e/smoke.spec.ts::built app is served by the server` |
 | Guest sender names use the Member list, then readable-Message authors, then メンバー in timeline and announcements; no directory widening | `web/src/timeline.svelte.test.ts::Guest Workspace resolves Member list then author lookup then fallback in timeline and announcements` |
 | Guest directory refreshes on access/list change, reconnect and member-panel opens; remote grant changes converge at the next trigger | `web/src/auth.svelte.test.ts::Guest Organization selection and reconnect reload Members and stop old selection refreshes`, `web/src/timeline.svelte.test.ts::Guest member panels reload remote grants on every open and keep the add-candidate picker hidden`, `web/src/member-access.test.ts::remote grant changes converge at the next panel open without channel_access_lost and keep past sender identities`, `web/src/member-access.test.ts::refreshes Members on Channel list additions removals access loss and reconnect and detaches on selection teardown` |
 | A superseded full Member-list response cannot restore identities after a newer Guest-scoped response | `web/src/members.test.ts::ignores an older unscoped response after a newer Guest directory load completes` |
