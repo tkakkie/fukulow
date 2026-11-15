@@ -31,6 +31,7 @@ if (exportedSql) {
 }
 writeFileSync(resolve(output, 'source.json'), JSON.stringify({
   head: run('git', ['rev-parse', 'HEAD']).trim(), node: process.version,
+  dirty: run('git', ['status', '--porcelain']),
   exportedSql: exportedSql ? resolve(exportedSql) : 'production builders in working tree',
   hashes: Object.fromEntries(['access_rows_batch', 'access_rows_single', 'member_access', 'member_access_batch'].map(name =>
     [name, createHash('sha256').update(readFileSync(resolve(output, 'sql', `${name}.sql`))).digest('hex')])),
@@ -80,16 +81,18 @@ ${batch ? 'COMMIT;' : ''}
 `;
     writeFileSync(resolve(output, `${mode}-${probe.name}.sql`), prefix);
     const samples = [];
-    for (let pass = 0; pass < 6; pass++) {
+    const measuredPasses = 15;
+    for (let pass = 0; pass <= measuredPasses; pass++) {
       const raw = psql(prefix);
       writeFileSync(resolve(output, `${mode}-${probe.name}-${pass}.json`), raw);
       const plan = JSON.parse(raw)[0];
       if (pass > 0) samples.push(plan);
     }
     samples.sort((a, b) => a['Execution Time'] - b['Execution Time']);
-    const median = samples[2];
+    const median = samples[Math.floor(samples.length / 2)];
     summary.push({ mode, query: probe.name, milliseconds: median['Execution Time'],
-      range: [samples[0]['Execution Time'], samples[4]['Execution Time']],
+      samples: samples.length,
+      range: [samples[0]['Execution Time'], samples[samples.length - 1]['Execution Time']],
       hits: median.Plan['Shared Hit Blocks'], reads: median.Plan['Shared Read Blocks'],
       plan: median.Plan });
     console.log(mode, probe.name, median['Execution Time']);

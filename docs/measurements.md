@@ -760,7 +760,7 @@ Validation on Node v26.13.0: type check and all 61 tests passed. The corrected s
 
 Bounds Organization/Member candidate work in `access_rows` and one-statement `member_access`; RLS policies, permission predicates and context helpers are unchanged. Baseline: production SQL at `1662d5d`. Full record (conditions, per-node row/Index Cond audit, loaded-host rounds, rejected `member_access_in` point version): moved to #354 as a comment.
 
-Method: `node load/hot-plans/fanout.ts <container> <database> <out>` exports the real Rust builders through the ignored `export_fanout_plan_sql` test and runs them as `fukulow_app` (NOBYPASSRLS) on `load/hot-plans/seed.sql` (11,000 Members, 5,000 grants, 248,000 Messages). `EXPLAIN (ANALYZE, BUFFERS)`, forced Custom/Generic plans, B/A A/B B/A rounds, median of 15 samples per side. Apple M5 Mac, Docker, PostgreSQL 18.6; host load 6–9.
+Method: `node load/hot-plans/fanout.ts <container> <database> <out>` exports the real Rust builders through the ignored `export_fanout_plan_sql` test and runs them as `fukulow_app` (NOBYPASSRLS) on `load/hot-plans/seed.sql` (11,000 Members, 5,000 grants, 248,000 Messages). `EXPLAIN (ANALYZE, BUFFERS)`, forced Custom/Generic plans. The table records B/A A/B B/A rounds: each arm discarded one warm-up pass and kept **5 measured passes**; each reported time is the median of the three arm medians (15 retained samples per side, not a pooled 15-sample median). Raw plans and summaries: `target/rls354/pair{5,6,7}-{before,after}/`, `target/rls354/final-comparison.json`. Apple M5 Mac, Docker, PostgreSQL 18.6; host load 6–9. The current harness records HEAD/dirty state and SQL hashes, discards one warm-up pass, and collects **15 measured passes per invocation**; the table has not been remeasured with that method.
 
 | Query / candidates | Custom ms before → after | Generic ms before → after | Shared hits Custom; Generic |
 |---|---:|---:|---:|
@@ -773,4 +773,3 @@ Method: `node load/hot-plans/fanout.ts <container> <database> <out>` exports the
 - **Removed work.** Generic plans no longer reject 499,500 Member and 5,000,000 grant join pairs (`access_rows`) or 1,047,552 pairs (`member_access`); Members and grants are now index-bounded per candidate.
 - **Tradeoff.** Point probes raise shared-buffer hits. The 24-row tail was already bounded.
 - **Limits.** Shared Mac, warm cache, no DMs in the timing fixture, no Linux or concurrent send-load run. The Generic pathology fix is clear; no stable Custom-latency improvement is claimed. Not a performance acceptance (#431).
-

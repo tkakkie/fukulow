@@ -479,34 +479,15 @@ async fn bounded_candidates_keep_organization_scope_with_account_read_policy(poo
         })
         .await
         .unwrap();
-        // Session Account context lets the pool-based one-statement path run
-        // with both permissive policies, rather than only testing member_access_in.
-        sqlx::query("SELECT set_config('fukulow.account_id', $1, false)")
+        // This dedicated pool has exactly one connection and no concurrent users.
+        // Keep local Account context across checkouts in an explicit transaction
+        // so the pool-based one-statement path also sees both permissive policies.
+        sqlx::query("BEGIN").execute(&app).await.unwrap();
+        sqlx::query("SELECT set_config('fukulow.account_id', $1, true)")
             .bind(account.to_string())
             .execute(&app)
             .await
             .unwrap();
-        crate::database::organization_read_only(
-            &app,
-            entry.organization,
-            async |tx: &mut sqlx::PgConnection| {
-                let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id=$1")
-                    .bind(entry.member.0)
-                    .fetch_one(tx)
-                    .await?;
-                assert_eq!(visible, 2, "{mode}: overlapping-policy positive control");
-                Ok::<_, sqlx::Error>(())
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            super::super::member_access(&app, entry.organization, entry.channel, &[entry.member])
-                .await
-                .unwrap(),
-            [(entry.member.0, 0, true)],
-            "{mode}: one-statement candidates must stay Organization-bound"
-        );
         let own: Vec<Uuid> = sqlx::query_scalar("SELECT organization_id FROM users WHERE id=$1")
             .bind(entry.member.0)
             .fetch_all(&app)
@@ -517,10 +498,37 @@ async fn bounded_candidates_keep_organization_scope_with_account_read_policy(poo
             [fixture.organizations[1]],
             "{mode}: Account-read control"
         );
-        sqlx::query("RESET fukulow.account_id")
-            .execute(&app)
+        let mut connection = app.acquire().await.unwrap();
+        crate::database::set_organization(&mut connection, entry.organization)
             .await
             .unwrap();
+        let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id=$1")
+            .bind(entry.member.0)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(visible, 2, "{mode}: overlapping-policy positive control");
+        drop(connection);
+        assert_eq!(
+            super::super::member_access(&app, entry.organization, entry.channel, &[entry.member])
+                .await
+                .unwrap(),
+            [(entry.member.0, 0, true)],
+            "{mode}: one-statement candidates must stay Organization-bound"
+        );
+        assert_eq!(
+            super::super::member_access(
+                &app,
+                entry.organization,
+                entry.channel,
+                &[(fixture.members[0], 0), (entry.member.0, 1)]
+            )
+            .await
+            .unwrap(),
+            [(fixture.members[0], 0, false)],
+            "{mode}: private non-member and stale revision must still deny"
+        );
+        sqlx::query("ROLLBACK").execute(&app).await.unwrap();
         crate::database::tests::context::clean(&app).await;
         app.close().await;
     }
