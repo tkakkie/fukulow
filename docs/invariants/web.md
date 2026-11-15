@@ -42,6 +42,7 @@ Web UI shell: sign-in/session UI, navigation, tokens, timeline, a11y, setup. Wri
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [deployment](deployment.md): `both proxies enforce browser headers with removal weakening and inheritance denials`, `csp_websocket_source_rejects_injected_or_ambiguous_hosts`
 - [messages](messages.md): `treats admission 503 as retryable and preserves the send key`, `an admission refusal cannot restore a draft after the Account Session store was cleared`
 - [messages](messages.md): `retains the 429 delay even when ErrorBody is malformed`
 - [sync](sync.md): `429 waits without resending early, re-arms with a new delay and preserves the entire request`, `throttled sends cancel waits on canonical settlement, discard, access loss and lifecycle changes`

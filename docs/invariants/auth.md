@@ -90,6 +90,7 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [deployment](deployment.md): `both proxies enforce browser headers with removal weakening and inheritance denials`, `csp_websocket_source_rejects_injected_or_ambiguous_hosts`
 - [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`
 
 - [messages](messages.md): `author_lookup_authorization_and_identities_share_a_nonlocking_snapshot`, `author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bounds_batches`

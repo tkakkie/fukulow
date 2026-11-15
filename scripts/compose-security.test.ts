@@ -7,6 +7,102 @@ import { fileURLToPath } from 'node:url'
 const cwd = fileURLToPath(new URL('..', import.meta.url))
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
 const args = (profile: string) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', '--profile', profile, 'config', '--format', 'json']
+const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
+
+function checkRestrictions(service: Record<string, unknown>) {
+  assert.equal(service.read_only, true, 'read_only must be true')
+  assert.deepEqual(service.cap_drop, ['ALL'], 'cap_drop must deny ALL')
+  assert.deepEqual(service.security_opt, ['no-new-privileges:true'], 'no-new-privileges must be true')
+  assert.ok(!service.privileged, 'privileged must be disabled')
+  assert.deepEqual(service.cap_add ?? [], [], 'cap_add must stay empty')
+  assert.deepEqual(service.volumes ?? [], [], 'no demonstrated writable-path exception')
+  assert.deepEqual(service.tmpfs ?? [], [], 'no demonstrated tmpfs exception')
+}
+
+// Guard the shipped, deliberately simple configuration shape. After CI builds the
+// image, check-compose-security.ts exercises errors independently of app headers.
+function checkProxyHeaders(profile: string, source: string) {
+  if (profile === 'caddy') {
+    assert.match(source, /^\(browser_headers\) \{\n/, 'shared browser policy snippet required')
+    assert.match(source, /\{\$FUKULOW_DOMAIN:localhost\} \{\n\s+import browser_headers\n/, 'normal routes must import browser headers')
+    assert.match(source, /handle_errors \{\n\s+import browser_headers\n\s+respond "\{err.status_code\} \{err.status_text\}" \{err.status_code\}\n\s+\}/, 'upstream errors must import browser headers and preserve status')
+  }
+  const lines = source.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#'))
+  let depth = 0
+  for (const line of lines) {
+    if (profile === 'nginx' && line.startsWith('add_header ')) {
+      assert.equal(depth, 1, 'location add_header discards server headers')
+    }
+    for (const [name, value] of [['Permissions-Policy', permissionsPolicy], ['Cross-Origin-Opener-Policy', 'same-origin']]) {
+      if (line.includes(name)) {
+        assert.equal(depth, 1, `${name} must be unconditional at server scope`)
+        const allowed = profile === 'caddy' ? [`header >${name} "${value}"`] :
+          [`proxy_hide_header ${name};`, `add_header ${name} "${value}" always;`]
+        assert.ok(allowed.includes(line), `${name} must retain its enforced value on errors`)
+      }
+    }
+    // Ignore placeholders (Caddy env / nginx variables) and inline map blocks.
+    if (line.endsWith(' {')) depth++
+    if (line === '}') depth--
+  }
+  for (const [name, value] of [['Permissions-Policy', permissionsPolicy], ['Cross-Origin-Opener-Policy', 'same-origin']]) {
+    const expected = profile === 'caddy' ? `header >${name} "${value}"` : `add_header ${name} "${value}" always;`
+    assert.equal(lines.filter(line => line === expected).length, 1, `${name} must be emitted exactly once`)
+    if (profile === 'nginx') assert.ok(lines.includes(`proxy_hide_header ${name};`), `${name} must replace the upstream header`)
+  }
+}
+
+test('deployment and load app and migrate enforce container restrictions with removal and weakening denials', () => {
+  for (const file of ['compose.yml', 'load/compose.yml']) {
+    for (const profileArgs of file === 'compose.yml' ? [['--profile', 'caddy'], ['--profile', 'nginx']] : [[]]) {
+      const config = JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', '-f', file,
+        ...profileArgs, 'config', '--format', 'json'], { cwd, env: { ...env, LOAD_PROJECT: 'restrictions-test', LOAD_PORT: '18080',
+          LOAD_DB_PASSWORD: 'owner-test-only', LOAD_APP_PASSWORD: 'app-test-only', LOAD_SETUP_TOKEN: 'setup-test-only' }, encoding: 'utf8' }))
+      for (const name of ['app', 'migrate']) {
+        const service = config.services[name]
+        checkRestrictions(service)
+        for (const [key, weakened] of [['read_only', false], ['cap_drop', ['NET_RAW']], ['security_opt', ['no-new-privileges:false']]] as const) {
+          const removed = structuredClone(service)
+          delete removed[key]
+          assert.throws(() => checkRestrictions(removed), undefined, `${file} ${name} removed ${key}`)
+          assert.throws(() => checkRestrictions({ ...service, [key]: weakened }), undefined, `${file} ${name} weakened ${key}`)
+        }
+        for (const mutation of [{ privileged: true }, { cap_add: ['NET_RAW'] }, { volumes: ['/tmp:/tmp'] }, { tmpfs: ['/tmp'] }]) {
+          assert.throws(() => checkRestrictions({ ...service, ...mutation }))
+        }
+      }
+    }
+  }
+})
+
+test('both proxies enforce browser headers with removal weakening and inheritance denials', () => {
+  for (const [profile, file] of [['caddy', 'deploy/Caddyfile'], ['nginx', 'deploy/nginx.conf']]) {
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
+    checkProxyHeaders(profile, source)
+    for (const name of ['Permissions-Policy', 'Cross-Origin-Opener-Policy']) {
+      const declaration = source.split('\n').find(line => line.includes(name) && !line.includes('proxy_hide_header'))!
+      assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, '')), undefined, `${profile} removed ${name}`)
+      const weakened = name === 'Permissions-Policy' ? declaration.replace('camera=()', 'camera=(self)') : declaration.replace('same-origin', 'unsafe-none')
+      assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, weakened)), undefined, `${profile} weakened ${name}`)
+      if (profile === 'nginx') {
+        assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, declaration.replace(' always;', ';'))))
+        assert.throws(() => checkProxyHeaders(profile, source.replace(`    proxy_hide_header ${name};`, '')))
+      } else {
+        assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, declaration.replace('header >', 'header @hsts >'))))
+        assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, declaration.replace('header >', 'header '))))
+      }
+    }
+    if (profile === 'nginx') {
+      assert.throws(() => checkProxyHeaders(profile, source.replace('return 404;', 'add_header X-Test "test";\n        return 404;')), /location add_header/)
+    } else {
+      for (const declaration of ['\timport browser_headers\n', '\t\timport browser_headers\n']) {
+        assert.throws(() => checkProxyHeaders(profile, source.replace(declaration, '')), /must import browser headers/)
+      }
+    }
+  }
+  const app = readFileSync(new URL('../server/src/lib.rs', import.meta.url), 'utf8')
+  assert.ok(app.includes(`const PERMISSIONS_POLICY: &str = "${permissionsPolicy}";`), 'direct app policy must agree with proxies')
+})
 
 function checkBaseImages(dockerfile: string) {
   const bases = dockerfile.matchAll(/^FROM (\S+)/gm)

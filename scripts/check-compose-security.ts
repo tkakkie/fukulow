@@ -24,6 +24,7 @@ const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'com
 const run = (args: string[], input?: string) => execFileSync('docker', args, { cwd, env, input, encoding: 'utf8', timeout: 180_000 }).trim()
 const dc = (...args: string[]) => run([...compose, ...args])
 const owner = { email: 'compose-owner@example.test', password: 'compose-owner-password-test-only' }
+const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
 writeFileSync(override, `services:
   migrate:
     image: ${image}
@@ -45,10 +46,11 @@ async function check(profile: string) {
     proxy('up', '-d', '--no-build', '--wait')
     const port = proxy('port', profile, profile === 'caddy' ? '443' : '80')
     const url = `${profile === 'caddy' ? 'https' : 'http'}://${port.replace('127.0.0.1:', 'localhost:')}`
-    const request = (path: string, data?: unknown, forwarded?: string, baseUrl = url) => {
+    const request = (path: string, data?: unknown, forwarded?: string, baseUrl = url, token?: string) => {
       const args = ['--insecure', '--silent', '--show-error', '--max-time', '10', '-w', '\n%{http_code}']
       if (data !== undefined) args.push('-H', 'Content-Type: application/json', '--data', JSON.stringify(data))
       if (forwarded) args.push('-H', `X-Forwarded-For: ${forwarded}`)
+      if (token) args.push('-H', `Authorization: Bearer ${token}`)
       const response = execFileSync('curl', [...args, baseUrl + path], { encoding: 'utf8' }).trim()
       const boundary = response.lastIndexOf('\n')
       return { status: Number(response.slice(boundary + 1)), body: response.slice(0, boundary) }
@@ -59,11 +61,36 @@ async function check(profile: string) {
       await delay(1000)
     }
     const app = proxy('ps', '-q', 'app')
+    function checkHeaders(path: string, status: number, baseUrl = url) {
+      const output = execFileSync('curl', ['-sI', '--insecure', '--show-error', '--max-time', '10', baseUrl + path], { encoding: 'utf8' })
+      assert.match(output, new RegExp(`^HTTP/\\S+ ${status}\\b`))
+      for (const [name, value] of [['permissions-policy', permissionsPolicy], ['cross-origin-opener-policy', 'same-origin']]) {
+        const values = output.split(/\r?\n/).filter(line => line.toLowerCase().startsWith(`${name}:`)).map(line => line.slice(line.indexOf(':') + 1).trim())
+        assert.deepEqual(values, [value], `${profile} ${path}: ${name}`)
+      }
+      console.log(`curl -sI --insecure ${baseUrl + path}\n${output.split(/\r?\n/).filter(line => /^(HTTP\/|permissions-policy:|cross-origin-opener-policy:)/i.test(line)).join('\n')}`)
+    }
+    for (const [path, status] of [['/', 200], ['/api/v1/health', 200], ['/api/v1/missing', 404], ['/api/v1/ready', 404], ['/api/v1/ready?check=1', 404]] as const) checkHeaders(path, status)
     assert.equal(request('/api/v1/ready').status, 404, 'readiness must stay internal')
     assert.equal(request('/api/v1/ready?check=1').status, 404, 'query strings must not bypass the exact-path block')
     assert.deepEqual(request('/api/v1/health'), { status: 200, body: 'ok' })
     run(['exec', app, 'fukulow-server', 'probe'])
     const [state] = JSON.parse(run(['inspect', app]))
+    for (const container of [app, proxy('ps', '-aq', 'migrate')]) {
+      const [actual] = JSON.parse(run(['inspect', container]))
+      assert.equal(actual.HostConfig.ReadonlyRootfs, true)
+      assert.deepEqual(actual.HostConfig.CapDrop, ['ALL'])
+      assert.deepEqual(actual.HostConfig.SecurityOpt, ['no-new-privileges:true'])
+      assert.equal(actual.HostConfig.Privileged, false)
+      assert.deepEqual(actual.HostConfig.CapAdd ?? [], [])
+      assert.deepEqual(actual.Mounts, [], 'no writable mounts or tmpfs needed')
+      assert.equal(run(['diff', container]), '', 'no runtime filesystem writes')
+      if (container !== app) assert.equal(actual.State.ExitCode, 0, 'read-only migration succeeded')
+    }
+    const processStatus = run(['exec', app, 'cat', '/proc/1/status'])
+    assert.match(processStatus, /^NoNewPrivs:\s+1$/m)
+    for (const capability of ['CapPrm', 'CapEff', 'CapBnd']) assert.match(processStatus, new RegExp(`^${capability}:\\s+0+$`, 'm'))
+    assert.equal(state.State.Health.Status, 'healthy')
     assert.equal(state.Config.User, '10001:10001')
     assert.equal(run(['exec', app, 'id', '-u']), '10001')
     assert.match(run(['exec', app, 'cat', '/proc/1/status']), /^Uid:\s+10001\s+10001\s+10001\s+10001$/m)
@@ -77,6 +104,18 @@ async function check(profile: string) {
     }
     assert.equal(request('/api/v1/setup', { ...setup, setup_token: env.FUKULOW_SETUP_TOKEN }).status, 201)
     assert.equal(request('/api/v1/session', owner).status, 200)
+    const native = request('/api/v1/native/session', owner)
+    assert.equal(native.status, 200)
+    const session = JSON.parse(native.body)
+    const me = request('/api/v1/me', undefined, undefined, url, session.token)
+    assert.equal(me.status, 200)
+    const organization = JSON.parse(me.body).organizations[0].organization_id
+    const authenticated = (path: string, data?: unknown) => request(`/api/v1/orgs/${organization}${path}`, data, undefined, url, session.token)
+    const created = authenticated('/channels', { name: 'Read-only check', visibility: 'public' })
+    assert.equal(created.status, 201)
+    const channel = JSON.parse(created.body).id
+    const messagesPath = `/channels/${channel}/messages`
+    assert.equal(authenticated(messagesPath, { body: 'Fresh read-only send', client_message_id: randomUUID() }).status, 201)
 
     // This helper joins only backend for the test. Its socket peer is untrusted even
     // though the configured header is present; changing spoofed IPs cannot escape 429.
@@ -131,6 +170,8 @@ async function check(profile: string) {
     // the public proxy and the debug publication. Prefer edge as its gateway.
     await restartApp()
     const debugUrl = `http://${proxy('port', 'app', '8080')}`
+    checkHeaders('/api/v1/health', 200, debugUrl)
+    checkHeaders('/api/v1/missing', 404, debugUrl)
     assert.equal(request('/api/v1/session', owner, undefined, debugUrl).status, 200)
     for (let n = 1; n <= 20; n++) {
       assert.equal(request('/api/v1/session', { email: `debug${n}@example.test`, password: 'wrong-password-test-only' },
@@ -141,9 +182,17 @@ async function check(profile: string) {
     const [stopped] = JSON.parse(run(['inspect', app]))
     assert.equal(stopped.State.ExitCode, 0, 'PID 1 must handle default SIGTERM without SIGKILL')
     assert.equal(stopped.State.OOMKilled, false)
+    // Caddy has a separate error chain. nginx's always headers are already
+    // exercised by its own 404; a stopped Docker peer can take 60 s to time out.
+    if (profile === 'caddy') checkHeaders('/api/v1/health', 502)
     await restartApp()
     assert.equal(request('/api/v1/setup').body, '{"setup_required":false}')
-    console.log(`PASS ${profile}: non-root, log rotation, SIGTERM exit 0, token, sign-in, backend/public/debug-port spoofing, independent client budgets, restart, retained setup`)
+    const history = authenticated(messagesPath)
+    assert.equal(history.status, 200)
+    assert.equal(JSON.parse(history.body).messages[0].body, 'Fresh read-only send')
+    assert.equal(authenticated(messagesPath, { body: 'Read-only send after restart', client_message_id: randomUUID() }).status, 201)
+    assert.equal(run(['diff', app]), '')
+    console.log(`PASS ${profile}: read-only app/migrate without mounts, zero capabilities, no-new-privileges, healthy probe, fresh sends and restart/history/send, proxy/direct 200 and app/proxy 404 headers${profile === 'caddy' ? ', proxy 502 headers' : ''}, non-root, log rotation, SIGTERM exit 0, token, sign-in, backend/public/debug-port spoofing, independent client budgets, retained setup`)
   } finally {
     spawnSync('docker', ['rm', '-f', helper], { cwd, env, stdio: 'ignore' })
     proxy('down', '-v', '--remove-orphans')
