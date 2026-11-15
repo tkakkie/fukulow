@@ -97,7 +97,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends age
           age --version && age-keygen --version
-      - name: Script tests including backup publication and disposable restore guards
+      - name: Script tests including cache credential scope, backup publication and disposable restore guards
         env: { FUKULOW_REQUIRE_AGE: '1' }
         run: node --test scripts/*.test.ts
       - name: Context settings are transaction-local
@@ -130,25 +130,23 @@ jobs:
       - name: Compose security configuration and rejection checks
         run: node --test scripts/compose-security.test.ts
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Expose GitHub Actions cache credentials to buildx bake
+      # Only main writes the layer cache: a PR export once hung for 17 minutes, and PRs read main's layers anyway.
+      - name: Build image with GitHub Actions layer cache
+        id: build-image
+        timeout-minutes: 20
+        # Like e2e-compose, only the action's build child inherits cache credentials.
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const url = process.env.ACTIONS_RESULTS_URL;
-            const token = process.env.ACTIONS_RUNTIME_TOKEN;
-            if (!url || !token) { throw new Error("Actions cache credentials are not available"); }
-            core.exportVariable("ACTIONS_RESULTS_URL", url);
-            core.exportVariable("ACTIONS_RUNTIME_TOKEN", token);
-      # Only main writes the layer cache: a PR export once hung for 17 minutes, and PRs read main's layers anyway.
-      - name: Build image with GitHub Actions layer cache
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          cache=(--set "app.cache-from=type=gha,scope=docker")
-          if [ "$GITHUB_EVENT_NAME" = push ]; then cache+=(--set "app.cache-to=type=gha,scope=docker,mode=max"); fi
-          docker buildx bake --load --file compose.yml "${cache[@]}"
-        env:
-          POSTGRES_PASSWORD: ci-compose-only
+            if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
+              throw new Error("Actions cache credentials are not available");
+            }
+            const args = ["buildx", "bake", "--load", "--file", "compose.yml",
+              "--set", "app.cache-from=type=gha,scope=docker"];
+            if (context.eventName === "push") {
+              args.push("--set", "app.cache-to=type=gha,scope=docker,mode=max");
+            }
+            await exec.exec("docker", args);
       - name: Both proxy profiles reject forwarded-IP spoofing
         run: node scripts/check-compose-security.ts
         env:
@@ -157,13 +155,35 @@ jobs:
         run: node scripts/check-db-roles.ts
         env:
           CHECK_COMPOSE_IMAGE: fukulow-app
+      - name: Fetch upgrade source
+        run: git fetch origin main --depth=1
+      - name: Build old image with GitHub Actions layer cache
+        id: build-upgrade-image
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
+              throw new Error("Actions cache credentials are not available");
+            }
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const source = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "fukulow-upgrade-build-"));
+            const archive = `${source}.tar`;
+            const env = { PATH: process.env.PATH };
+            try {
+              await exec.exec("git", ["archive", "--format=tar", "--output", archive, "origin/main"], { env });
+              await exec.exec("tar", ["-xf", archive, "-C", source], { env });
+              await exec.exec("docker", ["buildx", "build", "--load", "--cache-from", "type=gha,scope=docker",
+                "-q", "-t", "fukulow-upgrade-main", source]);
+            } finally {
+              fs.rmSync(archive, { force: true });
+              fs.rmSync(source, { recursive: true, force: true });
+            }
       - name: Upgrade populated main volume and verify backup/restore with app grants
-        run: |
-          git fetch origin main --depth=1
-          node scripts/check-db-upgrade.ts
+        run: node scripts/check-db-upgrade.ts
         env:
           CHECK_COMPOSE_IMAGE: fukulow-app
-          CHECK_UPGRADE_CACHE_FROM: type=gha,scope=docker
+          CHECK_UPGRADE_OLD_IMAGE: fukulow-upgrade-main
       - run: docker compose --profile caddy up -d --no-build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only

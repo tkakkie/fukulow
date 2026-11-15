@@ -12,6 +12,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - Rust + PostgreSQL + WebSocket; Svelte SPA embedded in the binary. Reason: performance, one-image delivery.
 - Reverse proxy is optional: the app speaks plain HTTP; Caddy (default) or nginx via compose profile. Reason: Caddy gave trouble in ribbitto and may limit performance.
 - #194 C: use UID/GID 10001 and root-owned runtime files; the app needs only network/DB access. Pin external images by tag + multi-platform digest for reproducibility; weekly Docker/Compose Dependabot updates retain reviewed upgrades. Bound local logs to 10m x 3 per container.
+- #401: deployment/load app and migrate use read-only roots, drop ALL capabilities and forbid new privileges. Embedded assets/SQL and DB-only persistence need no writable mount; fresh and populated-upgrade checks guard this.
 - #194 C: no init wrapper or STOPSIGNAL override: the server spawns no child processes to reap, and #195 registers SIGTERM/SIGINT before serving and drains work. Exec-form CMD keeps the binary as PID 1; SIGTERM is already Docker's default.
 - OpenAPI generated from Rust, committed, diff-checked in CI. Reason: future native clients (Kotlin).
 - `organization_id` on every table from day one. Reason: multi-organization later without retrofit.
@@ -27,7 +28,8 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 
 ## Rules, CI and AI process
 - Rules have tiers: Absolute (CI only with a reliable check), Default (deviation needs a PR line), Free. Reason: hard rules without a good check push AIs into awkward code; boundaries and tenant isolation are worth enforcing (#29).
-- Module boundaries, each module owning its tables; more crates allowed when responsibility, dependency direction, build time or testability justify it (#373, maintainer). Crates keep the module DAG with no cycles; release stays one binary in one image. Production domain crates: decided in #378.
+- Module boundaries, each module owning its tables; more crates allowed when responsibility, dependency direction, build time or testability justify it (#373, maintainer). Crates keep the module DAG with no cycles; release stays one binary in one image.
+- #378 (2026-11-15): staged domain crate split allowed, deferred: weighs compiler-enforced responsibility/dependency boundaries against migration cost; touch-only Mac rebuilds (measurements) don't show a split's effect. auth first; one crate and module-direction checker stay until #378 revisit.
 - #194 B: `database` is composition-level deployment/startup plumbing and depends on no domain module; review enforces it until M1 (#320) checks it as a leaf (#319).
 - #248: shared read-only closures ROLLBACK on Ok/Err and reuse clean backends. A Drop guard discards cancellation and failed BEGIN/ROLLBACK; SQLx 0.8.6 records depth only after BEGIN responds, so its rollback-on-drop misses cancelled starts.
 - #200 adds `docs/ui.md` as a doc kind for web UI rules. Reason: several AIs build screens in parallel; one short rule set keeps look, states, focus and copy consistent without re-deciding per PR.
@@ -72,6 +74,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [realtime](realtime.md): `#196 B app pool`, `#196 B keeps`, `#196 B headroom is shared`, `#196 B sets session-level`, `#196 B leaves RLS`, `#196 B migrations disable`
 
 - [auth](auth.md): `#197 FUKULOW_COOKIE_SECURE describes the public HTTPS`, `#197 HSTS max-age=31536000 lives at TLS`, `#197 Vite manifest outputs alone get`, `#194: forwarded IPs require a trusted`, `#194: require a nonblank FUKULOW_SETUP_TOKEN in`, `#194: Compose separates proxy/app edge from`
+- [auth](auth.md): `#401: app and both proxies send`
 - [auth](auth.md): `CI probes health through Caddy HTTPS`, `#163: after an unexpected worker exit`, `#163 manual check: node scripts/check-compose-restart.ts verifies`
 - [realtime](realtime.md): `#195: retain provisional 60 s drain`, `#88/#194 B bounds one-shot migration lock`
 - [web](web.md): `#211: Compose browser acceptance runs on`, `#211/#254: upload only allowlisted report.json on`

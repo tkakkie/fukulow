@@ -5,9 +5,10 @@
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
   import EmptyState from './ui/EmptyState.svelte'
-  let { rows, selectedId, loading = false, error = false, more = true, busy = false, canOpen = false, message = '', unread, onselect, onmore, onretry }: {
+  let { rows, selectedId, loading = false, error = false, more = true, busy = false, canOpen = false, message = '', unread, mentions, onselect, onmore, onretry }: {
     rows: DmRow[]; selectedId: string | null; loading?: boolean; error?: boolean; more?: boolean; busy?: boolean; canOpen?: boolean; message?: string
     unread?(id: string): number | null
+    mentions?(id: string): number | null
     onselect(id: string): void; onmore(): void; onretry(): void
   } = $props()
 </script>
@@ -28,7 +29,7 @@
         <ListRow prefix="💬" name={`${row.identity.peer.name}${row.identity.peer.active ? '' : '（無効）'}`}
           selected={selectedId === row.identity.id}
           unreadCount={row.baseline ? (unread?.(row.identity.id) ?? row.baseline.unread_count) : 0}
-          mentioned={(row.baseline?.mention_unread_count ?? 0) > 0}
+          mentionUnreadCount={row.baseline ? (mentions?.(row.identity.id) ?? row.baseline.mention_unread_count) : 0}
           onclick={() => onselect(row.identity.id)} />
         {#if !row.baseline}<span class="dm-list__unknown">未読を確認中</span>{/if}
       </li>

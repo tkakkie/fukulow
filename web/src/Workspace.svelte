@@ -4,6 +4,7 @@
   import { navigationAdapter } from './navigation.svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import { createAnnouncementController } from './announcements'
+  import type { MentionName } from './mentions'
   import { senderName } from './authors'
   import type { Channel, DmDiscovery, Identity, Message } from './api'
   import DmList from './DmList.svelte'
@@ -214,6 +215,7 @@
   let openedReplyTarget = ''
 
   const authorIdentities = $derived(members?.authors.identities)
+  const resolveMentionName: MentionName = (id, fallback, mentions) => members?.authors.mentionName(id, fallback, mentions) ?? fallback
   const memberNames = $derived(new Map((members?.state.members ?? []).map(member => [member.id, member.name])))
   $effect(() => {
     const ids: string[] = []
@@ -683,6 +685,7 @@
         topics={currentTopicsState && selected?.id === s.selectedId ? currentTopicsState.topics : []}
         allTopicsKnown={selected?.id === s.selectedId ? allTopicsKnown : false}
         {channelUnreadCount}
+        channelMentionUnreadCount={(id) => session.unread?.(id).state.mentionUnreadCount ?? null}
         topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
         onselect={handleSelectChannel}
         onselecttopic={handleSelectTopic}
@@ -695,7 +698,8 @@
         <DmList rows={dmState.rows} selectedId={s.selectedId} loading={dmState.status === 'loading'}
           error={dmState.status === 'error'} message={dmState.message} busy={dmState.busy}
           canOpen={Boolean(organization && organization.member.role !== 'guest')}
-          more={!dmState.lanes.browse.done} unread={channelUnreadCount} onselect={handleSelectChannel}
+          more={!dmState.lanes.browse.done} unread={channelUnreadCount}
+          mentions={(id) => session.unread?.(id).state.mentionUnreadCount ?? null} onselect={handleSelectChannel}
           onmore={() => session.dms?.browse()} onretry={() => session.dms?.refresh()} />
       {/if}
       {#if !organizationUnavailable && members && organization}
@@ -788,6 +792,9 @@
               {organizationUnavailable}
               reconnecting={announcementView.reconnecting}
               resolveSenderName={resolveSender}
+            {resolveMentionName}
+            members={members?.state.members ?? []}
+            onmentionrequest={() => { void members?.load() }}
               bind:composerRef={mainComposerRef}
               onopenreplies={handleOpenReplies}
               onretrytopicmeta={() => {
@@ -812,6 +819,9 @@
             {organizationUnavailable}
             reconnecting={announcementView.reconnecting}
             resolveSenderName={resolveSender}
+              {resolveMentionName}
+              members={members?.state.members ?? []}
+              onmentionrequest={() => { void members?.load() }}
             bind:composerRef={mainComposerRef}
             bind:topicInputRef={mainTopicInputRef}
             onopentopic={handleSelectTopic}
@@ -929,6 +939,9 @@
               sendDisabled={dmSendDisabled}
               bind:composerRef={replyComposerRef}
               resolveSenderName={resolveSender}
+              {resolveMentionName}
+              members={members?.state.members ?? []}
+              onmentionrequest={() => { void members?.load() }}
               onopenreplies={handleOpenReplies}
               onretrytarget={() => {
                 if (route) void session.navigationTargets?.load(route, true)
@@ -947,6 +960,7 @@
         {:else if activePanelTab === 'topics'}
           {#if currentTopics && selected}
             <TopicList
+              {resolveMentionName}
               topics={currentTopics}
               unread={currentUnread}
               channelId={selected.id}

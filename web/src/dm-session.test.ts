@@ -8,7 +8,7 @@ const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve()
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 function client() {
-  const first: Message = { id: 'first', channel_id: 'D', client_message_id: 'first-key', seq: 1, sender: 'peer', body: 'First before selection', topic_id: null, reply_to: null, reply_root_id: null, created_at: '2026-11-14T00:00:00Z' }
+  const first: Message = { mentions: [], id: 'first', channel_id: 'D', client_message_id: 'first-key', seq: 1, sender: 'peer', body: 'First before selection', topic_id: null, reply_to: null, reply_root_id: null, created_at: '2026-11-14T00:00:00Z' }
   let rows: Dm[] = [dm('D', { as_of_seq: 1, read_seq: 0, main_unread_count: 1, unread_count: 1 })]
   let socket!: RealtimeHandlers
   const listMessages = vi.fn(async () => ok({ messages: [first], has_more: false }))
@@ -136,5 +136,55 @@ it('DM discovery during an unknown-kind bootstrap uses common history before est
   expect(c.session.sync.get().channels.D.messages.map(m => m.seq)).toEqual([2, 3])
   expect(c.session.sync.get().channels.D.cursor).toBe(3)
   expect(c.session.sync.getTimeline('D').get().hasOlder).toBe(true)
+  c.session.close()
+})
+
+it('DM Mention counts converge across live duplicate replay reconnect marks and access loss', async () => {
+  const c = client()
+  c.first.mentions = [{ member_id: 'me', name: 'Me' }]
+  c.rows = [dm('D', { as_of_seq: 1, read_seq: 0, main_unread_count: 1, unread_count: 1, mention_unread_count: 1 })]
+  await c.ready()
+  expect(c.session.unread.get('D').mentionUnreadCount).toBe(1)
+  c.session.dms.select('D'); await flush()
+  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(c.session.unread.get('D').mentionUnreadCount).toBe(1)
+  const live: Message = { ...c.first, id: 'second', client_message_id: 'second-key', seq: 2 }
+  for (let i = 0; i < 3; i++) c.socket.onEvent({ type: 'message', message: live })
+  await flush()
+  expect(c.session.unread.get('D').mentionUnreadCount).toBe(2)
+  expect(c.session.unread.get('D').unreadCount).toBe(2)
+  c.rows = [dm('D', { as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2, mention_unread_count: 2 })]
+  c.socket.onClose(1001); await vi.advanceTimersByTimeAsync(1000)
+  c.socket.onReady(); c.socket.onEvent({ type: 'activity_ready' })
+  c.socket.onEvent({ type: 'message', message: live }); c.socket.onEvent({ type: 'message', message: live })
+  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 2 })
+  await vi.advanceTimersByTimeAsync(16_000)
+  expect(c.session.unread.get('D').mentionUnreadCount).toBe(2)
+  c.rows = [dm('D', { as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, mention_unread_count: 0 })]
+  c.socket.onEvent({ type: 'read_position_changed', channel_id: 'D', topic_id: null, read_seq: 2 })
+  await vi.advanceTimersByTimeAsync(16_000)
+  expect(c.session.unread.get('D').mentionUnreadCount).toBe(0)
+  c.socket.onEvent({ type: 'channel_access_revoked', channel_id: 'D' }); await flush()
+  expect(c.session.dms.get().rows).toEqual([])
+  expect(c.session.unread.get('D').mentionUnreadCount).toBeNull()
+  c.socket.onEvent({ type: 'message', message: live }); await flush()
+  expect(c.session.unread.get('D').mentionUnreadCount).toBeNull()
+  c.session.close()
+})
+
+it('unwatched DM Mention baselines follow activity notices and cross-device marks without watching or marking', async () => {
+  const c = client(); await c.ready()
+  c.rows = [dm('D', { as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2, mention_unread_count: 1 })]
+  c.socket.onEvent({ type: 'channel_activity', channel_id: 'D', seq: 2 })
+  c.socket.onEvent({ type: 'channel_activity', channel_id: 'D', seq: 2 })
+  await vi.advanceTimersByTimeAsync(16_000)
+  expect(c.session.unread.get('D').mentionUnreadCount).toBe(1)
+  expect(c.session.sync.get().channels.D).toBeUndefined()
+  c.rows = [dm('D', { as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, mention_unread_count: 0 })]
+  c.socket.onEvent({ type: 'read_position_changed', channel_id: 'D', topic_id: null, read_seq: 2 })
+  await vi.advanceTimersByTimeAsync(16_000)
+  expect(c.session.unread.get('D').mentionUnreadCount).toBe(0)
+  expect(c.listMessages).not.toHaveBeenCalled(); expect(c.markRead).not.toHaveBeenCalled()
   c.session.close()
 })

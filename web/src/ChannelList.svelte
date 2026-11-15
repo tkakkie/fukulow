@@ -14,6 +14,7 @@
     topics = [],
     allTopicsKnown = false,
     channelUnreadCount,
+    channelMentionUnreadCount,
     topicUnreadCounts = {},
     onselect,
     onselecttopic,
@@ -25,7 +26,8 @@
     topics?: readonly TopicLine[]
     allTopicsKnown?: boolean
     channelUnreadCount?: (channelId: string) => number | null
-    topicUnreadCounts?: Readonly<Record<string, { readonly unreadCount: number | null }>>
+    topicUnreadCounts?: Readonly<Record<string, { readonly unreadCount: number | null; readonly mentionUnreadCount?: number | null }>>
+    channelMentionUnreadCount?: (channelId: string) => number | null
     onselect: (id: string) => void
     onselecttopic?: (topicId: string) => void
     onopenalltopics?: (opener: HTMLElement | null) => void
@@ -49,6 +51,7 @@
         name={c.name}
         selected={c.id === selectedId && !activeTopicId}
         unreadCount={channelUnread !== null && channelUnread > 0 ? channelUnread : 0}
+        mentionUnreadCount={channelMentionUnreadCount?.(c.id) ?? 0}
         expanded={isExpanded ? true : undefined}
         onclick={() => onselect(c.id)}
       >
@@ -60,6 +63,7 @@
               name={t.baseline?.summary.name ?? 'トピック'}
               selected={activeTopicId === t.topicId}
               unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
+              mentionUnreadCount={topicUnreadCounts[t.topicId]?.mentionUnreadCount ?? 0}
               onclick={() => onselecttopic?.(t.topicId)}
             />
           {/each}

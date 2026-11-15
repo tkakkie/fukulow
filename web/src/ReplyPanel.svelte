@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Member } from './api'
+  import type { MentionName } from './mentions'
   import { tick } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
@@ -41,6 +43,9 @@
     sendDisabled = false,
     composerRef = $bindable(null),
     resolveSenderName,
+    resolveMentionName,
+    members = [],
+    onmentionrequest,
     onopenreplies,
     onretrytarget,
     ongoToChannelList,
@@ -58,6 +63,9 @@
     sendDisabled?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     resolveSenderName?: (senderId: string) => string
+    resolveMentionName?: MentionName
+    members?: readonly Member[]
+    onmentionrequest?: () => void
     onopenreplies?: (message: Message, opener?: HTMLElement | null) => void
     onretrytarget?: () => void
     ongoToChannelList?: () => void
@@ -433,6 +441,9 @@
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
                 body={m.body}
+                mentions={m.mentions}
+                {resolveMentionName}
+                {selfId}
                 replyCount={replyCounts.get(m.id) ?? 0}
                 focusable
                 rovingTabindex={rovingRowId === m.id ? 0 : -1}
@@ -485,6 +496,8 @@
 
   <div class="reply-panel__composer">
     <Composer
+      {members}
+      {onmentionrequest}
       bind:textareaRef={composerRef}
       placeholder="返信を入力"
       value={composerState.draft}

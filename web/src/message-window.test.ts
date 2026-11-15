@@ -247,7 +247,7 @@ it('retains Topic positions after evicting their latest body and refetches the e
   await c.topics.loadSummary('A', 'T')
   expect(c.topics.get('A').lines.find(l => l.kind === 'topic')).toMatchObject({ summaryError: 'retryable' })
   c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 1000,
-    topic: { id: 'T', name: 'Topic T', first_seq: 1, last_seq: 11, message_count: 4, latest_message: msg(11, 'T'), read_seq: 0, unread_count: 0 } }))
+    topic: { mention_unread_count: 0, id: 'T', name: 'Topic T', first_seq: 1, last_seq: 11, message_count: 4, latest_message: msg(11, 'T'), read_seq: 0, unread_count: 0 } }))
   await c.topics.retrySummary('A', 'T')
   expect(c.topics.get('A').lines.find(l => l.kind === 'topic')).toMatchObject({ position: 11, messageCount: 4, latestMessage: { seq: 11 } })
   expect(c.sync.get().channels.A.cursor).toBe(1000)

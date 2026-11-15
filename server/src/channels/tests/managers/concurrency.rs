@@ -195,7 +195,7 @@ async fn channel_manager_guest_change_and_send_never_invert_member_grant_locks(p
     });
     tokio::time::timeout(Duration::from_secs(3),async {
         loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'UPDATE channel_members SET manager=false%' OR query LIKE 'SELECT role FROM (%' OR query LIKE 'SELECT member_id FROM channel_members%')").fetch_one(&f.pools.admin).await.unwrap();
+            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'UPDATE channel_members SET manager=false%' OR query LIKE 'SELECT role FROM (%' OR query LIKE 'SELECT member_id FROM channel_members%' OR query LIKE 'SELECT visibility=%' OR query LIKE 'SELECT id,membership_revision,role FROM users%')").fetch_one(&f.pools.admin).await.unwrap();
             if waiting >= 2 {break;}
             tokio::task::yield_now().await;
         }

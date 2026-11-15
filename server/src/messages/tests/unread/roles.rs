@@ -344,11 +344,9 @@ async fn unread_access_migration_repairs_guest_rows_and_backfills_without_resett
     let missing = Uuid::new_v4();
     for (c, private) in [(granted, false), (private, true), (missing, false)] {
         super::super::channel(&pool, org, c, owner_id, private).await;
-        crate::messages::tests::historical_send(&pool, org, owner_id, c, Some("Before migration"))
-            .await;
+        historical_post(&pool, org, owner_id, c, Some("Before migration")).await;
     }
-    crate::messages::tests::historical_send(&pool, org, owner_id, public, Some("Must disappear"))
-        .await;
+    historical_post(&pool, org, owner_id, public, Some("Must disappear")).await;
     grant(&pool, org, granted, guest).await;
     grant(&pool, org, private, guest).await;
     role(&pool, org, guest, "guest").await;

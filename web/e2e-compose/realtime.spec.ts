@@ -22,7 +22,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   const sockets: ObservedWebSocket[] = []
   const signIns: Promise<unknown>[] = []
   for (const page of [a, b]) {
-    page.on('console', message => { if (/content.security.policy|violates.*directive/i.test(message.text())) cspErrors.push(message.text()) })
+    page.on('console', message => { if (/content.security.policy|violates.*directive|permissions.policy.*(violation|violat|blocked)|violat.*permissions.policy/i.test(message.text())) cspErrors.push(message.text()) })
     page.on('pageerror', error => cspErrors.push(error.message))
     page.on('response', response => {
       if (new URL(response.url()).pathname === '/api/v1/session' && response.request().method() === 'POST') {
@@ -62,7 +62,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   expect(headers['x-content-type-options']).toBe('nosniff')
   expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin')
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(baseURL!).hostname)
-  expect(headers['strict-transport-security']).toBe(loopback ? undefined : 'max-age=31536000')
+  expect(headers['strict-transport-security']).toBe(loopback && process.env.E2E_EXTERNAL_TLS !== 'true' ? undefined : 'max-age=31536000')
   expect(headers['cache-control']).toBe('no-cache')
   for (const path of ['/index.html', '/channels/general', '/favicon.svg']) {
     expect((await secretSafe(() => a.request.get(path))).headers()['cache-control']).toBe('no-cache')

@@ -344,3 +344,236 @@ async fn dm_stale_revision_cannot_subscribe_replay_or_receive_even_after_explici
     ready(&mut current, c, 2).await;
     fallback.release();
 }
+
+#[fukulow_test::test]
+async fn dm_mention_denial_matrix_has_no_identity_rows_counts_or_notifications(pool: PgPool) {
+    for case in ["member", "owner", "admin", "guest", "foreign", "inactive"] {
+        let f = fixture(&pool).await;
+        sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
+            .bind(f.organization)
+            .bind(f.member)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (peer, reader) = member(&pool, f.organization).await;
+        let target_org = if case == "foreign" {
+            organization(&pool).await
+        } else {
+            f.organization
+        };
+        let (target, target_token) = member(&pool, target_org).await;
+        let role = if matches!(case, "owner" | "admin" | "guest") {
+            case
+        } else {
+            "member"
+        };
+        sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=ANY($2)")
+            .bind(f.organization)
+            .bind([peer, target])
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let c = open(&f, peer).await;
+        let mut good = f.server.connect(&reader).await;
+        subscribe(&mut good, c, 0).await;
+        ready(&mut good, c, 0).await;
+        let mut bad = f.server.connect(&target_token).await;
+        subscribe(&mut bad, c, 0).await;
+        denied(&mut bad, c).await;
+        if case == "inactive" {
+            let r = request(
+                &f.app,
+                "POST",
+                &format!(
+                    "/api/v1/orgs/{}/members/{target}/deactivate",
+                    f.organization
+                ),
+                &f.token,
+                Value::Null,
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::NO_CONTENT);
+            closed(&mut bad, CLOSE_ORGANIZATION_UNAVAILABLE).await;
+        }
+        let text = format!("@{{member:{target}}} @{{member:{peer}}}");
+        let m = send(&f, &f.token, c, Uuid::new_v4(), &text).await;
+        assert_eq!(m["mentions"], json!([{"member_id":peer,"name":"Member"}]));
+        assert_eq!(event(&mut good).await["message"], m);
+        f.state.message_delivery.flush().await;
+        if case != "inactive" {
+            assert_eq!(
+                activity::collect(&f.state.message_delivery.channel_access.activity, &mut bad)
+                    .await,
+                json!([]).as_array().unwrap().clone()
+            );
+            silent(&mut bad).await;
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM message_mentions WHERE organization_id=$1 AND member_id=$2",
+        )
+        .bind(f.organization)
+        .bind(target)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "{case}");
+        let r = request(
+            &f.app,
+            "GET",
+            &format!("/api/v1/orgs/{}/dms", f.organization),
+            &reader,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(body(r).await["dms"][0]["mention_unread_count"], 1);
+        let r = request(
+            &f.app,
+            "GET",
+            &format!("/api/v1/orgs/{target_org}/dms"),
+            &target_token,
+            Value::Null,
+        )
+        .await;
+        if case == "inactive" {
+            assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        } else {
+            assert_eq!(body(r).await["dms"], json!([]));
+        }
+        let mut replay = f.server.connect(&reader).await;
+        subscribe(&mut replay, c, 0).await;
+        assert_eq!(event(&mut replay).await["message"], m);
+        ready(&mut replay, c, 1).await;
+    }
+}
+
+#[fukulow_test::test]
+async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines(
+    pool: PgPool,
+) {
+    for phase in ["live", "page", "frame"] {
+        let f = fixture(&pool).await;
+        sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
+            .bind(f.organization)
+            .bind(f.member)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (peer, reader) = member(&pool, f.organization).await;
+        let c = open(&f, peer).await;
+        let mut socket = f.server.connect(&reader).await;
+        let gate = access_loss::gate(
+            c,
+            phase,
+            if phase == "page" {
+                0
+            } else if phase == "frame" {
+                2
+            } else {
+                1
+            },
+        );
+        if phase == "live" {
+            subscribe(&mut socket, c, 0).await;
+            ready(&mut socket, c, 0).await;
+        }
+        for _ in 0..3 {
+            let m = send(
+                &f,
+                &f.token,
+                c,
+                Uuid::new_v4(),
+                &format!("@{{member:{peer}}}"),
+            )
+            .await;
+            assert_eq!(m["mentions"], json!([{"member_id":peer,"name":"Member"}]));
+        }
+        if phase != "live" {
+            subscribe(&mut socket, c, 0).await;
+        }
+        entered(&gate).await;
+        let r = request(
+            &f.app,
+            "GET",
+            &format!("/api/v1/orgs/{}/dms", f.organization),
+            &reader,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(body(r).await["dms"][0]["mention_unread_count"], 3);
+        if phase == "frame" {
+            assert_eq!(event(&mut socket).await["message"]["seq"], 1);
+        }
+        let r = request(
+            &f.app,
+            "POST",
+            &format!("/api/v1/orgs/{}/members/{peer}/deactivate", f.organization),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        gate.release.add_permits(1);
+        closed(&mut socket, CLOSE_ORGANIZATION_UNAVAILABLE).await;
+        sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2")
+            .bind(f.organization)
+            .bind(peer)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut socket = f.server.connect(&reader).await;
+        let r = request(
+            &f.app,
+            "GET",
+            &format!("/api/v1/orgs/{}/dms", f.organization),
+            &reader,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(body(r).await["dms"], json!([]));
+        subscribe(&mut socket, c, 0).await;
+        denied(&mut socket, c).await;
+        silent(&mut socket).await;
+        // Historical identities remain readable to the authorized participant.
+        let mut control = f.server.connect(&f.token).await;
+        subscribe(&mut control, c, 0).await;
+        for seq in 1..=3 {
+            let m = event(&mut control).await;
+            assert_eq!(m["message"]["seq"], seq);
+            assert_eq!(
+                m["message"]["mentions"],
+                json!([{"member_id":peer,"name":"Member"}])
+            );
+        }
+        ready(&mut control, c, 3).await;
+        let denied_send = request(
+            &f.app,
+            "POST",
+            &format!("/api/v1/orgs/{}/channels/{c}/messages", f.organization),
+            &f.token,
+            json!({"client_message_id":Uuid::new_v4(),"body":format!("@{{member:{peer}}}")}),
+        )
+        .await;
+        assert_eq!(denied_send.status(), StatusCode::CONFLICT);
+        silent(&mut control).await;
+        let r = request(
+            &f.app,
+            "POST",
+            &format!("/api/v1/orgs/{}/dms", f.organization),
+            &f.token,
+            json!({"member_id":peer,"renew":true}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = request(
+            &f.app,
+            "GET",
+            &format!("/api/v1/orgs/{}/dms", f.organization),
+            &reader,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(body(r).await["dms"][0]["mention_unread_count"], 0);
+    }
+}

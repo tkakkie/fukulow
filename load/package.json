@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test *.test.ts"
+    "test": "node --test *.test.ts search-engines/*.test.ts search-engines/quality/*.test.ts"
   },
   "devDependencies": {
     "@types/k6": "2.3.1",

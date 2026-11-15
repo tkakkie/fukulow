@@ -89,3 +89,8 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [web](web.md): `Guest member panels reload remote grants on every open and keep the add-candidate picker hidden`
 
 - [realtime](realtime.md): `dm_notice_denies_nonparticipant_owner_with_participant_control`, `dm_notices_reach_both_participants_and_only_other_senders_and_own_read_sessions`, `dm_peer_deactivation_reactivation_and_rename_invalidate_only_current_viewers_and_renewal_gains_only_lapsed_participant`, `dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival`
+- [messages](messages.md): `mention_denies_private_owner_without_grant`, `mention_waiting_acceptance_rechecks_committed_role_revision_revocation_and_activity`
+- [unread](unread.md): `mention_access_loss_removes_counts_and_regrant_never_resurrects_them`
+
+- [messages](messages.md): `dm_mentions_participant_roles_replies_mark_read_and_renewal_share_batched_counts`, `dm_mention_denies_nonparticipant_member`, `dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set`
+- [realtime](realtime.md): `dm_mention_denial_matrix_has_no_identity_rows_counts_or_notifications`, `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`

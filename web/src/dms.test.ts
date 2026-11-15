@@ -204,3 +204,13 @@ it('a refused held-id lane stays visibly failed until refresh notice reconnect o
     c.close()
   }
 })
+
+it('Unread-only DM responses cannot cover Mention invalidations and retry through the shared schedule', async () => {
+  const c = client(); c.rows = [dm('A', { mention_unread_count: 2 })]
+  c.api.list.mockResolvedValueOnce(ok({ dms: [{ ...dm('A'), mention_unread_count: undefined } as unknown as Dm], next_cursor: null }))
+  await c.ready()
+  expect(c.baseline).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(16_000)
+  expect(c.baseline).toHaveBeenCalledWith(dm('A', { mention_unread_count: 2 }), true)
+  c.close()
+})

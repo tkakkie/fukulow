@@ -95,6 +95,7 @@ Accounts, sign-in, sessions, roles, permissions, Organization scoping (server). 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
 - [channels](channels.md): `reclaims_only_strictly_older_revisions_and_preserves_other_organizations`, `reclaimed_revision_cursors_fail_and_older_read_snapshots_stay_complete`
+- [deployment](deployment.md): `both proxies enforce browser headers with removal weakening and inheritance denials`, `csp_websocket_source_rejects_injected_or_ambiguous_hosts`
 - [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`
 
 - [messages](messages.md): `author_lookup_authorization_and_identities_share_a_nonlocking_snapshot`, `author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bounds_batches`
@@ -118,3 +119,9 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [channels](channels.md): `guest_directory_denies_unrelated_ungranted_public_private_and_stale_grants`, `guest_directory_refetch_removes_revoked_inactive_and_stale_peers_and_keeps_past_authors`, `directory_full_roles_keep_exact_bytes_name_id_order_and_organization_isolation`, `directory_reads_fresh_role_after_auth_and_keeps_inactive_stale_caller_denials`, `guest_directory_role_grants_and_results_share_one_nonlocking_snapshot`
 
 - [realtime](realtime.md): `dm_notice_denies_nonparticipant_owner_with_participant_control`, `dm_notices_reach_both_participants_and_only_other_senders_and_own_read_sessions`, `dm_peer_deactivation_reactivation_and_rename_invalidate_only_current_viewers_and_renewal_gains_only_lapsed_participant`, `dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival`
+- [messages](messages.md): `mention_denies_private_owner_without_grant`, `mention_waiting_acceptance_rechecks_committed_role_revision_revocation_and_activity`
+- [unread](unread.md): `mention_access_loss_removes_counts_and_regrant_never_resurrects_them`
+- [realtime](realtime.md): `mention_lost_channel_live_and_fetched_replay_never_handoff_identities`
+
+- [messages](messages.md): `dm_mention_denies_nonparticipant_member`, `dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set`
+- [realtime](realtime.md): `dm_mention_denial_matrix_has_no_identity_rows_counts_or_notifications`, `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`

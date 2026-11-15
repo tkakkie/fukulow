@@ -1,4 +1,10 @@
+(browser_headers) {
+	header >Permissions-Policy "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()"
+	header >Cross-Origin-Opener-Policy "same-origin"
+}
+
 {$FUKULOW_DOMAIN:localhost} {
+	import browser_headers
 	@static not path /api /api/*
 	encode @static zstd gzip
 	@hsts {
@@ -9,5 +15,10 @@
 	respond /api/v1/ready 404
 	reverse_proxy app:8080 {
 		flush_interval -1
+	}
+	# Upstream connection errors execute a separate route chain.
+	handle_errors {
+		import browser_headers
+		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 }

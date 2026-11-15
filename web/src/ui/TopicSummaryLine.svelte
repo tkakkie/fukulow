@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Message } from '../api'
+  import { mentionText, type MentionName } from '../mentions'
   import Badge from './Badge.svelte'
   import StatusBanner from './StatusBanner.svelte'
 
@@ -8,6 +10,9 @@
     selected = false,
     messageCount,
     latestBody,
+    mentions = [],
+    resolveMentionName,
+    mentionUnreadCount = 0,
     unreadCount = 0,
     onclick,
     onretry,
@@ -17,6 +22,9 @@
     selected?: boolean
     messageCount?: number
     latestBody?: string
+    mentions?: Message['mentions']
+    resolveMentionName?: MentionName
+    mentionUnreadCount?: number
     unreadCount?: number
     onclick?: () => void
     onretry?: () => void
@@ -36,12 +44,15 @@
       {#if messageCount !== undefined}
         <span class="ui-topic-summary__count">{messageCount}件›</span>
       {/if}
+      {#if mentionUnreadCount > 0}
+        <Badge kind="mention" count={mentionUnreadCount} />
+      {/if}
       {#if unreadCount > 0}
         <Badge kind="unread" count={unreadCount} />
       {/if}
     </span>
     {#if latestBody}
-      <span class="ui-topic-summary__preview">{latestBody}</span>
+      <span class="ui-topic-summary__preview">{mentionText(latestBody, mentions, resolveMentionName)}</span>
     {/if}
   </button>
   {#if onretry}

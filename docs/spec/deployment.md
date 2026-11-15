@@ -10,7 +10,7 @@ Related: [Setup token](accounts.md#setup).
 - Compose runs exactly one of `--profile caddy` (HTTPS) or `--profile nginx` (HTTP). Only proxy + app join `edge`; only app, the one-shot `migrate` service and DB join `backend`. The app has no published port by default. `FUKULOW_EDGE_PREFIX` (default `172.30.94`) derives the edge subnet `<prefix>.0/29`, gateway `<prefix>.1`, fixed proxy IP `<prefix>.2`, app IP `<prefix>.3` and dynamic allocation range `<prefix>.4/30`; change this one value to move them together. Dynamic containers cannot take the proxy or app IP. Compose trusts exactly `<prefix>.2`, never the gateway or subnet, and sets `x-forwarded-for` itself.
 - For opt-in local debugging, add a temporary Compose override with `services: {app: {ports: ["127.0.0.1:8080:8080"]}}` and pass it with `-f compose.yml -f /path/to/debug.yml`. The published-port peer is untrusted; forwarded headers cannot select a budget. Remove the override afterward. Health checks normally use the selected proxy.
 - Upgrade existing deployments: set a random `FUKULOW_SETUP_TOKEN` before `docker compose up`; missing/empty fails interpolation before container recreation and leaves the running stack and volume intact. Existing Accounts and sign-in are unaffected; the token only gates setup, but remains required after setup. The default `127.0.0.1:8080` publication is gone; move host health probes to the proxy or use the debug override above. Existing `.env` values for `FUKULOW_TRUSTED_PROXIES` and `FUKULOW_CLIENT_IP_HEADER` are ignored by Compose. If Docker reports a subnet overlap, set `FUKULOW_EDGE_PREFIX` to three octets of a free private IPv4 subnet (for example `172.29.193` for `172.29.193.0/29`) and recreate the stack; never widen trusted proxies to resolve it.
-- `node --test scripts/compose-security.test.ts` checks both configurations; `node scripts/check-compose-security.ts` builds an isolated stack for each profile, testing token setup, sign-in, spoofing over proxy, untrusted backend and published debug-port paths, restart and retained setup. It ignores deployment `.env`, uses disposable values/ports/volumes, and cleans up its own resources. Both it and `check-compose-restart.ts` choose random per-run private edge prefixes in separate ranges; `CHECK_EDGE_PREFIX` can select a known free test subnet. `CHECK_COMPOSE_IMAGE` can reuse a locally built image for the security check.
+- `node --test scripts/compose-security.test.ts` checks both configurations, including removal/weakening of container restrictions and proxy headers; `node scripts/check-compose-security.ts` builds an isolated stack for each profile, testing read-only migration/probe/send/restart, success and app/proxy error headers, token setup, sign-in, spoofing over proxy, untrusted backend and published debug-port paths, and retained setup. It ignores deployment `.env`, uses disposable values/ports/volumes, and cleans up its own resources. Both it and `check-compose-restart.ts` choose random per-run private edge prefixes in separate ranges; `CHECK_EDGE_PREFIX` can select a known free test subnet. `CHECK_COMPOSE_IMAGE` can reuse a locally built image for the security check.
 
 ## Database deployment and upgrade (#194 B)
 - Keep `fukulow` as the migration owner. The one-shot Compose `migrate` service uses the same image with `fukulow-server migrate`; only it and DB receive owner credentials. App depends on `service_completed_successfully` and receives only the `fukulow_app` URL. Standalone/dev must run the matching migration command separately with an owner URL; migration commands do not serve HTTP or require setup/proxy settings.
@@ -24,11 +24,75 @@ Related: [Setup token](accounts.md#setup).
 
 ## Deployment (#194 C)
 - The runtime image runs as UID/GID 10001, with a root-owned executable and no writable application data. Dockerfile base images and external deployment/load Compose images use a tag plus a registry-verified multi-platform sha256 digest. Dependabot checks Dockerfile and both Compose directories weekly; image updates still require review and deployment checks.
+- Deployment and load `app`/`migrate` use a read-only root, drop ALL capabilities and enable no-new-privileges. Neither has writable mounts or tmpfs; DB and proxy state retain their existing storage. `check-compose-security.ts` checks fresh stacks; `check-db-upgrade.ts` checks a populated main volume, role/migration runs, probe, retained data/Session, send and restart under these restrictions.
+- App and both proxies send `Cross-Origin-Opener-Policy: same-origin` and identical empty `Permissions-Policy` feature allowlists on success/errors, including proxy 404s and upstream failures. Listed sensor, media, Clipboard, fullscreen, device and other unused APIs are denied; unlisted features keep browser defaults (no wildcard default directive exists). Current web code needs no exception and has no browser notification, popup/opener or file flow. Ordinary editing/paste is retained; recheck when adding features. App headers cover optional direct access; proxies replace upstream copies and cover their own errors. Caddy shares one policy across normal/error routes; nginx uses server-scope `add_header ... always`, without location overrides.
+- #401's production-equivalent browser acceptance remains a maintainer/orchestrator gate for each deployed TLS profile: setup, Sign in/out, WebSocket send/reconnect, Channel/Topic/Reply, DM, Mention, Search and any external-window/file flow. Automated HTTP/container checks do not satisfy that gate; regressions require a decision before weakening headers.
 - Every deployment and load service uses `json-file` logging with `max-size: 10m` and `max-file: 3`. These bounds apply to Docker's local logs per container; arrange separate retention if longer incident history is needed. Recreate existing containers to apply log options.
-- Caddy is the default production profile: use a public DNS name pointing at the VPS, reachable TCP ports 80/443, persistent `caddy_data` and valid HTTPS before setup or Sign in. The localhost certificate is for local checks; clients must trust it explicitly.
+- Caddy is the default production profile: use a public DNS name pointing at the VPS, reachable TCP ports 80/443 (or the restricted-access procedure below), persistent `caddy_data` and valid HTTPS before setup or Sign in. The localhost certificate is for local checks; clients must trust it explicitly.
 - The shipped nginx profile serves HTTP only and is **not production-safe alone**. Production requires an external TLS terminator with a valid certificate for the public domain, HTTP-to-HTTPS redirection, HSTS on HTTPS responses (including errors), and WebSocket upgrade support. Restrict nginx's HTTP ingress to that terminator using a firewall or a private/loopback port override; clients must never bypass TLS. Preserve the public Host and keep `FUKULOW_COOKIE_SECURE=true`. The stock nginx config derives HSTS from actual local TLS, so it cannot set HSTS for external TLS; the terminator must do so. Caddy handles the public HTTPS path directly.
 - An HTTP TLS terminator also becomes nginx's immediate client. To preserve per-client sign-in budgets, configure nginx real-IP handling to trust only that terminator's fixed IP and a client-IP header it overwrites; verify distinct client budgets. Never trust arbitrary forwarded headers. This deployment-specific configuration is outside the stock HTTP-only profile.
 - The binary remains PID 1 with Docker's default SIGTERM stop signal and the existing 75-second stop grace period; #195 handles shutdown. No init wrapper is needed because the server starts no child processes.
+
+### Restricted access through SSH (#392; preparation for #285)
+
+SSH tunnelling is the first candidate, pending maintainer deployment. Firewall public ingress to allow only SSH; close 80/443 on every public IPv4/IPv6 address, including Docker-published paths (host firewall rules alone may be bypassed by Docker). Keep app/DB unpublished. Caddy still terminates TLS for `FUKULOW_DOMAIN=<app-domain>` with a valid domain certificate and persistent `caddy_data`; the tunnel carries TLS unchanged to Caddy, never directly to app HTTP.
+
+**Loopback-only Caddy ports.** Docker publishes `80:80`/`443:443` on every host address and its rules can bypass the host firewall, so bind Caddy to loopback with a private Compose override kept outside the checkout:
+
+```yaml
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1:443:443"
+```
+
+Use `!override` (Compose 2.24.4 or later): a plain `ports:` list in an override is appended to the base list and leaves `80`/`443` public (verified with `docker compose config`). Pass it on every command (`docker compose -f compose.yml -f '<override>' --profile caddy ...`); a command that recreates Caddy without it republishes the public ports. Port 80 stays unpublished; the SSH tunnel needs only loopback 443. Verify on the VPS before and after each change:
+
+```sh
+docker compose -f compose.yml -f '<override>' --profile caddy port caddy 443   # expect 127.0.0.1:443
+ss -ltnH '( sport = :80 or sport = :443 )'                                    # expect only 127.0.0.1:443
+```
+
+The maintainer chooses certificate issuance/renewal:
+
+- DNS-01 keeps 80/443 closed, but needs a custom Caddy build with the DNS provider module (absent from the stock image), reviewed/pinned updates and a least-privilege DNS API token kept privately outside the checkout. DNS propagation and token custody add operational work; outbound DNS/ACME access is still needed.
+- HTTP-01 (80) or TLS-ALPN-01 (443) can use a short, deliberate public opening with correct public DNS. Run the window without the loopback override, then restore it immediately after issuance and rerun the restriction checks. This temporarily weakens isolation; renewal needs another approved window before expiry or a switch to DNS-01. A one-time opening does not provide unattended renewal while closed.
+
+After approval, on the operator machine (replace placeholders privately):
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8443:127.0.0.1:443 '<ssh-user>@<vps-host>'
+```
+
+Map `<app-domain>` to `127.0.0.1` in the operator's hosts file, then browse `https://<app-domain>:8443`; keep `<vps-host>` resolving to the VPS for SSH. Local 8443 avoids privileged binding. Preserve domain TLS SNI and HTTP Host (including `:8443`) through Caddy: browsing by loopback name/IP or changing only Host breaks certificate/SNI checks. Do not disable certificate verification. Keep `FUKULOW_COOKIE_SECURE=true` for `Secure`/`__Host-fukulow_session` cookies. Cookie WebSockets require the HTTPS same-Host Origin, including port, or an exact `FUKULOW_WS_ALLOWED_ORIGINS` match; forwarded headers do not decide it ([auth decisions](../decisions/auth.md)). If configured, allow `https://<app-domain>:8443` explicitly. The browser uses `wss://<app-domain>:8443` automatically.
+
+Restriction check, in one run with the tunnel and app healthy: from a non-allowlisted source outside the VPS, test each public address, bypassing local name overrides. Both ports must refuse or time out; DNS failure is not evidence. Any successful TCP connection fails the restriction check.
+
+```sh
+nc -4 -vz -w 5 '<vps-public-ipv4>' 80
+nc -4 -vz -w 5 '<vps-public-ipv4>' 443
+nc -6 -vz -w 5 '<vps-public-ipv6>' 80
+nc -6 -vz -w 5 '<vps-public-ipv6>' 443
+```
+
+Run the IPv6 pair from a source with IPv6 connectivity against every global VPS IPv6 address; skip it only when `ip -6 addr show scope global` on the VPS is empty, and record that. A source without IPv6 cannot prove refusal.
+
+In that same run, on the operator machine, require HTTPS 200 (`ok`) and a TLS WebSocket upgrade (`101 Switching Protocols`) through the tunnel:
+
+```sh
+curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 --max-time 10 -sS -D - 'https://<app-domain>:8443/api/v1/health'
+curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 --max-time 10 --http1.1 -sS -D - -o /dev/null \
+  --cookie '<private-cookie-jar>' -H 'Origin: https://<app-domain>:8443' \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: <base64-16-byte-nonce>' \
+  'https://<app-domain>:8443/api/v1/orgs/<organization-id>/ws'
+```
+
+Use a valid signed-in Member's cookie jar (0600, outside checkout) and a base64-encoded 16-byte handshake nonce; never paste credentials into commands/logs. HTTPS with Upgrade headers performs the `wss` handshake. The curl stream may time out after 101; require the observed 101, not curl exit success. No credential with an allowed Origin returns 401 before upgrade; missing/disallowed cookie Origin returns 403 (`origin_not_allowed`), not 101 (`server/src/realtime.rs`, `server/src/realtime/origin.rs`).
+
+**Client IP through the tunnel (operational note).** All tunnelled traffic reaches Caddy from the VPS itself through Docker's loopback port proxy, so the app sees one shared client IP (typically the Docker bridge gateway) for every operator. The per-IP sign-in failure budget (20 per IPv4 or IPv6 /64, 60 s) is therefore shared: one user's failed sign-ins can throttle every tunnel user, and logs/metrics cannot tell users apart by IP; identify them by Account instead. Do not add forwarded headers or widen `FUKULOW_TRUSTED_PROXIES` to recover the original IP. Lifting the restriction restores per-client IPs only for clients connecting directly to public Caddy; clients still using the SSH tunnel keep sharing one IP.
+
+#285 manual checks stay behind Caddy: two signed-in browsers exchange Messages over verified `wss`; restart app with `docker compose -f compose.yml -f '<override>' restart app` and verify reconnect/catch-up; interrupt then restore the tunnel/operator network and verify reconnect/catch-up again. A tunnel drop tests the client transport path, not loss of the VPS network; record that distinction privately. Inspect [application logs](#logs-and-aggregates-198-b) over SSH for startup, upgrade, disconnect and recovery; keep results private. R2 backup/alert/restore gates remain [#316](#operator-runbook-and-production-hold-316), without credentials, endpoints or account values here. Provisioning, contracts, DNS, certificates, credentials, deployment and lifting the restriction remain maintainer work ([workflow §12](../workflow.md#12-needs-the-maintainer)); #285 remains blocked.
 
 ## Send limit (#306)
 - `FUKULOW_SEND_BURST` (tokens, default 10) and `FUKULOW_SEND_REFILL_PER_SECOND` (tokens per second, default 1) size the per-(Organization, Member) send bucket (S6 in `docs/spec/realtime.md`). Each must be an integer from 1 to 1,000,000; unset uses the default; empty, zero or invalid values fail startup.

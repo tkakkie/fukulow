@@ -48,13 +48,14 @@ async fn baselines(
                 row.try_get::<i64, _>("as_of_seq")?,
                 row.try_get::<i64, _>("read_seq")?,
                 row.try_get::<i64, _>("unread_count")?,
+                row.try_get::<i64, _>("mention_unread_count")?,
             ),
         );
     }
     identities
         .into_iter()
         .map(|d| {
-            let (as_of_seq, read_seq, unread_count) =
+            let (as_of_seq, read_seq, unread_count, mention_unread_count) =
                 counts.remove(&d.id).ok_or(sqlx::Error::RowNotFound)?;
             Ok(Dm {
                 id: d.id,
@@ -68,7 +69,7 @@ async fn baselines(
                 read_seq,
                 main_unread_count: unread_count,
                 unread_count,
-                mention_unread_count: 0,
+                mention_unread_count,
             })
         })
         .collect()

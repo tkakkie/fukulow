@@ -47,6 +47,8 @@ it('ignores malformed payloads for every forwarded event without throwing or clo
     malformed.push({ type: 'message', message: { ...message, [field]: field === 'seq' ? '101' : 123 } })
   }
   for (const seq of [null, 0, -1, 1.5, Infinity]) malformed.push({ type: 'message', message: { ...message, seq } })
+  for (const mentions of [null, {}, [null], [{}], [{ member_id: 'target' }], [{ member_id: 1, name: 'Name' }]])
+    malformed.push({ type: 'message', message: { ...message, mentions } })
   for (const data of [undefined, 1, {}, 'bad json', ...malformed.map(value => JSON.stringify(value)),
     '{"type":"message","message":{"seq":1e999}}',
     '{"type":"subscribed","channel_id":"A","caught_up_seq":1e999}']) {
