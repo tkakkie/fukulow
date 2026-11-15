@@ -49,12 +49,16 @@ export class Session {
   }
 }
 export class Database {
+  command:typeof docker;
+  constructor(command=docker) {this.command=command;}
   name=`fukulow-log-compare-${process.pid}-${randomUUID().slice(0,8)}`;
   volume=this.name+'-data';
   created=false; volumeCreated=false;
   start() {
-    docker('volume','create',this.volume); this.volumeCreated=true;
-    docker('run','-d','--name',this.name,'--mount',`type=volume,source=${this.volume},target=/var/lib/postgresql`,
+    this.command('volume','create',this.volume); this.volumeCreated=true;
+    // Own the unique name before run: Docker may create it then fail to start.
+    this.created=true;
+    this.command('run','-d','--name',this.name,'--mount',`type=volume,source=${this.volume},target=/var/lib/postgresql`,
       '-e','POSTGRES_HOST_AUTH_METHOD=trust',image!,
       '-c','shared_preload_libraries=pg_stat_statements','-c','pg_stat_statements.track=all',
       '-c','shared_buffers=128MB','-c','work_mem=4MB','-c','max_connections=100'); this.created=true;
@@ -83,9 +87,12 @@ export class Database {
     // not evicted: global cache eviction would disturb other measurements.
     docker('restart',this.name); await this.ready();
   }
-  cleanup() {
-    if(this.created) docker('rm','-f',this.name);
-    if(this.volumeCreated) docker('volume','rm',this.volume);
+  cleanup(originalError?:unknown) {
+    const errors:unknown[]=[];
+    if(this.created) try {this.command('rm','-f',this.name);} catch(error) {errors.push(error);}
+    if(this.volumeCreated) try {this.command('volume','rm',this.volume);} catch(error) {errors.push(error);}
+    if(errors.length && originalError===undefined) throw new AggregateError(errors,'owned resource cleanup failed');
+    if(errors.length) console.error('Cleanup errors (original failure preserved):',errors);
   }
 }
 export interface Sizes { heap:number; index:number; relations:unknown }

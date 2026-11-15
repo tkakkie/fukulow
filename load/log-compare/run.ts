@@ -4,20 +4,25 @@ import { arch, cpus, platform, release, totalmem } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Database, docker, image } from './database.ts';
-import { alternating, arms, gates, repetition, type Sample, type Conditions } from './model.ts';
+import { alternating, arms, gates, repetition, correct, sustainable, type Sample, type Conditions } from './model.ts';
 import { setup, bench, scenarios, fixtureSize, replay, migration } from './measure.ts';
+import { databaseNegatives } from './negative.ts';
+const designLimits='NOT IMPLEMENTED: history_generation use/rotation in replay/bootstrap; snapshot_expired and projection-expiry watermark; explicit bootstrap cursor; mutation-operation idempotency/receipts/expected_version. Their DB costs are omitted. This DB-shape comparison cannot validate condition 5 or qualify adoption. Exploratory deviations from docs/spec/realtime.md: per-Message incrementing versions, one position per Message in a Move (eight per chain), tombstone-inclusive counts; immutable historical snapshots may retain deleted bodies. Replay/retention policy remains undecided.';
 const help=`Issue #160 DB log comparison (no production server or migrations).
 Usage: node load/log-compare/run.ts --smoke --out /private/tmp/i160-smoke
        node load/log-compare/run.ts --full --out /private/tmp/i160-full
 Options: --rates 50,250,1000   fixed offered ops/s (default full: 50,250,1000)
          --seconds 30        fixed-rate seconds per arm (default full: 30)
          --max-seconds 15    unthrottled maximum-throughput step per arm
-         --clients 16        pgbench connections (default full: 16)
+         --clients 16        persistent client connections (default full: 16)
          --rounds 3          alternating rounds, minimum 3
          --help              show this procedure
 Full: 12 workloads (1/200 Channels x 17-byte/4000-scalar bodies x creation/90-5-3-2/
 50-20-20-10), five arms including both payload policies, 3 alternating rounds
-at every offered rate; separate fresh data for each maximum step. Seed 160,
+at every offered rate; independent seeded Poisson deadlines and operation trace,
+persistent psql queues, full drain and committed-effect ledger reconciliation.
+Maximum uses completion-paced pgbench, a diagnostic with no matched offered-load
+claim; separate fresh data for each maximum step. Seed 160,
 100k Messages in the hot Channel or 1k per each of 200 Channels. New Topics
 (10%) and Replies (20%, inheriting parent Topic); maximum body is 16000 UTF-8
 bytes. Creates reply to a separate root, so Move stays bounded at 8 Messages.
@@ -28,10 +33,16 @@ blocking SHARE lock with an observed concurrent candidate-aware writer wait.
 Smoke: 1 second fixed at 20/s + 1 second max, 2 clients, 4 representative
 workloads, 1/100 hot/replay/backfill scale; many-Channel seeds have a 200-row
 floor to exercise all shapes. Smoke does not establish any performance gate.
+A benchmark-only expected-effects ledger is written before each state/log change,
+charged equally in WAL/storage and transaction cost. Results cannot be compared
+with older harness runs that lacked this oracle. Full-range SQL checks and paged
+reduction supplement sampled replay plans. Fixed-rate latency includes host/psql
+transport; maximum pgbench latency excludes its scheduling lag.
 No pg dependency: use bundled pgbench/psql in the image pinned in load/compose.yml.
 Own container/volume, no published port, no shared DB, cleanup in finally/signals.
 Artifacts: metadata, source hashes/patch, per-arm transaction logs, relation
 sizes, WAL, replay plans, migration lock waits, and reported gates in results.json.
+${designLimits}
 Label MAC-RELATIVE. Absolute budgets NOT EVALUATED (#431). No policy adopted.
 Correctness: zero missing/out-of-order positions, resurrected bodies or retry/
 rollback positions. Invalid: errors, skipped/dropped work, latency-limit overruns,
@@ -65,7 +76,7 @@ mkdirSync(out,{recursive:true});
 const save=(name:string,value:unknown)=>writeFileSync(`${out}/${name}`,JSON.stringify(value,null,2));
 const command=(file:string,...argv:string[])=>execFileSync(file,argv,{encoding:'utf8'}).trim();
 const db=new Database();
-let interrupted=false;
+let interrupted=false;let originalError:unknown;
 const signal=()=>{interrupted=true;};
 process.on('SIGINT',signal);process.on('SIGTERM',signal);
 const check=()=>{if(interrupted)throw new Error('measurement interrupted');};
@@ -73,7 +84,7 @@ const samples:Sample[]=[],maxima:Awaited<ReturnType<typeof bench>>[]=[],
   replays:(Awaited<ReturnType<typeof replay>> & {round:number})[]=[],
   migrations:(Awaited<ReturnType<typeof migration>> & {round:number})[]=[];
 const results:Record<string,unknown>={label:'MAC-RELATIVE',absoluteBudgets:'NOT EVALUATED (#431)',smoke,complete:false,
-  samples,maxima,replays,migrations};
+  designLimits,samples,maxima,replays,migrations};
 try {
   console.log(`MAC-RELATIVE ${smoke?'SMOKE':'FULL'} artifacts: ${out}; container: ${db.name}`);
   db.start();await db.ready();db.reset();
@@ -90,8 +101,10 @@ try {
     competingContainers:docker('ps','--format','{{.Names}}\t{{.Image}}\t{{.Status}}'),
     sourceHashes:Object.fromEntries(sourceFiles.map(n=>[n,createHash('sha256').update(readFileSync(new URL(n,import.meta.url))).digest('hex')])),
     configOptions:{rates,rounds,seconds,maxSeconds,clients,seed:160},
+    designLimits,
     limits:'DB-only owner-role synthetic shapes; PG-cold does not evict filesystem cache; no WebSocket/client or absolute-budget claim'};
   save('metadata.json',metadata);writeFileSync(`${out}/source.patch`,command('git','diff','HEAD'));
+  if(smoke) {results.databaseNegatives=await databaseNegatives(db);save('results.json',results);}
   const selected=smoke ? scenarios.filter(s=>['create-1-17','create-200-4000','mixed90-200-4000','mixed50-1-17'].includes(s.name)) : scenarios;
   const hash=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
   for(const scenario of selected) {
@@ -132,13 +145,16 @@ try {
     migrations.push({round,...await migration(db,arm,smoke?10000:1000000,`${out}/migration-${round}-${arm}.json`)});save('results.json',results);
   }
   results.maximumSpread=selected.flatMap(scenario=>arms.map(arm=>({scenario:scenario.name,arm,
+    valid:sustainable(maxima.filter(m=>m.arm===arm && m.conditions.scenario===scenario.name)) && ['tps','p95'].every(key=>repetition(maxima.filter(m=>m.arm===arm && m.conditions.scenario===scenario.name).map(m=>m[key as 'tps'])).valid),
     tps:repetition(maxima.filter(m=>m.arm===arm && m.conditions.scenario===scenario.name).map(m=>m.tps)),
     p95:repetition(maxima.filter(m=>m.arm===arm && m.conditions.scenario===scenario.name).map(m=>m.p95))})));
   results.migrationSpread=arms.filter(a=>a!=='baseline').map(arm=>({arm,
+    valid:correct(migrations.filter(m=>m.arm===arm)) && ['durationMs','walBytes','blockingMs'].every(key=>repetition(migrations.filter(m=>m.arm===arm).map(m=>m[key as 'durationMs'])).valid),
     duration:repetition(migrations.filter(m=>m.arm===arm).map(m=>m.durationMs)),
     wal:repetition(migrations.filter(m=>m.arm===arm).map(m=>m.walBytes)),
     blocking:repetition(migrations.filter(m=>m.arm===arm).map(m=>m.blockingMs))}));
   results.replaySpread=replays.filter(r=>r.round===0).map(first=>({arm:first.arm,positions:first.positions,range:first.range,
+    valid:correct(replays.filter(r=>r.arm===first.arm && r.positions===first.positions && r.range===first.range)) && ['recent','deep'].every(depth=>['cold','warm'].every(cache=>repetition(replays.filter(r=>r.arm===first.arm && r.positions===first.positions && r.range===first.range).flatMap(r=>r.rows as {depth:string;cache:string;executionMs:number}[]).filter(r=>r.depth===depth&&r.cache===cache).map(r=>r.executionMs)).valid)),
     pages:['recent','deep'].flatMap(depth=>['cold','warm'].map(cache=>({depth,cache,
       execution:repetition(replays.filter(r=>r.arm===first.arm && r.positions===first.positions && r.range===first.range)
         .flatMap(r=>r.rows as {depth:string;cache:string;executionMs:number}[])
@@ -146,8 +162,8 @@ try {
   results.complete=true;results.finishedAt=new Date().toISOString();save('results.json',results);
   console.log(`Completed ${samples.length} fixed-rate arms, ${maxima.length} maximum steps, ${replays.length} replay fixtures, ${migrations.length} migrations. Gates reported only. ${out}`);
 } catch(error) {
-  results.error=String(error);save('results.json',results);throw error;
+  originalError=error;results.error=String(error);save('results.json',results);throw error;
 } finally {
   process.off('SIGINT',signal);process.off('SIGTERM',signal);
-  db.cleanup();
+  db.cleanup(originalError);
 }

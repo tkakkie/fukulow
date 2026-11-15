@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { arms, alternating, gates, reduce, repetition, type Sample } from './model.ts';
-import { parsePgbench, planSummary } from './measure.ts';
+import { arms, alternating, gates, reduce, repetition, arrivalSchedule, coverage, sameOperations, sustainable, correct, type Sample } from './model.ts';
+import { parsePgbench, planSummary, positionSQL, coverageSQL } from './measure.ts';
 import { commonSchema, variantSchema, functions, replaySQL, workloadSQL } from './sql.ts';
 const entry=(position:number,deleted=false,body=deleted?'':'body',version=position)=>({position,id:'m',deleted,body,version});
 function samples():Sample[] {
   return [0,1,2].flatMap(round=>arms.map(arm=>({arm,round,
-    conditions:{scenario:'create',rate:10,seconds:10,clients:2,seed:160,image:'sha256:x',config:'same',machine:'same'},
+    conditions:{scenario:'create',rate:10,seconds:10,clients:2,seed:1,image:'sha256:x',config:'same',machine:'same'},
+    schedule:{count:100,hash:arrivalSchedule(10,10,1,[100,0,0,0]).hash,mix:[100,0,0,0]},offeredMix:[100,0,0,0],missingOffers:0,
     offered:100,accepted:100,errors:0,dropped:0,late:0,elapsed:10,p50:1,p95:2,p99:3,tps:10,
     walPerOp:100,heapPerOp:80,indexPerOp:20,correctness:{missing:0,resurrected:0,retryPositions:0}})));
 }
@@ -107,4 +108,45 @@ test('mixed edits change content while preserving the configured body length',()
   assert.match(ascii,/substr\('Load test message',2\)/);
   const maximum=workloadSQL('𠀀'.repeat(4000),1,[90,5,3,2]);
   assert.match(maximum,/chr\(131072\+\(:n%65536\)/);
+});
+
+test('95 percent candidate actual offers cannot pass paired comparison',()=>{
+  const s=samples();s.filter(r=>r.arm!=='baseline').forEach(r=>Object.assign(r,{offered:95,accepted:95,tps:9.5,p95:1,offeredMix:[95,0,0,0]}));
+  assert.equal(gates(s,true).valid,false);
+});
+test('all arms offering only one operation cannot pass',()=>{
+  const s=samples();s.forEach(r=>Object.assign(r,{offered:1,accepted:1,tps:.1,offeredMix:[1,0,0,0]}));
+  assert.equal(gates(s,true).valid,false);
+});
+test('generator omissions and substituted operation mix invalidate even matched arms',()=>{
+  for(const change of [{schedule:{count:99,hash:'omitted',mix:[99,0,0,0]},offered:99,accepted:99,offeredMix:[99,0,0,0]},
+    {missingOffers:1},{offeredMix:[99,1,0,0]}]) {
+    const s=samples();s.forEach(r=>Object.assign(r,change));assert.equal(gates(s,true).valid,false);
+  }
+  const a=arrivalSchedule(20,1,160,[50,20,20,10]);
+  assert.deepEqual(a,arrivalSchedule(20,1,160,[50,20,20,10]));
+  assert.equal(a.operations.length,a.mix.reduce((a,b)=>a+b,0));
+});
+test('full replay coverage rejects a missing unsampled creation snapshot and shorter history',()=>{
+  const expected=Array.from({length:1000},(_,i)=>({...entry(i+1),id:String(i)}));
+  assert.equal(coverage(expected,expected),true);
+  assert.equal(coverage(expected,expected.filter(e=>e.position!==500)),false);
+  assert.equal(coverage(expected,expected.slice(0,-1)),false);
+  assert.match(positionSQL('events-snapshot'),/FROM creation_snapshots/);
+  assert.match(coverageSQL('events-snapshot'),/EXCEPT ALL/);
+});
+test('reducer carries terminal Delete across the reviewer two-page boundary',()=>{
+  const first=reduce([{...entry(50,true),version:2}],49);
+  assert.throws(()=>reduce([{...entry(51,false,'revived'),version:3}],50,first.state),/resurrected/);
+});
+test('combined validity rejects stable correctness and maximum work failures',()=>{
+  const s=samples();assert.equal(sustainable(s),true);assert.equal(correct(s),true);
+  s[0].correctness.resurrected=1;assert.equal(correct(s),false);assert.equal(sustainable(s),false);
+  s[0].correctness.resurrected=0;s[0].errors=1;assert.equal(sustainable(s),false);
+});
+
+test('operation reconciliation is independent of database collation and rejects omissions/duplicates',()=>{
+  assert.equal(sameOperations(['1/1','2/2','10/10'],['1/1','10/10','2/2']),true);
+  assert.equal(sameOperations(['1/1','2/2'],['1/1','10/10','2/2']),false);
+  assert.equal(sameOperations(['1/1','1/1'],['1/1','2/2']),false);
 });

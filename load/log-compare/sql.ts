@@ -26,6 +26,14 @@ export function record(arm: Arm, kind: string, row: string, position: string) {
   return `INSERT INTO ${logTable(arm)} (${columns}) VALUES
     (${org},ch,${position},${row}.id,${row}.version,${kind},${snapshot(arm) ? payload(row) : 'NULL'});`;
 }
+export function expected(operation:string, kind:string, id:string, position:string, version:string, deleted:string, body:string) {
+  return `INSERT INTO expected_operations (organization_id,operation,channel_id,position,message_id,version,kind,deleted,body)
+    VALUES (${org},${operation},ch,${position},${id},${version},${kind},${deleted},${body});`;
+}
+export function seedExpected() {
+  return `INSERT INTO expected_operations (organization_id,operation,channel_id,position,message_id,version,kind,deleted,body)
+    SELECT organization_id,'seed',channel_id,seq,id,1,'Create',false,body FROM messages;`;
+}
 export function functions(arm: Arm, perChannel = 100000) {
   return `CREATE FUNCTION apply_op(c integer, n bigint, op integer, b text, fresh boolean, reply boolean)
   RETURNS bigint LANGUAGE plpgsql AS $$
@@ -62,6 +70,7 @@ export function functions(arm: Arm, perChannel = 100000) {
           VALUES (${org},ch,t,CASE WHEN fresh THEN mid::text ELSE 'topic 1' END,p,p,1)
           ON CONFLICT (organization_id,channel_id,name_key) DO NOTHING;
       END IF;
+      ${expected("c::text||'/'||n::text", "'Create'", 'mid', 'p', '1', 'false', 'b')}
       INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id,reply_to_id,reply_root_id)
         VALUES (${org},mid,ch,p,${member},client,b,t,CASE WHEN reply THEN fixture_id(c,40) ELSE NULL END,
           CASE WHEN reply THEN fixture_id(c,40) ELSE NULL END) RETURNING * INTO r;
@@ -84,6 +93,7 @@ export function functions(arm: Arm, perChannel = 100000) {
       AND (id=target OR (op=2 AND reply_root_id=target)) ORDER BY seq
     LOOP
       ${arm === 'baseline' ? 'p := r.seq;' : `UPDATE channel_message_sequences SET seq=seq+1 WHERE organization_id=${org} AND channel_id=ch RETURNING seq INTO p;`}
+      ${expected("c::text||'/'||n::text", "CASE op WHEN 1 THEN 'Edit' WHEN 2 THEN 'Move' ELSE 'Delete' END", 'r.id', 'p', 'r.version+1', 'r.deleted OR op=3', "CASE WHEN op=3 THEN '' WHEN op=1 AND NOT r.deleted THEN b ELSE r.body END")}
       UPDATE messages SET version=version+1,
         body=CASE WHEN op=3 THEN '' WHEN op=1 AND NOT deleted THEN b ELSE body END,
         deleted=deleted OR op=3, topic_id=CASE WHEN op=2 THEN t ELSE topic_id END
@@ -119,7 +129,7 @@ export function seedSQL(arm: Arm, channels: number, perChannel: number, bodySize
     WHERE t.organization_id=s.organization_id AND t.id=s.topic_id;
   INSERT INTO send_receipts SELECT organization_id,sender,client_message_id,id,seq,
     send_hash(body,channel_id,topic_id,reply_to_id) FROM messages;
-  ${backfill(arm)} ANALYZE;`;
+  ${seedExpected()} ${backfill(arm)} ANALYZE;`;
 }
 export function backfill(arm: Arm) {
   if (arm === 'baseline') return '';

@@ -68,3 +68,11 @@ $$ SELECT left((SELECT string_agg(md5(n::text || '/' || i::text), '' ORDER BY i)
     FROM generate_series(1, (scalars + 31) / 32) i), scalars) $$;
 CREATE FUNCTION send_hash(b text, c uuid, t uuid, r uuid) RETURNS bytea LANGUAGE sql IMMUTABLE AS
 $$ SELECT sha256(convert_to(jsonb_build_array(b,c,t,r)::text, 'UTF8')) $$;
+
+-- Independent expected effects, written before state/log writes in the same
+-- transaction. This oracle cost is charged equally; it is benchmark-only.
+CREATE TABLE expected_operations (
+ organization_id uuid NOT NULL, ordinal bigserial PRIMARY KEY, operation text NOT NULL,
+ channel_id uuid NOT NULL, position bigint NOT NULL, message_id uuid NOT NULL,
+ version bigint NOT NULL, kind text NOT NULL, deleted boolean NOT NULL, body text NOT NULL
+);
