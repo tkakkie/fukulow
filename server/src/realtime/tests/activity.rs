@@ -1214,6 +1214,145 @@ async fn fallback_fences_first_in_flight_notice_without_buffered_provenance(pool
 }
 
 #[fukulow_test::test]
+async fn coalesced_query_fence_preserves_independent_activity_and_read_positions(pool: PgPool) {
+    use crate::channels::activity::{Notice, pause, pause_member};
+
+    for read_position in [false, true] {
+        for (first, second, fence_first) in [(1, 2, false), (2, 1, true), (2, 2, true)] {
+            for fence in [false, true] {
+                let mut f = fixture(&pool).await;
+                f.channel = channel(&pool, f.organization, f.member, true).await;
+                let delivery = &f.state.message_delivery.channel_access.activity;
+                // Keep both publications buffered, as when another socket write is busy.
+                let dequeue = pause_member(f.organization, Uuid::nil(), "dequeue", Some(f.member));
+                let mut socket = connect(&f, &f.token).await;
+                tokio::time::timeout(Duration::from_secs(5), dequeue.entered.acquire())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .forget();
+                let notice = |value| {
+                    if read_position {
+                        Notice::ReadPositionChanged {
+                            channel_id: f.channel,
+                            topic_id: None,
+                            read_seq: value,
+                        }
+                    } else {
+                        Notice::ChannelActivity {
+                            channel_id: f.channel,
+                            seq: value,
+                        }
+                    }
+                };
+                if !fence_first {
+                    delivery
+                        .publish(
+                            &f.state.pool,
+                            f.organization,
+                            notice(first),
+                            Some(f.member),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                }
+                let query = pause(f.organization, f.channel, "query");
+                let publisher = delivery.clone();
+                let publish_pool = f.state.pool.clone();
+                let organization = f.organization;
+                let target = f.member;
+                let winner = notice(if fence_first { first } else { second });
+                let publication = tokio::spawn(async move {
+                    publisher
+                        .publish(&publish_pool, organization, winner, Some(target), None)
+                        .await
+                        .unwrap();
+                });
+                tokio::time::timeout(Duration::from_secs(5), query.entered.acquire())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .forget();
+                let check = if fence {
+                    let fallback = pause_member(
+                        f.organization,
+                        f.channel,
+                        "fallback_snapshot",
+                        Some(f.member),
+                    );
+                    let checker = delivery.clone();
+                    let check_pool = f.state.pool.clone();
+                    let check = tokio::spawn(async move {
+                        checker
+                            .check(
+                                &check_pool,
+                                crate::auth::SubscriptionScope::Member(organization, target),
+                            )
+                            .await;
+                    });
+                    tokio::time::timeout(Duration::from_secs(5), fallback.entered.acquire())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .forget();
+                    Some((fallback, check))
+                } else {
+                    None
+                };
+                query.release.add_permits(1);
+                publication.await.unwrap();
+                if fence_first {
+                    delivery
+                        .publish(
+                            &f.state.pool,
+                            f.organization,
+                            notice(second),
+                            Some(f.member),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                }
+                // Both authorization queries have completed and their guards have
+                // dropped before the old unproved snapshot fences the winning token.
+                // Access, grant and registration have remained unchanged throughout.
+                if let Some((fallback, check)) = check {
+                    fallback.release.add_permits(1);
+                    check.await.unwrap();
+                }
+                dequeue.release.add_permits(1);
+                let expected = if fence {
+                    json!({"type":"activity_reset"})
+                } else {
+                    serde_json::to_value(notice(2)).unwrap()
+                };
+                assert_eq!(
+                    notices(&f, &mut socket).await,
+                    vec![expected],
+                    "read_position={read_position}, first={first}, second={second}, fence={fence}"
+                );
+                // New work still delivers normally in the same socket epoch.
+                delivery
+                    .publish(
+                        &f.state.pool,
+                        f.organization,
+                        notice(3),
+                        Some(f.member),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    notices(&f, &mut socket).await,
+                    vec![serde_json::to_value(notice(3)).unwrap()]
+                );
+            }
+        }
+    }
+}
+
+#[fukulow_test::test]
 async fn fallback_unproved_snapshot_rejects_authorization_completed_before_regrant(pool: PgPool) {
     for phase in ["authorized", "handoff"] {
         let f = fixture(&pool).await;
