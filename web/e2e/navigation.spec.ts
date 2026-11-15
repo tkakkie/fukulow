@@ -22,11 +22,6 @@ for (const visibility of ['public', 'private'] as const) {
     await page.goto(`/o/${org}/c/${first}?panel=overview`)
     await expect(page.getByRole('heading', { name: firstName, exact: true })).toBeVisible()
     const length = await page.evaluate(() => history.length)
-    const historyReads: string[] = []
-    page.on('request', request => {
-      const path = new URL(request.url()).pathname
-      if (request.method() === 'GET' && (path.endsWith('/messages') || path.endsWith('/timeline'))) historyReads.push(path)
-    })
     const name = `Created navigation-${crypto.randomUUID()}`
     await page.getByRole('textbox', { name: 'チャンネル名', exact: true }).fill(name)
     const choices = page.getByRole('group', { name: '公開範囲', exact: true })
@@ -46,8 +41,10 @@ for (const visibility of ['public', 'private'] as const) {
     expect(channel.visibility).toBe(visibility)
     await expect(page).toHaveURL(`/o/${org}/c/${channel.id}?panel=overview`)
     await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+    // Access-gained can fence an in-flight bootstrap; wait for the live handoff instead of counting reads.
+    await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    await expect(page.getByRole('tab', { name: '概要', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(composer(page)).toBeFocused()
-    expect(historyReads.filter(path => path.includes(`/channels/${channel.id}/`))).toHaveLength(1)
     expect(await page.evaluate(() => history.length)).toBe(length + 1)
     await page.goBack()
     await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=overview`)
