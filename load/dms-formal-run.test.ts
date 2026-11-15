@@ -401,3 +401,20 @@ test('reviewed overhead runner restores six arms in order and retains a judged c
   assert.equal(JSON.parse(readFileSync(config.output+'/summary.json','utf8')).acceptance,false);
   assert.equal(events.filter(e=>e.includes(' cleanup && timeout')).length,3);
 });
+
+for(const code of [0,17])test('executor records flushed generator log bytes, exit '+code,async t=>{
+  const path=temporary(t)+'/run.log';
+  const result=await execute({program:process.execPath,args:['-e',"process.stdout.write('日本語');process.stderr.write('stderr');process.exitCode="+code],log:path});
+  assert.equal(result.code,code);
+  const manifest=JSON.parse(readFileSync(path+'-retention.json','utf8'));
+  assert.equal(manifest.complete,true);
+  assert.equal(manifest.bytes,Buffer.byteLength('日本語stderr'));
+  assert.equal(manifest.bytes,readFileSync(path).length);
+});
+test('executor marks timed out log capture incomplete',async t=>{
+  const path=temporary(t)+'/run.log';
+  await assert.rejects(execute({program:process.execPath,args:['-e',"process.stdout.write('partial');setInterval(()=>{},1000)"],timeout:500,log:path}),/timeout/);
+  const manifest=JSON.parse(readFileSync(path+'-retention.json','utf8'));
+  assert.equal(manifest.complete,false);
+  assert.equal(manifest.bytes,readFileSync(path).length);
+});

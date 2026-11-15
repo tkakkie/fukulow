@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -6,7 +7,7 @@ import { resolve } from 'node:path';
 import { baselinePaths, baselineSource } from './pool-overhead-baseline.ts';
 const root=resolve(import.meta.dirname,'..');
 test('baseline applies to HEAD and changes only the exact instrumentation hunks',()=>{
-  const dir=mkdtempSync('/private/tmp/pool-baseline-test-');
+  const dir=mkdtempSync(tmpdir()+'/pool-baseline-test-');
   const git=(args:string[])=>execFileSync('git',args,{cwd:dir,encoding:'utf8'});
   try {
     execFileSync('git',['worktree','add','--detach',dir,'HEAD'],{cwd:root});

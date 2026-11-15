@@ -25,7 +25,7 @@ index 1e68196..246558d 100644
 @@ -9,7 +10,9 @@ use std::{
      time::{Duration, Instant},
  };
- 
+
 +#[cfg(test)]
  const INTERVAL: Duration = Duration::from_secs(1);
 +#[cfg(test)]
@@ -40,7 +40,7 @@ index 1e68196..246558d 100644
  const ACTIVE: &[u64] = &[0, 1, 2, 4, 8, 16, 24, 32, 48, 64, 100, u64::MAX];
 +#[cfg(test)]
  static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
- 
+
  pub(crate) async fn acquire(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
 @@ -32,7 +37,10 @@ pub(crate) async fn acquire(pool: &PgPool) -> Result<PoolConnection<Postgres>, s
      if let Ok(stats) = TEST_STATS.try_with(std::sync::Arc::clone) {
@@ -52,12 +52,12 @@ index 1e68196..246558d 100644
 +    #[cfg(not(test))]
 +    pool.acquire().await
  }
- 
+
  pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
 @@ -40,7 +48,9 @@ pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres
      Transaction::begin(acquire(pool).await?, None).await
  }
- 
+
 +#[cfg(test)]
  struct Histogram(Box<[AtomicU64]>);
 +#[cfg(test)]
@@ -67,7 +67,7 @@ index 1e68196..246558d 100644
 @@ -61,6 +71,7 @@ impl Histogram {
      }
  }
- 
+
 +#[cfg(test)]
  struct Stats {
      wait: Histogram,
@@ -83,7 +83,7 @@ index 1e68196..246558d 100644
 @@ -143,11 +155,13 @@ impl Stats {
      }
  }
- 
+
 +#[cfg(test)]
  struct Wait<'a> {
      stats: &'a Stats,
@@ -97,7 +97,7 @@ index 1e68196..246558d 100644
 @@ -160,10 +174,7 @@ impl Drop for Wait<'_> {
      }
  }
- 
+
 -pub async fn report_pool_periodically(pool: PgPool) {
 -    report(&STATS, &pool).await;
 -}
@@ -109,7 +109,7 @@ index 1e68196..246558d 100644
 @@ -179,6 +190,7 @@ async fn report(stats: &Stats, pool: &PgPool) {
      }
  }
- 
+
 +#[cfg(test)]
  fn wait_us(elapsed: Duration) -> u64 {
      (elapsed.as_nanos().saturating_add(999) / 1000).min(u128::from(u64::MAX)) as u64

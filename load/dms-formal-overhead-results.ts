@@ -1,9 +1,16 @@
-import { readFileSync, writeFileSync, mkdirSync, symlinkSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, symlinkSync, existsSync, lstatSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { checked, type Executor } from './dms-formal-exec.ts';
 import { concurrentBrowsingReasons } from './dms-formal-concurrency.ts';
 import { productionPoolEvidence } from './dms-formal-pool.ts';
 import { overheadClasses, type OverheadArm } from './dms-formal-overhead.ts';
+
+function retainedLog(path:string,manifest:{bytes?:number;complete?:boolean}) {
+  try {
+    const file=lstatSync(path);
+    return manifest.complete===true && typeof manifest.bytes==='number' && Number.isSafeInteger(manifest.bytes) && manifest.bytes>0 && file.isFile() && file.size===manifest.bytes;
+  } catch {return false;}
+}
 
 type Resource={at:number;intervalMs:number;cpu:number;rssKiB:number;identity?:unknown};
 export function overheadResources(rows:Resource[],from:number,to:number) {
@@ -34,7 +41,7 @@ export async function reportOverheadArm(directory:string,exec:Executor) {
     const summaries=[];
     for(let shard=0;shard<11;shard++) {
       for(const file of ['metrics.json','run.log','summary.json'])if(!existsSync(`${directory}/shard-${shard}/${file}`))throw new Error('Missing generator log');
-      if(statSync(`${directory}/shard-${shard}/run.log`).size===0)reasons.push('Empty generator log');
+      if(!retainedLog(`${directory}/shard-${shard}/run.log`,read(`shard-${shard}/run.log-retention.json`)))throw new Error('Missing/incomplete generator logs');
       const dir=directory+'/overhead-'+shard;mkdirSync(dir,{mode:0o700});symlinkSync(`${directory}/shard-${shard}`,dir+'/shard-0','dir');
       await checked(exec,{program:'env',args:['DM_FORMAL_MODE=formal','DM_FORMAL_SCENARIO=main','DM_SHARDS=1',`DM_SOCKETS=${shard===10?10000:1000}`,`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),dir],timeout:600000});
       summaries.push(JSON.parse(readFileSync(dir+'/combined.json','utf8')));
@@ -53,10 +60,10 @@ export async function reportOverheadArm(directory:string,exec:Executor) {
     if(exits.length!==11 || new Set(exits.map((r:{shard:number})=>r.shard)).size!==11 || Array.from({length:11},(_,i)=>i).some(i=>!exits.some((r:{shard:number;code:number})=>r.shard===i && r.code===0)))reasons.push('Missing/failed generator');
     reasons.push(...concurrentBrowsingReasons({from,to},summaries.slice(0,10),summaries[10],'main'));
     const dbLog=read('db-log-retention.json');
-    if(!Number.isFinite(dbLog.bytes) || dbLog.bytes<=0 || !dbLog.complete || !Number.isFinite(dbLog.startedAt) || !Number.isFinite(dbLog.endedAt) || dbLog.startedAt>from || dbLog.endedAt<to || !existsSync(directory+'/db.log'))reasons.push('Missing/incomplete DB logs');
+    if(!retainedLog(directory+'/db.log',dbLog) || !Number.isFinite(dbLog.startedAt) || !Number.isFinite(dbLog.endedAt) || dbLog.startedAt>from || dbLog.endedAt<to)reasons.push('Missing/incomplete DB logs');
     const appLog=read('app-log-retention.json');
-    if(!Number.isFinite(appLog.bytes) || !Number.isFinite(appLog.startedAt) || !Number.isFinite(appLog.endedAt) || appLog.bytes<=0 || !appLog.complete || appLog.startedAt>from || appLog.endedAt<to || !existsSync(directory+'/app.log'))reasons.push('Missing/incomplete app logs');
-    if(context.arm==='C')reasons.push(...productionPoolEvidence(readFileSync(directory+'/app.log','utf8').split('\n'),from,to,appLog).reasons);
+    if(!retainedLog(directory+'/app.log',appLog) || !Number.isFinite(appLog.startedAt) || !Number.isFinite(appLog.endedAt) || appLog.startedAt>from || appLog.endedAt<to)reasons.push('Missing/incomplete app logs');
+    if(context.arm==='C' && retainedLog(directory+'/app.log',appLog))reasons.push(...productionPoolEvidence(readFileSync(directory+'/app.log','utf8').split('\n'),from,to,appLog).reasons);
     const resource=(role:string)=>readFileSync(directory+'/resources-'+role+'.jsonl','utf8').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line));
     const appResources=overheadResources(resource('app'),from,to),dbResources=overheadResources(resource('db'),from,to);
     reasons.push(...appResources.reasons,...dbResources.reasons);

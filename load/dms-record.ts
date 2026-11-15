@@ -3,10 +3,10 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { cpus, totalmem } from 'node:os';
+import { cpus, totalmem, tmpdir } from 'node:os';
 import { outsideCheckout } from './dms-workload.ts';
 
-const output = resolve(process.env.LOAD_RESULT_DIR || `/private/tmp/fukulow-dms-${Date.now()}`);
+const output = resolve(process.env.LOAD_RESULT_DIR || `${tmpdir()}/fukulow-dms-${Date.now()}`);
 if (!outsideCheckout(output, resolve('.'))) throw new Error('LOAD_RESULT_DIR must be outside checkout');
 mkdirSync(output, { recursive: true });
 const project = `fukulow-dms-${Date.now()}`;

@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
@@ -15,7 +16,7 @@ const port = process.env.LOAD_PORT || '18057';
 if (!/^\d+$/.test(port) || Number(port) < 1024 || Number(port) > 65535 || ['8080', '55432'].includes(port)) {
   throw new Error('LOAD_PORT must be a non-default unprivileged host port');
 }
-const output = resolve(process.env.LOAD_RESULT_DIR || `/private/tmp/${project}`);
+const output = resolve(process.env.LOAD_RESULT_DIR || `${tmpdir()}/${project}`);
 mkdirSync(output, { recursive: true });
 const inherited = { ...process.env };
 delete inherited.LOAD_ORGANIZATION_ID;
