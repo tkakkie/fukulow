@@ -1,5 +1,6 @@
+import { summarize } from './summarize.ts';
 import { supervise, ownedContainer, ownedVolume } from './runtime.ts';
-import { loadManifest, verifyRuntime } from './manifest.ts';
+import { loadManifest, verifyRuntime, verifyImage, verifySession } from './manifest.ts';
 // Run from the repository root with the Node version in .node-version.
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -19,10 +20,11 @@ const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1)
 if (out === root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
 if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
 process.env.SEARCH_RESULT_DIR = out;
-await supervise(import.meta.url,out);
+await supervise(import.meta.url,out,manifest.sha256,()=>summarize(out));
 mkdirSync(out);
 const container = ownedContainer();
-const image = 'fukulow-search-measure-153';
+const imageTag = 'fukulow-search-measure-153';
+let image = imageTag;
 const engines = ['trgm','bigm','pgroonga'] as const;
 type Engine = typeof engines[number] | 'none';
 const count = Number(process.env.SEARCH_ROWS ?? 1000000);
@@ -40,6 +42,8 @@ const results: Record<string,unknown>[] = [];
 function create(db: string) {
   owner('postgres',`CREATE DATABASE ${db};`);
   for (const migration of migrations) owner(db,`BEGIN;\n${readFileSync(`server/migrations/${migration}`,'utf8')}\nCOMMIT;`);
+  verifySession(text=>owner(db,text));
+  verifySession(text=>app(db,text));
   owner(db,file('schema.sql')); owner(db,grants); owner(db,fixtureSql());
 }
 function seedDb(db: string, rows: number) {
@@ -139,6 +143,7 @@ async function restoreDrill() {
     // Build completes before any timing. No server image/dependency is changed.
     const log = command('docker',['build','-t',image,'load/search-engines']); writeFileSync(`${out}/build.txt`,log);
   }
+  image = verifyImage(docker,imageTag,manifest.frozen.image.id);
   docker('volume','create',ownedVolume());
   const password = randomUUID();
   command('docker',['run','-d','--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD','-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,
@@ -155,8 +160,11 @@ async function restoreDrill() {
   }
   if (!ready) throw new Error('PostgreSQL startup timed out');
   verifyRuntime(text=>owner('postgres',text),docker,container);
+  verifySession(text=>owner('postgres',text));
   save(`${out}/manifest.json`,manifest);
   owner('postgres',`BEGIN; SET LOCAL fukulow.app_password=${literal(password)};\n${readFileSync('deploy/db-role-settings.sql','utf8')}\n${readFileSync('deploy/db-roles.sql','utf8')}\nCOMMIT;`);
+  verifyRuntime(text=>app('postgres',text),docker,container);
+  verifySession(text=>app('postgres',text));
   const metadata = {manifestHash:manifest.sha256,at:new Date().toISOString(),node:process.version,cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem(),arch:arch(),
     os:command('sw_vers',[]),model:command('sysctl',['-n','hw.model']),
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{.NCPU}},"memory":{{.MemTotal}}}')),
@@ -189,6 +197,8 @@ async function restoreDrill() {
         await new Promise(r=>setTimeout(r,500));
       }
       owner('measured',"SELECT pgroonga_command('status');");
+      verifySession(text=>owner('measured',text));
+      verifySession(text=>app('measured',text));
       note(`round ${round+1} ${engine}, index ${Math.round(build.buildMs)} ms`);
       const row: Record<string,unknown> = {manifestHash:manifest.sha256,round:round+1,engine,...build};
       if (engine!=='none') {
@@ -221,7 +231,6 @@ async function restoreDrill() {
       owner('postgres','DROP DATABASE measured WITH (FORCE);'); note(`round ${round+1} ${engine} complete`);
     }
   }
-  save(`${out}/finished.json`,{manifestHash:manifest.sha256,at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
-  command(process.execPath,['load/search-engines/summarize.ts',out]);
+  save(`${out}/completed.json`,{manifestHash:manifest.sha256,at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
   note('All measurements completed; no formal Linux performance judgement.');
 }

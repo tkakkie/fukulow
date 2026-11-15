@@ -1,5 +1,5 @@
 {
-  "sha256": "7b0a5ccfd28e2c6011882484dc7a33818f63432edefa82fd6baf1204e221343c",
+  "sha256": "1183b9169910942f9387333d5d8c35f26095e00d14353693b2152ff5ce16d099",
   "frozen": {
     "version": 1,
     "date": "2026-11-15",
@@ -9,51 +9,184 @@
       "clock": "2026-11-15T00:00:00.000Z"
     },
     "node": "26.13.0",
-    "sourceHashes": {
-      ".node-version": "6e775beae185bb3f5837d2f6d3fbe910e6f60e18fa507e661e312e84d707a92f",
-      "deploy/db-grants.sql": "f45e5b392826878f13ae7044a812638cd233842555c7c2f6e8bbe817b78647d4",
-      "deploy/db-role-settings.sql": "33cf155262132029911afb8a017953b68a16f65b8a055c0e861f7d9b66665b69",
-      "deploy/db-roles.sql": "d9756a87c05282bc237333325cbfd4c669b754883fb3cb17206ccdac69e241c2",
-      "load/package-lock.json": "544fd87c278f2336ba8256a421b09cf50f3619a25b82b8d94e86315b3b03c480",
-      "load/search-engines/Dockerfile": "035259bdb2ee0bdbeb1ee2e956d7bdfc27482be4199047e34cce756c36ec2ca3",
-      "load/search-engines/bench.ts": "a4b5974eff74ba73e34490d051ac13663324560dca7dcf1a0cf40f562a9e8d02",
-      "load/search-engines/bigm.sql": "966e24866866a4b76c2feb85a236cc1b655902ffd6c1671d063c2e502c8cbfe8",
-      "load/search-engines/manifest.ts": "813682cd2e2c31eaab705884987844d64e285995c05c92c0fe70d8c1251aadc8",
-      "load/search-engines/pgroonga.sql": "77247b66eb7179990b6d35ab13e185eec75663e7674c846cb5504fa02237a688",
-      "load/search-engines/quality/dataset.ts": "ec16de2e782723af3dd4f11eef27dc59d1228fd83a9f0805b39b46bb500d8461",
-      "load/search-engines/quality/metrics.ts": "2a868175bdd2c3917404fee82291427060a3ac614a4d72df275c274b2904f822",
-      "load/search-engines/quality/modes.ts": "e17e0e1f70de1bf4f411c79ccb3e42f0eb7cbd96da6726dd2c9994d3bdfba885",
-      "load/search-engines/quality/run.ts": "af12c653a60b19f4059ee498bc9e5f6fa07d9218826b2e9a8a75b1c01dfc7ce5",
-      "load/search-engines/queries.ts": "c3826eb14e824feb502ca16a562166e543783914ce024d7d3421a1508f9aebf8",
-      "load/search-engines/run.ts": "8b01ac10d6b3425357cfff3ab32b09d5eadb2dcbf414d3be229e2d7ab0225ce9",
-      "load/search-engines/runtime.ts": "094d588b85f09af373d57b192bc973d2116301b1d0d57e29545dc1f250faf6b9",
-      "load/search-engines/schema.sql": "ead322707a434a5dcb35e703e5f376b707dde0eb0d932e0aa67da1ccac3b22fb",
-      "load/search-engines/seed.ts": "bf23d30b595dbc2bfe3ebf533356f34c1019ceeac2da725373d57c5d2c6fec3f",
-      "load/search-engines/summarize.ts": "d2fb03cad4eb5e721b12c929e1268cd60781e4ca1d52124a5a1cb9f18faca15f",
-      "load/search-engines/trgm.sql": "d68359574d6672358b1a1e48b03ea1324b0e98a1fdddb7b0c70b88514347c37e",
-      "server/migrations/202611080001_auth.sql": "28349d93a7e94e0a8e134e80b37336091074fc92d119bb93991d8737389e6a73",
-      "server/migrations/202611090001_channels.sql": "1a05e69d3d556c36edbe42ab8b462bb19a4fc9355b500c55c4a473f7d31d3a56",
-      "server/migrations/202611090002_messages.sql": "870de83d557adb582238b3f45e1fa22641a217e029daf6504539b68adcc3cafd",
-      "server/migrations/202611090003_channel_names.sql": "d41231a2dbe4e0631383e71300625b58cc428896bf3a4b9ddd5e1345a8806c48",
-      "server/migrations/202611090004_channel_name_length.sql": "bf25e4b37d839d0d052d0aed5b910e629c6a761497186da33120c55992d691a1",
-      "server/migrations/202611090053_session_cleanup.sql": "cda129a84cc6e93c43c87b432fb768413493ef5769becd0bbade1b8153e7091a",
-      "server/migrations/202611090075_drop_sessions_expiry.sql": "0a1685d74150785f0b5bab65d484ce0ff1c1d4d00ef8248d7389ecc19f4930ed",
-      "server/migrations/202611100146_account_members.sql": "43036c12a2212ef1d5552a8b86db6d156ea5b4236286a4ef42b7ab74dffd57c2",
-      "server/migrations/202611100172_member_protection_indexes.sql": "7625730e4b699870e3cb99c256408e38c75a5b51d5bc6b23457bfe7baadc893f",
-      "server/migrations/202611110001_topics.sql": "51704296fb3e071873f6fc82f03694fd841c3f71c45f9ca94231166ce3cd4468",
-      "server/migrations/202611110197_revoke_exposed_sessions.sql": "72f714453259852d758f4dddffdd283371c83f5c3475f09b667d54ef260f1fc2",
-      "server/migrations/202611110198_replies.sql": "e4ffde2b99967edc03d923a977a79cfddc52ac056dd6d53c9ed821eb21bc4066",
-      "server/migrations/202611110199_unread.sql": "8f6641e7ba66bae72f75414c5282839db14afc1b75d867921e603eed4d2e33ec",
-      "server/migrations/202611110200_invites.sql": "d4be53c94380f87dace96f77fcae5e4a842c81265bf3aa279a3bc6ead6b7cf97",
-      "server/migrations/202611110201_unread_access.sql": "662db2a4d69347cf5c260b9c4428c5e52cd658a739153872df86efb528b004f1",
-      "server/migrations/202611110202_channel_grant_lifetime.sql": "509fd99ea87ba451e7c07ae480e134871e363988f8040412227b0aec282c2021",
-      "server/migrations/202611130311_channel_managers.sql": "090f1307fb3bc32065f0eaafc52f076aefdb01926dfa592819f228cee24e5abf",
-      "server/migrations/202611130314_tenant_rls.sql": "990e06102bfe3dc7946829f4c3d90de9e4c2c6f28c5c200c8ca758898799cb4e",
-      "server/migrations/202611140299_channel_name_nonempty.sql": "b2fa3bb58b9b609ad63e35dfb1ef515d9aeb63ad8dd5385179ae59f9d82415a6",
-      "server/migrations/202611140300_message_mentions.sql": "59c3535e337da44449af9fa9398ad1283fc9c16f614c225c64a55d49564d7e26",
-      "server/migrations/202611140303_invite_revocation.sql": "0a396b54103f51c84a28f6a523cac2158aeb195c2b2d92ff7173e8a852b7a611",
-      "server/migrations/202611140388_invite_expiry_scan.sql": "1960c4400b9a88e916a7b2096c81747648c86c543bf61bbeaed3f17737975779"
-    },
+    "sourceHashes": [
+      {
+        "path": ".gitattributes",
+        "sha256": "6fb0c0ed549e48a5109a0b6904418c03e6ecf1eeaa6bbfa7705ebe7433c97adf"
+      },
+      {
+        "path": ".node-version",
+        "sha256": "6e775beae185bb3f5837d2f6d3fbe910e6f60e18fa507e661e312e84d707a92f"
+      },
+      {
+        "path": "deploy/db-grants.sql",
+        "sha256": "f45e5b392826878f13ae7044a812638cd233842555c7c2f6e8bbe817b78647d4"
+      },
+      {
+        "path": "deploy/db-role-settings.sql",
+        "sha256": "33cf155262132029911afb8a017953b68a16f65b8a055c0e861f7d9b66665b69"
+      },
+      {
+        "path": "deploy/db-roles.sql",
+        "sha256": "d9756a87c05282bc237333325cbfd4c669b754883fb3cb17206ccdac69e241c2"
+      },
+      {
+        "path": "load/package-lock.json",
+        "sha256": "544fd87c278f2336ba8256a421b09cf50f3619a25b82b8d94e86315b3b03c480"
+      },
+      {
+        "path": "load/search-engines/Dockerfile",
+        "sha256": "035259bdb2ee0bdbeb1ee2e956d7bdfc27482be4199047e34cce756c36ec2ca3"
+      },
+      {
+        "path": "load/search-engines/bench.ts",
+        "sha256": "a4b5974eff74ba73e34490d051ac13663324560dca7dcf1a0cf40f562a9e8d02"
+      },
+      {
+        "path": "load/search-engines/bigm.sql",
+        "sha256": "966e24866866a4b76c2feb85a236cc1b655902ffd6c1671d063c2e502c8cbfe8"
+      },
+      {
+        "path": "load/search-engines/manifest.ts",
+        "sha256": "8ecde8593d020a1957a8514fde1d4f14c861ade22def9490a6d666229d795ec9"
+      },
+      {
+        "path": "load/search-engines/pgroonga.sql",
+        "sha256": "77247b66eb7179990b6d35ab13e185eec75663e7674c846cb5504fa02237a688"
+      },
+      {
+        "path": "load/search-engines/quality/dataset.ts",
+        "sha256": "ec16de2e782723af3dd4f11eef27dc59d1228fd83a9f0805b39b46bb500d8461"
+      },
+      {
+        "path": "load/search-engines/quality/metrics.ts",
+        "sha256": "2a868175bdd2c3917404fee82291427060a3ac614a4d72df275c274b2904f822"
+      },
+      {
+        "path": "load/search-engines/quality/modes.ts",
+        "sha256": "e17e0e1f70de1bf4f411c79ccb3e42f0eb7cbd96da6726dd2c9994d3bdfba885"
+      },
+      {
+        "path": "load/search-engines/quality/run.ts",
+        "sha256": "0308de3c0b027b048ff76dc99545661680711a633dad180b2120e89ab126bfc0"
+      },
+      {
+        "path": "load/search-engines/queries.ts",
+        "sha256": "c3826eb14e824feb502ca16a562166e543783914ce024d7d3421a1508f9aebf8"
+      },
+      {
+        "path": "load/search-engines/run.ts",
+        "sha256": "1faa4618ba113410616be1ef0aff3686aeba85fbb46685deb544c8b1804dbbf0"
+      },
+      {
+        "path": "load/search-engines/runtime.ts",
+        "sha256": "114bca018ef6ab916f847916cb60ce8f067661b1de60dbe33f083eddc0629935"
+      },
+      {
+        "path": "load/search-engines/schema.sql",
+        "sha256": "ead322707a434a5dcb35e703e5f376b707dde0eb0d932e0aa67da1ccac3b22fb"
+      },
+      {
+        "path": "load/search-engines/seed.ts",
+        "sha256": "bf23d30b595dbc2bfe3ebf533356f34c1019ceeac2da725373d57c5d2c6fec3f"
+      },
+      {
+        "path": "load/search-engines/summarize.ts",
+        "sha256": "6c620f35536bc06046112c66d78db5d960b99ef115c71ef546c1f93591d5310a"
+      },
+      {
+        "path": "load/search-engines/trgm.sql",
+        "sha256": "d68359574d6672358b1a1e48b03ea1324b0e98a1fdddb7b0c70b88514347c37e"
+      },
+      {
+        "path": "server/migrations/202611080001_auth.sql",
+        "sha256": "28349d93a7e94e0a8e134e80b37336091074fc92d119bb93991d8737389e6a73"
+      },
+      {
+        "path": "server/migrations/202611090001_channels.sql",
+        "sha256": "1a05e69d3d556c36edbe42ab8b462bb19a4fc9355b500c55c4a473f7d31d3a56"
+      },
+      {
+        "path": "server/migrations/202611090002_messages.sql",
+        "sha256": "870de83d557adb582238b3f45e1fa22641a217e029daf6504539b68adcc3cafd"
+      },
+      {
+        "path": "server/migrations/202611090003_channel_names.sql",
+        "sha256": "d41231a2dbe4e0631383e71300625b58cc428896bf3a4b9ddd5e1345a8806c48"
+      },
+      {
+        "path": "server/migrations/202611090004_channel_name_length.sql",
+        "sha256": "bf25e4b37d839d0d052d0aed5b910e629c6a761497186da33120c55992d691a1"
+      },
+      {
+        "path": "server/migrations/202611090053_session_cleanup.sql",
+        "sha256": "cda129a84cc6e93c43c87b432fb768413493ef5769becd0bbade1b8153e7091a"
+      },
+      {
+        "path": "server/migrations/202611090075_drop_sessions_expiry.sql",
+        "sha256": "0a1685d74150785f0b5bab65d484ce0ff1c1d4d00ef8248d7389ecc19f4930ed"
+      },
+      {
+        "path": "server/migrations/202611100146_account_members.sql",
+        "sha256": "43036c12a2212ef1d5552a8b86db6d156ea5b4236286a4ef42b7ab74dffd57c2"
+      },
+      {
+        "path": "server/migrations/202611100172_member_protection_indexes.sql",
+        "sha256": "7625730e4b699870e3cb99c256408e38c75a5b51d5bc6b23457bfe7baadc893f"
+      },
+      {
+        "path": "server/migrations/202611110001_topics.sql",
+        "sha256": "51704296fb3e071873f6fc82f03694fd841c3f71c45f9ca94231166ce3cd4468"
+      },
+      {
+        "path": "server/migrations/202611110197_revoke_exposed_sessions.sql",
+        "sha256": "72f714453259852d758f4dddffdd283371c83f5c3475f09b667d54ef260f1fc2"
+      },
+      {
+        "path": "server/migrations/202611110198_replies.sql",
+        "sha256": "e4ffde2b99967edc03d923a977a79cfddc52ac056dd6d53c9ed821eb21bc4066"
+      },
+      {
+        "path": "server/migrations/202611110199_unread.sql",
+        "sha256": "8f6641e7ba66bae72f75414c5282839db14afc1b75d867921e603eed4d2e33ec"
+      },
+      {
+        "path": "server/migrations/202611110200_invites.sql",
+        "sha256": "d4be53c94380f87dace96f77fcae5e4a842c81265bf3aa279a3bc6ead6b7cf97"
+      },
+      {
+        "path": "server/migrations/202611110201_unread_access.sql",
+        "sha256": "662db2a4d69347cf5c260b9c4428c5e52cd658a739153872df86efb528b004f1"
+      },
+      {
+        "path": "server/migrations/202611110202_channel_grant_lifetime.sql",
+        "sha256": "509fd99ea87ba451e7c07ae480e134871e363988f8040412227b0aec282c2021"
+      },
+      {
+        "path": "server/migrations/202611130311_channel_managers.sql",
+        "sha256": "090f1307fb3bc32065f0eaafc52f076aefdb01926dfa592819f228cee24e5abf"
+      },
+      {
+        "path": "server/migrations/202611130314_tenant_rls.sql",
+        "sha256": "990e06102bfe3dc7946829f4c3d90de9e4c2c6f28c5c200c8ca758898799cb4e"
+      },
+      {
+        "path": "server/migrations/202611140299_channel_name_nonempty.sql",
+        "sha256": "b2fa3bb58b9b609ad63e35dfb1ef515d9aeb63ad8dd5385179ae59f9d82415a6"
+      },
+      {
+        "path": "server/migrations/202611140300_message_mentions.sql",
+        "sha256": "59c3535e337da44449af9fa9398ad1283fc9c16f614c225c64a55d49564d7e26"
+      },
+      {
+        "path": "server/migrations/202611140303_invite_revocation.sql",
+        "sha256": "0a396b54103f51c84a28f6a523cac2158aeb195c2b2d92ff7173e8a852b7a611"
+      },
+      {
+        "path": "server/migrations/202611140388_invite_expiry_scan.sql",
+        "sha256": "1960c4400b9a88e916a7b2096c81747648c86c543bf61bbeaed3f17737975779"
+      }
+    ],
     "quality": {
       "querySet": [
         {
@@ -691,6 +824,7 @@
       "qualityTimed": false
     },
     "image": {
+      "id": "sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77",
       "base": "postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42",
       "packages": {
         "postgresql-18": "18.6-1.pgdg13+2",
@@ -724,6 +858,16 @@
       "shared_preload_libraries": "pgroonga_wal_resource_manager,pgroonga_crash_safer",
       "pgroonga.enable_wal_resource_manager": "on",
       "pgroonga.enable_crash_safe": "on"
+    },
+    "sessionPolicy": {
+      "planner": "Query Tuning settings must equal image boot_val",
+      "settings": {
+        "row_security": "on",
+        "default_transaction_read_only": "off",
+        "default_transaction_isolation": "read committed",
+        "client_encoding": "UTF8",
+        "standard_conforming_strings": "on"
+      }
     },
     "shmBytes": 1073741824
   }

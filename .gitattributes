@@ -1,0 +1,9 @@
+# Frozen evaluation sources use identical bytes in every Git checkout.
+/.gitattributes text eol=lf
+/.node-version text eol=lf
+/load/package-lock.json text eol=lf
+/load/search-engines/** text eol=lf
+/server/migrations/*.sql text eol=lf
+/deploy/db-grants.sql text eol=lf
+/deploy/db-roles.sql text eol=lf
+/deploy/db-role-settings.sql text eol=lf

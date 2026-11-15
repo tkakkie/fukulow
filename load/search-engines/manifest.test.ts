@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings } from './manifest.ts';
+import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, verifyImage, verifySession, sessionSettings } from './manifest.ts';
 import { boundedCommand } from './bench.ts';
 
 const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 test('checked-in manifest matches the evaluation inputs',()=>{
-  assert.equal(verifyManifest(JSON.parse(readFileSync('load/search-engines/manifest-v1.json','utf8'))),document.sha256);
+  assert.equal(verifyManifest(JSON.parse(readFileSync(new URL('./manifest-v1.json',import.meta.url),'utf8'))),document.sha256);
 });
 test('manifest content tampering is refused',()=>{
   assert.throws(()=>verifyManifest({...document,sha256:'changed'}),/content hash mismatch/);
 });
-for (const field of ['generator','sourceHashes','quality','performance','timing','image','settings','shmBytes'] as const) {
+for (const field of ['generator','sourceHashes','quality','performance','timing','image','sessionPolicy','settings','shmBytes'] as const) {
   test(`changed ${field} is refused before a run`,()=>{
     const actual = structuredClone(frozen);
     Object.assign(actual,{[field]:'changed'});
@@ -49,3 +49,24 @@ test('client exceptions omit stdout, stderr and input',()=>{
 test('an unavailable command fails without leaking the input',()=>{
   assert.throws(()=>boundedCommand('/nonexistent-search-test-command',[],50,'private-input'),/failed/);
 });
+
+test('mutable reused image must match the frozen immutable identity',()=>{
+  assert.throws(()=>verifyImage(()=> 'sha256:changed','mutable-tag',frozen.image.id),/image identity mismatch/);
+  assert.equal(verifyImage(()=>frozen.image.id,'mutable-tag',frozen.image.id),frozen.image.id);
+});
+for (const role of ['owner','app']) {
+  test(`${role}: inherited PGOPTIONS disabling bitmap scans is refused`,()=>{
+    const effective = [{name:'enable_bitmapscan',setting:'off',boot_val:'on',category:'Query Tuning / Planner Method Configuration'}];
+    const sql = (text: string)=>{
+      if (!text.includes('count(*)')) return JSON.stringify(sessionSettings);
+      assert.match(text,/category LIKE 'Query Tuning%'/);
+      assert.match(text,/setting IS DISTINCT FROM boot_val/);
+      return String(effective.filter(s=>s.category.startsWith('Query Tuning') && s.setting!==s.boot_val).length);
+    };
+    assert.throws(()=>verifySession(sql),/planner defaults mismatch/);
+  });
+  test(`${role}: frozen planner and session defaults pass`,()=>{
+    verifySession(text=>text.includes('count(*)') ? '0' : JSON.stringify(sessionSettings));
+    assert.throws(()=>verifySession(()=>JSON.stringify({...sessionSettings,row_security:'off'})),/session settings mismatch/);
+  });
+}

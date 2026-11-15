@@ -10,6 +10,9 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 
 const runners = ['./run.ts','./quality/run.ts'];
+const manifest = JSON.parse(readFileSync(new URL('./manifest-v1.json',import.meta.url),'utf8'));
+const manifestHash = manifest.sha256;
+const imageId = manifest.frozen.image.id;
 const version = readFileSync(new URL('../../.node-version',import.meta.url),'utf8').trim();
 
 function start(t: TestContext, runnerPath: string, mode: string, existing = false) {
@@ -23,13 +26,29 @@ import { appendFileSync, existsSync, writeFileSync, rmSync } from 'node:fs';
 const args = process.argv.slice(2);
 appendFileSync(process.env.STUB_LOG,JSON.stringify(args)+'\\n');
 const state = process.env.STUB_LOG+'.state';
+if (args[0] === 'image') console.log(process.env.STUB_MODE==='image-mismatch'?'sha256:changed':${JSON.stringify(imageId)});
 if (args[0] === 'run') {
   if (process.env.STUB_MODE !== 'absent') writeFileSync(state,'owned');
-  if (!['signal','hang','mismatch'].includes(process.env.STUB_MODE)) process.exit(42);
+  if (!['signal','hang','mismatch','planner-owner','planner-app'].includes(process.env.STUB_MODE)) process.exit(42);
 }
 if (args[0] === 'exec' && process.env.STUB_MODE === 'mismatch' && args.includes('psql')) {
   let input='';for await (const chunk of process.stdin) input+=chunk;
   console.log(input.includes('server_version_num')?'180005':'1');
+}
+if (args[0] === 'exec' && process.env.STUB_MODE.startsWith('planner-')) {
+  if (args.includes('dpkg-query')) console.log(${JSON.stringify(Object.entries(manifest.frozen.image.packages).map(p=>p.join('|')).join('\n'))});
+  if (args.includes('psql')) {
+    let input='';for await (const chunk of process.stdin) input+=chunk;
+    if (input.includes('INSERT INTO messages') || input.includes('COPY messages')) appendFileSync(process.env.STUB_LOG,JSON.stringify(['unexpected-load'])+'\\n');
+    if (input.includes('SELECT 1;')) console.log('1');
+    else if (input.includes('server_version_num')) console.log('180006');
+    else if (input.includes('pg_available_extensions')) console.log(${JSON.stringify(JSON.stringify(manifest.frozen.image.extensions))});
+    else if (input.includes('count(*) FROM pg_settings')) {
+      // Model an image PGOPTIONS default or an app-role-specific default.
+      const changed=process.env.STUB_MODE==='planner-owner' || args.includes('fukulow_app');
+      console.log(changed?'1':'0');
+    } else if (input.includes('pg_settings')) console.log(input.includes("'row_security'")?${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.settings))}:${JSON.stringify(JSON.stringify(manifest.frozen.settings))});
+  }
 }
 if (args[0] === 'exec' && process.env.STUB_MODE === 'hang') setInterval(()=>{},1000);
 if (args[0] === 'rm') {
@@ -95,7 +114,23 @@ for (const runner of runners) {
       assert.equal(run.child.kill(signal),true);
       assert.deepEqual(await run.closed,[code,null]);
       assertCleanup(run.calls());
-      assert.deepEqual(JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8')),{valid:false,cleanupVerified:true,exitCode:code});
+      assert.deepEqual(JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8')),{manifestHash,valid:false,cleanupVerified:true,exitCode:code});
+    });
+  }
+
+  for (const mode of ['image-mismatch','planner-owner','planner-app']) {
+    test(`${runner}: ${mode} refuses drift before corpus loading`,{timeout:10000},async t=>{
+      const run = start(t,runner,mode);
+      assert.deepEqual(await run.closed,[1,null]);
+      assert.match(run.stderr(),mode==='image-mismatch'?/Frozen image identity mismatch/:/Frozen planner defaults mismatch/);
+      assert.equal(run.calls().some(args=>args[0]==='cp' || args[0]==='unexpected-load'),false);
+      if(mode==='image-mismatch') assert.equal(run.calls().some(args=>args[0]==='run'),false);
+      else assertCleanup(run.calls());
+      const status = JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8'));
+      assert.equal(status.valid,false);
+      assert.equal(status.manifestHash,manifestHash);
+      assert.equal(existsSync(join(run.out,'finished.json')),false);
+      assert.equal(existsSync(join(run.out,'summary.json')),false);
     });
   }
 

@@ -1,9 +1,9 @@
 import { supervise, ownedContainer, ownedVolume } from '../runtime.ts';
-import { loadManifest, verifyRuntime } from '../manifest.ts';
+import { loadManifest, verifyRuntime, verifyImage, verifySession } from '../manifest.ts';
 // Quality only: full result sets, no timers or performance measurements.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,10 +23,11 @@ const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1)
 if (out===root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
 if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
 process.env.SEARCH_QUALITY_DIR = out;
-await supervise(import.meta.url,out);
+await supervise(import.meta.url,out,manifest.sha256,()=>{ renameSync(`${out}/pending-summary.json`,`${out}/summary.json`); });
 mkdirSync(out);
 const container = ownedContainer();
-const image = 'fukulow-search-measure-153';
+const imageTag = 'fukulow-search-measure-153';
+let image = imageTag;
 const owner = (db: string,text: string)=>sql(container,db,text);
 const app = (db: string,text: string)=>sql(container,db,text,'fukulow_app');
 const read = (p: string)=>readFileSync(p,'utf8');
@@ -34,6 +35,7 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
 {
   console.log(`Quality artifacts: ${out}`);
   if (process.env.SEARCH_SKIP_BUILD!=='1') writeFileSync(`${out}/build.txt`,docker('build','-t',image,'load/search-engines'));
+  image = verifyImage(docker,imageTag,manifest.frozen.image.id);
   docker('volume','create',ownedVolume());
   const password = randomUUID();
   command('docker',['run','-d','--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD',
@@ -53,12 +55,17 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
   }
   assert.ok(ready,'PostgreSQL startup timed out');
   verifyRuntime(text=>owner('postgres',text),docker,container);
+  verifySession(text=>owner('postgres',text));
   save(`${out}/manifest.json`,manifest);
   owner('postgres',`BEGIN; SET LOCAL fukulow.app_password=${literal(password)};
     ${read('deploy/db-role-settings.sql')}\n${read('deploy/db-roles.sql')}\nCOMMIT; CREATE DATABASE quality_base;`);
+  verifyRuntime(text=>app('postgres',text),docker,container);
+  verifySession(text=>app('postgres',text));
   const migrations = readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).sort();
   for (const p of migrations) owner('quality_base',`BEGIN; ${read(`server/migrations/${p}`)} COMMIT;`);
   owner('quality_base',read('load/search-engines/schema.sql')+read('deploy/db-grants.sql')+fixtureSql());
+  verifySession(text=>owner('quality_base',text));
+  verifySession(text=>app('quality_base',text));
   const data = corpus();
   const rows: string[] = [];
   let i = 0;
@@ -89,6 +96,8 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
   for (const mode of modes) {
     owner('postgres','CREATE DATABASE quality_mode TEMPLATE quality_base;');
     owner('quality_mode',"CREATE EXTENSION pgroonga; SELECT pgroonga_command('status');"+mode.ddl+' ANALYZE;');
+    verifySession(text=>owner('quality_mode',text));
+    verifySession(text=>app('quality_mode',text));
     const facts = app('quality_mode',"SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user; SELECT count(*) FROM messages;");
     assert.equal(facts,'fukulow_app|f|f\n0');
     const runQuery = (q: typeof evaluated[number],actor = 2)=>{
@@ -116,9 +125,9 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
     const result = {manifestHash:manifest.sha256,mode:mode.id,engine:mode.engine,ddl:mode.ddl,settings,
       extensions:owner('quality_mode','SELECT extname,extversion FROM pg_extension ORDER BY extname;'),ranked:mode.ranked,rls:facts,
       overall:aggregate(scored),classes:Object.fromEntries(Object.keys(classes).map(c=>[c,aggregate(scored.filter(r=>r.class===c))])),queries:scored};
-    results.push(result); save(`${out}/summary.json`,results);
+    results.push(result); save(`${out}/pending-summary.json`,results);
     console.log(`${mode.id}: micro F1 ${result.overall.micro.f1.toFixed(4)}, macro F1 ${result.overall.macro.f1.toFixed(4)}`);
     owner('postgres','DROP DATABASE quality_mode WITH (FORCE);');
   }
-  save(`${out}/finished.json`,{manifestHash:manifest.sha256,modes:results.length,queries:queries.length,rows:i});
+  save(`${out}/completed.json`,{manifestHash:manifest.sha256,modes:results.length,queries:queries.length,rows:i});
 }
