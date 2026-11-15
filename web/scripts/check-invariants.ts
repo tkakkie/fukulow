@@ -30,7 +30,11 @@
 //     CI fails loudly; this check does not look for it.
 //   - scripts/*.test.ts: counts only with the explicit CI node --test glob; options are refused conservatively.
 //     Runtime skips inside callbacks cannot be detected, as with web tests.
-//   - web/e2e/** (Playwright) is not run in CI, so references to it are refused until E2E joins CI.
+//   - Playwright: web/e2e/**/*.{test,spec}.ts only with the verified unfiltered PR smoke command and
+//     literal single-project discovery config. Compose acceptance is not PR CI and never counts.
+//     Refuses skip/fixme/fail declarations and skipped suites; runtime skip/fixme, .only, mode changes,
+//     conditional declarations and unsupported test APIs make the whole file unverifiable.
+//     A focused .only call anywhere in the smoke directory refuses all smoke references (focus is suite-wide).
 // A test title that is defined twice in one file counts only if no definition of it is skipped.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -189,31 +193,72 @@ function calleeOf(e: ts.Expression): Callee {
   return { root, words }
 }
 
-export type TsTest = { title: string; skipped: boolean }
+export type TsTest = { title: string; skipped: boolean; reason?: string }
+
+function isPlaywrightImport(s: ts.Node): s is ts.ImportDeclaration {
+  return ts.isImportDeclaration(s) && ts.isStringLiteral(s.moduleSpecifier) && s.moduleSpecifier.text === '@playwright/test'
+}
 
 /** Titles of test(...) / it(...) calls (vitest, Playwright) in the AST; skipped if the call or a parent describe is skipped. */
-export function tsTests(src: string, fileName = 'x.ts', nodeTests = false): TsTest[] {
+export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playwright = false): TsTest[] {
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true)
   const out: TsTest[] = []
+  let unverifiable: string | undefined
   const visit = (node: ts.Node, parentSkipped: boolean) => {
     let skipped = parentSkipped
     if (ts.isCallExpression(node)) {
       const c = calleeOf(node.expression)
+      if (playwright) {
+        let root = node.expression
+        while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) root = root.expression
+        if (ts.isIdentifier(root) && root.text === 'test' && !c)
+          unverifiable ??= 'unsupported Playwright test API (including describe.configure mode changes)'
+      }
       if (c) {
         const options = node.arguments[1]
         // Fail closed on node:test options (skip/todo may be computed or spread).
         const nodeOptions = nodeTests && options && !ts.isArrowFunction(options) && !ts.isFunctionExpression(options)
-        const own = nodeOptions || c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w))
+        const own = nodeOptions || c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w) || (playwright && w === 'fail'))
         const isSuite = c.root === 'describe' || c.root === 'suite' || c.root === 'xdescribe' || c.words.includes('describe')
         const a = node.arguments[0]
         const literal = a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))
-        if (literal && !isSuite) out.push({ title: a.text, skipped: parentSkipped || own })
+        if (playwright) {
+          if (c.words.some(w => !['describe', 'skip', 'fixme', 'fail', 'only'].includes(w)))
+            unverifiable ??= 'unsupported Playwright modifier or suite mode'
+          const callback = node.arguments[node.arguments.length - 1]
+          const declaration = literal && callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+          if (c.words.includes('only')) unverifiable = 'Playwright .only cannot be verified'
+          if (c.words.some(w => w === 'skip' || w === 'fixme' || w === 'fail') && !declaration)
+            unverifiable ??= 'runtime/conditional Playwright skip/fixme/fail makes the file unverifiable'
+          if (!declaration || c.root !== 'test') unverifiable ??= 'Playwright declaration is not a literal title and inline callback'
+          if (declaration) {
+            // Only direct source/suite declarations count; control flow, helper functions and test bodies may not register tests.
+            let p = node.parent
+            while (p && !ts.isSourceFile(p)) {
+              if (ts.isArrowFunction(p) || ts.isFunctionExpression(p)) {
+                const call = p.parent
+                const parent = ts.isCallExpression(call) ? calleeOf(call.expression) : null
+                if (!parent?.words.includes('describe')) unverifiable ??= 'conditional/nested Playwright declaration cannot be verified'
+              } else if (!ts.isExpressionStatement(p) && !ts.isBlock(p) && !ts.isCallExpression(p))
+                unverifiable ??= 'conditional/nested Playwright declaration cannot be verified'
+              p = p.parent
+            }
+          }
+        }
+        if (literal && !isSuite) out.push({ title: a.text, skipped: parentSkipped || own,
+          ...(playwright && own ? { reason: `Playwright ${c.words.find(w => SKIP_WORDS.has(w) || w === 'fail') ?? 'skipped'} declaration` } : {}),
+        })
         if (isSuite) skipped = parentSkipped || own
       }
     }
     ts.forEachChild(node, (child) => visit(child, skipped))
   }
   visit(sf, false)
+  if (playwright && !sf.statements.some(s => isPlaywrightImport(s) && s.importClause?.namedBindings
+    && ts.isNamedImports(s.importClause.namedBindings)
+    && s.importClause.namedBindings.elements.some(e => !e.propertyName && e.name.text === 'test')))
+    unverifiable ??= 'Playwright test must be imported directly without an alias from @playwright/test'
+  if (playwright && unverifiable) return out.map(t => ({ ...t, skipped: true, reason: unverifiable }))
   return out
 }
 
@@ -353,6 +398,97 @@ function rustPlacement(file: string, t: RustTest, files: Map<string, RustFile>, 
   return { runs: true, expect: places.map((p) => names(p.binary, p.modPath)) }
 }
 
+/** Literal properties only: computed names, duplicates and spreads cannot prove discovery. */
+function configProperties(node: ts.Node | undefined): Map<string, ts.Expression> | null {
+  if (!node || !ts.isObjectLiteralExpression(node)) return null
+  const props = new Map<string, ts.Expression>()
+  for (const p of node.properties) {
+    if (!ts.isPropertyAssignment(p) || (!ts.isIdentifier(p.name) && !ts.isStringLiteral(p.name)) || props.has(p.name.text)) return null
+    props.set(p.name.text, p.initializer)
+  }
+  return props
+}
+
+/** Deliberately recognizes the current smoke invocation, not arbitrary YAML or shell programs. */
+function playwrightCI(root: string): string | null {
+  const workflow = join(root, '.github/workflows/e2e.yml')
+  if (!existsSync(workflow)) return 'Playwright PR CI workflow e2e.yml is missing (not run in CI)'
+  const src = readFileSync(workflow, 'utf8').replace(/^\s*#.*$/gm, '')
+  if ([...src.matchAll(/^on:/gm)].length !== 1 || !/^on:\n  pull_request:\s*\n(?=\S)/m.test(src))
+    return 'Playwright workflow pull_request trigger is absent or filtered'
+  const smoke = /^  smoke:\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/m.exec(src)?.[1]
+  if (!smoke || [...src.matchAll(/^jobs:/gm)].length !== 1 || [...src.matchAll(/^  smoke:/gm)].length !== 1
+    || /^(?:defaults|env):|^    (?:if|needs|strategy|defaults|continue-on-error):|[&*][\w-]+/m.test(src))
+    return 'Playwright smoke job execution cannot be verified statically'
+  const steps = smoke.split(/^      - /m).slice(1)
+  const cliSteps = steps.filter(step => step.includes('node_modules/@playwright/test/cli.js'))
+  // Match the complete Docker invocation, so extra CLI filters, config overrides, shell guards,
+  // workdir overrides and Docker entrypoint/env changes cannot silently narrow discovery.
+  const command = String.raw`docker run --pull never --rm --init --network host --ipc host \
+  --user "$(id -u):$(id -g)" \
+  --env CI --env DATABASE_URL --env FUKULOW_SEND_BURST --env FUKULOW_SEND_REFILL_PER_SECOND \
+  --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+  --volume "$RUNNER_TOOL_CACHE:$RUNNER_TOOL_CACHE:ro" \
+  --workdir "$GITHUB_WORKSPACE/web" \
+  --entrypoint "$(command -v node)" \
+  "$PLAYWRIGHT_IMAGE" node_modules/@playwright/test/cli.js test`
+  const step = cliSteps[0] ?? ''
+  const run = /\n        shell: bash\n        run: \|\n([\s\S]*)$/.exec(step)?.[1]
+  const body = run?.split('\n').map(line => line.replace(/^          /, '')).join('\n').trim()
+  const prefix = String.raw`set -euo pipefail
+if ! timeout 60s docker pull "$PLAYWRIGHT_IMAGE"; then
+  echo '::error::Playwright image pull failed or exceeded 60 seconds'
+  exit 1
+fi`
+  if (cliSteps.length !== 1 || !/^name: [^\n]+\n        shell: bash\n        run: \|\n/.test(step) || body !== `${prefix}\n${command}`)
+    return 'Playwright smoke CLI must run unfiltered test from web (filters/overrides or command unverifiable)'
+  return null
+}
+
+function playwrightConfig(root: string): string | null {
+  const file = join(root, 'web/playwright.config.ts')
+  if (!existsSync(file)) return 'Playwright discovery config is missing'
+  const sf = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+  const exports = sf.statements.filter(ts.isExportAssignment)
+  const exp = exports[0]?.expression
+  const config = exp && ts.isCallExpression(exp) && exp.expression.getText(sf) === 'defineConfig' && exp.arguments.length === 1
+    ? configProperties(exp.arguments[0]) : null
+  const imported = sf.statements.some(s => isPlaywrightImport(s) && s.importClause?.namedBindings
+    && ts.isNamedImports(s.importClause.namedBindings)
+    && s.importClause.namedBindings.elements.some(e => !e.propertyName && e.name.text === 'defineConfig'))
+  if (exports.length !== 1 || !config || !imported) return 'Playwright discovery config must be a literal defineConfig object imported from @playwright/test'
+  const dir = config.get('testDir')
+  if (!dir || !ts.isStringLiteral(dir) || dir.text !== './e2e') return "Playwright testDir must be './e2e'"
+  const allowed = new Set(['testDir', 'projects', 'forbidOnly', 'workers', 'timeout', 'preserveOutput', 'reporter', 'use', 'webServer'])
+  for (const key of config.keys()) if (!allowed.has(key)) return `Playwright config ${key} discovery is unverifiable`
+  if (config.has('forbidOnly') && config.get('forbidOnly')?.kind !== ts.SyntaxKind.TrueKeyword)
+    return 'Playwright forbidOnly must not be false or computed'
+  const projects = config.get('projects')
+  if (!projects || !ts.isArrayLiteralExpression(projects) || projects.elements.length !== 1)
+    return 'Playwright config must have exactly one literal project'
+  const project = configProperties(projects.elements[0])
+  if (!project) return 'Playwright project must be a literal object'
+  for (const key of project.keys()) if (!['name', 'use'].includes(key)) return `Playwright project ${key} discovery is unverifiable`
+  return null
+}
+
+/** Focus can suppress tests in other files too, including when declared by an imported helper or alias. */
+function playwrightFocus(src: string): boolean {
+  const sf = ts.createSourceFile('x.ts', src, ts.ScriptTarget.Latest, true)
+  const visit = (node: ts.Node): boolean => {
+    if (ts.isCallExpression(node)) {
+      let e = node.expression
+      while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
+        if (ts.isPropertyAccessExpression(e) ? e.name.text === 'only'
+          : e.argumentExpression && ts.isStringLiteral(e.argumentExpression) && e.argumentExpression.text === 'only') return true
+        e = e.expression
+      }
+    }
+    return ts.forEachChild(node, visit) ?? false
+  }
+  return visit(sf)
+}
+
 /** Collects every test definition in the repository, keyed by `path::name`, with whether CI runs it. */
 export function collectKnownTests(root: string): Known {
   const known: Known = new Map()
@@ -370,12 +506,24 @@ export function collectKnownTests(root: string): Known {
           : rustPlacement(file, t, rust, tree)
       record(known, `${file}::${t.name}`, status)
     }
-  for (const f of walk(join(root, 'web'), skip)) {
+  const webFiles = walk(join(root, 'web'), skip)
+  const focused = webFiles.find(f => rel(f).startsWith('web/e2e/') && f.endsWith('.ts') && playwrightFocus(readFileSync(f, 'utf8')))
+  const playwrightRefusal = playwrightCI(root) ?? playwrightConfig(root)
+    ?? (focused ? `Playwright .only in ${rel(focused)} makes the entire smoke suite unverifiable` : null)
+  for (const f of webFiles) {
     if (!/\.(test|spec)\.ts$/.test(f)) continue
-    const e2e = rel(f).startsWith('web/e2e/')
-    for (const t of tsTests(readFileSync(f, 'utf8'), f)) {
+    const src = readFileSync(f, 'utf8')
+    const path = rel(f)
+    const e2e = /^web\/e2e(?:[/-])/.test(path)
+      || ts.createSourceFile(f, src, ts.ScriptTarget.Latest, true).statements.some(isPlaywrightImport)
+    // e2e-compose.yml -> package script e2e:compose -> playwright.compose.config.ts -> e2e-compose.
+    const refusal = path.startsWith('web/e2e-compose/') ? 'Compose-only Playwright acceptance is not PR CI'
+      : !path.startsWith('web/e2e/') ? 'Playwright file is outside smoke testDir web/e2e'
+      : playwrightRefusal
+    for (const t of tsTests(src, f, false, e2e)) {
       const status: TestStatus = e2e
-        ? { runs: false, reason: 'web/e2e (Playwright) is not run in CI' }
+        ? refusal ? { runs: false, reason: refusal }
+          : t.skipped ? { runs: false, reason: t.reason ?? 'inside a skipped Playwright describe (skip/fixme/fail)' } : { runs: true }
         : t.skipped
           ? { runs: false, reason: 'skipped (skip/fixme/todo, or inside a skipped describe)' }
           : { runs: true }
