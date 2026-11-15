@@ -513,7 +513,7 @@ async fn sign_in_with_entropy(
         .map_err(ApiError::throttled)?;
     // Admission covers lookup too, so overload does not turn into a DB flood.
     let permit = workers.acquire().await?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = crate::database::begin(&state.pool).await?;
     let stored = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, password_hash FROM accounts WHERE email = $1 FOR UPDATE",
     )
@@ -611,7 +611,7 @@ impl FromRequestParts<AppState> for AccountAuth {
             "SELECT account_id FROM account_sessions WHERE token_hash = $1 AND expires_at > now()",
         )
         .bind(&token_hash)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *crate::database::acquire(&state.pool).await?)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
         Ok(Self {

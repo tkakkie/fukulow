@@ -136,7 +136,7 @@ async fn secure_account(
         .map_err(ApiError::throttled)?;
     let email = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
         .bind(auth.account_id)
-        .fetch_one(&state.pool)
+        .fetch_one(&mut *crate::database::acquire(&state.pool).await?)
         .await?;
     attempt.account(email).map_err(ApiError::throttled)?;
     let permit = workers.acquire().await?;
@@ -173,7 +173,7 @@ async fn update_and_revoke(
     attempt: Attempt,
     permit: PasswordPermit,
 ) -> Result<Vec<Vec<u8>>, ApiError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::database::begin(pool).await?;
     let stored = sqlx::query_scalar("SELECT password_hash FROM accounts WHERE id = $1 FOR UPDATE")
         .bind(auth.account_id)
         .fetch_optional(&mut *tx)

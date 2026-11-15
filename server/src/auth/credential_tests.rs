@@ -132,3 +132,31 @@ async fn session_entropy_success_encodes_every_byte_once(pool: sqlx::PgPool) {
         .bind(expected).fetch_one(&pool).await.unwrap();
     assert!(stored);
 }
+
+#[fukulow_test::test]
+async fn formerly_implicit_executor_and_begin_acquisitions_are_counted(pool: sqlx::PgPool) {
+    use axum::extract::FromRequestParts;
+    let app = AppState::for_test(pool).await;
+    let ((), count) = crate::database::test_acquisitions(async {
+        let (mut parts, ()) = axum::http::Request::builder()
+            .header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", "a".repeat(64)),
+            )
+            .body(())
+            .unwrap()
+            .into_parts();
+        // AccountAuth formerly passed &PgPool to fetch_optional. Even this
+        // unauthorized lookup must count its acquisition.
+        assert!(
+            super::AccountAuth::from_request_parts(&mut parts, &app)
+                .await
+                .is_err()
+        );
+        let tx = crate::database::begin(&app.pool).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert!(crate::database::ready(&app.pool).await);
+    })
+    .await;
+    assert_eq!(count, 3);
+}
