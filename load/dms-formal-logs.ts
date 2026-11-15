@@ -4,8 +4,8 @@ import { appendFileSync, writeFileSync } from 'node:fs';
 export const appLogLimit=64*1024*1024;
 // Keep a live reader across Docker rotation. On overflow, continue draining but
 // explicitly disqualify the retained evidence; never silently keep a tail.
-export function captureAppLogs(directory:string,args:string[],limit=appLogLimit,program='docker') {
-  const path=`${directory}/app.log`;
+export function captureAppLogs(directory:string,args:string[],limit=appLogLimit,program='docker',name='app') {
+  const path=`${directory}/${name}.log`;
   writeFileSync(path,'',{mode:0o600});
   const startedAt=Date.now();
   const child=spawn(program,args,{stdio:['ignore','ignore','pipe']});
@@ -24,7 +24,7 @@ export function captureAppLogs(directory:string,args:string[],limit=appLogLimit,
     const timer=setTimeout(()=>{reason ??= 'app log reader stop timeout';child.kill('SIGKILL');},5000);
     await closed;clearTimeout(timer);
     const record={complete:!truncated && !reason,reason:truncated?'64 MiB app log retention limit exceeded':reason,startedAt,endedAt:Date.now(),bytes,limit};
-    writeFileSync(`${directory}/app-log-retention.json`,JSON.stringify(record),{mode:0o600});
+    writeFileSync(`${directory}/${name}-log-retention.json`,JSON.stringify(record),{mode:0o600});
     return record;
   };
 }

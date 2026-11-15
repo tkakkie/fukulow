@@ -1,0 +1,138 @@
+diff --git a/server/src/database.rs b/server/src/database.rs
+index df014f3..1a08a9e 100644
+--- a/server/src/database.rs
++++ b/server/src/database.rs
+@@ -8,7 +8,6 @@ pub(crate) use context::set_organization;
+ pub use context::{account, account_read_only, organization, organization_read_only};
+ pub(crate) use context::{organization_statement, organization_statement_sql};
+ pub use pool::PoolConfig;
+-pub use stats::report_pool_periodically;
+ pub(crate) use stats::{acquire, begin};
+ #[cfg(test)]
+ pub(crate) use stats::{test_acquisitions, test_inherit_acquisitions};
+diff --git a/server/src/database/stats.rs b/server/src/database/stats.rs
+index 1e68196..246558d 100644
+--- a/server/src/database/stats.rs
++++ b/server/src/database/stats.rs
+@@ -1,6 +1,7 @@
+ //! All application pool entry points route here, including formerly implicit
+ //! executors. Owner commands and SQLx's initial connect are deliberately separate.
+ use sqlx::{PgPool, Postgres, Transaction, pool::PoolConnection};
++#[cfg(test)]
+ use std::{
+     sync::{
+         LazyLock,
+@@ -9,7 +10,9 @@ use std::{
+     time::{Duration, Instant},
+ };
+ 
++#[cfg(test)]
+ const INTERVAL: Duration = Duration::from_secs(1);
++#[cfg(test)]
+ const WAIT_US: &[u64] = &[
+     100,
+     500,
+@@ -24,7 +27,9 @@ const WAIT_US: &[u64] = &[
+     5_000_000,
+     u64::MAX,
+ ];
++#[cfg(test)]
+ const ACTIVE: &[u64] = &[0, 1, 2, 4, 8, 16, 24, 32, 48, 64, 100, u64::MAX];
++#[cfg(test)]
+ static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
+ 
+ pub(crate) async fn acquire(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+@@ -32,7 +37,10 @@ pub(crate) async fn acquire(pool: &PgPool) -> Result<PoolConnection<Postgres>, s
+     if let Ok(stats) = TEST_STATS.try_with(std::sync::Arc::clone) {
+         return stats.acquire(pool).await;
+     }
+-    STATS.acquire(pool).await
++    #[cfg(test)]
++    return STATS.acquire(pool).await;
++    #[cfg(not(test))]
++    pool.acquire().await
+ }
+ 
+ pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+@@ -40,7 +48,9 @@ pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres
+     Transaction::begin(acquire(pool).await?, None).await
+ }
+ 
++#[cfg(test)]
+ struct Histogram(Box<[AtomicU64]>);
++#[cfg(test)]
+ impl Histogram {
+     fn new(edges: &[u64]) -> Self {
+         Self(edges.iter().map(|_| AtomicU64::new(0)).collect())
+@@ -61,6 +71,7 @@ impl Histogram {
+     }
+ }
+ 
++#[cfg(test)]
+ struct Stats {
+     wait: Histogram,
+     occupancy: Histogram,
+@@ -73,6 +84,7 @@ struct Stats {
+     cancelled: AtomicU64,
+     waiting: AtomicU64,
+ }
++#[cfg(test)]
+ impl Stats {
+     fn new() -> Self {
+         Self {
+@@ -143,11 +155,13 @@ impl Stats {
+     }
+ }
+ 
++#[cfg(test)]
+ struct Wait<'a> {
+     stats: &'a Stats,
+     start: Instant,
+     completed: bool,
+ }
++#[cfg(test)]
+ impl Drop for Wait<'_> {
+     fn drop(&mut self) {
+         self.stats
+@@ -160,10 +174,7 @@ impl Drop for Wait<'_> {
+     }
+ }
+ 
+-pub async fn report_pool_periodically(pool: PgPool) {
+-    report(&STATS, &pool).await;
+-}
+-
++#[cfg(test)]
+ async fn report(stats: &Stats, pool: &PgPool) {
+     let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + INTERVAL, INTERVAL);
+     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+@@ -179,6 +190,7 @@ async fn report(stats: &Stats, pool: &PgPool) {
+     }
+ }
+ 
++#[cfg(test)]
+ fn wait_us(elapsed: Duration) -> u64 {
+     (elapsed.as_nanos().saturating_add(999) / 1000).min(u128::from(u64::MAX)) as u64
+ }
+diff --git a/server/src/main.rs b/server/src/main.rs
+index 4bb7606..19fa60d 100644
+--- a/server/src/main.rs
++++ b/server/src/main.rs
+@@ -71,9 +71,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
+             fukulow_server::observability::database_failure(&error);
+             "Database connection failed (diagnostics suppressed)"
+         })?;
+-    let pool_metrics = tokio::spawn(fukulow_server::database::report_pool_periodically(
+-        pool.clone(),
+-    ));
+     fukulow_server::database::validate_migrations(&pool).await?;
+     let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+     let listener = tokio::net::TcpListener::bind(&addr)
+@@ -108,7 +105,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
+     reclamation.abort();
+     let _ = reclamation.await;
+     metrics.abort();
+-    pool_metrics.abort();
+     if !completed {
+         tracing::warn!(target: "fukulow", event = "shutdown_drain_deadline", send_outcomes = "unknown");
+         // Runtime destruction can outlast the drain deadline while blocking tasks finish.

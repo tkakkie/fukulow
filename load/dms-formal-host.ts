@@ -1,6 +1,6 @@
 // Remote Linux worker. This file is transported with the existing harness, not installed globally.
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, appendFileSync, existsSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { lines, parseSend } from './dms-formal-results.ts';
@@ -13,8 +13,11 @@ import { copyVolume, removeCopy } from './dms-formal-copy.ts';
 import { requireHeadroom, directoryBytes, GiB, summaryLimit } from './dms-formal-storage.ts';
 import { captureAppLogs } from './dms-formal-logs.ts';
 import { histogramsSql } from './dms-formal-histograms.ts';
+import { baselinePaths, baselineSource } from './pool-overhead-baseline.ts';
+import { overheadOrder } from './dms-formal-overhead.ts';
+import { reportOverheadArm } from './dms-formal-overhead-results.ts';
 import { reportAttempt } from './dms-formal-results.ts';
-export type HostState = { id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
+export type HostState = { overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
 const root = resolve(import.meta.dirname,'../..');
 const statePath = `${root}/state.json`;
 let cleaning = false;
@@ -95,14 +98,17 @@ async function app(s: HostState) {
   const proxy = await docker(['inspect','--format','{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',`${s.id}-caddy`]);
   const env = readFileSync(`${root}/app.env`,'utf8').replace(`${s.id}-caddy`,proxy);
   save(`${root}/app.env`,env);
-  await docker(['run','-d','--log-driver','json-file','--log-opt','max-size=10m','--log-opt','max-file=3','--name',`${s.id}-app-1`,'--label',`dm-formal=${s.id}`,'--network',`${s.id}-edge`,'--network-alias','app','--cpus',s.mode === 'smoke' ? '1' : '8','--memory',s.mode === 'smoke' ? '1g' : '4g','--ulimit','nofile=65536:65536','--env-file',`${root}/app.env`,image(s)]);
+  await launchApp(s);
+  await docker(['cp',`${s.id}-caddy:/data/caddy/pki/authorities/local/root.crt`,`${root}/ca.crt`]);
+}
+async function launchApp(s:HostState,tag=image(s)) {
+  await docker(['run','-d','--log-driver','json-file','--log-opt','max-size=10m','--log-opt','max-file=3','--name',`${s.id}-app-1`,'--label',`dm-formal=${s.id}`,'--network',`${s.id}-edge`,'--network-alias','app','--cpus',s.mode === 'smoke' ? '1' : '8','--memory',s.mode === 'smoke' ? '1g' : '4g','--ulimit','nofile=65536:65536','--env-file',`${root}/app.env`,tag]);
   for (let i=0;i<60;i++) {
     const probe = await execute({program:'docker',args:['exec',`${s.id}-app-1`,'fukulow-server','probe'],timeout:5000});
     if (probe.code === 0) break;
     if (i === 59) throw new Error('App readiness timeout');
     await delay(1000);
   }
-  await docker(['cp',`${s.id}-caddy:/data/caddy/pki/authorities/local/root.crt`,`${root}/ca.crt`]);
   save(`${root}/app-caps.json`,await docker(['inspect',`${s.id}-app-1`]));
 }
 async function seed(s: HostState) {
@@ -143,6 +149,7 @@ async function seed(s: HostState) {
   await docker([...compose(s),'stop','db']);
   await docker(['volume','create','--label',`dm-formal=${s.id}`,`${s.id}-snapshot`]);
   await copyVolume(execute,s.id,0,s.id+'-data',s.id+'-snapshot',s.postgres,false);
+  if(s.overhead)save(`${root}/overhead-snapshot.json`,await docker(['volume','inspect',s.id+'-snapshot']));
 }
 async function restore(s: HostState, attempt: number) {
   const start = Date.now();
@@ -152,6 +159,11 @@ async function restore(s: HostState, attempt: number) {
   await docker([...compose(s),'up','-d','--no-build','--wait','db']);
   const counts = await sql(s,countsSql);
   save(`${root}/restore-${attempt}.json`,{ms:Date.now()-start,counts:JSON.parse(counts)});
+  if(s.overhead) {
+    const snapshot=await docker(['volume','inspect',s.id+'-snapshot']);
+    mkdirSync(`${root}/attempt-${attempt}`,{recursive:true,mode:0o700});
+    save(`${root}/attempt-${attempt}/overhead-restore.json`,{snapshot,expectedSnapshot:readFileSync(`${root}/overhead-snapshot.json`,'utf8')});
+  }
   if (counts !== readFileSync(`${root}/seed-counts.json`,'utf8')) throw new Error('Restored row counts differ');
   save(`${root}/histograms-before-${attempt}.json`,await sql(s,histogramsSql));
   await sql(s,'SELECT pg_stat_statements_reset();');
@@ -159,7 +171,8 @@ async function restore(s: HostState, attempt: number) {
 async function observe(s: HostState, attempt: number, until: number) {
   const directory = `${root}/attempt-${attempt}`; mkdirSync(directory,{recursive:true,mode:0o700});
   const name = `${s.id}-${s.role}-1`;
-  const stopLogs=s.role==='app' ? captureAppLogs(directory,['logs','--follow','--timestamps','--since',await docker(['inspect','--format','{{.State.StartedAt}}',name]),name]) : undefined;
+  const stopLogs=s.role==='app'||s.overhead ? captureAppLogs(directory,['logs','--follow','--timestamps','--since',await docker(['inspect','--format','{{.State.StartedAt}}',name]),name],undefined,undefined,s.role) : undefined;
+  const before=s.overhead?await observation(s):undefined;
   try {
     let previous: { at:number; usage:number } | undefined;
     let next = Date.now();
@@ -168,7 +181,8 @@ async function observe(s: HostState, attempt: number, until: number) {
       try {
         const raw = await docker(['exec',name,'sh','-c','cat /sys/fs/cgroup/cpu.stat /proc/1/status']);
         const usage = Number(raw.match(/usage_usec (\d+)/)?.[1]), rss = Number(raw.match(/VmRSS:\s+(\d+)/)?.[1]);
-        const row = { at:start, intervalMs:previous ? start-previous.at : null, cpu:previous ? (usage-previous.usage)/((start-previous.at)*1000) : null, rssKiB:Number.isFinite(rss) ? rss : null };
+        const identity=s.overhead?await containerIdentity(name):undefined;
+        const row = { identity, at:start, intervalMs:previous ? start-previous.at : null, cpu:previous ? (usage-previous.usage)/((start-previous.at)*1000) : null, rssKiB:Number.isFinite(rss) ? rss : null };
         appendFileSync(`${directory}/resources-${s.role}.jsonl`,JSON.stringify(row)+'\n',{mode:0o600});
         previous = {at:start,usage};
         if(s.role==='db') appendFileSync(`${directory}/db-activity.jsonl`, JSON.stringify({at:start,activity:JSON.parse(await sql(s,"SELECT json_build_object('connections',count(*),'active',count(*) FILTER(WHERE state='active'),'lockWaiters',count(*) FILTER(WHERE wait_event_type='Lock')) FROM pg_stat_activity WHERE usename='fukulow_app';"))})+'\n',{mode:0o600});
@@ -176,6 +190,7 @@ async function observe(s: HostState, attempt: number, until: number) {
       next += 1000; await delay(Math.max(0,next-Date.now()));
     }
   } finally { if(stopLogs)await stopLogs(); }
+  if(s.overhead)save(`${directory}/overhead-observation-${s.role}.json`,{before,after:await observation(s)});
   if (s.role === 'db') save(`${directory}/sql-after.json`,await sql(s,"SELECT coalesce(json_agg(t),'[]') FROM (SELECT query,toplevel,calls,total_exec_time,rows FROM pg_stat_statements ORDER BY calls DESC) t;"));
 }
 async function generators(s: HostState, attempt: number, epoch: number) {
@@ -189,17 +204,25 @@ async function generators(s: HostState, attempt: number, epoch: number) {
     try {requireHeadroom(root,s.mode==='smoke'?GiB:20*GiB);if(directoryBytes(directory)>100*GiB)throw new Error('Attempt exceeds 100 GiB raw evidence budget');}
     catch { storageFault=true;void docker(['ps','-q','--filter',`label=dm-formal=${s.id}`]).then(ids=>ids?docker(['stop','--time','1',...ids.split(/\s+/)]):undefined).catch(()=>{}); }
   },5000);
+  const generatorBefore=s.overhead?await generatorObservation(s):undefined;
+  const configurations:Record<string,string>[]=[];
   let results:{shard:number;code:number}[];
   try { results = await Promise.all(Array.from({length:orgs+1},async(_,index) => {
     const browser = index === orgs, shard = browser ? 10 : index;
     const out = `${directory}/shard-${shard}`; mkdirSync(out,{recursive:true,mode:0o700});
-    const settings = { BASE_URL:`https://${s.appAddress}`, DM_FORMAL:'1', DM_FORMAL_SCENARIO:s.scenario, DM_EPOCH:String(epoch), DM_SOCKETS:smoke ? '20' : String(mixedLoad.socketsPerOrganization), DM_SENDERS:smoke ? '10' : '200', DM_OFFSET:'0', DM_SHARD:'0', DM_RATE:browser ? '0' : smoke ? '2' : String(mixedLoad.sendsPerOrganization), DM_OPEN_RATE:browser ? '0' : smoke ? '1' : '2', DM_BROWSE_RATE:browser ? smoke ? '2' : '100' : '0', DM_LEDGER:'1', DM_BROWSER_ONLY:browser ? '1' : '0', DM_CONNECT_INTERVAL_MS:smoke ? '1000' : String(mixedLoad.rampSeconds*100), DM_SEND_START:smoke ? '30' : '300', DM_SECONDS:smoke ? '95' : '2345', SSL_CERT_FILE:'/ca.crt', DM_SMOKE:smoke ? '1' : '0' };
-    const args = ['run','--rm','--name',`${s.id}-k6-${shard}`,'--label',`dm-formal=${s.id}`,'--user',`${process.getuid?.()}:${process.getgid?.()}`,'--ulimit','nofile=65536:65536','--sysctl','net.ipv4.ip_local_port_range=1024 65535','-v',`${root}/harness:/work:ro`,'-v',`${browser ? root+'/deep.json' : root+`/formal/org-${index}.json`}:/seed.json:ro`,'-v',`${out}:/output`,'-v',`${root}/ca.crt:/ca.crt:ro`,...Object.entries(settings).flatMap(([key,value])=>['-e',`${key}=${value}`]),s.k6,'run','--log-format','raw','--out','json=/output/metrics.json','/work/load/dms.ts'];
+    const settings = { BASE_URL:`https://${s.appAddress}`, DM_FORMAL:'1', DM_FORMAL_SCENARIO:s.scenario, DM_EPOCH:String(epoch), DM_SOCKETS:smoke ? '20' : String(mixedLoad.socketsPerOrganization), DM_SENDERS:smoke ? '10' : '200', DM_OFFSET:'0', DM_SHARD:'0', DM_RATE:browser ? '0' : smoke ? '2' : String(mixedLoad.sendsPerOrganization), DM_OPEN_RATE:browser ? '0' : smoke ? '1' : '2', DM_BROWSE_RATE:browser ? smoke ? '2' : '100' : '0', DM_LEDGER:'1', DM_BROWSER_ONLY:browser ? '1' : '0', DM_CONNECT_INTERVAL_MS:smoke ? '1000' : String(mixedLoad.rampSeconds*100), DM_SEND_START:smoke ? '30' : '300', DM_SECONDS:smoke ? '95' : s.overhead?'605':'2345', SSL_CERT_FILE:'/ca.crt', DM_SMOKE:smoke ? '1' : '0' };
+    configurations[shard]=settings;
+    const args = ['run',...(s.overhead?[]:['--rm']),'--name',`${s.id}-k6-${shard}`,'--label',`dm-formal=${s.id}`,'--user',`${process.getuid?.()}:${process.getgid?.()}`,'--ulimit','nofile=65536:65536','--sysctl','net.ipv4.ip_local_port_range=1024 65535','-v',`${root}/harness:/work:ro`,'-v',`${browser ? root+'/deep.json' : root+`/formal/org-${index}.json`}:/seed.json:ro`,'-v',`${out}:/output`,'-v',`${root}/ca.crt:/ca.crt:ro`,...Object.entries(settings).flatMap(([key,value])=>['-e',`${key}=${value}`]),s.k6,'run','--log-format','raw','--out','json=/output/metrics.json','/work/load/dms.ts'];
     const result = await execute({program:'docker',args,timeout:(smoke ? 360 : 3000)*1000,log:`${out}/run.log`}).catch(() => ({code:124,stdout:''}));
+    if(s.overhead) {
+      const c=JSON.parse(await docker(['inspect',`${s.id}-k6-${shard}`]))[0];
+      save(`${out}/container.json`,{id:c.Id,startedAt:Date.parse(c.State.StartedAt),createdAt:Date.parse(c.Created),restarts:c.RestartCount,exit:c.State.ExitCode,image:c.Image,limits:{cpu:c.HostConfig.NanoCpus,memory:c.HostConfig.Memory,cpuset:c.HostConfig.CpusetCpus,ulimits:c.HostConfig.Ulimits,sysctls:c.HostConfig.Sysctls,network:c.HostConfig.NetworkMode}});
+    }
     save(`${out}/exit.json`,{code:result.code}); return {shard,code:result.code};
   }));
   } finally {clearInterval(monitor);}
   save(`${directory}/exits.json`,results);
+  if(s.overhead)save(`${directory}/overhead-context.json`,{arm:overheadOrder[attempt-1],sha:s.sha,patchSha256:s.patchSha256,expectedImage:JSON.parse(readFileSync(root+'/overhead-images.json','utf8'))[overheadOrder[attempt-1]!],epoch,window:{from:epoch+600000,to:epoch+900000},generatorBefore,generatorAfter:await generatorObservation(s),generator:{fixtures:Object.fromEntries(Array.from({length:11},(_,i)=>{const path=i===10?'deep.json':'formal/org-'+i+'.json';return [path,createHash('sha256').update(readFileSync(root+'/'+path)).digest('hex')];})),configurations,host:await command('cat',['/etc/machine-id']),node:await command('node',['--version']),docker:await docker(['version','--format','{{json .}}']),k6:await docker(['image','inspect','--format','{{.Id}}',s.k6]),settings:{sockets:10000,sends:2000,opens:20,browsing:100,scenario:'main',ramp:300,warm:300,core:300,seconds:605},harness:createHash('sha256').update(readFileSync(root+'/harness.tgz')).digest('hex')},toolchains:JSON.parse(readFileSync(root+'/source-toolchains.json','utf8'))});
   if(storageFault) {save(`${directory}/storage-failure.json`,{failed:true,operation:'generator-storage-monitor'});throw new Error('Generator storage budget/headroom failed');}
   const drained = { attempted:0, succeeded:0, failed:0 };
   for (const {shard} of results) {
@@ -244,6 +267,7 @@ async function cleanup(s: HostState) {
   }
   const images=await docker(['image','ls','-q',image(s)]);
   if(images)await docker(['image','rm',image(s)]);
+  if(s.overhead && s.role==='app' && await docker(['image','ls','-q',s.id+':baseline']))await docker(['image','rm',s.id+':baseline']);
   save(`${root}/cleanup-retained.json`,{privateScratch:root,sharedBaseImagesAndBuildCache:true,rawEvidence:'retained on generator until operator deletion'});
   // Pinned shared base images/build cache are deliberately retained.
 }
@@ -263,7 +287,23 @@ async function main() {
       if (!values || !/\b0% packet loss/.test(raw) || (s.mode !== 'smoke' && Number(values[3])>1)) throw new Error('RTT must be <=1 ms with no loss');
       break;
     }
-    case 'build': await clone(s); await docker(['build','--label',`dm-formal=${s.id}`,'--label',`org.opencontainers.image.revision=${s.sha}`,'-t',image(s),`${root}/source`],undefined,7200000); save(`${root}/image.json`,await docker(['image','inspect',image(s)])); break;
+    case 'build': await clone(s); await docker(['build','--label',`dm-formal=${s.id}`,'--label',`org.opencontainers.image.revision=${s.sha}`,'-t',image(s),`${root}/source`],undefined,7200000); save(`${root}/image.json`,await docker(['image','inspect',image(s)]));
+      if(s.overhead) {
+        await recordBuildToolchains();
+        const patch=root+'/harness/load/pool-overhead-baseline.patch';
+        if(createHash('sha256').update(readFileSync(patch)).digest('hex')!==s.patchSha256)throw new Error('Reviewed patch digest mismatch');
+        const originals=await Promise.all(baselinePaths.map(p=>command('git',['-C',root+'/source','show','HEAD:'+p])));
+        await command('git',['-C',root+'/source','apply','--check',patch]);
+        await command('git',['-C',root+'/source','apply',patch]);
+        if(await command('git',['-C',root+'/source','diff','--summary']))throw new Error('Baseline mode/rename change');
+        const paths=(await command('git',['-C',root+'/source','diff','--name-only'])).split('\n').sort();
+        if(JSON.stringify(paths)!==JSON.stringify([...baselinePaths].sort()))throw new Error('Baseline path allowlist mismatch');
+        baselinePaths.forEach((p,i)=>{if(readFileSync(root+'/source/'+p,'utf8').trimEnd()!==baselineSource(p,originals[i]!+'\n').trimEnd())throw new Error('Baseline hunk mismatch');});
+        await docker(['build','--label',`dm-formal=${s.id}`,'--label',`org.opencontainers.image.revision=${s.sha}`,'-t',s.id+':baseline',root+'/source'],undefined,7200000);
+        save(root+'/overhead-images.json',{B:await docker(['image','inspect','--format','{{.Id}}',s.id+':baseline']),C:await docker(['image','inspect','--format','{{.Id}}',image(s)])});
+        await command('git',['-C',root+'/source','apply','--reverse',patch]);
+      }
+      break;
     case 'stop-generators': { const ids=(await docker(['ps','-aq','--filter',`label=dm-formal=${s.id}`])).split(/\s+/).filter(Boolean); if(ids.length)await docker(['rm','-f',...ids]); break; }
     case 'prepare-generator': await docker(['pull',s.k6],undefined,600000); save(`${root}/k6-image.json`,await docker(['image','inspect',s.k6])); break;
     case 'database': await database(s); break;
@@ -280,11 +320,16 @@ async function main() {
       for(const file of readdirSync(directory).filter(file=>!file.startsWith('durable')))await command('scp',['-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',directory+'/'+file,s.generatorTarget+':'+directory+'/'+file],120000);
       break;
     }
+    case 'overhead-arm': {
+      await docker(['rm','-f',`${s.id}-app-1`]);
+      await launchApp(s,overheadOrder[attempt-1]==='B'?s.id+':baseline':image(s));
+      break;
+    }
     case 'reduce': {
       const directory=`${root}/attempt-${attempt}`;
       requireHeadroom(root,directoryBytes(directory)+(s.mode==='smoke'?GiB:20*GiB));
       await command('gzip',['-df',directory+'/durable.jsonl.gz'],900000);
-      await reportAttempt(directory,s.mode,execute,s.scenario);
+      if(s.overhead)await reportOverheadArm(directory,execute);else await reportAttempt(directory,s.mode,execute,s.scenario);
       rmSync(directory+'/ledger-buckets',{recursive:true,force:true});
       await command('tar',['-czf',`${root}/raw-${attempt}.tgz.tmp`,'-C',directory,...readdirSync(directory).filter(file=>file!=='extended' && !file.startsWith('organization-'))],1800000);
       renameSync(`${root}/raw-${attempt}.tgz.tmp`,`${root}/raw-${attempt}.tgz`);
@@ -319,3 +364,34 @@ async function main() {
   }
 }
 if (process.argv[1] === import.meta.filename) main().catch(() => { console.error('Remote phase failed; private artifacts retained until collection'); process.exitCode=1; });
+
+async function containerIdentity(name:string) {
+  const c=JSON.parse(await docker(['inspect',name]))[0];
+  if(!c.State.Running || c.RestartCount!==0)throw new Error('Container stopped or restarted');
+  return {id:c.Id,startedAt:c.State.StartedAt,restarts:c.RestartCount};
+}
+async function observation(s:HostState) {
+  const name=`${s.id}-${s.role}-1`,c=JSON.parse(await docker(['inspect',name]))[0];
+  return {proxy:s.role==='app'?await containerIdentity(s.id+'-caddy'):undefined,identity:await containerIdentity(name),image:c.Image,sha:JSON.parse(readFileSync(root+'/source-toolchains.json','utf8')).sha,
+    revision:c.Config.Labels?.['org.opencontainers.image.revision'],
+    host:{machine:await command('cat',['/etc/machine-id']),kernel:await command('uname',['-a']),cpu:JSON.parse(await command('lscpu',['-J'])).lscpu.filter((row:{field:string})=>!row.field.includes('MHz')),memory:await command('sh',['-c',"sed -n '/^MemTotal:/p' /proc/meminfo"])},
+    limits:{cpu:c.HostConfig.NanoCpus,memory:c.HostConfig.Memory,swap:c.HostConfig.MemorySwap,cpuset:c.HostConfig.CpusetCpus,ulimits:c.HostConfig.Ulimits,envSha256:createHash('sha256').update(JSON.stringify(c.Config.Env)).digest('hex'),command:c.Config.Cmd},
+    toolchains:{node:await command('node',['--version']),docker:await docker(['version','--format','{{json .}}']),source:JSON.parse(readFileSync(root+'/source-toolchains.json','utf8'))}};
+}
+async function generatorObservation(s:HostState) {
+  return {host:await command('cat',['/etc/machine-id']),node:await command('node',['--version']),docker:await docker(['version','--format','{{json .}}']),k6:await docker(['image','inspect','--format','{{.Id}}',s.k6])};
+}
+async function recordBuildToolchains() {
+  const path=root+'/source-toolchains.json',record=JSON.parse(readFileSync(path,'utf8'));
+  const base=(kind:string)=>{
+    const pin=new RegExp('^FROM ('+kind+':\\S+)','m').exec(record.dockerfile)?.[1];
+    if(!pin || !/@sha256:[a-f0-9]{64}$/.test(pin))throw new Error('Missing exact build base pin');return pin;
+  };
+  const versions:Record<string,string>={};
+  for(const [kind,commands] of [['rust',['rustc','cargo']],['node',['node','npm']]] as const) {
+    const pin=base(kind);
+    for(const command of commands)versions[command]=await docker(['run','--rm','--network','none',pin,command,'--version'],undefined,600000);
+    versions[kind+'Image']=await docker(['image','inspect','--format','{{.Id}}',pin]);
+  }
+  save(path,{...record,build:versions});
+}

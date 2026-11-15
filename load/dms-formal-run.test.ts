@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, cpSync } from 'node:fs';
@@ -318,7 +319,7 @@ test('unverified owned-process cleanup prevents retention and another restore',a
 test('scenario config selects main, held200 and explicit deferred stubs',t=>{
   const path=temporary(t),file=path+'/private.env';
   for(const scenario of ['main','held200','hot-DM','pool-overhead']) {
-    writeFileSync(file,env(path,`DM_FORMAL_SCENARIO=${scenario}\n`),{mode:0o600});
+    writeFileSync(file,env(path,`DM_FORMAL_SCENARIO=${scenario}\n${scenario==='pool-overhead'?'DM_FORMAL_REVIEWED_PATCH_SHA256='+createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex')+'\n':''}`),{mode:0o600});
     assert.equal(readConfig(file,checkout).scenario,scenario);
   }
 });
@@ -371,14 +372,32 @@ test('Q4 reduction checks concurrent connection/send/open/O5 evidence and keeps 
     assert.match(readFileSync(path+'/judgment.md','utf8'),/Separate browsing Organization/);
   }
 });
-test('pool overhead selection records incompatible baseline and alternative without contacting hosts',async t=>{
+test('pool overhead refuses unreviewed patch before contacting hosts',async t=>{
   const path=temporary(t);
   const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',scenario:'pool-overhead',attempts:3,mode:'formal'};
-  const unused=()=>{throw new Error('Overhead design contacted a host');};
-  const result=await run(config,{exec:unused,transfer:unused,on:unused,off:unused});
-  assert.equal(result.acceptance,false);
-  const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
-  assert.equal(summary.status,'NOT EVALUATED');assert.equal(summary.design.limitPercent,10);
-  assert.match(summary.design.reason,/no DM implementation/);
-  assert.match(summary.design.alternative,/same formal DM SHA/);
+  const unused=()=>{throw new Error('Unreviewed overhead contacted a host');};
+  await assert.rejects(run(config,{exec:unused,transfer:unused,on:unused,off:unused}),/reviewed patch/);
+});
+
+test('reviewed overhead runner restores six arms in order and retains a judged comparison',async t=>{
+  const {config,runtime,events}=lifecycle(t);config.scenario='pool-overhead';
+  config.reviewedPatchSha256=createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex');
+  const {overheadOrder,overheadMetrics,overheadClasses,overheadConditionKeys}=await import('./dms-formal-overhead.ts');
+  const original=runtime.exec;
+  runtime.exec=async command=>{
+    const result=await original(command);
+    if(command.program==='tar' && command.args.includes('-xzf')) {
+      const dest=command.args.at(-1)!,index=Number(dest.split('attempt-')[1])-1,arm=overheadOrder[index];
+      writeFileSync(dest+'/judgment.json',JSON.stringify({arm,metrics:Object.fromEntries(overheadMetrics.map(m=>[m,100])),samples:Object.fromEntries(Object.keys(overheadClasses).map(c=>[c,1000])),conditions:Object.fromEntries(overheadConditionKeys.map(k=>[k,'same'])),imageDigest:'sha256:'+(arm==='B'?'b':'c').repeat(64),reasons:[]}));
+    }
+    return result;
+  };
+  const result=await run(config,runtime);assert.equal(result.attempts.length,6);
+  assert.equal(events.filter(e=>e.includes("'restore'")).length,6);
+  const arms=events.filter(e=>e.includes("'overhead-arm'"));assert.equal(arms.length,6);
+  arms.forEach((command,i)=>assert.ok(command.includes("'overhead-arm' "+(i+1)+' 0')));
+  const report=JSON.parse(readFileSync(config.output+'/overhead-comparison.json','utf8'));
+  assert.equal(report.status,'PASS');assert.deepEqual(report.arms.map((a:{arm:string})=>a.arm),overheadOrder);
+  assert.equal(JSON.parse(readFileSync(config.output+'/summary.json','utf8')).acceptance,false);
+  assert.equal(events.filter(e=>e.includes(' cleanup && timeout')).length,3);
 });

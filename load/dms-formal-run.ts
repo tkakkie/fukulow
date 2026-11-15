@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { readConfig, quote, type Config } from './dms-formal-config.ts';
 import { execute, checked, transferImage, type Executor } from './dms-formal-exec.ts';
 import { requireHeadroom, GiB, summaryLimit } from './dms-formal-storage.ts';
-import { poolOverheadDesign } from './dms-formal-overhead.ts';
+import { poolOverheadDesign, judgeOverhead, type OverheadArm } from './dms-formal-overhead.ts';
 import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
@@ -14,7 +14,11 @@ export const cleanupReserveMs=10*60*1000;
 export const attemptBudgetMs=(mode:'formal'|'smoke')=>mode==='formal'?150*60*1000:30*60*1000;
 export const canStartAttempt=(config:Config,now=Date.now())=>config.deadline===undefined || config.deadline-now>=attemptBudgetMs(config.mode)+cleanupReserveMs;
 export async function run(config:Config, runtime:Runtime=defaultRuntime) {
-  if(!isMixedScenario(config.scenario)) {
+  const overhead=config.scenario==='pool-overhead';
+  const patchSha256=createHash('sha256').update(readFileSync(resolve(import.meta.dirname,'pool-overhead-baseline.patch'))).digest('hex');
+  if(overhead && (config.mode!=='formal' || config.attempts!==3 || config.reviewedPatchSha256!==patchSha256))throw new Error('Pool overhead requires formal mode, three pairs and the reviewed patch SHA256');
+  const totalArms=overhead?6:config.attempts;
+  if(!isMixedScenario(config.scenario) && !overhead) {
     mkdirSync(config.output,{mode:0o700});
     const summary={scenario:config.scenario,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',status:'NOT EVALUATED',acceptance:false,reason:'Deferred scenario; not implemented.',...(config.scenario==='pool-overhead'?{design:poolOverheadDesign}:{})};
     writeFileSync(`${config.output}/summary.json`,JSON.stringify(summary,null,2),{mode:0o600});
@@ -25,7 +29,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   let phase='initializing', attempt=0, lastError:string|null=null, interrupted=false;
   const start=new Date().toISOString();
   let operation='initializing',outcome='running',infrastructureFailure=false,statusWriteFailed=false;
-  const status=()=>{try {json('status.json',{id,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',phase,operation,outcome,attempt:Math.min(attempt,config.attempts),started:start,updated:new Date().toISOString(),lastError});}catch {statusWriteFailed=true;console.error('Status write failed; cleanup remains active');}};
+  const status=()=>{try {json('status.json',{id,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',phase,operation,outcome,attempt:Math.min(attempt,totalArms),started:start,updated:new Date().toISOString(),lastError});}catch {statusWriteFailed=true;console.error('Status write failed; cleanup remains active');}};
   const abort = new AbortController();
   const bounded=(timeout:number)=>phase==='cleanup'||config.deadline===undefined?timeout:Math.max(1000,Math.min(timeout,config.deadline-Date.now()-cleanupReserveMs));
   const remote=(host:string,command:string,timeout=120000,log?:string)=>checked(runtime.exec,{program:'ssh',args:[...sshOptions,host,command],timeout:bounded(timeout),log,signal:phase==='cleanup' ? undefined : abort.signal});
@@ -55,6 +59,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const results:unknown[]=[];
   try {
     mkdirSync(config.output,{mode:0o700});
+    if(overhead)json('summary.json',{scenario:'pool-overhead',status:'NOT EVALUATED',acceptance:false,design:poolOverheadDesign});
     requireHeadroom(config.output,2*GiB);
     json('metadata.json',{id,mode:config.mode,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',sha:config.sha,acceptance:false});
     change('preflight');
@@ -65,7 +70,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     };
     const [appAddress,dbAddress]=await Promise.all([address(config.app),address(config.db)]);
     const pin=(file:string,pattern:RegExp)=>{const value=pattern.exec(readFileSync(`${checkout}/${file}`,'utf8'))?.[1];if(!value)throw new Error('Missing repository image pin');return value;};
-    const common={id,scenario:config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:config.attempts,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
+    const common={id,overhead,patchSha256,scenario:overhead?'main':config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:totalArms,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
     json('private-state.json',{...common,hosts});
     await checked(runtime.exec,{program:'tar',args:['--exclude=node_modules','-czf',`${config.output}/harness.tgz`,'-C',checkout,'load','web/src','deploy/Caddyfile'],timeout:120000});
     chmodSync(`${config.output}/harness.tgz`,0o600);
@@ -82,11 +87,17 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     const identities=hosts.map((_,i)=>JSON.parse(readFileSync(`${config.output}/preflight-${i}.json`,'utf8')).machine);
     if(new Set(identities).size!==3)throw new Error('Hosts are not three separate machines');
     await worker(config.app,'rtt');await worker(config.generator,'rtt');
-    change('build');await worker(config.app,'build',0,0,7500000);
+    change('build');await worker(config.app,'build',0,0,overhead?15000000:7500000);
     for(const host of [config.db,config.generator]) {
       checkpoint();await runtime.transfer([...sshOptions,config.app,`timeout --signal=KILL 600s docker save ${quote(id+':release')}`],[...sshOptions,host,'timeout --signal=KILL 600s docker load'],600000,abort.signal);
     }
     change('services');await worker(config.generator,'prepare-generator',0,0,720000);await worker(config.db,'database',0,0,900000);await worker(config.app,'app',0,0,300000);
+    if(overhead) {
+      await artifact(config.app,'overhead-images.json',`${config.output}/overhead-images.json`);
+      await artifact(config.app,'source-toolchains.json',`${config.output}/source-toolchains.json`);
+      await upload(config.generator,`${config.output}/overhead-images.json`,'overhead-images.json');
+      await upload(config.generator,`${config.output}/source-toolchains.json`,'source-toolchains.json');
+    }
     await artifact(config.app,'image.json',`${config.output}/image.json`);
     const imageId=JSON.parse(readFileSync(`${config.output}/image.json`,'utf8'))[0].Id;
     await artifact(config.db,'image.json',`${config.output}/db-image.json`);
@@ -100,15 +111,15 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       if(file.startsWith('formal/'))await remote(config.generator,`mkdir -p ${quote(root+'/formal')}`);
       await upload(config.generator,`${config.output}/${file}`,file);
     }
-    json('metadata.json',{id,mode:config.mode,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',sha:config.sha,harnessSha256:createHash('sha256').update(readFileSync(`${config.output}/harness.tgz`)).digest('hex'),imageDigest:imageId,scenario:config.scenario,attempts:config.attempts,images:{postgres:common.postgres,k6:common.k6,caddy:common.caddy},sampleExtension:config.mode==='formal'?'Minutes 40-44 supplement the fixed minute-10–40 core to exceed 10,000 aggregate create/renew samples at unchanged rates.':'none',tls:'Per-run Caddy internal CA; generator SSL_CERT_FILE=/ca.crt, Node NODE_EXTRA_CA_CERTS. Verification enabled.',deferredScenarios});
-    for(attempt=1;attempt<=config.attempts;attempt++) {
+    json('metadata.json',{id,mode:config.mode,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',sha:config.sha,harnessSha256:createHash('sha256').update(readFileSync(`${config.output}/harness.tgz`)).digest('hex'),imageDigest:imageId,scenario:config.scenario,attempts:totalArms,...(overhead?{pairs:3,patchSha256}:{}),images:{postgres:common.postgres,k6:common.k6,caddy:common.caddy},sampleExtension:overhead?'none; core is minute 10–15':config.mode==='formal'?'Minutes 40-44 supplement the fixed minute-10–40 core to exceed 10,000 aggregate create/renew samples at unchanged rates.':'none',tls:'Per-run Caddy internal CA; generator SSL_CERT_FILE=/ca.crt, Node NODE_EXTRA_CA_CERTS. Verification enabled.',deferredScenarios});
+    for(attempt=1;attempt<=totalArms;attempt++) {
       if(!canStartAttempt(config)) {infrastructureFailure=true;lastError='Insufficient time before deadline for next attempt and cleanup';results.push({attempt,status:'not started',operation:'deadline-admission',acceptance:false});break;}
       requireHeadroom(config.output,2*GiB);outcome='running';
       const directory=`${config.output}/attempt-${attempt}`;mkdirSync(directory,{mode:0o700});
       try {
-      change('restore');await worker(config.generator,'stop-generators');await worker(config.app,'stop-app');await worker(config.db,'restore',attempt,0,7500000);await worker(config.app,'start-app');
-      // Fixed epoch permits exact common minute-10–40 selection; startup misses fail the generators.
-      const epoch=Date.now()+60000, end=epoch+(config.mode==='smoke'?270000:2790000);
+      change('restore');await worker(config.generator,'stop-generators');await worker(config.app,'stop-app');await worker(config.db,'restore',attempt,0,7500000);await worker(config.app,overhead?'overhead-arm':'start-app');
+      // Fixed epoch aligns warm-up and the judged core; startup misses fail the generators.
+      const epoch=Date.now()+60000, end=epoch+(config.mode==='smoke'?270000:overhead?990000:2790000);
       json(`attempt-${attempt}/schedule.json`,{epoch,until:end});
       change('timing');
       const runs=await Promise.allSettled([worker(config.app,'observe',attempt,end,end-Date.now()+120000),worker(config.db,'observe',attempt,end,end-Date.now()+120000),worker(config.generator,'generators',attempt,epoch,end-Date.now()+120000)]);
@@ -131,7 +142,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         const failed={attempt,...judge({},config.mode,config.scenario),operation,error:lastError};
         json(`attempt-${attempt}/judgment.json`,failed);
         writeFileSync(`${directory}/judgment.md`,`${failed.label} — scenario: ${config.scenario}\n\nAcceptance: NOT PASSED\n\n| Budget | Limit | Observed | Judgment |\n|---|---:|---:|---|\n${failed.rows.map(row=>`| ${row.budget} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} |`).join('\n')}\n`,{mode:0o600});
-        results.push(failed);
+        results.push(overhead?{arm:undefined,metrics:{},samples:{},conditions:{},imageDigest:'',reasons:[lastError]}:failed);
       } finally {
         if(!interrupted) {
           // Verify every previous command group is stopped before retention or retry.
@@ -144,6 +155,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       }
       json('summary.json',{label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',acceptance:false,attempts:results,deferredScenarios});
     }
+    if(overhead)json('overhead-comparison.json',{...judgeOverhead(results as OverheadArm[]),design:poolOverheadDesign,patchSha256,sha:config.sha});
     change('retain');
     for(const [host,index] of hosts.map((host,index)=>[host,index] as const)) {
       const destination=`${config.output}/host-${index}`;mkdirSync(destination,{mode:0o700});
@@ -151,7 +163,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       await remote(host,`find ${quote(root)} -maxdepth 1 -type f ! -name '*.tgz' -print0 | tar --null -T - -czf ${quote(root+'/evidence.tgz')}`,120000);
       try {await artifact(host,'evidence.tgz',`${destination}/evidence.tgz`);}catch {infrastructureFailure=true;json(`host-${index}/transfer-failure.json`,{operation:'retain',remoteRoot:root});}
     }
-    json('summary.json',{label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',acceptance:false,attempts:results,deferredScenarios,requiredScenarios:['main','held200'],scenarioAcceptance:scenarioAcceptance(results.map((row)=>({...row as {attempt:number;acceptance:boolean},scenario:config.scenario,mode:config.mode})),deferredScenarios),reason:'Acceptance requires main and held200, each with three consecutive passing formal attempts, and all deferred scenarios; missing evidence is NOT EVALUATED.'});
+    json('summary.json',{...(overhead?{status:judgeOverhead(results as OverheadArm[]).status,overhead:judgeOverhead(results as OverheadArm[])}:{}),label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',acceptance:false,attempts:results,deferredScenarios,requiredScenarios:['main','held200'],scenarioAcceptance:scenarioAcceptance(results.map((row)=>({...row as {attempt:number;acceptance:boolean},scenario:config.scenario,mode:config.mode})),deferredScenarios),reason:'Acceptance requires main and held200, each with three consecutive passing formal attempts, and all deferred scenarios; missing evidence is NOT EVALUATED.'});
   } catch(error) {lastError=error instanceof Error?error.message:'Runner failed';json('failure.json',{label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',phase,attempt,lastError,acceptance:false});throw error;}
   finally {
     try {await cleanup();}catch(error){lastError='Remote cleanup incomplete';throw error;}finally {clearInterval(heartbeat);clearTimeout(deadlineTimer);runtime.off('SIGINT',signal);runtime.off('SIGTERM',signal);phase=lastError?'failed':'complete';outcome=lastError?'infrastructure-failed':'complete';status();}

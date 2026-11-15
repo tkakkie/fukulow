@@ -3,7 +3,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { outsideCheckout } from './dms-workload.ts';
 import { requiredScenarios, deferredNames, type Scenario } from './dms-formal-scenarios.ts';
 
-export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: Scenario; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; downloadRaw?: boolean };
+export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: Scenario; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; reviewedPatchSha256?:string; downloadRaw?: boolean };
 export const quote = (s: string) => "'" + s.replaceAll("'", "'\\''") + "'";
 export function external(path: string, checkout: string): string {
   if (!isAbsolute(path)) throw new Error('Paths must be absolute');
@@ -16,10 +16,10 @@ export function readConfig(path: string, checkout: string): Config {
   const stat = statSync(path);
   if (!stat.isFile() || (stat.mode & 0o177) !== 0 || stat.uid !== process.getuid?.()) throw new Error('Private env must be an owned regular file, mode 0600 or narrower');
   const entries: Record<string, string> = {};
-  const allowed = ['DM_FORMAL_APP','DM_FORMAL_DB','DM_FORMAL_GENERATOR','DM_FORMAL_SHA','DM_FORMAL_OUTPUT','DM_FORMAL_SCENARIO','DM_FORMAL_ATTEMPTS','DM_FORMAL_MODE','DM_FORMAL_DEADLINE','DM_FORMAL_DOWNLOAD_RAW'];
+  const allowed = ['DM_FORMAL_APP','DM_FORMAL_DB','DM_FORMAL_GENERATOR','DM_FORMAL_SHA','DM_FORMAL_OUTPUT','DM_FORMAL_SCENARIO','DM_FORMAL_ATTEMPTS','DM_FORMAL_MODE','DM_FORMAL_DEADLINE','DM_FORMAL_DOWNLOAD_RAW','DM_FORMAL_REVIEWED_PATCH_SHA256'];
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     if (!line.trim() || line.trimStart().startsWith('#')) continue;
-    const match = /^([A-Z_]+)=(.*)$/.exec(line);
+    const match = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
     if (!match || !allowed.includes(match[1]) || Object.hasOwn(entries, match[1])) throw new Error('Unknown, duplicate or malformed env entry');
     entries[match[1]] = match[2];
   }
@@ -38,5 +38,6 @@ export function readConfig(path: string, checkout: string): Config {
   const deadline = entries.DM_FORMAL_DEADLINE ? Date.parse(entries.DM_FORMAL_DEADLINE) : undefined;
   if (deadline !== undefined && (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(entries.DM_FORMAL_DEADLINE) || !Number.isFinite(deadline) || deadline<=Date.now())) throw new Error('Deadline must be a future ISO time with timezone');
   if(entries.DM_FORMAL_DOWNLOAD_RAW && !['0','1'].includes(entries.DM_FORMAL_DOWNLOAD_RAW))throw new Error('DOWNLOAD_RAW must be 0 or 1');
-  return { app, db, generator, sha, output, mode, scenario:scenario as Scenario, attempts, deadline, downloadRaw:entries.DM_FORMAL_DOWNLOAD_RAW==='1' };
+  if(scenario==='pool-overhead' && (mode!=='formal' || attempts!==3 || !/^[a-f0-9]{64}$/.test(entries.DM_FORMAL_REVIEWED_PATCH_SHA256 || '')))throw new Error('Pool overhead requires formal mode, exactly three pairs and reviewed patch SHA256');
+  return { reviewedPatchSha256:entries.DM_FORMAL_REVIEWED_PATCH_SHA256, app, db, generator, sha, output, mode, scenario:scenario as Scenario, attempts, deadline, downloadRaw:entries.DM_FORMAL_DOWNLOAD_RAW==='1' };
 }
