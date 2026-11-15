@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, verifyImage, verifySession, sessionSettings } from './manifest.ts';
+import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings } from './manifest.ts';
 import { boundedCommand } from './bench.ts';
 
 const frozen = snapshot();
@@ -56,9 +56,40 @@ test('an unavailable command fails without leaking the input',()=>{
   assert.throws(()=>boundedCommand('/nonexistent-search-test-command',[],50,'private-input'),/failed/);
 });
 
-test('mutable reused image must match the frozen immutable identity',()=>{
-  assert.throws(()=>verifyImage(()=> 'sha256:changed','mutable-tag',frozen.image.id),/image identity mismatch/);
-  assert.equal(verifyImage(()=>frozen.image.id,'mutable-tag',frozen.image.id),frozen.image.id);
+for (const reused of [false,true]) {
+  test(`different image identity with matching runtime passes and is recorded (reused=${reused})`,()=>{
+    const id = 'sha256:'+'b'.repeat(64);
+    const record = resolveImage(()=>id,'mutable-tag',reused);
+    assert.notEqual(record.id,frozen.image.historicalId);
+    assert.deepEqual(JSON.parse(JSON.stringify(record)),{id,reused});
+    const sql = (text:string)=>text.includes('server_version_num') ? '180006' :
+      JSON.stringify(text.includes('pg_available_extensions') ? extensions : settings);
+    const docker = ()=>Object.entries(packages).map(p=>p.join('|')).join('\n');
+    verifyRuntime(sql,docker,'disposable');
+    assert.throws(()=>verifyRuntime(()=> '180005',docker,'disposable'),/PostgreSQL version mismatch/);
+  });
+}
+test('both runners launch the recorded settings, compared in pg_settings units',()=>{
+  // pg_settings: buffers/cache use 8kB, work memory kB, WAL MB, timeout seconds.
+  const units: Record<string,number> = {shared_buffers:8192,effective_cache_size:8192,
+    work_mem:1024,maintenance_work_mem:1024,max_wal_size:1024*1024,checkpoint_timeout:1};
+  const scales: Record<string,number> = {MB:1024*1024,GB:1024**3,min:60};
+  const launched = Object.fromEntries(postgresArguments.slice(1).filter((_,i)=>i%2===1).map(arg=>{
+    const [name,value] = arg.split('=') as [string,string];
+    const match = /^(\d+)(MB|GB|min)$/.exec(value);
+    return [name,match ? String(Number(match[1])*scales[match[2]!]!/units[name]!) : value];
+  }));
+  assert.deepEqual({...launched,server_encoding:'UTF8'},frozen.settings);
+  assert.deepEqual(Object.fromEntries(Object.keys(units).map(name=>[name,launched[name]])),{
+    shared_buffers:'16384',effective_cache_size:'524288',work_mem:'4096',
+    maintenance_work_mem:'65536',max_wal_size:'1024',checkpoint_timeout:'300',
+  });
+  for (const runner of ['run.ts','quality/run.ts']) {
+    const source = readFileSync(new URL(runner,import.meta.url),'utf8');
+    assert.match(source,/image,\s*\.\.\.postgresArguments\]/);
+    const launch = source.slice(source.indexOf("command('docker',['run'"),source.indexOf('POSTGRES_PASSWORD:password}'));
+    assert.doesNotMatch(launch,/'-c'/,'runner must not override common launch settings');
+  }
 });
 for (const role of ['owner','app']) {
   test(`${role}: inherited PGOPTIONS disabling bitmap scans is refused`,()=>{

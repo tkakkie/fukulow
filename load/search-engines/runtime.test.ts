@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { cleanup } from './runtime.ts';
 
-for (const mode of ['absent','hang','failure','leak']) {
+for (const mode of ['absent','hang','failure','leak','stopped']) {
   test(`cleanup handles ${mode} with bounded verification`,async t=>{
     const dir = mkdtempSync(join(tmpdir(),'search-cleanup-'));
     const before = process.env.PATH;
@@ -14,6 +14,7 @@ for (const mode of ['absent','hang','failure','leak']) {
 const mode = ${JSON.stringify(mode)};
 if (mode === 'hang') setInterval(()=>{},1000);
 if (mode === 'failure') process.exit(1);
+if (mode === 'stopped' && process.argv[2]==='container' && process.argv.includes('-aq')) console.log('stopped-owned');
 if (mode === 'leak' && process.argv.includes('ls')) console.log('owned');
 if (mode === 'absent' && !process.argv.includes('ls')) { console.error('No such container');process.exit(1); }
 `,{mode:0o755});
@@ -35,6 +36,8 @@ import { writeFileSync } from 'node:fs';
 if (process.argv[2]==='volume' && process.argv[3]==='ls') writeFileSync(${JSON.stringify(join(dir,'verified'))},'');
 if (${JSON.stringify(mode)}==='cleanup-error') process.exit(1);
 `,{mode:0o755});
+    const image = {id:'sha256:'+'b'.repeat(64),reused:true};
+    writeFileSync(join(dir,'image.json'),JSON.stringify(image));
     const fixture = join(dir,'fixture.mjs');
     writeFileSync(fixture,`import { supervise } from ${JSON.stringify(new URL('./runtime.ts',import.meta.url).href)};
 import { existsSync, writeFileSync } from 'node:fs';
@@ -47,7 +50,7 @@ writeFileSync(${JSON.stringify(join(dir,'completed.json'))},JSON.stringify({mani
     const child = spawn(process.execPath,[fixture],{env:{...process.env,PATH:dir+':'+process.env.PATH},stdio:'ignore'});
     assert.deepEqual(await once(child,'close'),[mode==='success'?0:1,null]);
     assert.deepEqual(JSON.parse(readFileSync(join(dir,'run-status.json'),'utf8')),
-      {manifestHash:'test-manifest',valid:mode==='success',cleanupVerified:mode!=='cleanup-error',exitCode:mode==='success'?0:1});
+      {manifestHash:'test-manifest',image,valid:mode==='success',cleanupVerified:mode!=='cleanup-error',exitCode:mode==='success'?0:1});
     assert.equal(existsSync(join(dir,'finished.json')),mode==='success');
     assert.equal(existsSync(join(dir,'summary.json')),mode==='success');
   });

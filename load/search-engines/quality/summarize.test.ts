@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { hash, snapshot } from '../manifest.ts';
+import { corpus, queries } from './dataset.ts';
 import { finalizeQuality } from './summarize.ts';
 
 const cases = ['success','tampered-manifest','wrong-summary-hash','missing-mode','duplicate-mode','missing-query','duplicate-query',
   'wrong-completion-hash','wrong-finished-hash','wrong-status-hash','invalid-status','failed-cleanup','failed-exit',
   'incomplete-modes','incomplete-queries','incomplete-rows','incomplete-finished','incomplete-dataset',
-  'incomplete-visible-rows','incomplete-dataset-queries',
+  'incomplete-visible-rows','incomplete-dataset-queries','edited-corpus','edited-query-text',
   ...['manifest','pending-summary','completed','finished','run-status','dataset'].map(name=>`missing-${name}`)];
 for (const mode of cases) {
   test(`quality publication fails closed: ${mode}`,t=>{
@@ -32,7 +33,9 @@ for (const mode of cases) {
     if (mode==='incomplete-queries') completion.queries=0;
     if (mode==='incomplete-rows') completion.rows=0;
     if (mode==='incomplete-finished') finished.rows=0;
-    const dataset = {totalRows:expected.totalRows,messages:Array(expected.visibleRows).fill({}),queries:expected.querySet.map(q=>({id:q.id}))};
+    const dataset = {totalRows:expected.totalRows,messages:corpus(),queries:queries.map(q=>({...q,trimmed:q.text,normalized:q.text}))};
+    if (mode==='edited-corpus') dataset.messages[0]!.body+='edited';
+    if (mode==='edited-query-text') dataset.queries[0]!.text+='edited';
     if (mode==='incomplete-dataset') dataset.totalRows=0;
     if (mode==='incomplete-visible-rows') dataset.messages.pop();
     if (mode==='incomplete-dataset-queries') dataset.queries.pop();

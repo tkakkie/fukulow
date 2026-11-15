@@ -1,5 +1,5 @@
 {
-  "sha256": "e6aaf6f8f70de8f8df62e26190655bd10eb975b5d67b788c507f3f401864339c",
+  "sha256": "c66080bb5ac27575013121e659315807c682b07406c3d74680710c24e1bebeb3",
   "frozen": {
     "version": 1,
     "date": "2026-11-15",
@@ -48,7 +48,7 @@
       },
       {
         "path": "load/search-engines/manifest.ts",
-        "sha256": "8ecde8593d020a1957a8514fde1d4f14c861ade22def9490a6d666229d795ec9"
+        "sha256": "8c26e265b7d7b6e953eca9984832e3f5a4a7b005267cd0ac0f628e841a1b7231"
       },
       {
         "path": "load/search-engines/pgroonga.sql",
@@ -68,11 +68,11 @@
       },
       {
         "path": "load/search-engines/quality/run.ts",
-        "sha256": "53f0e4f30c54708b1ba3791ae8b3a6b14de958412d0de1ae3ddd97b6915662f7"
+        "sha256": "80833baf0530a3edd88abd96297d48d80a4ec6d69c9678367e283f0f53a79c41"
       },
       {
         "path": "load/search-engines/quality/summarize.ts",
-        "sha256": "2facca408edf647e485aaa3bdba89003f80a989367400e01370e40955df9c178"
+        "sha256": "8b9af12b5b7e35ab6888a6a1b82368d9d74e891bb060188a5c9430838fa959ec"
       },
       {
         "path": "load/search-engines/queries.ts",
@@ -80,11 +80,11 @@
       },
       {
         "path": "load/search-engines/run.ts",
-        "sha256": "aa8a1e0ffd3b2b292f9cbd91306d1e3fbf4ccc3295b3bdc77b8ce842bfb87515"
+        "sha256": "3b7ec5b12fe1452ff66d7999d33af29aafb78263042265a4e6684cfed5d29f84"
       },
       {
         "path": "load/search-engines/runtime.ts",
-        "sha256": "7828799625086598136a4a035f21e338cc35e2d8576a472ee6d0e632e8fe56d1"
+        "sha256": "2999f860a25ce0f7f6c7d775fad37e34527376d34f2ffa4bad9ba5d4bb933887"
       },
       {
         "path": "load/search-engines/schema.sql",
@@ -828,7 +828,7 @@
       "qualityTimed": false
     },
     "image": {
-      "id": "sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77",
+      "historicalId": "sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77",
       "base": "postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42",
       "packages": {
         "postgresql-18": "18.6-1.pgdg13+2",
@@ -845,7 +845,7 @@
       "pgBigmRelease": "v1.2-20250903"
     },
     "settings": {
-      "shared_buffers": "8192",
+      "shared_buffers": "16384",
       "work_mem": "4096",
       "maintenance_work_mem": "65536",
       "effective_cache_size": "524288",

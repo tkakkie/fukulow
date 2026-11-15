@@ -1,7 +1,7 @@
 // Keep signal handling outside the synchronous SQL worker, including hung clients.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export const timeouts = { docker:120_000, build:900_000, psql:900_000, benchmark:900_000, cleanup:10_000 };
@@ -28,7 +28,7 @@ export async function cleanup(container: string, volume: string, timeout = timeo
   await call(['rm','-fv',container],true);
   await call(['volume','rm','-f',volume],true);
   for (const [kind,name] of [['container',container],['volume',volume]]) {
-    const r = await call([kind,'ls','-q','--filter',`name=${name}`]);
+    const r = await call([kind,'ls',kind==='container'?'-aq':'-q','--filter',`name=${name}`]);
     if (r.stdout.trim()) failures.push(`${kind} cleanup verification found an owned resource`);
   }
   if (failures.length) throw new Error(failures.join('; '));
@@ -65,6 +65,7 @@ export async function supervise(entry: string, out: string, manifestHash: string
   try { await cleanup(container,volume); cleanupVerified=true; }
   catch (error) { console.error(String(error)); code=1; }
   const record = () => writeFileSync(`${out}/run-status.json`,JSON.stringify({manifestHash,
+    ...(existsSync(`${out}/image.json`) ? {image:JSON.parse(readFileSync(`${out}/image.json`,'utf8'))} : {}),
     valid:code===0 && !interrupted && cleanupVerified,cleanupVerified,exitCode:interrupted || code})+'\n');
   const discard = () => {
     rmSync(`${out}/finished.json`,{force:true});

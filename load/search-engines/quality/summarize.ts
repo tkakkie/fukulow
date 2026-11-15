@@ -26,6 +26,11 @@ export function finalizeQuality(root: string) {
   const dataset = read('dataset');
   assert.equal(dataset.totalRows,expected.totalRows,'Dataset row count mismatch');
   assert.equal(dataset.messages.length,expected.visibleRows,'Dataset visible row count mismatch');
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  assert.equal(digest(dataset.messages),expected.corpusHash,'Dataset corpus hash mismatch');
+  // Runner-added normalization and labels are not part of query identity.
+  const identities = dataset.queries.map(({gold,trimmed,normalized,...q}: Record<string,unknown>)=>q);
+  assert.equal(digest(identities),expected.queryHash,'Dataset query hash mismatch');
   const queryIds = expected.querySet.map(q=>q.id);
   assert.equal(queryIds.length,expected.queries);
   assert.deepEqual(dataset.queries.map((q: {id:string})=>q.id),queryIds,'Dataset queries mismatch');

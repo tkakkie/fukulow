@@ -12,7 +12,8 @@ import type { TestContext } from 'node:test';
 const runners = ['./run.ts','./quality/run.ts'];
 const manifest = JSON.parse(readFileSync(new URL('./manifest-v1.json',import.meta.url),'utf8'));
 const manifestHash = manifest.sha256;
-const imageId = manifest.frozen.image.id;
+// A fresh build has a different identity even when its runtime matches.
+const imageId = 'sha256:'+'b'.repeat(64);
 const version = readFileSync(new URL('../../.node-version',import.meta.url),'utf8').trim();
 
 function start(t: TestContext, runnerPath: string, mode: string, existing = false) {
@@ -26,7 +27,7 @@ import { appendFileSync, existsSync, writeFileSync, rmSync } from 'node:fs';
 const args = process.argv.slice(2);
 appendFileSync(process.env.STUB_LOG,JSON.stringify(args)+'\\n');
 const state = process.env.STUB_LOG+'.state';
-if (args[0] === 'image') console.log(process.env.STUB_MODE==='image-mismatch'?'sha256:changed':${JSON.stringify(imageId)});
+if (args[0] === 'image') console.log(process.env.STUB_MODE==='invalid-image'?'sha256:changed':${JSON.stringify(imageId)});
 if (args[0] === 'run') {
   if (process.env.STUB_MODE !== 'absent') writeFileSync(state,'owned');
   if (!['signal','hang','mismatch','planner-owner','planner-app'].includes(process.env.STUB_MODE)) process.exit(42);
@@ -97,6 +98,7 @@ for (const runner of runners) {
       if (mode==='leak') assert.match(run.stderr(),/cleanup verification found/);
       assertCleanup(run.calls());
       const status = JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8'));
+      assert.deepEqual(status.image,{id:imageId,reused:true});
       assert.equal(status.valid,false);
       assert.equal(status.cleanupVerified,mode!=='leak');
     });
@@ -114,17 +116,17 @@ for (const runner of runners) {
       assert.equal(run.child.kill(signal),true);
       assert.deepEqual(await run.closed,[code,null]);
       assertCleanup(run.calls());
-      assert.deepEqual(JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8')),{manifestHash,valid:false,cleanupVerified:true,exitCode:code});
+      assert.deepEqual(JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8')),{manifestHash,image:{id:imageId,reused:true},valid:false,cleanupVerified:true,exitCode:code});
     });
   }
 
-  for (const mode of ['image-mismatch','planner-owner','planner-app']) {
+  for (const mode of ['invalid-image','planner-owner','planner-app']) {
     test(`${runner}: ${mode} refuses drift before corpus loading`,{timeout:10000},async t=>{
       const run = start(t,runner,mode);
       assert.deepEqual(await run.closed,[1,null]);
-      assert.match(run.stderr(),mode==='image-mismatch'?/Frozen image identity mismatch/:/Frozen planner defaults mismatch/);
+      assert.match(run.stderr(),mode==='invalid-image'?/Invalid image identity/:/Frozen planner defaults mismatch/);
       assert.equal(run.calls().some(args=>args[0]==='cp' || args[0]==='unexpected-load'),false);
-      if(mode==='image-mismatch') assert.equal(run.calls().some(args=>args[0]==='run'),false);
+      if(mode==='invalid-image') assert.equal(run.calls().some(args=>args[0]==='run'),false);
       else assertCleanup(run.calls());
       const status = JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8'));
       assert.equal(status.valid,false);

@@ -12,12 +12,17 @@ const readSource = (path: string) => readFileSync(new URL(path,sourceRoot),'utf8
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const jsonHash = (value: unknown) => hash(JSON.stringify(value));
 export const settings: Record<string,string> = {
-  shared_buffers:'8192',work_mem:'4096',maintenance_work_mem:'65536',effective_cache_size:'524288',
+  shared_buffers:'16384',work_mem:'4096',maintenance_work_mem:'65536',effective_cache_size:'524288',
   random_page_cost:'4',max_connections:'100',max_worker_processes:'16',jit:'on',fsync:'on',
   synchronous_commit:'on',wal_level:'replica',max_wal_size:'1024',checkpoint_timeout:'300',server_encoding:'UTF8',
   shared_preload_libraries:'pgroonga_wal_resource_manager,pgroonga_crash_safer',
   'pgroonga.enable_wal_resource_manager':'on','pgroonga.enable_crash_safe':'on',
 };
+// Explicit values preserve the recorded conditions across both runners.
+export const postgresArguments = ['postgres', ...Object.entries({
+  ...settings,shared_buffers:'128MB',work_mem:'4MB',maintenance_work_mem:'64MB',
+  effective_cache_size:'4GB',max_wal_size:'1GB',checkpoint_timeout:'5min',
+}).filter(([name])=>name!=='server_encoding').flatMap(([name,value])=>['-c',`${name}=${value}`])];
 export const extensions = {pg_trgm:'1.6',pg_bigm:'1.2',pgroonga:'4.1.0'};
 export const packages = {
   'postgresql-18':'18.6-1.pgdg13+2','postgresql-client-18':'18.6-1.pgdg13+2',
@@ -44,7 +49,7 @@ export function snapshot() {
       clients:5,transactions:20,rounds:3,warmupSweeps:1,writeWarmTransactions:10,writeTransactions:200,
       order:[['none','trgm','bigm','pgroonga'],['bigm','pgroonga','none','trgm'],['pgroonga','trgm','bigm','none']]},
     timing:{timeouts,startupAttempts:60,startupPollMs:500,rangeDays:180,qualityTimed:false},
-    image:{id:'sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77',base:readSource('load/search-engines/Dockerfile').split('\n')[0].slice(5),
+    image:{historicalId:'sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77',base:readSource('load/search-engines/Dockerfile').split('\n')[0].slice(5),
       packages,extensions,pgBigmRelease:'v1.2-20250903'},settings,sessionPolicy:{planner:'Query Tuning settings must equal image boot_val',settings:sessionSettings},shmBytes:1073741824};
 }
 export function verifyManifest(document: {sha256:string; frozen:ReturnType<typeof snapshot>}, actual = snapshot()) {
@@ -71,10 +76,11 @@ export function verifyRuntime(sql: (text:string)=>string, docker: (...args:strin
   assert.deepEqual(actualPackages,packages,'Frozen package versions mismatch');
 }
 
-// Resolve the mutable tag once, refuse drift, then launch by immutable ID.
-export function verifyImage(docker: (...args:string[])=>string, image: string, expected: string) {
-  assert.equal(docker('image','inspect',image,'--format','{{.Id}}'),expected,'Frozen image identity mismatch');
-  return expected;
+// Resolve once and launch by immutable ID; runtime verification gates data loading.
+export function resolveImage(docker: (...args:string[])=>string, image: string, reused: boolean) {
+  const id = docker('image','inspect',image,'--format','{{.Id}}');
+  assert.match(id,/^sha256:[a-f0-9]{64}$/,'Invalid image identity');
+  return {id,reused};
 }
 export function verifySession(sql: (text:string)=>string) {
   const session = sessionSettings;

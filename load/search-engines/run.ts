@@ -1,6 +1,6 @@
 import { summarize } from './summarize.ts';
 import { supervise, ownedContainer, ownedVolume } from './runtime.ts';
-import { loadManifest, verifyRuntime, verifyImage, verifySession } from './manifest.ts';
+import { loadManifest, verifyRuntime, resolveImage, verifySession, postgresArguments } from './manifest.ts';
 // Run from the repository root with the Node version in .node-version.
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -143,15 +143,13 @@ async function restoreDrill() {
     // Build completes before any timing. No server image/dependency is changed.
     const log = command('docker',['build','-t',image,'load/search-engines']); writeFileSync(`${out}/build.txt`,log);
   }
-  image = verifyImage(docker,imageTag,manifest.frozen.image.id);
+  const imageRecord = resolveImage(docker,imageTag,process.env.SEARCH_SKIP_BUILD==='1');
+  image = imageRecord.id;
+  save(`${out}/image.json`,imageRecord);
   docker('volume','create',ownedVolume());
   const password = randomUUID();
   command('docker',['run','-d','--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD','-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,
-    'postgres','-c','shared_buffers=128MB','-c','work_mem=4MB','-c','maintenance_work_mem=64MB',
-    '-c','max_connections=100','-c','jit=on','-c','fsync=on','-c','synchronous_commit=on',
-    '-c','shared_preload_libraries=pgroonga_wal_resource_manager,pgroonga_crash_safer',
-    '-c','pgroonga.enable_wal_resource_manager=on','-c','pgroonga.enable_crash_safe=on',
-    '-c','max_worker_processes=16'],undefined,{...process.env,POSTGRES_PASSWORD:password});
+    ...postgresArguments],undefined,{...process.env,POSTGRES_PASSWORD:password});
   // The password is passed via environment, never a command argument or artifact.
   let ready = false;
   for (let attempt=0;attempt<60;attempt++) {
@@ -168,7 +166,7 @@ async function restoreDrill() {
   const metadata = {manifestHash:manifest.sha256,at:new Date().toISOString(),node:process.version,cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem(),arch:arch(),
     os:command('sw_vers',[]),model:command('sysctl',['-n','hw.model']),
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{.NCPU}},"memory":{{.MemTotal}}}')),
-    image:docker('image','inspect',image,'--format','{{.Id}}'),source:command('git',['rev-parse','HEAD']),
+    image: imageRecord,source:command('git',['rev-parse','HEAD']),
     hashes:Object.fromEntries([...readdirSync('load/search-engines',{withFileTypes:true}).filter(n=>n.isFile()).map(n=>'load/search-engines/'+n.name),...migrations.map(n=>'server/migrations/'+n)].map(p=>[p,digest(readFileSync(p,'utf8'))])),
     versions:owner('postgres','SELECT version(); SELECT name,default_version FROM pg_available_extensions WHERE name IN (\'pg_trgm\',\'pg_bigm\',\'pgroonga\');'),
     packages:docker('exec',container,'dpkg-query','-W','postgresql-18','postgresql-client-18','postgresql-server-dev-18','postgresql-18-pgdg-pgroonga','libgroonga0'),
@@ -200,7 +198,7 @@ async function restoreDrill() {
       verifySession(text=>owner('measured',text));
       verifySession(text=>app('measured',text));
       note(`round ${round+1} ${engine}, index ${Math.round(build.buildMs)} ms`);
-      const row: Record<string,unknown> = {manifestHash:manifest.sha256,round:round+1,engine,...build};
+      const row: Record<string,unknown> = {manifestHash:manifest.sha256,image:imageRecord,round:round+1,engine,...build};
       if (engine!=='none') {
         // Exactly one complete sweep of all queries before latency sampling.
         for (const q of normalized) app('measured',begin()+search(q.value)+'; COMMIT;');

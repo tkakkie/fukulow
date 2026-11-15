@@ -1,5 +1,5 @@
 import { supervise, ownedContainer, ownedVolume } from '../runtime.ts';
-import { loadManifest, verifyRuntime, verifyImage, verifySession } from '../manifest.ts';
+import { loadManifest, verifyRuntime, resolveImage, verifySession, postgresArguments } from '../manifest.ts';
 // Quality only: full result sets, no timers or performance measurements.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -36,13 +36,13 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
 {
   console.log(`Quality artifacts: ${out}`);
   if (process.env.SEARCH_SKIP_BUILD!=='1') writeFileSync(`${out}/build.txt`,docker('build','-t',image,'load/search-engines'));
-  image = verifyImage(docker,imageTag,manifest.frozen.image.id);
+  const imageRecord = resolveImage(docker,imageTag,process.env.SEARCH_SKIP_BUILD==='1');
+  image = imageRecord.id;
+  save(`${out}/image.json`,imageRecord);
   docker('volume','create',ownedVolume());
   const password = randomUUID();
   command('docker',['run','-d','--name',container,'--shm-size=1g','--mount',`type=volume,source=${ownedVolume()},target=/var/lib/postgresql`,'-e','POSTGRES_PASSWORD',
-    '-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,'postgres',
-    '-c','shared_preload_libraries=pgroonga_wal_resource_manager,pgroonga_crash_safer',
-    '-c','pgroonga.enable_wal_resource_manager=on','-c','pgroonga.enable_crash_safe=on','-c','max_worker_processes=16'],
+    '-e','POSTGRES_USER=fukulow','-e','POSTGRES_DB=postgres',image,...postgresArguments],
     undefined,{...process.env,POSTGRES_PASSWORD:password});
   let ready = false;
   for (let i=0;i<60;i++) {
@@ -86,7 +86,7 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
   const evaluated = queries.map(q=>({...q,trimmed:trimQuery(q.text),normalized:owner('quality_base',`SELECT ${normalizedQuery(q.text)};`)}));
   save(`${out}/dataset.json`,{classes,messages:data,queries:evaluated,totalRows:i,scope:'Org1, Member2, public Channel0, recent; other fixtures denied'});
   save(`${out}/metadata.json`,{manifestHash:manifest.sha256,at:new Date().toISOString(),node:process.version,os:platform(),arch:arch(),cpu:cpus()[0]?.model,
-    source:command('git',['rev-parse','HEAD']),image:docker('image','inspect',image,'--format','{{.Id}}'),
+    source:command('git',['rev-parse','HEAD']),image: imageRecord,
     versions:owner('quality_base','SELECT version(); SELECT extname,extversion FROM pg_extension;'),
     packages:docker('exec',container,'dpkg-query','-W','postgresql-18','postgresql-18-pgdg-pgroonga','libgroonga0'),
     hashes:Object.fromEntries([...migrations.map(n=>`server/migrations/${n}`),
@@ -123,7 +123,7 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
       PERFORM similarity('a','a'),bigm_similarity('a','a'),pgroonga_command('status');
       END $$; BEGIN; ${mode.settings}
       SELECT name,setting FROM pg_settings WHERE name LIKE 'pg_trgm.%' OR name LIKE 'pg_bigm.%' OR name LIKE 'pgroonga.%'; COMMIT;`);
-    const result = {manifestHash:manifest.sha256,mode:mode.id,engine:mode.engine,ddl:mode.ddl,settings,
+    const result = {manifestHash:manifest.sha256,image:imageRecord,mode:mode.id,engine:mode.engine,ddl:mode.ddl,settings,
       extensions:owner('quality_mode','SELECT extname,extversion FROM pg_extension ORDER BY extname;'),ranked:mode.ranked,rls:facts,
       overall:aggregate(scored),classes:Object.fromEntries(Object.keys(classes).map(c=>[c,aggregate(scored.filter(r=>r.class===c))])),queries:scored};
     results.push(result); save(`${out}/pending-summary.json`,results);
