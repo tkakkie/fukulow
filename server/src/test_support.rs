@@ -67,8 +67,10 @@ const APP_ROLE: &str = "fukulow_sqlx_test_app";
 /// The test harness closes every app pool before returning to SQLx, even when
 /// application state or background tasks retain pool handles. Apps over the same
 /// admin pool share one restricted pool, including concurrent initialization.
-/// This conventional module path keeps the invariants check's module tree resolvable;
-/// integration tests share it through `tests/support/pools.rs`.
+/// `lib.rs` declares it at the conventional path `crate::test_support`, which keeps
+/// the invariants check's module tree resolvable. Integration tests include this file
+/// by `#[path]`: through `tests/support/pools.rs` (`TestPools`, `run`), and directly
+/// from `tests/test_pools.rs`, which also tests `run_with_close_timeout`.
 pub struct TestPools {
     pub admin: PgPool,
     pub app: PgPool,
