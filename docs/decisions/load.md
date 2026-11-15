@@ -14,6 +14,7 @@ Load testing and measurement rules. Writing rules and the other parts: [index](.
 - #151 adopts DM performance acceptance (2026-11-14): 10,000 connections, 2,000 sends/s and spec/dms.md latency/DB/memory budgets. Reason: validate combined O5/write load; include hot bursts, notice loss, bootstrap, bounded backlog/drain and storage/WAL/lock/backup/restore cost.
 
 - #151: keep main at exactly 100 DMs/Member; measure held200 separately under full mixed load. Samples sum over ten Organizations; judge each Organization too. Reason: preserve fixture comparability and prevent aggregate tails from hiding an Organization failure.
+- #151 (2026-11-15): each mixed-load Organization needs ≥1,000 samples/class/attempt; first-page/deep browsing is judged only on a separate browsing Organization at full load. Reason: per-Organization tails stay visible, and the 100-DM fixture cannot supply deep continuations.
 
 - #151 absolute budgets are judged on hourly-rented Linux servers after the first deploy (#431); the developer Mac is only for same-machine comparisons (#426, #153, #196). Reason: on a Mac the generator shares the CPU and a VM is added (2026-11-15).
 
@@ -23,5 +24,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [process](process.md): `#401: deployment/load app and migrate use`
 - [process](process.md): `k6 bumps are manual (Dependabot does`
-- [process](process.md): `#442 (maintainer, 2026-11-15): feature work`, `#442: large-scale measurement runs once`, `#442: measurement aims to find bottlenecks`, `#442: add no new files under`
+- [process](process.md): `#442 (maintainer, 2026-11-15): feature work`, `#442: large-scale measurement runs once`, `#442: measurement aims to find bottlenecks`, `#442: add no new files under`, `#442 (maintainer, 2026-11-16): the milestone cadence`
 - [realtime](realtime.md): `#212 follows up handshake admission, listen`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`

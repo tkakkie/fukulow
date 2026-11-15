@@ -74,6 +74,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #442: large-scale measurement runs once per milestone, not per feature; the small CI `make load` smoke stays the per-change regression check. Reason: heavy runs are slow and costly, and one per milestone still catches regressions.
 - #442: measurement aims to find bottlenecks, not exact capacity numbers. Reason: a bottleneck can be fixed and remeasured; a precise capacity figure from a Mac or one run would be false precision.
 - #442: add no new files under `load/` unless a milestone measurement needs them. Reason: unused harness code costs review and maintenance without adding evidence.
+- #442 (maintainer, 2026-11-16): the milestone cadence exempts no gate: #431's formal performance evaluation after the first rented-server deploy and #153's search-engine selection gate still apply. Reason: the cadence only batches heavy runs; it does not lower acceptance.
 
 ## Entries in other parts
 

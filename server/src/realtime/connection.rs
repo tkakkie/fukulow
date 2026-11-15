@@ -45,7 +45,37 @@ impl Connection<'_> {
         let Some(watch) = self.access.get(&channel) else {
             return Ok(false);
         };
-        match watch.handoff(Self::event(socket, event)).await {
+        match watch
+            .handoff(async {
+                #[cfg(test)]
+                if matches!(event, ServerEvent::Message { .. }) {
+                    self.state
+                        .message_delivery
+                        .message_serializations
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Self::event(socket, event).await
+            })
+            .await
+        {
+            Some(result) => {
+                result?;
+                Ok(true)
+            }
+            None => self.protected(socket, channel).await,
+        }
+    }
+
+    async fn protected_frame(
+        &mut self,
+        socket: &mut WebSocket,
+        channel: Uuid,
+        frame: axum::extract::ws::Utf8Bytes,
+    ) -> Result<bool, u16> {
+        let Some(watch) = self.access.get(&channel) else {
+            return Ok(false);
+        };
+        match watch.handoff(Self::send(socket, Frame::Text(frame))).await {
             Some(result) => {
                 result?;
                 Ok(true)
@@ -118,7 +148,7 @@ impl Connection<'_> {
     async fn live(
         &mut self,
         socket: &mut WebSocket,
-        message: std::sync::Arc<messages::Message>,
+        message: std::sync::Arc<messages::LiveMessage>,
     ) -> Result<(), u16> {
         #[cfg(test)]
         super::tests::access_loss::pause(message.channel_id, "live", message.seq).await;
@@ -140,13 +170,7 @@ impl Connection<'_> {
             return self.catch_up(socket, message.channel_id).await;
         }
         if !self
-            .protected_event(
-                socket,
-                message.channel_id,
-                ServerEvent::Message {
-                    message: (*message).clone(),
-                },
-            )
+            .protected_frame(socket, message.channel_id, message.frame.clone())
             .await?
         {
             return Ok(());

@@ -4,6 +4,8 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 | Rule | Test |
 |---|---|
+| Live Messages serialize once per fan-out, including shared gap recovery, independent of socket count; zero recipients may serialize zero times | `server/src/realtime/tests/shared_frame.rs::live_serialization_is_once_per_fanout_including_shared_gap_recovery` |
+| Shared live JSON bytes equal ServerEvent::Message on the same refreshed payload, including Topic, Reply, Mention names and escaping | `server/src/realtime/tests/shared_frame.rs::shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed_mentions` |
 | Connection DB failures emit one allowlisted database_failure with a fixed operation before 1011; subscription authorization, refresh and replay omit raw details | `server/src/realtime/tests/observability.rs::connection_database_failures_emit_once_with_fixed_operation_and_no_details` |
 | SIGTERM/SIGINT stop acceptance, close sockets with 1001 and drain HTTP, detached sends and notifications before pool close; normal fallback exit is not fatal | `server/src/realtime/tests/shutdown.rs::sigterm_drains_http_persistence_and_detached_notification_then_replays_without_duplicates`, `server/src/realtime/tests/shutdown.rs::sigint_drains_and_closes_idle_sockets_normally` |
 | A shutdown deadline expires without waiting for unfinished persistence/notification or closing their pool first | `server/src/realtime/tests/shutdown.rs::sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work` |

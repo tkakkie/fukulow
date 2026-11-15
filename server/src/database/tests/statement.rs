@@ -102,3 +102,85 @@ async fn statement_context_errors_and_unconfirmed_completion_discard(pool: PgPoo
     }
     pools.app.close().await;
 }
+
+#[fukulow_test::test]
+async fn statement_context_cancelled_during_rls_read_discards_in_each_plan_mode(pool: PgPool) {
+    let pools = pools(pool).await;
+    let org = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO organizations (organization_id,name) VALUES ($1,'Cancellation control')",
+    )
+    .bind(org)
+    .execute(&pools.admin)
+    .await
+    .unwrap();
+    for mode in ["force_custom_plan", "force_generic_plan", "auto"] {
+        // A replacement connection must inherit the mode too.
+        let single = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |connection, _| {
+                Box::pin(async move {
+                    sqlx::query(&format!("SET plan_cache_mode={mode}"))
+                        .execute(connection)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .connect_with(pools.app.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        let read = async || {
+            organization_statement(
+                &single,
+                "SELECT organization_id FROM organizations",
+                async |connection: &mut PgConnection, sql: &str| {
+                    sqlx::query_scalar::<_, Uuid>(sql)
+                        .bind(org)
+                        .fetch_all(connection)
+                        .await
+                },
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(read().await, vec![org], "{mode}: positive RLS control");
+        let pid = clean(&single).await;
+        let pending_pool = single.clone();
+        let pending = tokio::spawn(async move {
+            organization_statement(
+                &pending_pool,
+                "SELECT organization_id, pg_sleep(60) FROM organizations",
+                async |connection: &mut PgConnection, sql: &str| {
+                    sqlx::query(sql).bind(org).fetch_all(connection).await
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let sleeping: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event='PgSleep')")
+                    .bind(pid).fetch_one(&pools.admin).await.unwrap();
+                if sleeping { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("RLS row was read before cancellation during pg_sleep");
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        let replacement = tokio::time::timeout(std::time::Duration::from_secs(5), clean(&single))
+            .await
+            .unwrap();
+        assert_ne!(replacement, pid, "{mode}: unconfirmed statement discarded");
+        let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM organizations")
+            .fetch_one(&single)
+            .await
+            .unwrap();
+        assert_eq!(
+            absent, 0,
+            "{mode}: replacement fails closed without context"
+        );
+        assert_eq!(read().await, vec![org], "{mode}: positive recovery control");
+        assert_eq!(clean(&single).await, replacement);
+        single.close().await;
+    }
+    pools.app.close().await;
+}
