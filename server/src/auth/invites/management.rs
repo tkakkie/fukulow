@@ -2,8 +2,10 @@ use super::*;
 use axum::extract::Query;
 use utoipa::IntoParams;
 
-// The stable lower bound gives the expiry index a range; the clock check still
-// excludes Invites that expire while the statement runs. Anchors stay unfiltered.
+// The stable lower bound gives the expiry index a range; the clock check excludes
+// Invites already expired when the predicate is evaluated. A listed Invite can still
+// expire during the sort, COMMIT or response; accept and revoke recheck expiry
+// themselves. Anchors stay unfiltered.
 pub(super) const LIST_SQL: &str = "SELECT id,email,role,created_by,to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at FROM invites \
              WHERE organization_id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>statement_timestamp() AND expires_at>clock_timestamp() \
              AND ($2 OR role<>'owner') AND ($3::uuid IS NULL OR (created_at,id) > \
