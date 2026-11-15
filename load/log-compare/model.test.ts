@@ -71,6 +71,7 @@ test('pgbench parsing separates transaction latency from scheduling lag and coun
   const r=parsePgbench(report,'0 1 2000 0 123 0 1000\n0 2 skipped 0 123 1 500\n1 1 4000 0 123 2 2000',1);
   assert.equal(r.p50,1);assert.equal(r.p95,2);assert.equal(r.scheduledP95,4);assert.equal(r.offered,3);assert.equal(r.dropped,1);
   assert.throws(()=>parsePgbench(report,'',1),/mismatch/);
+  assert.throws(()=>parsePgbench(report,'0 1 2000 0 123',1),/log shape/);
   assert.throws(()=>parsePgbench('', '',1),/incomplete/);
 });
 test('physical rows scanned include loop multipliers and filtered rows, buffers use the root',()=>{

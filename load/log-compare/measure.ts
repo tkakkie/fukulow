@@ -21,6 +21,8 @@ export function parsePgbench(report:string,log:string,seconds:number) {
   const late=Number(/number of transactions above the.*?:\s*(\d+)/.exec(report)?.[1] ?? 0);
   if (!Number.isFinite(count) || !Number.isFinite(errors)) throw new Error('incomplete pgbench report');
   const rows=log.trim().split('\n').filter(Boolean).map(l=>l.trim().split(/\s+/));
+  // pgbench --log: client txn latency_us script epoch us [schedule_lag_us with --rate]
+  if(rows.some(r=>r.length!==6 && r.length!==7)) throw new Error('unexpected pgbench log shape');
   const completed=rows.filter(r=>r[2]!=='skipped' && r[2]!=='failed');
   const latencies=completed.map(r=>(Number(r[2])-Number(r[6]??0))/1000).sort((a,b)=>a-b);
   const scheduledLatencies=completed.map(r=>Number(r[2])/1000).sort((a,b)=>a-b);
