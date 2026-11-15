@@ -135,8 +135,20 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.deepEqual(snapshot(), before)
     if (hasMigrate) assert.equal(sql(roleQuery), previousRole)
     else assert.match(sql(roleQuery), /^\d+$/)
-    dc('up', '-d', '--no-build', 'app')
+    dc('up', '-d', '--no-build', '--wait', 'app')
     url = await health(current)
+    for (const service of ['app', 'migrate']) {
+      const container = dc('ps', '-aq', service)
+      const [actual] = JSON.parse(run(['inspect', container]))
+      assert.equal(actual.HostConfig.ReadonlyRootfs, true)
+      assert.deepEqual(actual.HostConfig.CapDrop, ['ALL'])
+      assert.deepEqual(actual.HostConfig.SecurityOpt, ['no-new-privileges:true'])
+      assert.deepEqual(actual.Mounts, [], 'upgrade requires no writable-path exception')
+      assert.equal(run(['diff', container]), '')
+      if (service === 'migrate') assert.equal(actual.State.ExitCode, 0)
+      else assert.equal(actual.State.Health.Status, 'healthy')
+    }
+    dc('exec', '-T', 'app', 'fukulow-server', 'probe')
     assert.deepEqual(snapshot(), before)
     await request(url, `/orgs/${organization}/me`, undefined, session.token)
     // An older/newer binary must fail before listening, even with the same row count.
@@ -154,6 +166,12 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     dc('restart', 'app')
     url = await health(current)
     await request(url, `/orgs/${organization}/me`, undefined, session.token)
+    dc('exec', '-T', 'app', 'fukulow-server', 'probe')
+    const upgradedMessage = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`,
+      { body: 'Sent after read-only upgrade and restart', client_message_id: randomUUID() }, session.token, 201)
+    const upgradedHistory = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
+    assert.deepEqual(upgradedHistory.messages, [message, upgradedMessage])
+    assert.equal(run(['diff', dc('ps', '-q', 'app')]), '')
     for (const statement of [
       'ALTER TABLE users DISABLE TRIGGER protect_member_identity',
       'DROP TRIGGER protect_member_identity ON users',
@@ -185,13 +203,13 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.equal(restoredApp('SELECT count(*) FROM messages'), '0')
     assert.equal(restoredApp("WITH context AS MATERIALIZED (SELECT set_config('fukulow.organization_id', " +
       `'${organization}', true) AS id) SELECT count(*) FROM context CROSS JOIN LATERAL ` +
-      '(SELECT 1 FROM messages WHERE context.id IS NOT NULL OFFSET 0) m'), '1')
+      '(SELECT 1 FROM messages WHERE context.id IS NOT NULL OFFSET 0) m'), '2')
     // --no-acl resets function ACLs; the grants step must leave the definer function to fukulow_app only.
     assert.equal(dc('exec', '-T', 'db', 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow_restore', '-Atc',
       "SELECT string_agg(coalesce(nullif(acl.grantee, 0)::regrole::text, 'PUBLIC'), ',' ORDER BY 1) FROM pg_proc p, " +
       "aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl WHERE p.proname = 'fukulow_setup_required' " +
       "AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner"), 'fukulow_app')
-    console.log('PASS existing volume: idempotent roles, identical Organizations/Accounts/Members/Messages/Sessions, old Session, sign-in, history, restart, startup mismatch denial/revert, DDL denials, #198 backup/drill/restored grants, restored RLS and definer ACL')
+    console.log('PASS existing volume: read-only app/migrate without mounts, dropped capabilities, no-new-privileges, probe, idempotent roles, identical Organizations/Accounts/Members/Messages/Sessions, old Session, sign-in, history, restart/send, startup mismatch denial/revert, DDL denials, #198 backup/drill/restored grants, restored RLS and definer ACL')
   } finally {
     if (!configOnly) {
       spawnSync('docker', [...current, 'down', '-v', '--remove-orphans'], { cwd, env, stdio: 'inherit' })
