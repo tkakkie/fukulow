@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   createAnnouncementController,
   createLiveAnnouncementQueue,
@@ -813,4 +813,13 @@ describe('announcements: single polite status region rules (docs/ui.md §2, §5,
     })
     expect(res.announcement).toBe('佐藤 健: 日報の更新です')
   })
+})
+
+it('DM navigation announces the peer name once without a Channel prefix or badge announcement', () => {
+  const announce = vi.fn()
+  const controller = createAnnouncementController({ onAnnounce: announce })
+  controller.onViewChanged({ viewId: 'dm-A', kind: 'dm', name: '相手の名前' })
+  controller.onViewChanged({ viewId: 'dm-A', kind: 'dm', name: '相手の名前' })
+  expect(announce).toHaveBeenCalledExactlyOnceWith('相手の名前')
+  controller.destroy()
 })

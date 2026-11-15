@@ -56,8 +56,11 @@ impl PoolConfig {
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::query("SET statement_timeout = '10s'")
-                        .execute(connection)
+                        .execute(&mut *connection)
                         .await?;
+                    // These are latency-bound OLTP queries. Generic visibility
+                    // plans can JIT-compile unused Guest branches on every call.
+                    sqlx::query("SET jit = off").execute(connection).await?;
                     Ok(())
                 })
             })

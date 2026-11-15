@@ -2,6 +2,7 @@ use super::*;
 
 mod counts;
 mod denials;
+mod dms;
 mod ordering;
 mod plans;
 
@@ -41,6 +42,7 @@ async fn mention_migration_has_no_backfill_and_enforces_scoped_keys_and_cascade(
     .await
     .unwrap();
     assert_eq!(mention_rows(&pool, org).await, 0);
+    apply_migrations_after(&pool, "202611140300_message_mentions.sql").await;
     assert_eq!(
         list(&app, &author, channel, "").await["messages"][0]["mentions"],
         json!([])
