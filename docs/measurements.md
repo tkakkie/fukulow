@@ -755,3 +755,23 @@ Gates are reported only and never relaxed: zero missing/out-of-order positions, 
 Condition 5 is **not validated**: history_generation use/rotation in replay/bootstrap, snapshot_expired and its projection-expiry watermark, an explicit bootstrap cursor, and mutation-operation idempotency (receipts, expected_version, conflicts/no-ops) are **not implemented**, and their DB costs are omitted. The retry-position probe covers original sends only. This DB-shape comparison cannot validate condition 5 or qualify adoption. Exploratory assumptions differ from the provisional design in docs/spec/realtime.md: incrementing per-Message versions rather than event-position versions; one position per Message in a Move (eight for the fixture chain) rather than one per chain operation; tombstone-inclusive Topic counts rather than nondeleted counts. Immutable snapshots retain historical bodies as an exploratory cost. No wire protocol, replay semantics or retention policy is decided here.
 
 Validation on Node v26.13.0: type check and all 61 tests passed. The corrected short real-DB smoke (`node load/log-compare/run.ts --smoke --out /private/tmp/i160-smoke-fix`) completed 60 fixed-rate arms, 60 maximum steps, 15 replay fixtures and four migrations. All 139 correctness summaries had zero missing/resurrected/retry positions; all fixed-rate schedules balanced and matched paired actual offers/mix. Fault injections detected a deleted creation snapshot at position 500 and a historical Delete followed by revival in all five arms. All four fixed-rate performance comparisons were INVALID from spread over 10%; replay/migration summaries were invalid from insufficient smoke repetitions. Combined summary validity includes correctness and, for maximum steps, work acceptance/errors as well as spread. The historical-body metric covers candidate replay archives; the benchmark oracle separately retains expected bodies and is included in whole-schema storage/WAL. No owned containers/volumes remained. Raw artifacts/log: /private/tmp/i160-smoke-fix{,.log}; an earlier bounded attempt stopped on an operation-string collation mismatch, corrected by canonicalizing both identity arrays in JavaScript and covered by a new negative test. No full comparison was run.
+
+## Unread candidate bounds (#355, 2026-11-16 JST)
+
+Adds Organization/Member/revision bounds to the visible list's manager-grant lookup and materializes unread Topic candidates once in the count statement. RLS policies, authorization, `access_rows_sql()`, `member_access`, indexes and the #356 Topic seq bound are unchanged. Baseline: production SQL at `1662d5d`. Full record (conditions, method, per-round medians, plan findings, validation): moved to #355 as a comment.
+
+Method: the actual `channels::visible_list` SQL and `messages::unread::LIST_COUNTS_SQL`, prepared as `fukulow_app` (NOBYPASSRLS, JIT off as in the app pool), each in `REPEATABLE READ READ ONLY` with transaction-local context, on `load/hot-plans/seed.sql` (Org A Member 2, 50 visible Channels, hot Channel 100,000 Messages). Forced Custom/Generic and Auto; three B/A A/B B/A rounds, median of 5 `EXPLAIN (ANALYZE, BUFFERS)` samples each; before/after rows matched exactly. Apple M5 Mac, Docker, PostgreSQL 18.6, shared host.
+
+| Query | Mode | Before → after ms | Change | Root shared hits | Key scan |
+|---|---|---:|---:|---|---|
+| visible list | Custom | 0.177 → 0.069 | −61.0% | 101 → 37 | manager grants filtered 5,000 → 10 |
+| visible list | Generic | 0.179 → 0.128 | −28.5% | 101 → 37 | same |
+| visible list | Auto | 0.178 → 0.117 | −34.3% | 101 → 37 | same |
+| counts | Custom | 5.115 → 3.486 | −31.8% | 3,707 → 502 | Topic tuples examined 100,000 → 2,000 |
+| counts | Generic | 4.539 → 3.271 | −27.9% | 3,707 → 550 | same |
+| counts | Auto | 5.477 → 3.677 | −32.9% | 3,707 → 550 | same |
+
+- **Evidence strength.** Round medians overlap, so the percentages are observed, not isolated causal estimates. The scan and buffer reductions are stable in every sample.
+- **Unchanged cost.** The Topic Message scan (`messages_topic_seq`, seq still in Filter) is unchanged; restoring that bound is #356.
+- **Limits.** One synthetic fixture with no accepted Mentions, warm plans, no concurrent send load or Linux run. Not a performance acceptance (#431).
+

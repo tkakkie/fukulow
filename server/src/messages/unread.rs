@@ -42,7 +42,19 @@ pub struct ReadPosition {
 // that Channel's Unread at its snapshot's committed counter, without persisting.
 // The counter and Messages commit atomically, so this snapshot's counts are
 // exactly bounded by its counter, including own and already-read Messages.
+// Materialize the Member's unread Topic candidates once, rather than rescan
+// every Topic under RLS per Channel. The per-Channel range calculation stays below.
 pub(super) const LIST_COUNTS_SQL: &str = r#"
+WITH unread_topics AS MATERIALIZED (
+    SELECT t.organization_id, t.channel_id, t.id, t.last_seq
+    FROM topics t
+    JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $2
+        AND p.membership_revision = $3 AND p.channel_id = t.channel_id
+    LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = t.channel_id
+        AND tr.member_id = $2 AND tr.topic_id = t.id
+    WHERE t.organization_id = $1 AND t.channel_id = ANY($4)
+        AND t.last_seq > COALESCE(tr.read_seq, p.initial_seq)
+)
 SELECT c.channel_id, COALESCE(s.seq, 0) AS as_of_seq,
     COALESCE(p.read_seq, s.seq, 0) AS read_seq,
     p.channel_id IS NULL AS missing_position,
@@ -64,7 +76,7 @@ CROSS JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT COALESCE(sum(unread.unread_count), 0)::bigint AS unread_count,
         COALESCE(sum(unread.mention_unread_count), 0)::bigint AS mention_unread_count
-    FROM topics t
+    FROM unread_topics t
     LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = c.channel_id
         AND tr.member_id = $2 AND tr.topic_id = t.id
     CROSS JOIN LATERAL (

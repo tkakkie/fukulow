@@ -113,7 +113,7 @@ pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     let visible = visible_channel_sql();
     // The LEFT JOIN retains one empty row for an active Member with no visible Channels.
     let sql = format!(
-        "SELECT c.id, c.name, c.visibility, u.role, EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision AND cm.manager) FROM ({}) u \
+        "SELECT c.id, c.name, c.visibility, u.role, EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=$1 AND cm.member_id=$2 AND cm.membership_revision=$3 AND cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision AND cm.manager) FROM ({}) u \
          LEFT JOIN channels c ON c.organization_id = $1 AND c.kind='channel' \
          AND ({visible}) WHERE u.id = $2 AND u.membership_revision = $3 \
          ORDER BY lower(c.name COLLATE \"C\"), c.id",
