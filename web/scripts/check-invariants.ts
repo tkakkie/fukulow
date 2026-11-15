@@ -449,6 +449,10 @@ if ! timeout 60s docker pull "$PLAYWRIGHT_IMAGE"; then
 fi`
   if (cliSteps.length !== 1 || !/^name: [^\n]+\n        shell: bash\n        run: \|\n/.test(step) || body !== `${prefix}\n${command}`)
     return 'Playwright smoke CLI must run unfiltered test from web (filters/overrides or command unverifiable)'
+  const checks = steps.filter(step => step.includes('check-e2e-invariants.ts'))
+  if (checks.length !== 1 || steps.indexOf(checks[0]) <= steps.indexOf(step)
+    || !/^name: [^\n]+\n        run: node web\/scripts\/check-e2e-invariants\.ts\s*$/.test(checks[0]))
+    return 'Playwright runtime invariants check must run unconditionally after Playwright and fail the job'
   return null
 }
 
@@ -470,6 +474,13 @@ function playwrightConfig(root: string): string | null {
   for (const key of config.keys()) if (!allowed.has(key)) return `Playwright config ${key} discovery is unverifiable`
   if (config.has('forbidOnly') && config.get('forbidOnly')?.kind !== ts.SyntaxKind.TrueKeyword)
     return 'Playwright forbidOnly must not be false or computed'
+  const reporter = config.get('reporter')
+  const ciReporter = reporter && ts.isConditionalExpression(reporter) && reporter.condition.getText(sf) === 'process.env.CI'
+    ? reporter.whenTrue : reporter
+  if (!ciReporter || !ts.isArrayLiteralExpression(ciReporter)
+    || !ciReporter.elements.some(entry => ts.isArrayLiteralExpression(entry) && entry.elements.length === 1
+      && ts.isStringLiteral(entry.elements[0]) && entry.elements[0].text === './scripts/e2e-reporter.ts'))
+    return 'Playwright CI reporter must include ./scripts/e2e-reporter.ts'
   const projects = config.get('projects')
   if (!projects || !ts.isArrayLiteralExpression(projects) || projects.elements.length !== 1)
     return 'Playwright config must have exactly one literal project'

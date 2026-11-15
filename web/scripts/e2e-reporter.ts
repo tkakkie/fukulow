@@ -17,34 +17,39 @@ const sources = new Map(['e2e', 'e2e-compose'].flatMap(directory => {
     .filter(file => file.endsWith('.ts') && !/(?:^|\/)\.env(?:\.|\/|$)/.test(file)).map(file => {
     const path = join(e2eDir, file)
     const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
-    const titles = new Map<number, string>()
-    const titlePaths = new Map<number, string[]>()
-    function visit(node: ts.Node, parents: string[] = []) {
-      let path = parents
-      const members: string[] = []
-      let callee = ts.isCallExpression(node) ? node.expression : undefined
-      while (callee && ts.isPropertyAccessExpression(callee)) {
-        members.unshift(callee.name.text)
-        callee = callee.expression
-      }
-      const declaration = ts.isCallExpression(node) && callee && ts.isIdentifier(callee) && callee.text === 'test'
-      if (declaration && members.includes('describe')) {
-        const title = node.arguments[0]
-        path = [...parents, title && ts.isStringLiteralLike(title) ? title.text : 'Parameterized suite']
-      }
-      if (declaration && !members.includes('describe')) {
-        const title = node.arguments[0]
-        const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1
-        if (members.length === 0) titles.set(line,
-          title && ts.isStringLiteralLike(title) ? title.text : 'Parameterized test')
-        if (title && ts.isStringLiteralLike(title)) titlePaths.set(line, [...parents, title.text])
-      }
-      ts.forEachChild(node, child => visit(child, path))
-    }
-    visit(source)
+    const { titles, titlePaths } = sourceTitles(source)
     return [path, { file: `${directory}/${file}`, lines: source.getLineStarts().length, titles, titlePaths }] as const
   })
 }))
+
+export function sourceTitles(source: ts.SourceFile) {
+  const titles = new Map<number, string[]>()
+  const titlePaths = new Map<number, string[][]>()
+  function visit(node: ts.Node, parents: string[] = []) {
+    let path = parents
+    const members: string[] = []
+    let callee = ts.isCallExpression(node) ? node.expression : undefined
+    while (callee && ts.isPropertyAccessExpression(callee)) {
+      members.unshift(callee.name.text)
+      callee = callee.expression
+    }
+    const declaration = ts.isCallExpression(node) && callee && ts.isIdentifier(callee) && callee.text === 'test'
+    if (declaration && members.includes('describe')) {
+      const title = node.arguments[0]
+      path = [...parents, title && ts.isStringLiteralLike(title) ? title.text : 'Parameterized suite']
+    }
+    if (declaration && !members.includes('describe')) {
+      const title = node.arguments[0]
+      const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1
+      if (members.length === 0) titles.set(line, [...(titles.get(line) ?? []),
+        title && ts.isStringLiteralLike(title) ? title.text : 'Parameterized test'])
+      if (title && ts.isStringLiteralLike(title)) titlePaths.set(line, [...(titlePaths.get(line) ?? []), [...parents, title.text]])
+    }
+    ts.forEachChild(node, child => visit(child, path))
+  }
+  visit(source)
+  return { titles, titlePaths }
+}
 
 function location(value: TestError['location']) {
   if (!value) return undefined
@@ -91,21 +96,24 @@ export default class E2EReporter implements Reporter {
 
   onTestEnd(test: TestCase, result: TestResult) {
     const source = sources.get(resolve(test.location.file))
-    const expected = source?.titlePaths.get(test.location.line)
+    const candidates = source?.titlePaths.get(test.location.line) ?? []
     const path = [test.title]
     for (let suite: Suite | undefined = test.parent; suite?.type === 'describe'; suite = suite.parent) path.unshift(suite.title)
     // Compare runtime identity to public source before publishing any title. Never
     // turn an unknown runtime title into an apparently passing source title.
-    const titlePath = expected && JSON.stringify(expected) === JSON.stringify(path) ? expected : null
+    const matches = candidates.filter(expected => JSON.stringify(expected) === JSON.stringify(path))
+    const titlePath = matches.length === 1 ? matches[0] : null
+    const titles = source?.titles.get(test.location.line) ?? []
     this.finalTests.set(test, {
       file: source ? `web/${source.file}` : null, titlePath,
       status: testStatuses.has(result.status) ? result.status : 'unknown',
+      expectedStatusPassed: test.expectedStatus === 'passed',
       annotations: [...test.annotations, ...result.annotations].map(annotation => ({
         type: ['skip', 'fixme', 'fail', 'slow'].includes(annotation.type) ? annotation.type : 'other',
       })),
     })
     this.tests.push({
-      title: sources.get(resolve(test.location.file))?.titles.get(test.location.line) ?? 'Test',
+      title: titles.length === 1 ? titles[0] : titlePath?.at(-1) ?? 'Test',
       location: location(test.location), status: testStatuses.has(result.status) ? result.status : 'unknown',
       startTime: startTime(result.startTime), duration: duration(result.duration),
       errors: result.errors.map(errorSummary), steps: result.steps.map(stepSummary),

@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { parseInvariants } from './check-invariants.ts'
 
 const statuses = new Set(['passed', 'failed', 'skipped', 'interrupted', 'timedOut'])
-type Entry = { file: string | null; titlePath: string[] | null; status: string; annotations: { type: string }[] }
+type Entry = { file: string | null; titlePath: string[] | null; status: string; expectedStatusPassed: boolean; annotations: { type: string }[] }
 
 function isEntry(value: unknown): value is Entry {
   if (!value || typeof value !== 'object') return false
@@ -12,13 +12,14 @@ function isEntry(value: unknown): value is Entry {
   return (entry.file === null || typeof entry.file === 'string')
     && (entry.titlePath === null || (Array.isArray(entry.titlePath) && entry.titlePath.length > 0
       && entry.titlePath.every(title => typeof title === 'string')))
+    && typeof entry.expectedStatusPassed === 'boolean'
     && statuses.has(entry.status) && Array.isArray(entry.annotations)
     && entry.annotations.every(annotation => annotation && typeof annotation.type === 'string')
 }
 
 /** Uses the static check's row parser and its file::leaf-title identity (suite
  * titles are retained in the report; multiple matches are deliberately refused).
- * A final pass after retry counts, but skip/fixme annotations never do.
+ * A final pass after retry counts, but skip/fixme/fail annotations and expected failures never do.
  */
 export function checkE2EInvariants(root: string, reportPath = join(root, 'web/test-results/ci-diagnostics/invariants.json')): string[] {
   const refs: { at: string; name: string }[] = []
@@ -46,7 +47,8 @@ export function checkE2EInvariants(root: string, reportPath = join(root, 'web/te
     const reason = matches.length === 0 ? 'missing from E2E report'
       : matches.length !== 1 ? `duplicated title (${matches.length} report entries)`
       : matches[0].status !== 'passed' ? `final status ${matches[0].status}`
-      : matches[0].annotations.some(annotation => ['skip', 'fixme'].includes(annotation.type)) ? 'skip/fixme annotation'
+      : !matches[0].expectedStatusPassed ? 'expected status is not passed'
+      : matches[0].annotations.some(annotation => ['skip', 'fixme', 'fail'].includes(annotation.type)) ? 'skip/fixme/fail annotation'
       : undefined
     if (reason) errors.push(`${at}: ${name}: ${reason}`)
   }

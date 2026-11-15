@@ -6,7 +6,7 @@ import { checkE2EInvariants } from './check-e2e-invariants.ts'
 import { collectKnownTests } from './check-invariants.ts'
 
 const name = 'web/e2e/example.spec.ts::named guard'
-const passed = { file: 'web/e2e/example.spec.ts', titlePath: ['suite', 'named guard'], status: 'passed', annotations: [] }
+const passed = { file: 'web/e2e/example.spec.ts', titlePath: ['suite', 'named guard'], status: 'passed', expectedStatusPassed: true, annotations: [] }
 
 function fixture(run: (root: string, report: string) => void) {
   const root = mkdtempSync(join(tmpdir(), 'e2e-invariants-'))
@@ -33,6 +33,8 @@ describe('runtime E2E invariants', () => {
     ['skip annotation', [{ ...passed, annotations: [{ type: 'skip' }] }]],
     ['fixme', [{ ...passed, status: 'skipped', annotations: [{ type: 'fixme' }] }]],
     ['fixme annotation on a pass', [{ ...passed, annotations: [{ type: 'fixme' }] }]],
+    ['fail annotation on a pass', [{ ...passed, annotations: [{ type: 'fail' }] }]],
+    ['expectedStatus failed', [{ ...passed, expectedStatusPassed: false }]],
     ['failed', [{ ...passed, status: 'failed' }]],
     ['interrupted', [{ ...passed, status: 'interrupted' }]],
     ['timedOut', [{ ...passed, status: 'timedOut' }]],
@@ -46,6 +48,7 @@ describe('runtime E2E invariants', () => {
   }))
 
   it.each([undefined, '{', '{}', '{"version":1,"tests":{}}', '{"version":1,"tests":[{}]}',
+    JSON.stringify({ version: 1, tests: [{ ...passed, expectedStatusPassed: undefined }] }),
     JSON.stringify({ version: 1, tests: [{ ...passed, annotations: null }] }),
     JSON.stringify({ version: 1, tests: [{ ...passed, status: 'unknown' }] }),
   ])('fails closed and names the row for missing/malformed report %s', contents => fixture((root, report) => {

@@ -829,7 +829,7 @@ describe('script invariant CI coverage', () => {
 
 describe('Playwright invariant PR CI coverage', () => {
   const workflow = readFileSync(resolve(import.meta.dirname, '../../.github/workflows/e2e.yml'), 'utf8')
-  const config = "import { defineConfig } from '@playwright/test'\nexport default defineConfig({ testDir: './e2e', projects: [{ name: 'chromium' }] })\n"
+  const config = "import { defineConfig } from '@playwright/test'\nexport default defineConfig({ testDir: './e2e', reporter: [['./scripts/e2e-reporter.ts']], projects: [{ name: 'chromium' }] })\n"
   const plain = "import { test } from '@playwright/test'\ntest('runs', async () => {})\n"
   const fixture = (run: (root: string, put: (path: string, text: string) => void) => void) => {
     const root = mkdtempSync(join(tmpdir(), 'inv-playwright-'))
@@ -1128,6 +1128,33 @@ describe('Playwright invariant PR CI coverage', () => {
   it('refuses a changed working directory', () => fixture((root, put) => {
     put('.github/workflows/e2e.yml', workflow.replace('--workdir "$GITHUB_WORKSPACE/web"', '--workdir "$GITHUB_WORKSPACE"'))
     expect(check(root)[0]).toContain('smoke CLI must run unfiltered')
+  }))
+
+  const runtimeStep = '      - name: Verify named E2E invariants passed\n        run: node web/scripts/check-e2e-invariants.ts\n'
+  it.each([
+    ['removed', ''],
+    ['conditional', runtimeStep.replace('        run:', '        if: false\n        run:')],
+    ['continue-on-error', runtimeStep.replace('        run:', '        continue-on-error: true\n        run:')],
+    ['failure swallowed', runtimeStep.replace('.ts\n', '.ts || true\n')],
+  ])('refuses a runtime check that is %s', (_label, replacement) => fixture((root, put) => {
+    expect(workflow).toContain(runtimeStep)
+    put('.github/workflows/e2e.yml', workflow.replace(runtimeStep, replacement))
+    expect(check(root)[0]).toContain('runtime invariants check must run unconditionally after Playwright')
+  }))
+
+  it('refuses a runtime check before Playwright', () => fixture((root, put) => {
+    put('.github/workflows/e2e.yml', workflow.replace(runtimeStep, '')
+      .replace('      - name: Run smoke', runtimeStep + '      - name: Run smoke'))
+    expect(check(root)[0]).toContain('runtime invariants check must run unconditionally after Playwright')
+  }))
+
+  it.each([
+    '',
+    "reporter: 'list',",
+    "reporter: process.env.CI ? 'list' : [['./scripts/e2e-reporter.ts']],",
+  ])('refuses a missing CI reporter: %s', reporter => fixture((root, put) => {
+    put('web/playwright.config.ts', config.replace("reporter: [['./scripts/e2e-reporter.ts']],", reporter))
+    expect(check(root)[0]).toContain('CI reporter must include ./scripts/e2e-reporter.ts')
   }))
 
   it('refuses a conditional smoke job', () => fixture((root, put) => {

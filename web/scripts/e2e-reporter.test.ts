@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { FullResult, TestCase, TestError, TestResult, TestStep } from '@playwright/test/reporter'
 import { describe, expect, it, vi } from 'vitest'
-import E2EReporter from './e2e-reporter.ts'
+import ts from 'typescript'
+import E2EReporter, { sourceTitles } from './e2e-reporter.ts'
 import { secretSafe } from '../e2e/helpers.ts'
 import { checkE2EInvariants } from './check-e2e-invariants.ts'
 
@@ -70,10 +71,28 @@ function result(secret: string): TestResult {
 }
 
 function testCase(secret: string): TestCase {
-  return { title: secret, location, id: secret, tags: [secret], annotations: [{ type: secret, description: secret }] } as TestCase
+  return { title: secret, expectedStatus: 'passed', location, id: secret, tags: [secret], annotations: [{ type: secret, description: secret }] } as TestCase
 }
 
 describe('restricted E2E diagnostics', () => {
+  it('preserves multiple source declarations on one line, including duplicate identities', () => {
+    const source = ts.createSourceFile('fixture.ts', "test('first', () => {}); test('second', () => {}); test('first', () => {})", ts.ScriptTarget.Latest, true)
+    const { titles, titlePaths } = sourceTitles(source)
+    expect(titles.get(1)).toEqual(['first', 'second', 'first'])
+    expect(titlePaths.get(1)).toEqual([['first'], ['second'], ['first']])
+  })
+
+  it.each(['failed', 'passed'])('records only whether expectedStatus is passed: %s', async expectedStatus => {
+    await withReporter(async (reporter, directory) => {
+      const entry = testCase('built app is served by the server')
+      entry.expectedStatus = expectedStatus as TestCase['expectedStatus']
+      reporter.onTestEnd(entry, { ...result(secrets[0]), status: 'passed' })
+      await reporter.onEnd(completed)
+      const report = JSON.parse(await readFile(join(directory, 'invariants.json'), 'utf8'))
+      expect(report.tests[0].expectedStatusPassed).toBe(expectedStatus === 'passed')
+    })
+  })
+
   it('reports one final pass after retry, preserving duplicate TestCases and safe annotations', async () => {
     await withReporter(async (reporter, directory) => {
       const entry = testCase('built app is served by the server')
@@ -88,7 +107,7 @@ describe('restricted E2E diagnostics', () => {
       const report = JSON.parse(await readFile(path, 'utf8'))
       expect(report.tests).toEqual([{
         file: 'web/e2e/smoke.spec.ts', titlePath: ['built app is served by the server'],
-        status: 'passed', annotations: [{ type: 'slow' }],
+        status: 'passed', expectedStatusPassed: true, annotations: [{ type: 'slow' }],
       }])
       const root = resolve(import.meta.dirname, '../..')
       expect(checkE2EInvariants(root, path)).toEqual([])
