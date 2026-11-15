@@ -2,18 +2,24 @@ use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConn
 
 mod context;
 mod pool;
+mod stats;
 pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
 pub use context::{account, account_read_only, organization, organization_read_only};
 pub(crate) use context::{organization_statement, organization_statement_sql};
 pub use pool::PoolConfig;
+pub use stats::report_pool_periodically;
+pub(crate) use stats::{acquire, begin};
+#[cfg(test)]
+pub(crate) use stats::{test_acquisitions, test_inherit_acquisitions};
 
 pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_RETURN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub(crate) async fn ready(pool: &PgPool) -> bool {
-    let Ok(Ok(connection)) = tokio::time::timeout(READY_ACQUIRE_TIMEOUT, pool.acquire()).await
+    let Ok(Ok(connection)) =
+        tokio::time::timeout(READY_ACQUIRE_TIMEOUT, crate::database::acquire(pool)).await
     else {
         return false;
     };
@@ -82,7 +88,9 @@ where
         finished: false,
         discard,
     };
-    let connection = guard.connection.insert(pool.acquire().await?);
+    let connection = guard
+        .connection
+        .insert(crate::database::acquire(pool).await?);
     // SQLx 0.8.6 records transaction depth only after BEGIN's response, so its
     // rollback-on-drop cannot recover a BEGIN cancelled before that response.
     sqlx::Executor::execute(
@@ -226,7 +234,11 @@ pub async fn validate_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error
     let applied: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
         "SELECT version, checksum, success FROM public._sqlx_migrations ORDER BY version",
     )
-    .fetch_all(pool)
+    .fetch_all(
+        &mut *acquire(pool)
+            .await
+            .map_err(|_| "Cannot acquire migration history connection")?,
+    )
     .await
     .map_err(|_| "Cannot read migration history; run the matching migrate command first")?;
     let migrations = sqlx::migrate!();

@@ -1,3 +1,4 @@
+import { setTimeout } from 'node:timers/promises'
 import { expect, type APIRequestContext, type Browser, type BrowserContext, type Page, type WebSocket as ObservedWebSocket } from '@playwright/test'
 import type { components } from '../src/api-schema.d.ts'
 import { secretSafe } from '../e2e/helpers.ts'
@@ -174,6 +175,14 @@ export async function createChannelApi(
   const res = await secretSafe(() => request.post(`/api/v1/orgs/${orgId}/channels`, { data }))
   expect(res.status()).toBe(201)
   return (await secretSafe(() => res.json())) as Channel
+}
+
+export async function sendFixtureMessage(...args: Parameters<typeof sendApiMessage>): Promise<Message> {
+  // S6: burst 10, refill 1/s per Member across Channels and sessions. Earlier UI
+  // sends may have spent the burst, so allow one token to refill before every POST.
+  // Include a small timer margin; sendApiMessage still asserts 201 without retries.
+  await setTimeout(1_010)
+  return sendApiMessage(...args)
 }
 
 export async function sendApiMessage(

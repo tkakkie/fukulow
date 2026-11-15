@@ -132,7 +132,10 @@ it('a superseded list page cannot clear a replacement access-generation page loa
     expect(c.topics.get('A').list).toMatchObject({ loading: false, asOfSeq: 20, hasMore: false })
   } finally { activity.close(); await c.sync.close() }
 })
-it('access-gain reconciliation retries a superseded bootstrap without leaving a history error', async () => {
+it.each([
+  { name: 'bootstrap without an access notice uses one timeline read and subscribes', accessGain: false, reads: 1 },
+  { name: 'access-gain reconciliation retries a superseded bootstrap without leaving a history error', accessGain: true, reads: 2 },
+])('$name', async ({ accessGain, reads }) => {
   const { topicClient, page } = await import('./topic-test-helpers')
   const activity = createActivity({ watched: () => true })
   const c = topicClient(activity)
@@ -141,12 +144,14 @@ it('access-gain reconciliation retries a superseded bootstrap without leaving a 
     c.topicsApi.listTimeline.mockReturnValueOnce(old.promise)
     const boot = c.boot()
     await flush()
-    c.topics.activityAccess('A')
-    old.resolve(ok(page()))
+    expect(c.topicsApi.listTimeline).toHaveBeenCalledOnce()
+    expect(c.controls).not.toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
+    if (accessGain) c.topics.activityAccess('A')
+    old.resolve(ok(page(accessGain ? 9 : 10)))
     await boot
-    expect(c.topicsApi.listTimeline).toHaveBeenCalledTimes(2)
+    expect(c.topicsApi.listTimeline.mock.calls).toEqual(Array.from({ length: reads }, () => ['A', {}]))
     expect(c.sync.get().channels.A.state).toBe('ready')
-    expect(c.topics.get('A').main).toMatchObject({ loading: false, error: false })
+    expect(c.topics.get('A').main).toMatchObject({ asOfSeq: 10, loading: false, error: false })
     expect(c.controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
   } finally { activity.close(); await c.sync.close() }
 })

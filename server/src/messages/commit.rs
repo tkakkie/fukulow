@@ -24,7 +24,7 @@ impl Transaction {
         organization: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
         let mut tx = Self {
-            connection: Some(pool.acquire().await?),
+            connection: Some(crate::database::acquire(pool).await?),
             _permit: permit,
         };
         tx.connection()?.execute(sql).await?;

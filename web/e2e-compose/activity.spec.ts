@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { ServerEvent } from '../src/api-schema.d.ts'
-import { createChannelApi, ensureOwnerAndSignIn, inviteAndSignInPeerViaUi, sendApiMessage } from './helpers.ts'
+import { createChannelApi, ensureOwnerAndSignIn, inviteAndSignInPeerViaUi, sendFixtureMessage } from './helpers.ts'
 
 for (const visible of [2, 258]) test(`two Members update unwatched badges live with ${visible} visible Channels and one watch`, async ({ browser, baseURL }) => {
   test.setTimeout(180_000)
@@ -31,7 +31,7 @@ for (const visible of [2, 258]) test(`two Members update unwatched badges live w
   await expect(row).toHaveCount(1)
   await expect(row.locator('.ui-badge--unread')).toHaveCount(0)
   received.length = 0
-  const message = await sendApiMessage(owner.request, org, unwatched.id, { body: `Body stays off the unwatched socket ${suffix}` })
+  const message = await sendFixtureMessage(owner.request, org, unwatched.id, { body: `Body stays off the unwatched socket ${suffix}` })
   await expect.poll(() => received.some(e => e.type === 'channel_activity' && e.channel_id === unwatched.id && e.seq >= message.seq)).toBe(true)
   await expect(row.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
   expect(received.some(e => e.type === 'message' && e.message.channel_id === unwatched.id)).toBe(false)

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { createChannelApi, ensureOwnerAndSignIn, inviteAndSignInPeerViaUi, sendApiMessage } from './helpers.ts'
+import { createChannelApi, ensureOwnerAndSignIn, inviteAndSignInPeerViaUi, sendFixtureMessage } from './helpers.ts'
 
 test('two Members autocomplete accepted Mentions and converge Channel Topic and Reply badges', async ({ browser, baseURL }) => {
   test.setTimeout(180_000)
@@ -28,8 +28,8 @@ test('two Members autocomplete accepted Mentions and converge Channel Topic and 
     const row = peer.page.locator('#channel-content button.ui-list-row').filter({ hasText: channel.name })
     await expect(row.locator('.ui-badge--mention')).toHaveAttribute('aria-label', 'メンションあり')
     await expect(row.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
-    const topic = await sendApiMessage(owner.request, org, channel.id, { body: `${token} Topic ${suffix}`, topic_name: `議題-${suffix}` })
-    await sendApiMessage(owner.request, org, channel.id, { body: `${token} Reply ${suffix}`, reply_to: topic.id })
+    const topic = await sendFixtureMessage(owner.request, org, channel.id, { body: `${token} Topic ${suffix}`, topic_name: `議題-${suffix}` })
+    await sendFixtureMessage(owner.request, org, channel.id, { body: `${token} Reply ${suffix}`, reply_to: topic.id })
     await expect(row.locator('.ui-badge--mention')).toHaveAttribute('aria-label', 'メンション 3件')
     await peer.page.goto(`/o/${org}/c/${channel.id}`)
     const highlighted = peer.page.locator('#main-content .ui-message-row--mentioned')

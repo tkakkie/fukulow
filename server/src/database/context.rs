@@ -16,7 +16,7 @@ pub(crate) async fn organization_statement<T>(
 ) -> Result<T, sqlx::Error> {
     let sql = organization_statement_sql(sql);
     let mut guard = super::TransactionConnection {
-        connection: Some(pool.acquire().await?),
+        connection: Some(crate::database::acquire(pool).await?),
         finished: false,
         discard: super::Discard::Detach,
     };
