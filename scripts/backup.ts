@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { closeSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { closeSync, fsyncSync, mkdtempSync, openSync, renameSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { acquireLocalLock, assertLocalLock, diagnostic, privateDirectory, safeFailure, sweepPartials, syncDirectory, type Stage } from './backup-safety.ts'
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url))
 const composeFile = join(repositoryRoot, 'compose.yml')
@@ -16,49 +17,67 @@ export function docker(args: string[], input: number | 'ignore' = 'ignore', outp
   return typeof result.stdout === 'string' ? result.stdout.trim() : ''
 }
 
-export function backup(directory: string, capture?: () => void): string {
-  const destination = resolve(directory)
-  mkdirSync(destination, { mode: 0o700, recursive: true })
-  const info = lstatSync(destination)
-  if (!info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o700) {
-    throw new Error('Backup directory must be owned by this user, mode 0700, and not a symlink')
-  }
-  const compose = ['compose', '-f', composeFile, 'exec', '-T', 'db']
-  if (!/^pg_dump \(PostgreSQL\) 18\./.test(docker([...compose, 'pg_dump', '--version'], 'ignore', 'pipe'))) {
-    throw new Error('PostgreSQL 18 pg_dump is required')
-  }
-  const temporary = mkdtempSync(join(destination, '.partial-'))
+export function backup(directory: string, capture?: () => void, options: {
+  localLock?: () => void; syncDirectory?: typeof syncDirectory
+} = {}): string {
+  let stage: Stage = 'directory', temporary: string | undefined, release: (() => void) | undefined
   try {
+    const destination = privateDirectory(directory)
+    stage = 'lock'
+    if (options.localLock) assertLocalLock(destination, options.localLock)
+    else release = acquireLocalLock(destination)
+    stage = 'sweep'
+    sweepPartials(destination)
+    const compose = ['compose', '-f', composeFile, 'exec', '-T', 'db']
+    stage = 'version'
+    if (!/^pg_dump \(PostgreSQL\) 18\./.test(docker([...compose, 'pg_dump', '--version'], 'ignore', 'pipe'))) {
+      throw new Error('PostgreSQL 18 pg_dump is required')
+    }
+    temporary = mkdtempSync(join(destination, '.partial-'))
     const archive = join(temporary, 'archive')
     const output = openSync(archive, 'wx', 0o600)
     try {
       capture?.()
+      stage = 'dump'
       docker([...compose, 'pg_dump', '-U', 'fukulow', '-d', 'fukulow', '--format=custom'], 'ignore', output)
+      stage = 'archive-sync'
       fsyncSync(output)
     } finally {
       closeSync(output)
     }
     const input = openSync(archive, 'r')
     try {
+      stage = 'list'
       docker([...compose, 'pg_restore', '--list'], input)
     } finally {
       closeSync(input)
     }
     const name = `fukulow-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}.dump`
     const artifact = join(destination, name)
+    stage = 'publish'
     renameSync(archive, artifact)
+    stage = 'directory-sync'
+    ;(options.syncDirectory ?? syncDirectory)(destination)
     return artifact
+  } catch (error) {
+    throw safeFailure(stage, error)
   } finally {
-    rmSync(temporary, { recursive: true, force: true })
+    try {
+      if (temporary) rmSync(temporary, { recursive: true, force: true })
+    } catch (error) { throw safeFailure('cleanup', error) }
+    finally {
+      try { release?.() } catch (error) { throw safeFailure('lock', error) }
+    }
   }
 }
 
 if (import.meta.main) {
   try {
     if (process.argv.length !== 3) throw new Error('Usage: node scripts/backup.ts /absolute/private/backup-directory')
-    console.log(backup(process.argv[2]))
-  } catch {
-    console.error('Backup failed; no new verified artifact published. Check directory permissions, Compose project and PostgreSQL 18 availability. Diagnostics suppressed to protect secrets.')
+    backup(process.argv[2])
+    console.log('Backup passed.')
+  } catch (error) {
+    console.error(`Backup failed ${diagnostic(error)}; publication durability is unconfirmed. Diagnostics suppressed.`)
     process.exitCode = 1
   }
 }

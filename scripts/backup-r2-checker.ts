@@ -1,13 +1,49 @@
 import { day, inventory, type BackupBucket, type Generation, type ObjectInfo } from './backup-r2-model.ts'
+import { type RunLock } from './backup-safety.ts'
+import { type CheckerState, type StateStore } from './backup-r2-state.ts'
+import { validUsage, type UsageClient, type OperationUsage } from './backup-r2-usage.ts'
 
-export interface CheckerState { aliveDate?: string }
-export async function checkBackups(options: {
+export type { CheckerState } from './backup-r2-state.ts'
+interface CheckOptions {
   backups: BackupBucket; images: { list(): Promise<ObjectInfo[]> }; now: () => number
-  notify: (event: string) => Promise<void>; state: CheckerState
-  operations: { classA: number; classB: number }
-}) {
-  const now = options.now(), alerts: string[] = [], deleted: string[] = []
+  notify: (event: string) => Promise<void>; state: CheckerState; usage: UsageClient
+  persist?: (state: CheckerState) => Promise<void>
+  initialAlerts?: string[]; freeze?: boolean
+}
+export async function checkBackups(options: {
+  lock: RunLock
+} & CheckOptions) {
+  return options.lock(() => checkLocked(options))
+}
+export async function runChecker(options: Omit<CheckOptions, 'state' | 'persist' | 'initialAlerts' | 'freeze'> & { lock: RunLock; store: StateStore }) {
+  return options.lock(async () => {
+    let loaded: Awaited<ReturnType<StateStore['load']>>
+    try {
+      loaded = await options.store.load()
+    } catch {
+      try { await options.notify('checker-failed') } catch { /* Never expose storage/notification errors. */ }
+      throw new Error('Checker failed (diagnostics suppressed)')
+    }
+    return checkLocked({ ...options, state: loaded.state, persist: state => options.store.save(state),
+      initialAlerts: loaded.warning ? [loaded.warning] : [], freeze: !!loaded.warning })
+  })
+}
+async function checkLocked(options: CheckOptions) {
+  const now = options.now(), alerts: string[] = [...options.initialAlerts ?? []], deleted: string[] = []
+  const persist = () => options.persist?.(options.state)
+  const alert = async (event: string) => {
+    if (options.state.sentAlerts?.includes(event)) return
+    await options.notify(event)
+    options.state.sentAlerts = [...options.state.sentAlerts ?? [], event]
+    await persist()
+  }
   try {
+    let operations: OperationUsage | null = null
+    try {
+      const value = await options.usage.read(now)
+      if (validUsage(value)) operations = { classA: value.classA, classB: value.classB }
+    } catch { /* Unknown usage must alert, never become zero. */ }
+    if (!operations) alerts.push('operations-unknown')
     const data = await inventory(options.backups, now)
     const backups = data.verified.filter(g => g.prefix.startsWith('backups/'))
     const completionTime = (g: Generation) => Math.max(...g.objects.map(o => o.uploaded))
@@ -29,10 +65,10 @@ export async function checkBackups(options: {
     const total = backupBytes + imageBytes, percentage = total / 10_000_000_000 * 100
     if (percentage >= 70) alerts.push('capacity-70')
     if (percentage >= 90) alerts.push('capacity-90')
-    if (options.operations.classA >= 700_000) alerts.push('class-a-70')
-    if (options.operations.classB >= 7_000_000) alerts.push('class-b-70')
+    if (operations && operations.classA >= 700_000) alerts.push('class-a-70')
+    if (operations && operations.classB >= 7_000_000) alerts.push('class-b-70')
     // All deletion is frozen on unsafe inventory, not just the backup prefix.
-    if (stale || backups.length < 30 || data.malformed.length) alerts.push('pruning-refused')
+    if (options.freeze || !operations || stale || backups.length < 30 || data.malformed.length) alerts.push('pruning-refused')
     else {
       const candidates: Generation[] = []
       for (const generation of backups.slice(30)) {
@@ -49,16 +85,19 @@ export async function checkBackups(options: {
       }
       if (!candidates.length && backups.length > 30) alerts.push('pruning-guarded')
     }
-    for (const alert of alerts) await options.notify(alert)
+    for (const event of alerts) await alert(event)
     const date = new Date(now).toISOString().slice(0, 10)
     if (options.state.aliveDate !== date) {
       await options.notify(JSON.stringify({ event: 'checker-alive', newestCapture: latest?.manifest.captureTime ?? null,
-        backupBytes, imageBytes, total, percentage, operations: options.operations }))
+        backupBytes, imageBytes, total, percentage, operations }))
       options.state.aliveDate = date
+      await persist()
     }
+    options.state.sentAlerts = alerts
+    await persist()
     return { alerts, deleted, backupBytes, imageBytes, total }
   } catch {
-    try { await options.notify('checker-failed') } catch { /* Keep notification diagnostics private. */ }
+    try { await alert('checker-failed') } catch { /* Keep notification diagnostics private. */ }
     throw new Error('Checker failed (diagnostics suppressed)')
   }
 }

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomInt, randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -189,7 +189,10 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     // Exercise the actual #198 backup entry point with this isolated Compose project.
     const backups = join(directory, 'backups')
     mkdirSync(backups, { mode: 0o700 }); chmodSync(backups, 0o700)
-    const backup = execFileSync(process.execPath, ['scripts/backup.ts', backups], { cwd, env, encoding: 'utf8' }).trim()
+    assert.equal(execFileSync(process.execPath, ['scripts/backup.ts', backups], { cwd, env, encoding: 'utf8' }).trim(), 'Backup passed.')
+    const artifacts = readdirSync(backups).filter(name => /^fukulow-.*\.dump$/.test(name))
+    assert.equal(artifacts.length, 1)
+    const backup = join(backups, artifacts[0])
     restoreDrill(backup)
     // Production restore uses --no-acl, so explicitly reapply role grants after restore.
     sql('CREATE DATABASE fukulow_restore OWNER fukulow')

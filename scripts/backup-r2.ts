@@ -7,15 +7,22 @@ import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { backup } from './backup.ts'
 import { checksum, sha256, verifiedGeneration, type BackupBucket, type Manifest, parseManifest } from './backup-r2-model.ts'
+import { listObjects, runLockKey } from './backup-r2-list.ts'
+import { acquireLocalLock, privateDirectory, SafeFailure, sweepPartials, type RunLock } from './backup-safety.ts'
 
-export interface Request { method: 'PUT' | 'HEAD' | 'GET'; key: string; headers: Record<string, string>; body?: Buffer; digestOnly?: boolean }
+export interface Request { method: 'PUT' | 'HEAD' | 'GET' | 'DELETE'; key: string; headers: Record<string, string>; query?: Record<string, string>; body?: Buffer; digestOnly?: boolean }
 export interface Response { status: number; headers: Record<string, string>; body: Buffer; digest?: { sha256: string; size: number } }
 export type Runner = (request: Request) => Promise<Response>
 export type UploadBucket = Pick<BackupBucket, 'put' | 'head' | 'get'> & {
   readback?: (key: string) => Promise<{ sha256: string; size: number }>
 }
-export function objectTransport(run: Runner): UploadBucket {
+export function objectTransport(run: Runner): BackupBucket & UploadBucket {
   return {
+    list: () => listObjects(run),
+    async delete(key) {
+      const r = await run({ method: 'DELETE', key, headers: {} })
+      if (r.status !== 204 && r.status !== 200) throw new Error('Deletion failed')
+    },
     async put(key, body) {
       const hex = sha256(body)
       const response = await run({ method: 'PUT', key, body, headers: { 'x-amz-content-sha256': hex, 'x-amz-checksum-sha256': checksum(hex) } })
@@ -41,11 +48,17 @@ export function objectTransport(run: Runner): UploadBucket {
 }
 
 // Config contains credentials only outside the checkout; curl diagnostics never escape.
+export async function privateCurlConfig(configFile: string): Promise<string> {
+  try {
+    const root = resolve(fileURLToPath(new URL('../', import.meta.url)))
+    const path = resolve(configFile), info = await lstat(path)
+    const canonical = await realpath(path)
+    if (canonical.startsWith(await realpath(root) + sep) || !info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) throw new Error('Private external curl config required')
+    return path
+  } catch { throw new Error('Private external curl config required') }
+}
 export async function curlRunner(configFile: string, baseUrl: string, execute = executeCurl): Promise<Runner> {
-  const root = resolve(fileURLToPath(new URL('../', import.meta.url)))
-  const path = resolve(configFile), info = await lstat(path)
-  const canonical = await realpath(path)
-  if (canonical.startsWith(await realpath(root) + sep) || !info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) throw new Error('Private external curl config required')
+  const path = await privateCurlConfig(configFile)
   if (!/^https:\/\//.test(baseUrl) || /[\r\n"]/.test(baseUrl)) throw new Error('Invalid transport configuration')
   return async request => {
     const directory = await mkdtemp(join(tmpdir(), 'backup-curl-'))
@@ -53,11 +66,14 @@ export async function curlRunner(configFile: string, baseUrl: string, execute = 
       const headersFile = join(directory, 'headers'), bodyFile = join(directory, 'body')
       // --retry handles transient HTTP statuses without --fail; other HTTP responses
       // must reach objectTransport (notably missing objects and locked PUT retries).
-      const args = ['--disable', '--config', path, '--aws-sigv4', 'aws:amz:auto:s3', '--silent', '--retry', '3', '--retry-all-errors', '--max-time', '120', '--retry-max-time', '480', '--dump-header', headersFile, '--output', bodyFile, '--request', request.method]
+      // Retrying lock deletion could delete a successor's lock after a lost response.
+      const retries = request.key === runLockKey ? ['--retry', '0'] : ['--retry', '3', '--retry-all-errors']
+      const args = ['--disable', '--config', path, '--aws-sigv4', 'aws:amz:auto:s3', '--silent', ...retries, '--max-time', '120', '--retry-max-time', '480', '--dump-header', headersFile, '--output', bodyFile, '--request', request.method]
       if (request.method === 'HEAD') args.push('--head')
       for (const [key, value] of Object.entries(request.headers)) args.push('--header', `${key}: ${value}`)
       // URL is supplied via stdin config, so private endpoints never enter argv.
-      const input = `url = "${baseUrl.replace(/\/$/, '')}/${request.key.split('/').map(encodeURIComponent).join('/')}"\n`
+      const query = request.query ? '?' + new URLSearchParams(request.query).toString() : ''
+      const input = `url = "${baseUrl.replace(/\/$/, '')}/${request.key.split('/').map(encodeURIComponent).join('/')}${query}"\n`
       if (request.body) {
         const { writeFile } = await import('node:fs/promises')
         const upload = join(directory, 'upload')
@@ -112,15 +128,24 @@ export async function fileDigest(path: string) {
 }
 export async function runBackup(options: {
   directory: string; recipient: string; bucket: UploadBucket
+  lock: RunLock
   now: () => number; notify: (event: string) => Promise<void>
   dump?: (directory: string, capture: () => void) => string; encrypt?: (source: string, target: string, recipient: string) => void
 }) {
+  return options.lock(() => runBackupLocked(options))
+}
+async function runBackupLocked(options: Parameters<typeof runBackup>[0]) {
   let temporary: string | undefined
+  let release: (() => void) | undefined
   try {
     if (!options.recipient.trim()) throw new Error('Missing recipient')
+    const directory = privateDirectory(options.directory)
+    release = acquireLocalLock(directory)
+    sweepPartials(directory)
     // Conservative snapshot bound after preflight, immediately before pg_dump starts.
     let captureTime: string | undefined
-    const source = (options.dump ?? backup)(options.directory, () => { captureTime = new Date(options.now()).toISOString() })
+    const capture = () => { captureTime = new Date(options.now()).toISOString() }
+    const source = options.dump ? options.dump(directory, capture) : backup(directory, capture, { localLock: release })
     if (!captureTime) throw new Error('Missing capture timestamp')
     temporary = await mkdtemp(join(options.directory, '.partial-age-'))
     const target = join(temporary, 'archive.dump.age')
@@ -135,7 +160,14 @@ export async function runBackup(options: {
   } catch {
     try { await options.notify('backup-failed') } catch { /* Notification failure must not expose transport diagnostics. */ }
     throw new Error('Backup failed (diagnostics suppressed)')
-  } finally { if (temporary) await rm(temporary, { recursive: true, force: true }) }
+  } finally {
+    try {
+      if (temporary) await rm(temporary, { recursive: true, force: true })
+    } catch { throw new Error('Backup cleanup failed (diagnostics suppressed)') }
+    finally {
+      try { release?.() } catch { throw new Error('Backup lock release failed (diagnostics suppressed)') }
+    }
+  }
 }
 
 export async function recheckNewest(bucket: BackupBucket & UploadBucket, now: number) {
@@ -150,13 +182,37 @@ export async function recheckNewest(bucket: BackupBucket & UploadBucket, now: nu
 // Schedule contract only: activation and host/Worker wiring remain a maintainer gate.
 export const backupSchedule = { dailyUTC: '*-*-* 02:15:00 UTC', checkerCron: '0 * * * *', persistent: true } as const
 export async function dailyBackup(options: Parameters<typeof runBackup>[0] & { bucket: BackupBucket }) {
-  try { await recheckNewest(options.bucket, options.now()) } catch {
-    try { await options.notify('daily-readback-failed') } catch { /* Still take the next backup if notification is unavailable. */ }
-  }
-  return runBackup(options)
+  return options.lock(async () => {
+    try { await recheckNewest(options.bucket, options.now()) } catch {
+      try { await options.notify('daily-readback-failed') } catch { /* Still take the next backup if notification is unavailable. */ }
+    }
+    return runBackupLocked(options)
+  })
 }
 
-async function executeCurl(args: string[], input: string): Promise<void> {
+// Every host uses this same key, outside the retention-locked prefixes. An
+// ambiguous PUT/DELETE or crash leaves a lock: no timeout can safely fence a
+// suspended pruner. Manual recovery first stops all writers and checks ownership.
+export function bucketRunLock(run: Runner): RunLock {
+  return async work => {
+    const body = Buffer.from(randomUUID()), hex = sha256(body)
+    let response: Response
+    try {
+      response = await run({ method: 'PUT', key: runLockKey, body, headers: {
+        'if-none-match': '*', 'x-amz-content-sha256': hex, 'x-amz-checksum-sha256': checksum(hex),
+      } })
+    } catch { throw new SafeFailure('lock', 'operation') }
+    if (response.status < 200 || response.status >= 300) throw new SafeFailure('lock', response.status === 412 || response.status === 409 ? 'busy' : 'operation')
+    try { return await work() } finally {
+      try {
+        const release = await run({ method: 'DELETE', key: runLockKey, headers: {} })
+        if (release.status !== 204 && release.status !== 200) throw new Error('Release failed')
+      } catch { throw new SafeFailure('lock', 'operation') }
+    }
+  }
+}
+
+export async function executeCurl(args: string[], input: string): Promise<void> {
   await new Promise<void>((accept, reject) => {
     const child = spawn('curl', args, { stdio: ['pipe', 'ignore', 'ignore'] })
     child.on('error', () => reject(new Error('Transport failed')))
