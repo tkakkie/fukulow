@@ -421,10 +421,14 @@ function playwrightCI(root: string): string | null {
   const workflow = join(root, '.github/workflows/e2e.yml')
   if (!existsSync(workflow)) return 'Playwright PR CI workflow e2e.yml is missing (not run in CI)'
   const src = readFileSync(workflow, 'utf8').replace(/^\s*#.*$/gm, '')
-  if ([...src.matchAll(/^on:/gm)].length !== 1 || !/^on:\n  pull_request:\s*\n(?=\S)/m.test(src))
+  const triggers = /^on:\n([\s\S]*?)(?=^\S|$(?![\s\S]))/m.exec(src)?.[1]
+  if ([...src.matchAll(/^on:/gm)].length !== 1 || !triggers || !/^  pull_request:[ \t]*(?:\n[ \t]*)*$/.test(triggers))
     return 'Playwright workflow pull_request trigger is absent or filtered'
-  const smoke = /^  smoke:\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/m.exec(src)?.[1]
-  if (!smoke || [...src.matchAll(/^jobs:/gm)].length !== 1 || [...src.matchAll(/^  smoke:/gm)].length !== 1
+  const jobs = /^jobs:\n([\s\S]*?)(?=^\S|$(?![\s\S]))/m.exec(src)?.[1]
+  const smoke = jobs && /^  smoke:\n([\s\S]*)$/.exec(jobs)?.[1]
+  // Every nonblank line after the sole job key must belong to its indented body.
+  if (!smoke || smoke.split('\n').some(line => line.trim() !== '' && !/^ {4}/.test(line))
+    || [...src.matchAll(/^jobs:/gm)].length !== 1
     || /^(?:defaults|env):|^    (?:if|needs|strategy|defaults|continue-on-error):|[&*][\w-]+/m.test(src))
     return 'Playwright smoke job execution cannot be verified statically'
   const steps = smoke.split(/^      - /m).slice(1)
@@ -450,9 +454,9 @@ fi`
   if (cliSteps.length !== 1 || !/^name: [^\n]+\n        shell: bash\n        run: \|\n/.test(step) || body !== `${prefix}\n${command}`)
     return 'Playwright smoke CLI must run unfiltered test from web (filters/overrides or command unverifiable)'
   const checks = steps.filter(step => step.includes('check-e2e-invariants.ts'))
-  if (checks.length !== 1 || steps.indexOf(checks[0]) <= steps.indexOf(step)
+  if (checks.length !== 1 || steps.indexOf(checks[0]) !== steps.indexOf(step) + 1
     || !/^name: [^\n]+\n        run: node web\/scripts\/check-e2e-invariants\.ts\s*$/.test(checks[0]))
-    return 'Playwright runtime invariants check must run unconditionally after Playwright and fail the job'
+    return 'Playwright runtime invariants check must run unconditionally after Playwright as the immediately next step and fail the job'
   return null
 }
 

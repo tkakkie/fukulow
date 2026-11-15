@@ -1120,6 +1120,21 @@ describe('Playwright invariant PR CI coverage', () => {
     expect(check(root)[0]).toContain('pull_request trigger is absent or filtered')
   }))
 
+  it.each(['push', 'workflow_dispatch'])('refuses an extra %s trigger before or after pull_request', trigger => fixture((root, put) => {
+    for (const triggers of [`  ${trigger}:\n  pull_request:`, `  pull_request:\n  ${trigger}:`]) {
+      put('.github/workflows/e2e.yml', workflow.replace('  pull_request:', triggers))
+      expect(check(root)[0]).toContain('pull_request trigger is absent or filtered')
+    }
+  }))
+
+  it.each(['extra', '"extra"'])('refuses an extra job %s before or after smoke', name => fixture((root, put) => {
+    const job = `  ${name}:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo extra\n`
+    for (const changed of [workflow.replace('  smoke:', job + '  smoke:'), workflow + job]) {
+      put('.github/workflows/e2e.yml', changed)
+      expect(check(root)[0]).toContain('smoke job execution cannot be verified')
+    }
+  }))
+
   it.each([' x.spec.ts', ' --grep smoke', ' --project chromium', ' --config other.ts', ' --shard 1/2'])('refuses a CLI filter/override: %s', flag => fixture((root, put) => {
     put('.github/workflows/e2e.yml', workflow.replace('cli.js test', `cli.js test${flag}`))
     expect(check(root)[0]).toContain('smoke CLI must run unfiltered')
@@ -1131,6 +1146,14 @@ describe('Playwright invariant PR CI coverage', () => {
   }))
 
   const runtimeStep = '      - name: Verify named E2E invariants passed\n        run: node web/scripts/check-e2e-invariants.ts\n'
+  it.each([
+    '      - run: echo intervening\n',
+    '      - name: Overwrite invariant results\n        run: echo \'{}\' > web/test-results/ci-diagnostics/invariants.json\n',
+  ])('refuses an intervening step before the runtime check: %s', intervening => fixture((root, put) => {
+    put('.github/workflows/e2e.yml', workflow.replace(runtimeStep, intervening + runtimeStep))
+    expect(check(root)[0]).toContain('runtime invariants check must run unconditionally')
+  }))
+
   it.each([
     ['removed', ''],
     ['conditional', runtimeStep.replace('        run:', '        if: false\n        run:')],
