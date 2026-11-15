@@ -1,0 +1,131 @@
+import { uuid } from '../seed.ts';
+
+// Original authored fixtures. Keys are stable review handles, not extracted keywords.
+const examples = {
+  deploy: '再配備の手順書は青い台帳に挟みました。',
+  deploy2: '夜間の配備確認を担当交代前に済ませます。',
+  kyoto: '京都支店の棚卸しは水曜の午後です。',
+  tokyo: '東京都の配送窓口を別紙にまとめました。',
+  meeting: '打ち合わせの議題に倉庫移転を加えます。',
+  meeting2: '打合せの議題は倉庫移転だけです。',
+  meeting3: 'うちあわせの議題を音声でも残します。',
+  meeting4: 'ウチアワセの議題を仮の見出しにしました。',
+  server: 'サーバー移設の担当は森さんです。',
+  server2: 'サーバ移設の日程を二階の掲示板に出します。',
+  server3: 'さーばー移設の相談は夕方に受けます。',
+  server4: 'ｻｰﾊﾞｰ移設用の箱を搬入口に置きます。',
+  small: 'キャッシュ削除の前に利用者へ声をかけます。',
+  small2: 'キヤッシュ削除の説明図を描き直しました。',
+  smallNegative: 'キヤノン製の複合機を受付へ移動します。',
+  abc: 'ABC案件の検品票を封筒に入れました。',
+  abc2: 'ＡＢＣ案件の検品票は総務預かりです。',
+  abc3: 'abc案件の検品票に押印をお願いします。',
+  kana: 'カタカナ表記の名札を十枚作成します。',
+  kana2: 'ｶﾀｶﾅ表記の名札を追加発注しました。',
+  kana3: 'かたかな表記の名札は新人用です。',
+  march: '3月末に保管箱を回収します。',
+  march2: '３月末に保管箱の回収を予約しました。',
+  marchNegative: '13月末という誤記を赤字で訂正します。',
+  version: 'v2.3の配布先を営業所に限定します。',
+  version2: 'V2.3の配布資料を受付に置きます。',
+  versionNegative: 'v2.30の試作品は社内限りで配布します。',
+  api: 'API連携の見積書を経理へ渡します。',
+  api2: 'api連携の見積書は承認待ちです。',
+  api3: 'ＡＰＩ連携の見積書を再送してください。',
+  apiNegative: 'API連結という誤記を見積書から消しました。',
+  cafe: 'café研修の会場鍵を借りました。',
+  cafe2: 'cafe\u0301研修の会場鍵は返却済みです。',
+  strasse: 'Straße便の伝票を照合します。',
+  strasse2: 'STRASSE便の伝票に配送印がありません。',
+  ga: 'がく費の精算欄を新設しました。',
+  ga2: 'か\u3099く費の精算欄を会計へ確認します。',
+  estimate: '見積書を作る前に数量を確定します。',
+  estimate2: 'みつもり書の数量を担当者へ照会します。',
+  estimate3: 'ミツモリ書の数量欄は空欄でした。',
+  ai: 'AI勉強会の部屋を予約しました。',
+  aiNegative: 'MAIL配送の当番表を交換しました。',
+  stock: '在庫の棚番号を新しい札に写します。',
+  stockNegative: '存在確認のチェック欄を増やしました。',
+  backup: '復元 手順を紙の台帳にも残しました。',
+  backup2: '復元  手順の空白二つは原稿通りです。',
+  backup3: '手順の改訂は復元の演習後に行います。',
+  percent: '値札x%yを試験用に印刷しました。',
+  percentNegative: '値札xayは旧様式なので廃棄します。',
+  underscore: '識別札a_bを回収してください。',
+  slash: '識別札c\\dを回収してください。',
+  typo: 'バックアップ当番の連絡先を変更しました。',
+  typo2: 'バックアプ当番の引継ぎメモを訂正します。',
+  syntax1: '請求 承認の依頼は午前に集めます。',
+  syntax2: '請求の承認は保留になりました。',
+  syntax3: '請求の控えを紙で送ります。',
+  syntax4: '承認の印鑑を金庫に戻します。',
+} as const;
+export const messageId = (key: string) => {
+  const i = Object.keys(examples).indexOf(key);
+  if (i < 0) throw new Error(`Unknown gold key: ${key}`);
+  return uuid(2000000+i);
+};
+export const classes = {
+  partial: 'Relevant: intended compound contains the query internally; irrelevant: unrelated subjects.',
+  place: 'Relevant: Kyoto branch; irrelevant: Tokyo address despite the literal 京都 substring.',
+  notation: 'Relevant: the same meeting, estimate or server task across scripts/okurigana/long vowels; unrelated tasks are irrelevant.',
+  smallKana: 'Relevant: cache deletion including large-kana spelling; unrelated proper names are irrelevant.',
+  width: 'Relevant: identical business entity across width and script variants; unrelated entities are irrelevant.',
+  mixed: 'Relevant: exact version, integration task or month-end intent across case/width; longer version numbers, invalid months and different tasks are irrelevant.',
+  case: 'Relevant: identical named delivery across Unicode casefold forms; unrelated deliveries are irrelevant.',
+  unicode: 'Relevant: canonically equivalent accented/kana text; unrelated subjects are irrelevant.',
+  short: 'Relevant: AI workshop or inventory intent; internal substrings in MAIL or 存在 are irrelevant.',
+  whitespace: 'Relevant: the exact internal spacing in the requested wording; reordered words and other spacing are irrelevant.',
+  literal: 'Relevant: the exact label including punctuation; wildcard lookalikes are irrelevant.',
+  typo: 'Relevant: backup-duty task including a missing character; unrelated duties are irrelevant.',
+  syntax: 'Relevant: stated conjunction/disjunction/exclusion/phrase intent; other combinations are irrelevant.',
+  empty: 'Relevant: none; the requested entity does not exist in the corpus.',
+};
+export type Query = { id: string; class: keyof typeof classes; text: string; intent: string; gold: string[] };
+const q = (id: string, cls: keyof typeof classes, text: string, intent: string, keys: string[]): Query =>
+  ({id,class:cls,text,intent,gold:keys.map(messageId)});
+export const queries: Query[] = [
+  q('internal-ja','partial','配備','Find deployment work, including compounds',['deploy','deploy2']),
+  q('internal-ascii','partial','BC','Find ABC account by its trailing identifier',['abc','abc2','abc3']),
+  q('kyoto','place','京都','Find Kyoto branch work, exclude Tokyo',['kyoto']),
+  q('meeting','notation','打ち合わせ','Find meeting agenda in any spelling',['meeting','meeting2','meeting3','meeting4']),
+  q('meeting-kana','notation','うちあわせ','Find meeting agenda in any spelling',['meeting','meeting2','meeting3','meeting4']),
+  q('estimate','notation','見積','Find estimate quantity task in any script',['estimate','estimate2','estimate3']),
+  q('server-long','notation','サーバー','Find server relocation, with/without long vowel',['server','server2','server3','server4']),
+  q('server-short','notation','サーバ','Find server relocation, with/without long vowel',['server','server2','server3','server4']),
+  q('small','smallKana','キャッシュ','Find cache deletion despite large-kana spelling',['small','small2']),
+  q('width-latin','width','ＡＢＣ','Find ABC account regardless of width/case',['abc','abc2','abc3']),
+  q('width-kana','width','ｶﾀｶﾅ','Find katakana name tags regardless of script/width',['kana','kana2','kana3']),
+  q('width-kana-full','width','カタカナ','Find katakana name tags regardless of script/width',['kana','kana2','kana3']),
+  q('month','mixed','3月末','Find March-end collection, not invalid month 13',['march','march2']),
+  q('month-full','mixed','３月末','Find March-end collection regardless of width',['march','march2']),
+  q('version','mixed','v2.3','Find version 2.3 distribution, exclude 2.30',['version','version2']),
+  q('integration','mixed','API連携','Find API integration quotes',['api','api2','api3']),
+  q('fold','case','STRASSE','Find named Straße delivery',['strasse','strasse2']),
+  q('nfc','unicode','CAFÉ','Find café training keys',['cafe','cafe2']),
+  q('nfd','unicode','CAFE\u0301','Find café training keys',['cafe','cafe2']),
+  q('kana-nfd','unicode','か\u3099く','Find expense column',['ga','ga2']),
+  q('one','short','在','Find inventory task by one-character shorthand',['stock']),
+  q('two','short','AI','Find AI workshop, exclude MAIL',['ai']),
+  q('space','whitespace','\u3000復元 手順\u0085','Find exact one-space wording, trimming edges',['backup']),
+  q('two-spaces','whitespace','復元  手順','Find exact two-space wording',['backup2']),
+  q('percent','literal','x%y','Find exact percent label',['percent']),
+  q('underscore','literal','a_b','Find exact underscore label',['underscore']),
+  q('backslash','literal','c\\d','Find exact backslash label',['slash']),
+  q('typo','typo','バックアプ','Find backup duty despite omission',['typo','typo2']),
+  q('and','syntax','請求 承認','Find billing AND approval',['syntax1','syntax2']),
+  q('or','syntax','請求 OR 承認','Find billing OR approval, including pending quote approval',['syntax1','syntax2','syntax3','syntax4','api2']),
+  q('not','syntax','請求 -保留','Find billing excluding on-hold',['syntax1','syntax3']),
+  q('phrase','syntax','"請求 承認"','Find exact billing-approval phrase',['syntax1']),
+  q('absent','empty','火星支店','Find nonexistent Mars branch',[]),
+];
+
+// Background templates contain none of the labelled entities; every unlisted id
+// is irrelevant. No keyword matching or engine output participates in labelling.
+const subjects = ['封筒','椅子','傘立て','掲示板','工具箱','名刺入れ','湯のみ','床マット'];
+const actions = ['を入口へ運びました。','の数を台帳に記しました。','を午後に引き取ります。','の担当者は別室にいます。'];
+export function corpus() {
+  return [...Object.entries(examples).map(([key,body])=>({id:messageId(key),key,body})),
+    ...Array.from({length:2400},(_,i)=>({id:uuid(3000000+i),key:`background-${i}`,
+      body:`庶務連絡${i+1}：${subjects[i%subjects.length]}${actions[Math.floor(i/subjects.length)%actions.length]}`}))];
+}
