@@ -1,3 +1,5 @@
+import { identityOrder, rememberIdentityResponse } from './identity-order'
+import type { Message } from './api'
 import { lookupAuthors, isOrganizationUnavailable, type DisplayIdentity, type Member } from './api'
 
 export function senderName(identity: DisplayIdentity | undefined): string {
@@ -47,7 +49,7 @@ export function createAuthors(
         const next = new Map(identities)
         const requested = new Set(batch)
         for (const identity of result.data.identities) {
-          if (requested.has(identity.id)) next.set(identity.id, identity)
+          if (requested.has(identity.id)) { rememberIdentityResponse(identity); next.set(identity.id, identity) }
         }
         identities = next
       } finally {
@@ -61,6 +63,10 @@ export function createAuthors(
   function stop() { unavailable = true; generation++; pending.clear(); notify() }
   return {
     get: () => identities,
+    mentionName(id: string, fallback: string, mentions: Message['mentions']) {
+      const identity = identities.get(id)
+      return identity && identityOrder(identity) >= identityOrder(mentions) ? identity.name : fallback
+    },
     // An unattempted id is pending even before watch() queues its first request.
     isPending: (id: string) => !closed && !unavailable && !identities.has(id) && (!attempted.has(id) || pending.has(id)),
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
@@ -68,7 +74,12 @@ export function createAuthors(
     replaceMembers(members: Member[]) {
       if (closed || unavailable) return
       generation++
-      identities = new Map(members.map(member => [member.id, { id: member.id, name: member.name, deactivated: false }]))
+      identities = new Map(members.map(member => {
+        rememberIdentityResponse(member)
+        const identity = { id: member.id, name: member.name, deactivated: false }
+        rememberIdentityResponse(identity, identityOrder(member))
+        return [member.id, identity]
+      }))
       attempted = new Set()
       pending = new Set()
       notify()

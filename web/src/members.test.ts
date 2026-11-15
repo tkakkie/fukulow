@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { createMembers, createInviteAcceptance, takeInvite } from './members'
 import type { Identity, Member, MemberList, Result } from './api'
 import { signOut } from './auth'
+import { rememberIdentityResponse } from './identity-order'
+import { mentionText } from './mentions'
 
 const member: Member = { id: 'm', name: 'メンバー', role: 'member' }
 const identity: Identity = { member, organization: { organization_id: 'o', name: '組織', capabilities: { can_invite: { allowed: false }, can_deactivate_members: { allowed: false }, can_manage_roles: { allowed: false }, can_create_channels: { allowed: true } } } }
@@ -10,6 +12,31 @@ const token = 'a'.repeat(64)
 const org = '00000000-0000-0000-0000-000000000001'
 
 describe('Members controller', () => {
+  it('preserves a newer Message Mention name through another Member Role change and deactivation', async () => {
+    const target = { ...member, id: '123e4567-e89b-12d3-a456-426614174000', name: 'Old name' }
+    const other = { ...member, id: 'other' }
+    const deps = {
+      listMembers: vi.fn(async () => ok({ members: [target, other] })),
+      changeRole: vi.fn(async () => ok({ ...other, role: 'admin' as const })),
+      deactivateMember: vi.fn(async () => ok(undefined)),
+      createInvite: vi.fn(), baseUrl: () => 'https://chat.example/',
+    }
+    const c = createMembers(org, vi.fn(), vi.fn(), deps)
+    try {
+      await c.load()
+      const mentions = [{ member_id: target.id, name: 'New name' }]
+      rememberIdentityResponse(mentions)
+      const rendered = () => mentionText(`@{member:${target.id}}`, mentions, c.authors.mentionName)
+      expect(rendered()).toBe('@New name')
+      expect(await c.role(other.id, 'admin')).toBe(true)
+      expect(c.get().members.find(m => m.id === other.id)?.role).toBe('admin')
+      expect.soft(rendered()).toBe('@New name')
+      expect(await c.deactivate(other.id)).toBe(true)
+      expect(c.get().members).toEqual([target])
+      expect(rendered()).toBe('@New name')
+    } finally { c.close() }
+  })
+
   it('lists Members, updates Roles, and creates a fragment-only Invite link through the API', async () => {
     const deps = {
       listMembers: vi.fn(async () => ok({ members: [member] })),

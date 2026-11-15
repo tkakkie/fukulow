@@ -1,9 +1,14 @@
 <script lang="ts">
   import { shouldOpenRepliesFromRowKey } from '../composer-keys'
   import Button from './Button.svelte'
+  import type { Message } from '../api'
+  import { mentionText, type MentionName } from '../mentions'
 
   let {
     body,
+    mentions = [],
+    resolveMentionName,
+    selfId = '',
     createdAt,
     senderName,
     mentioned = false,
@@ -23,6 +28,9 @@
     onrowkeydown,
   }: {
     body: string
+    mentions?: Message['mentions']
+    resolveMentionName?: MentionName
+    selfId?: string
     createdAt?: string
     senderName?: string
     mentioned?: boolean
@@ -81,7 +89,7 @@
 <article
   bind:this={rowRef}
   class="ui-message-row"
-  class:ui-message-row--mentioned={mentioned}
+  class:ui-message-row--mentioned={mentioned || (!pendingStatus && mentions.some(target => target.member_id === selfId))}
   class:ui-message-row--sending={pendingStatus === 'sending'}
   class:ui-message-row--failed={pendingStatus === 'failed'}
   tabindex="-1"
@@ -99,7 +107,7 @@
   {/if}
 
   <div class="ui-message-row__content">
-    <span class="body">{body}</span>
+    <span class="body">{pendingStatus ? body : mentionText(body, mentions, resolveMentionName)}</span>
   </div>
 
   {#if pendingStatus === 'sending'}

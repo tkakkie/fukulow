@@ -1,5 +1,6 @@
 import type { Message, TimelineItem, TopicSummary } from './api'
 import { countSequencesAfter, type TopicEvidence } from './message-window'
+import { latestMessageCopy } from './identity-order'
 
 export type TopicSummaryError = 'retryable' | 'non_retryable'
 export type TopicBaseline = { asOfSeq: number; summary: TopicSummary }
@@ -19,7 +20,7 @@ export const linePosition = (line: MainTimelineLine) => line.kind === 'message' 
 export function selectMainTimeline(messages: Message[], pageMessages: Iterable<Message>, baselines: Iterable<TopicBaseline>, evidence?: TopicEvidence): MainTimelineLine[] {
   const records = new Map<number, Message>()
   for (const m of pageMessages) records.set(m.seq, m)
-  for (const m of messages) records.set(m.seq, m)
+  for (const m of messages) records.set(m.seq, records.has(m.seq) ? latestMessageCopy(records.get(m.seq)!, m) : m)
   const topics = new Map<string, TopicLine>()
   for (const baseline of baselines) {
     const summary = baseline.summary
@@ -35,7 +36,8 @@ export function selectMainTimeline(messages: Message[], pageMessages: Iterable<M
       topics.set(m.topic_id, topic)
     } else {
       if (!evidence && topic.baseline && m.seq > topic.baseline.asOfSeq) topic.messageCount = (topic.messageCount ?? 0) + 1
-      if (m.seq > topic.position) { topic.position = m.seq; topic.latestMessage = m }
+      topic.latestMessage = latestMessageCopy(topic.latestMessage, m)
+      topic.position = Math.max(topic.position, m.seq)
     }
   }
   if (evidence) for (const topic of topics.values()) {

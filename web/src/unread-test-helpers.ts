@@ -2,6 +2,7 @@ import { vi } from 'vitest'
 import type { Message, Result, TopicSummary, UnreadChannel } from './api'
 import type { UnreadApi, UnreadScope } from './unread'
 import type { TopicsApi } from './topics'
+import type { TimelineApi } from './sync'
 import type { RealtimeHandlers } from './realtime'
 import { createUnreadSync } from './unread-sync'
 import { record } from './protocol-test-helpers'
@@ -10,12 +11,12 @@ export { flush } from './sync-test-helpers'
 import { ok } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 export const msg = (seq: number, topic: string | null = null, sender = 'other', channel = 'A'): Message => ({ ...record(seq, channel), topic_id: topic, sender })
-export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ id: 'A', name: 'A', visibility: 'public',
+export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ mention_unread_count: 0, main_mention_unread_count: 0, id: 'A', name: 'A', visibility: 'public',
   capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
   as_of_seq: 3, read_seq: 0, main_unread_count: 1, unread_count: 3, ...extra })
-export const summary = (id = 'T', w = 3, p = 0, count = 1): TopicSummary => ({ id, name: id, first_seq: 2,
+export const summary = (id = 'T', w = 3, p = 0, count = 1): TopicSummary => ({ mention_unread_count: 0, id, name: id, first_seq: 2,
   last_seq: w, latest_message: msg(w, id), message_count: count, read_seq: p, unread_count: count })
-export function unreadClient() {
+export function unreadClient(sendMessage?: TimelineApi['sendMessage']) {
   const handlers: RealtimeHandlers[] = []
   const history = [msg(1), msg(2, 'T'), msg(3, 'U')]
   const rows = [row()]
@@ -39,7 +40,7 @@ export function unreadClient() {
   const onSessionEnded = vi.fn()
   const c = createUnreadSync({ selfId: 'me', organizationId: 'org', unreadApi, topicsApi, requestTimeoutMs: 1000, onSessionEnded,
     random: () => 0.5,
-    api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
+    api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
     connect(h) { handlers.push(h); return { send() {}, close() {} } },
   })
   return { ...c, history, rows, summaries, unreadApi, topicsApi, handlers, onSessionEnded,

@@ -2,11 +2,13 @@ import { createActivityTarget, type Activity } from './activity'
 import * as api from './api'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
+import { completeCountFields } from './unread-counts'
 import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import { selectMainTimeline, selectTopicMessages, type TopicBaseline, type TopicSummaryError } from './topic-selectors'
 import { countSequencesAfter, rememberTopicMessages, trimMessages, topicEvidence, boundTopicEvidence } from './message-window'
 import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
+import { latestMessageCopy } from './identity-order'
 
 type Sync = ReturnType<typeof createSync>
 export type TopicsApi = {
@@ -137,6 +139,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           rememberTopicMessages(w.evidence, incoming)
           if (!w.main.following && w.messages.size + w.baselines.size >= MAIN_MESSAGE_LIMIT) w.main.hasNewer = true
           for (const m of incoming) {
+            const baseline = m.topic_id && w.baselines.get(m.topic_id)
+            if (baseline && baseline.summary.latest_message.id === m.id) {
+              baseline.summary = { ...baseline.summary, latest_message: latestMessageCopy(baseline.summary.latest_message, m) }
+            }
             const arrived = m.seq > (before?.cursor ?? Infinity) && !before?.messages.some(old => old.seq === m.seq)
             if (arrived && w.main.hasNewer) w.main.newerCount++
             if (m.seq > (w.main.asOfSeq ?? 0) && (!w.main.hasNewer || (m.topic_id && w.baselines.has(m.topic_id)))) w.messages.set(m.seq, m)
@@ -209,7 +215,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       } else if (api.isOrganizationUnavailable(r) && session === sessionToken) void sync.unavailable()
     })
     try {
-      const result = withTimeout || signal ? await Promise.race([operation, new Promise<Result<T>>(resolve => {
+      const response = withTimeout || signal ? await Promise.race([operation, new Promise<Result<T>>(resolve => {
         settle = () => resolve({ ok: false, kind: 'network' })
         deadlines.add(settle)
         if (signal) {
@@ -218,6 +224,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         }
         if (withTimeout) timer = setTimeout(settle, options.requestTimeoutMs ?? 30_000)
       })]) : await operation
+      const result: Result<T> = response.ok && !completeCountFields(response.data) ? { ok: false, kind: 'network' } : response
       // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
       if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() && !result.ok && result.kind === 'http' &&
         [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
@@ -238,7 +245,16 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     for (const summary of response.topics) {
       holdSummary(w, summary.id)
       const old = w.baselines.get(summary.id)
-      if (!old || response.as_of_seq > old.asOfSeq || (response.as_of_seq === old.asOfSeq && (summary.read_seq > old.summary.read_seq || (summary.read_seq === old.summary.read_seq && summary.unread_count < old.summary.unread_count)))) w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary })
+      const latestMessage = old ? latestMessageCopy(old.summary.latest_message, summary.latest_message) : summary.latest_message
+      const equal = old && response.as_of_seq === old.asOfSeq && summary.read_seq === old.summary.read_seq
+      if (!old || response.as_of_seq > old.asOfSeq || (response.as_of_seq === old.asOfSeq && summary.read_seq >= old.summary.read_seq)) {
+        w.baselines.set(summary.id, { asOfSeq: response.as_of_seq, summary: equal
+          ? { ...summary, latest_message: latestMessage, unread_count: Math.min(summary.unread_count, old.summary.unread_count),
+            mention_unread_count: Math.min(summary.mention_unread_count, old.summary.mention_unread_count) }
+          : { ...summary, latest_message: latestMessage } })
+      } else if (old) {
+        old.summary = { ...old.summary, latest_message: latestMessage }
+      }
     }
   }
   function holdSummary(w: Window, topic: string) {
@@ -434,12 +450,17 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       for (const m of sync.get().channels[channel]?.messages ?? []) w.messages.set(m.seq, m)
       trimMain(w, 'newer')
     }
-    const w = getWindow(channel), p = w.main
+    const w = getWindow(channel), p = w.main, generation = w.generation
     if (!current(channel, w) || p.loading || !p.hasMore) return { ok: false, kind: 'network' }
     p.loading = true; p.error = false; notify(channel)
     const query: ListTimelineQuery = p.asOfSeq === undefined ? {} : { as_of_seq: p.asOfSeq, before_position: p.before }
     const { result, isCurrent } = await read(channel, w, 'main', () => options.api.listTimeline(channel, query), bootstrap)
-    if (isCurrent() && w.main === p) {
+    // An empty log has no Message identities or Unread baselines to invalidate.
+    // Its zero bootstrap cursor replays every Message, including post-snapshot arrivals.
+    const accepted = () => isCurrent() || (bootstrap && w.generation !== generation &&
+      current(channel, w) && w.main === p && !w.reads.has('main') &&
+      result.ok && result.data.as_of_seq === 0 && result.data.items.length === 0 && !result.data.has_more)
+    if (accepted() && w.main === p) {
       p.loading = false; p.error = !result.ok
       if (result.ok) {
         if (latest) {
@@ -461,7 +482,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       }
       notify(channel)
     }
-    return isCurrent() ? result : { ok: false, kind: 'network' }
+    return accepted() ? result : { ok: false, kind: 'network' }
   }
   async function reanchorMain(channel: string, w: Window) {
     if (!current(channel, w)) return false
@@ -740,8 +761,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         const w = getWindow(channel), generation = w.generation
         result = await loadMainPage(channel, true)
         if (sync.get().channels[channel]?.latest !== request) return { ok: false, kind: 'network' }
-        // Access reconciliation fences the old snapshot, but the same bootstrap still needs a fresh baseline.
-        if (current(channel, w) && w.generation !== generation) continue
+        // An invalidated nonempty snapshot still needs a fresh bootstrap.
+        if (!result.ok && current(channel, w) && w.generation !== generation) continue
         break
       }
       if (!result.ok) return result

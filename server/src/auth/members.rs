@@ -18,6 +18,20 @@ pub struct DisplayIdentity {
     pub deactivated: bool,
 }
 
+// Message-scoped disclosure is authorized by its reader, including inactive or
+// departed targets. This SQL does not widen the active Member directory.
+pub(crate) const RETAINED_IDENTITIES_SQL: &str =
+    "SELECT organization_id,id,name FROM users WHERE organization_id=$1";
+
+pub(crate) async fn lock_send_members(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, i64, Role)>, sqlx::Error> {
+    sqlx::query_as("SELECT id,membership_revision,role FROM users WHERE organization_id=$1 AND id=ANY($2) AND deactivated_at IS NULL ORDER BY id FOR SHARE")
+        .bind(organization).bind(ids).fetch_all(connection).await
+}
+
 // Callers authorize the requested authors in the same read snapshot.
 pub(crate) async fn display_identities(
     connection: &mut sqlx::PgConnection,

@@ -70,3 +70,6 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [realtime](realtime.md): `private_channel_activity_skips_non_members`
 - [web](web.md): `Guest member panels reload remote grants on every open and keep the add-candidate picker hidden`
+
+- [messages](messages.md): `mention_denies_private_owner_without_grant`, `mention_waiting_acceptance_rechecks_committed_role_revision_revocation_and_activity`
+- [unread](unread.md): `mention_access_loss_removes_counts_and_regrant_never_resurrects_them`

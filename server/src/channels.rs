@@ -334,6 +334,66 @@ pub(crate) async fn is_visible_for_write(
     ))
 }
 
+// All Member locks precede every grant lock. The Channel lock holds visibility
+// stable and is taken before Members, matching access-changing transactions.
+pub(crate) async fn authorize_send_targets(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    sender: (Uuid, i64),
+    channel: Uuid,
+    targets: &[Uuid],
+) -> Result<(Option<bool>, Vec<Uuid>), sqlx::Error> {
+    let public: Option<bool> = sqlx::query_scalar(
+        "SELECT visibility='public' FROM channels WHERE organization_id=$1 AND id=$2 FOR SHARE",
+    )
+    .bind(organization)
+    .bind(channel)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let mut ids = targets.to_vec();
+    ids.push(sender.0);
+    ids.sort_unstable();
+    ids.dedup();
+    let members = auth::members::lock_send_members(connection, organization, &ids).await?;
+    if !members
+        .iter()
+        .any(|&(id, revision, _)| (id, revision) == sender)
+    {
+        return Ok((None, Vec::new()));
+    }
+    let Some(public) = public else {
+        return Ok((Some(false), Vec::new()));
+    };
+    let grants: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT member_id,membership_revision FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=ANY($3) ORDER BY member_id FOR SHARE",
+    ).bind(organization).bind(channel).bind(&ids).fetch_all(connection).await?;
+    let mut accepted = Vec::new();
+    let mut sender_visible = false;
+    for (id, revision, role) in members {
+        let visible = authorize(
+            Actor::Member {
+                organization,
+                role,
+                channel_member: grants.contains(&(id, revision)),
+                channel_manager: false,
+            },
+            Action::ReadChannel,
+            Resource::Channel {
+                organization,
+                public,
+            },
+        )
+        .allowed;
+        if id == sender.0 {
+            sender_visible = visible;
+        }
+        if visible && targets.contains(&id) {
+            accepted.push(id);
+        }
+    }
+    Ok((Some(sender_visible), accepted))
+}
+
 pub(crate) async fn is_visible_scoped(
     pool: &sqlx::PgPool,
     organization: Uuid,
@@ -442,6 +502,26 @@ pub(crate) async fn member_access(
         },
     )
     .await
+}
+
+pub(crate) async fn member_access_in(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+    members: &[(Uuid, i64)],
+) -> Result<Vec<(Uuid, i64, bool)>, sqlx::Error> {
+    let (ids, revisions): (Vec<_>, Vec<_>) = members.iter().copied().unzip();
+    let sql = format!(
+        "SELECT v.id,v.membership_revision,v.visible FROM ({}) v JOIN UNNEST($3::uuid[], $4::bigint[]) candidate(id,revision) ON v.id=candidate.id AND v.membership_revision=candidate.revision",
+        visibility_sql(&auth::candidate_members_sql(), "$2")
+    );
+    sqlx::query_as(&sql)
+        .bind(organization)
+        .bind(channel)
+        .bind(ids)
+        .bind(revisions)
+        .fetch_all(connection)
+        .await
 }
 #[cfg(test)]
 mod tests;

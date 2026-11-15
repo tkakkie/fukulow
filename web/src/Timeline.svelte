@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Member } from './api'
+  import type { MentionName } from './mentions'
   import { tick, untrack } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
@@ -47,6 +49,9 @@
     organizationUnavailable = false,
     reconnecting = false,
     resolveSenderName,
+    resolveMentionName,
+    members = [],
+    onmentionrequest,
     composerRef = $bindable(null),
     topicInputRef = $bindable(null),
     onopentopic,
@@ -65,6 +70,9 @@
     organizationUnavailable?: boolean
     reconnecting?: boolean
     resolveSenderName?: (senderId: string) => string
+    resolveMentionName?: MentionName
+    members?: readonly Member[]
+    onmentionrequest?: () => void
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
     onopentopic?: (topicId: string) => void
@@ -575,6 +583,9 @@
                 senderName={resolveSenderName ? resolveSenderName(line.message.sender) : undefined}
                 createdAt={line.message.created_at}
                 body={line.message.body}
+                mentions={line.message.mentions}
+                {resolveMentionName}
+                {selfId}
                 replyCount={replyCounts.get(line.message.id) ?? 0}
                 focusable
                 rovingTabindex={rovingRowId === line.message.id ? 0 : -1}
@@ -593,6 +604,9 @@
                 name={line.baseline?.summary.name ?? 'トピック'}
                 messageCount={line.messageCount ?? undefined}
                 latestBody={line.latestMessage.body}
+                mentions={line.latestMessage.mentions}
+                {resolveMentionName}
+                mentionUnreadCount={uState?.topics[line.topicId]?.mentionUnreadCount ?? 0}
                 unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
                 onclick={() => onopentopic?.(line.topicId)}
                 onretry={!targetUnavailable && line.summaryError === 'retryable' && topics
@@ -639,6 +653,8 @@
 
   <div class="timeline-composer">
     <Composer
+      {members}
+      {onmentionrequest}
       bind:textareaRef={composerRef}
       bind:topicInputRef
       allowTopicName={Boolean(topics)}

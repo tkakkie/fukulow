@@ -28,12 +28,13 @@ pub(super) async fn parent(
     id: Option<Uuid>,
 ) -> Result<Option<Message>, MessageError> {
     let Some(id) = id else { return Ok(None) };
-    sqlx::query_as(
+    sqlx::query_as(&mentions::page_sql(
         "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
          reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id=$1 AND channel_id=$2 AND id=$3",
-    )
+        "p.seq",
+    ))
     .bind(organization)
     .bind(channel)
     .bind(id)
@@ -106,15 +107,16 @@ pub async fn reply_chain(
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or(MessageError::ReplyChainNotFound)?;
-                let mut messages = sqlx::query_as::<_, Message>(PAGE_SQL)
-                    .bind(organization)
-                    .bind(channel)
-                    .bind(root_id)
-                    .bind(after)
-                    .bind(i64::from(limit) + 1)
-                    .bind(w)
-                    .fetch_all(&mut *tx)
-                    .await?;
+                let mut messages =
+                    sqlx::query_as::<_, Message>(&mentions::page_sql(PAGE_SQL, "p.seq"))
+                        .bind(organization)
+                        .bind(channel)
+                        .bind(root_id)
+                        .bind(after)
+                        .bind(i64::from(limit) + 1)
+                        .bind(w)
+                        .fetch_all(&mut *tx)
+                        .await?;
                 let has_more = messages.len() > usize::from(limit);
                 messages.truncate(usize::from(limit));
                 Ok((

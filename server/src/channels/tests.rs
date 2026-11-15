@@ -113,6 +113,8 @@ fn unread_channel(channel: &Value) -> Value {
     channel["as_of_seq"] = json!(0);
     channel["main_unread_count"] = json!(0);
     channel["unread_count"] = json!(0);
+    channel["main_mention_unread_count"] = json!(0);
+    channel["mention_unread_count"] = json!(0);
     channel
 }
 

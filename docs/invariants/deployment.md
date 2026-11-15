@@ -52,6 +52,8 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 | Backup and image capabilities stay separate; the checker accesses images only by listing | `scripts/backup-r2.test.ts::backup and image capabilities cannot cross buckets and checker only lists images` |
 | Checker freshness uses capture time; capacity, operations, implausible sizes, overdue drill and daily alive are reported | `scripts/backup-r2.test.ts::capture time drives exact staleness boundary and independent checker alerts`, `scripts/backup-r2.test.ts::capacity operations plausibility overdue drill and daily alive alerts` |
 
+| Shared Message.mentions and Channel/Topic Mention counts are required in generated OpenAPI; counts are nonnegative; no Mention event exists | `server/tests/api_contract.rs::mention_contract_requires_one_shared_set_and_nonnegative_counts` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

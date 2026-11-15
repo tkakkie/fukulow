@@ -155,7 +155,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
           : { ok: false, kind: 'network' }); break
         case 'load_main_timeline': void topics.loadMain(channel); break
         case 'load_unread': unreadIds.add(channel); unreadSubject = channel; void unread!.refresh(); break
-        case 'unread_result': resolve({ ok: true, data: { channels: [{ id: channel, name: channel, visibility: 'public',
+        case 'unread_result': resolve({ ok: true, data: { channels: [{ mention_unread_count: 0, main_mention_unread_count: 0, id: channel, name: channel, visibility: 'public',
           capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: false } },
           ...(i.baseline as Pick<UnreadChannel, 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count'>),
         }] } }); break
@@ -166,7 +166,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
             items: items.map(item => {
               if (item.kind === 'message') return { kind: 'message', message: message(expandMessage(item.message, channel)[0], channel) }
               const t = item.topic
-              const summary: TopicSummary = { ...t, id: t.name, first_seq: 1, read_seq: 0, unread_count: 0,
+              const summary: TopicSummary = { mention_unread_count: 0, ...t, id: t.name, first_seq: 1, read_seq: 0, unread_count: 0,
                 latest_message: { ...record(t.last_seq, channel), topic_id: t.name } }
               return { kind: 'topic', topic: summary }
             }) }
