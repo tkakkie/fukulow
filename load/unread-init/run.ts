@@ -10,7 +10,8 @@
  * Full defaults: Topics 10,1000,10000; public affected Members 1,100,1000;
  * other operations affect one Member, joining/reactivating across 10 Channels;
  * 3 repeats / side, roughly 30–55 min (printed planning estimate, not a budget).
- * Pilot: Topics 10,1000; Members 1,100; 3 repeats, roughly 2–6 min.
+ * Pilot: Topics 10,1000; Members 1,100; 3 repeats, roughly 2–6 min of wall
+ * clock (--estimate prints a conservative 15 min planning allowance).
  * Options: --topics 10,1000 --members 1,100 --repeats 5 --channels 10.
  * --estimate prints the matrix/cost without starting Docker. Large overrides
  * may exceed 60 min. Results JSON + paste-ready summary.md stay outside Git;
