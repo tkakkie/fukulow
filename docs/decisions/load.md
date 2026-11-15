@@ -24,5 +24,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [process](process.md): `#401: deployment/load app and migrate use`
 - [process](process.md): `k6 bumps are manual (Dependabot does`
-- [process](process.md): `#442 (maintainer, 2026-11-15): feature work`, `#442: large-scale measurement runs once`, `#442: measurement aims to find bottlenecks`, `#442: add no new files under`
+- [process](process.md): `#442 (maintainer, 2026-11-15): feature work`, `#442: large-scale measurement runs once`, `#442: measurement aims to find bottlenecks`, `#442: add no new files under`, `#442 (maintainer, 2026-11-16): the milestone cadence`
 - [realtime](realtime.md): `#212 follows up handshake admission, listen`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
