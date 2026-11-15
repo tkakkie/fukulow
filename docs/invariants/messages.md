@@ -69,6 +69,7 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [realtime](realtime.md): `live_serialization_is_once_per_fanout_including_shared_gap_recovery`, `shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed_mentions`
 - [channels](channels.md): `reclamation_and_open_renew_send_complete_in_both_lock_orders`
 - [deployment](deployment.md): `request_spans_redact_secrets_and_use_templates_and_generated_ids`, `aggregates_have_fixed_cardinality_and_admission_flood_is_silent`
 

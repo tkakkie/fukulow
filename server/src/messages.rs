@@ -794,7 +794,7 @@ async fn persist_admitted(
         .ok_or(MessageError::Database(sqlx::Error::RowNotFound))
 }
 
-pub(crate) use delivery::LiveQueue;
+pub(crate) use delivery::{LiveMessage, LiveQueue};
 
 async fn latest_seq(
     pool: &sqlx::PgPool,
