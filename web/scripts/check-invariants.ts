@@ -494,6 +494,9 @@ function typeOnlyImport(node: ts.ImportDeclaration | ts.ExportDeclaration): bool
 /** Receiver-independent checks: helper effects and escaped test values cannot be confined to one spec. */
 function playwrightSafety(sf: ts.SourceFile, smokeDir?: string): { reason: string; suiteWide: boolean } | undefined {
   const modifiers = new Set(['skip', 'fixme', 'fail', 'only', 'configure', 'slow'])
+  // Allowlist: any other member (info, extend, describe.serial, ...) could skip or filter at runtime.
+  const testMembers = new Set(['describe', 'beforeEach', 'afterEach', 'beforeAll', 'afterAll', 'setTimeout', 'use', 'step'])
+  const describeMembers = new Set<string>()
   let refusal: { reason: string; suiteWide: boolean } | undefined
   const refuse = (reason: string, suiteWide: boolean) => {
     if (!refusal || suiteWide) refusal = { reason, suiteWide }
@@ -528,11 +531,27 @@ function playwrightSafety(sf: ts.SourceFile, smokeDir?: string): { reason: strin
         || clause.namedBindings.elements.some(e => e.propertyName))
         refuse('Playwright imports must be plain unaliased named imports', true)
     }
+    if (ts.isIdentifier(node) && node.text === 'eval')
+      refuse('eval cannot be verified', true)
+    if (isPlaywrightImport(node) && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)
+      && !node.importClause.isTypeOnly)
+      for (const e of node.importClause.namedBindings.elements)
+        if (!e.isTypeOnly && !['test', 'expect'].includes(e.name.text))
+          refuse(`Playwright value import ${e.name.text} cannot be verified`, true)
     if (ts.isIdentifier(node) && node.text === 'test') {
       const p = node.parent
       let target: ts.Node = node
-      while ((ts.isPropertyAccessExpression(target.parent) || ts.isElementAccessExpression(target.parent)) && target.parent.expression === target)
-        target = target.parent
+      while ((ts.isPropertyAccessExpression(target.parent) || ts.isElementAccessExpression(target.parent)) && target.parent.expression === target) {
+        const access = target.parent
+        // A computed key can spell skip/only at runtime (#440): only literal, listed members pass.
+        const member = ts.isPropertyAccessExpression(access) ? access.name.text
+          : ts.isStringLiteral(access.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(access.argumentExpression)
+            ? access.argumentExpression.text : undefined
+        if (member === undefined) refuse('dynamic property access on Playwright test cannot be verified', true)
+        else if (!modifiers.has(member) && !(target === node ? testMembers : describeMembers).has(member))
+          refuse(`unsupported Playwright test member ${member}`, true)
+        target = access
+      }
       const direct = ts.isCallExpression(target.parent) && target.parent.expression === target
       const imported = ts.isImportSpecifier(p) && !p.propertyName && p.name === node
       if (!direct && !imported) refuse('Playwright test used as a value cannot be verified', true)

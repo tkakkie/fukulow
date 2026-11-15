@@ -929,6 +929,42 @@ describe('Playwright invariant PR CI coverage', () => {
     }
   }))
 
+  it.each([
+    "test[('sk' + 'ip') as 'skip'](true)",
+    "const k = 'skip'; test[k](true)",
+    "test[`sk${'ip'}`](true)",
+    "test[('on' + 'ly') as 'only']('focused', () => {})",
+    "test.describe[('sk' + 'ip') as 'skip']('suite', () => {})",
+    "test.describe[('on' + 'ly') as 'only']('suite', () => {})",
+    "test[('fix' + 'me') as 'fixme'](true)",
+    "test['describe'][('sk' + 'ip') as 'skip']('suite', () => {})",
+    'test.info().skip()',
+    "test.info()[('sk' + 'ip') as 'skip']()",
+    'const t = test.extend({}); t.skip(true)',
+    "eval('test.skip(true)')",
+    "import { _baseTest } from '@playwright/test'",
+  ])('refuses dynamic or unlisted Playwright test access, in specs and helpers: %s', code => fixture((root, put) => {
+    // Each of these can skip or focus at runtime while the name never appears literally (#440).
+    for (const file of ['web/e2e/x.spec.ts', 'web/e2e/helpers.ts']) {
+      put(file, plain + code + '\n')
+      expect(check(root)[0], `${file}: ${code}`).toContain('entire smoke suite unverifiable')
+      put(file, plain)
+    }
+  }))
+
+  it('accepts the listed test members and literal keys in a helper', () => fixture((root, put) => {
+    // A helper is checked by the suite-wide scan only (spec files also go through tsTests, which is stricter).
+    put('web/e2e/helpers.ts', "import { test } from '@playwright/test'\n" + [
+      "test.describe('suite', () => {})",
+      'test.beforeEach(async () => {})', 'test.afterEach(async () => {})',
+      'test.beforeAll(async () => {})', 'test.afterAll(async () => {})',
+      "test.use({ locale: 'ja-JP' })", 'test.setTimeout(60_000)',
+      "export const step = () => test.step('s', async () => {})",
+      "const mime: Record<string, string> = { '.js': 'text/javascript' }; const k = '.js'; mime[k]",
+    ].join('\n') + '\n')
+    expect(check(root)).toEqual([])
+  }))
+
   it.each(['ts', 'mts', 'cts', 'js', 'mjs', 'tsx', 'cjs', 'jsx', 'custom'])('scans helper modifier access and bindings in .%s files', extension => fixture((root, put) => {
     for (const modifier of ['skip', 'fixme', 'fail', 'only', 'configure', 'slow']) {
       for (const code of [
