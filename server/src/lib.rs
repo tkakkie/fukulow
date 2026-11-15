@@ -29,6 +29,8 @@ use std::{
 
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
+const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()";
+
 #[derive(serde::Deserialize)]
 struct ManifestChunk {
     file: String,
@@ -374,6 +376,14 @@ async fn security_headers(State(secure): State<bool>, request: Request, next: Ne
         header::REFERRER_POLICY,
         HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static(PERMISSIONS_POLICY),
+    );
+    headers.insert(
+        "cross-origin-opener-policy",
+        HeaderValue::from_static("same-origin"),
+    );
     if api {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
@@ -650,6 +660,8 @@ mod tests {
                     "strict-origin-when-cross-origin"
                 );
                 assert!(!headers.contains_key(header::STRICT_TRANSPORT_SECURITY));
+                assert_eq!(headers["permissions-policy"], PERMISSIONS_POLICY);
+                assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
                 if path.starts_with("/api/") {
                     assert_eq!(headers[header::CACHE_CONTROL], "no-store");
                 }

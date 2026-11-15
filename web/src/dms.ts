@@ -1,3 +1,4 @@
+import { completeCountFields } from './unread-counts'
 import { createActivityTarget, type Activity, type ActivityTarget, type Invalidation } from './activity'
 import * as api from './api'
 import { dmListState, dmNextWake, stepDmList, type DmInput, type DmRequest } from './dm-list'
@@ -57,6 +58,7 @@ export function createDms(options: {
       const result = request.lane === 'delta' || request.lane === 'coverage'
         ? await options.api.changes({ lane: request.lane, ...(request.cursor === undefined ? {} : { cursor: request.cursor }) }, signal)
         : await options.api.list(request.lane === 'held' ? { channel_id: request.ids } : request.cursor === undefined ? {} : { cursor: request.cursor }, signal)
+      if (result.ok && !completeCountFields(result.data)) return { ok: false, kind: 'network' }
       return result.ok ? { ok: true, data: { request, data: result.data } } : result
     },
     accept(value) { if (value) dispatch({ type: 'result', ...value }) },
@@ -83,7 +85,10 @@ export function createDms(options: {
   const release = options.activity.hold('dms', activityTarget)
   const mutationTarget = createActivityTarget<api.Dm>({
     manualRetry: true, timeoutMs: options.timeoutMs,
-    load: signal => options.api.open(mutation!, signal),
+    load: async signal => {
+      const result = await options.api.open(mutation!, signal)
+      return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' } : result
+    },
     accept(dm) {
       // A POST snapshot never restores list authority after a notice/access/socket boundary.
       const current = mutationGeneration === state.generation && !state.paused

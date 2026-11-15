@@ -268,14 +268,19 @@ pub(crate) async fn send_locks(
     org: Uuid,
     sender: (Uuid, i64),
     channel: Uuid,
-) -> Result<Option<Vec<(Uuid, i64, Uuid)>>, ApiError> {
+    targets: &[Uuid],
+) -> Result<Option<(Vec<(Uuid, i64, Uuid)>, Vec<Uuid>)>, ApiError> {
     let Some((a, b)) = pair(connection, org, channel).await? else {
         return Ok(None);
     };
     if ![a, b].contains(&sender.0) {
         return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
     }
-    let members = auth::members::participants(connection, org, &[a, b], true).await?;
+    let mut ids = targets.to_vec();
+    ids.extend([a, b]);
+    ids.sort_unstable();
+    ids.dedup();
+    let members = auth::members::participants(connection, org, &ids, true).await?;
     let actor = members
         .iter()
         .find(|m| m.id == sender.0 && m.active && m.membership_revision == sender.1)
@@ -288,7 +293,19 @@ pub(crate) async fn send_locks(
     {
         return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
     }
-    Ok(Some(grants))
+    let accepted = members
+        .into_iter()
+        .filter(|m| {
+            m.active
+                && [a, b].contains(&m.id)
+                && targets.contains(&m.id)
+                && grants
+                    .iter()
+                    .any(|g| g.0 == m.id && g.1 == m.membership_revision)
+        })
+        .map(|m| m.id)
+        .collect();
+    Ok(Some((grants, accepted)))
 }
 
 // Call only after the canonical lookup, while send_locks retains both Members/grants.

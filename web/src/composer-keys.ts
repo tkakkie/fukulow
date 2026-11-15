@@ -145,3 +145,15 @@ export function resolveRovingMessageId(
   if (activeId !== null && messageIds.includes(activeId)) return activeId
   return messageIds[messageIds.length - 1]
 }
+
+/** The autocomplete consumes keys only while a suggestion list is open. */
+export function mentionKey(event: KeyEventLike): 'accept' | 'next' | 'previous' | 'dismiss' | null {
+  if (event.defaultPrevented || isImeComposing(event) || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return null
+  switch (event.key) {
+    case 'Enter': return 'accept'
+    case 'ArrowDown': return 'next'
+    case 'ArrowUp': return 'previous'
+    case 'Escape': return 'dismiss'
+    default: return null
+  }
+}

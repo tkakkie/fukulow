@@ -31,6 +31,8 @@ async fn main_unread_count_uses_covering_range_without_message_heap(pool: PgPool
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO message_mentions SELECT organization_id,channel_id,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq%10=0")
+        .bind(org).bind(channel).bind(viewer).execute(&pool).await.unwrap();
     sqlx::query("VACUUM(ANALYZE) messages")
         .execute(&pool)
         .await
@@ -53,6 +55,7 @@ async fn main_unread_count_uses_covering_range_without_message_heap(pool: PgPool
         .await
         .unwrap();
     assert_eq!(row.get::<i64, _>("unread_count"), 5_000);
+    assert_eq!(row.get::<i64, _>("mention_unread_count"), 1_000);
     let plan: Value = sqlx::query_scalar(&format!(
         "EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {}",
         crate::messages::unread::LIST_COUNTS_SQL

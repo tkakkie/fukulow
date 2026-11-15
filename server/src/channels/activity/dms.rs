@@ -83,7 +83,9 @@ impl Activity {
         for &(channel, _, _) in changes {
             test_pause(organization, channel, "dm_authorized", None).await;
         }
-        for ((entry, epoch, channel, gained), proof) in selected.into_iter().zip(proofs) {
+        for (((entry, epoch, channel, gained), authorization), proof) in
+            selected.into_iter().zip(&authorizations).zip(proofs)
+        {
             let Some(proof) = proof else {
                 continue;
             };
@@ -104,6 +106,8 @@ impl Activity {
                         epoch,
                         directory_epoch: None,
                         proof: Some(proof.clone()),
+                        valid: authorization.valid.clone(),
+                        recovery: None,
                     },
                 );
             }

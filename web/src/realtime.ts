@@ -35,7 +35,9 @@ function isMessage(value: unknown): value is Message {
     typeof value.client_message_id === 'string' && typeof value.body === 'string' &&
     typeof value.created_at === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') &&
     (value.reply_to === null || typeof value.reply_to === 'string') &&
-    (value.reply_root_id === null || typeof value.reply_root_id === 'string')
+    (value.reply_root_id === null || typeof value.reply_root_id === 'string') &&
+    Array.isArray(value.mentions) && value.mentions.every(mention =>
+      isObject(mention) && typeof mention.member_id === 'string' && typeof mention.name === 'string')
 }
 
 function isServerEvent(value: unknown): value is ServerEvent {

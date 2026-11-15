@@ -1,0 +1,50 @@
+import { expect, test } from '@playwright/test'
+import { createChannelApi, ensureOwnerAndSignIn, inviteAndSignInPeerViaUi, sendApiMessage } from './helpers.ts'
+
+test('two Members autocomplete accepted Mentions and converge Channel Topic and Reply badges', async ({ browser, baseURL }) => {
+  test.setTimeout(180_000)
+  const ownerContext = await browser.newContext({ baseURL, ignoreHTTPSErrors: true })
+  const owner = await ownerContext.newPage()
+  const org = await ensureOwnerAndSignIn(owner)
+  const suffix = crypto.randomUUID().slice(0, 8)
+  const watched = await createChannelApi(owner.request, org, `mention-watch-${suffix}`)
+  const channel = await createChannelApi(owner.request, org, `mention-${suffix}`)
+  const peer = await inviteAndSignInPeerViaUi(owner, browser, baseURL!, 'member', suffix)
+  try {
+    await peer.page.goto(`/o/${org}/c/${watched.id}`)
+    await expect(peer.page.getByRole('heading', { name: watched.name, exact: true })).toBeVisible()
+    await owner.goto(`/o/${org}/c/${channel.id}`)
+    const composer = owner.locator('#main-content textarea')
+    await composer.fill('@')
+    const candidates = owner.getByRole('listbox', { name: 'メンションするメンバー' })
+    await expect(candidates.getByRole('option', { name: peer.name })).toBeVisible()
+    await candidates.getByRole('option', { name: peer.name }).click()
+    const token = `@{member:${peer.memberId}}`
+    await expect(composer).toHaveValue(`${token} `)
+    const rejected = `@{member:${crypto.randomUUID()}}`
+    await composer.fill(`${token} ${token} ${rejected}`)
+    await composer.press('Enter')
+    await expect(owner.locator('#main-content .body').filter({ hasText: rejected })).toHaveText(`@${peer.name} @${peer.name} ${rejected}`)
+    const row = peer.page.locator('#channel-content button.ui-list-row').filter({ hasText: channel.name })
+    await expect(row.locator('.ui-badge--mention')).toHaveAttribute('aria-label', 'メンションあり')
+    await expect(row.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
+    const topic = await sendApiMessage(owner.request, org, channel.id, { body: `${token} Topic ${suffix}`, topic_name: `議題-${suffix}` })
+    await sendApiMessage(owner.request, org, channel.id, { body: `${token} Reply ${suffix}`, reply_to: topic.id })
+    await expect(row.locator('.ui-badge--mention')).toHaveAttribute('aria-label', 'メンション 3件')
+    await peer.page.goto(`/o/${org}/c/${channel.id}`)
+    const highlighted = peer.page.locator('#main-content .ui-message-row--mentioned')
+    await expect(highlighted.filter({ hasText: rejected })).toBeVisible()
+    await expect(row.locator('.ui-badge--mention')).toHaveAttribute('aria-label', 'メンション 2件')
+    const summary = peer.page.locator('#main-content .ui-topic-summary').filter({ hasText: `議題-${suffix}` })
+    await expect(summary.locator('.ui-badge--mention')).toHaveAttribute('aria-label', 'メンション 2件')
+    await summary.click()
+    await expect(peer.page.locator('#main-content .ui-message-row--mentioned')).toHaveCount(2)
+    await expect(row.locator('.ui-badge--mention')).toHaveCount(0)
+    await expect(row.locator('.ui-badge--unread')).toHaveCount(0)
+    await peer.page.locator('#main-content .ui-message-row').filter({ hasText: `Reply ${suffix}` }).getByRole('button', { name: '返信', exact: true }).click()
+    await expect(peer.page.locator('#panel-content .ui-message-row--mentioned')).toHaveCount(2)
+    await expect(peer.page.locator('#panel-content .body').filter({ hasText: `Reply ${suffix}` })).toHaveText(`@${peer.name} Reply ${suffix}`)
+  } finally {
+    await peer.context.close(); await ownerContext.close()
+  }
+})

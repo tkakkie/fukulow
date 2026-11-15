@@ -10,7 +10,7 @@
     prefix,
     selected = false,
     unreadCount = 0,
-    mentioned = false,
+    mentionUnreadCount = 0,
     expanded,
     onclick,
     children,
@@ -20,7 +20,7 @@
     prefix?: string
     selected?: boolean
     unreadCount?: number
-    mentioned?: boolean
+    mentionUnreadCount?: number
     expanded?: boolean
     onclick?: () => void
     children?: Snippet
@@ -41,10 +41,10 @@
     <span class="ui-list-row__label">
       {marker} {name}
     </span>
-    {#if mentioned || unreadCount > 0}
+    {#if mentionUnreadCount > 0 || unreadCount > 0}
       <span class="ui-list-row__badges">
-        {#if mentioned}
-          <Badge kind="mention" />
+        {#if mentionUnreadCount > 0}
+          <Badge kind="mention" count={mentionUnreadCount} />
         {/if}
         {#if unreadCount > 0}
           <Badge kind="unread" count={unreadCount} />
