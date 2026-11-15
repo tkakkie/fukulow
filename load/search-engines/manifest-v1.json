@@ -1,5 +1,5 @@
 {
-  "sha256": "0e3279022c828f2c5e50033f466b6e4ca762e17d6d14a7ac6c793bf8996b26eb",
+  "sha256": "c7ce2aaba5fa7eaf74fff83f93eeff06eb3739d1ea1e4b347301d38597846537",
   "frozen": {
     "version": 1,
     "date": "2026-11-15",
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "9010630f61d13a9e154505037515d0ebc7c9048616aa90a11bfc169fb04088bd"
+        "sha256": "61e9f00d63dfc10a572f9d6a1f35397415028cc64768f3da1d1a403db9298c5e"
       },
       {
         "path": ".node-version",
@@ -20,7 +20,7 @@
       },
       {
         "path": "deploy/db-grants.sql",
-        "sha256": "f45e5b392826878f13ae7044a812638cd233842555c7c2f6e8bbe817b78647d4"
+        "sha256": "ceaca5ecd45eef5f9e813cdc42ff42e9c270df56599d008cb2965b40e340aa3c"
       },
       {
         "path": "deploy/db-role-settings.sql",
@@ -191,8 +191,28 @@
         "sha256": "0a396b54103f51c84a28f6a523cac2158aeb195c2b2d92ff7173e8a852b7a611"
       },
       {
+        "path": "server/migrations/202611140370_direct_messages.sql",
+        "sha256": "5d1102622b4218b1dac31b1944f5a4c8b8a8f7de684ec01c3064c7a6e39ad9c9"
+      },
+      {
+        "path": "server/migrations/202611140386_dm_discovery_reclamation.sql",
+        "sha256": "f53bd27277ef9b3d2597e80fec3edd23b845042a0cde8d4183a34b8905b32933"
+      },
+      {
+        "path": "server/migrations/202611140387_main_unread_covering.sql",
+        "sha256": "ae0d76686b764b2dcef511b39bf9b95bebab844be0256b810e58a23a51206782"
+      },
+      {
         "path": "server/migrations/202611140388_invite_expiry_scan.sql",
         "sha256": "1960c4400b9a88e916a7b2096c81747648c86c543bf61bbeaed3f17737975779"
+      },
+      {
+        "path": "server/migrations/202611140389_member_directory_order.sql",
+        "sha256": "0c6c38b8fefd1309cf6f6ee55e41f402166487894bed1135e0715c0800a09512"
+      },
+      {
+        "path": "server/migrations/202611150390_mention_main_unread_covering.sql",
+        "sha256": "66bba5ea888ebebc7614059659a1c894f701d0c9220e4c319bdc1b6252109be0"
       }
     ],
     "quality": {

@@ -45,4 +45,9 @@
 /server/migrations/202611140299_channel_name_nonempty.sql text eol=lf
 /server/migrations/202611140300_message_mentions.sql text eol=lf
 /server/migrations/202611140303_invite_revocation.sql text eol=lf
+/server/migrations/202611140370_direct_messages.sql text eol=lf
+/server/migrations/202611140386_dm_discovery_reclamation.sql text eol=lf
+/server/migrations/202611140387_main_unread_covering.sql text eol=lf
 /server/migrations/202611140388_invite_expiry_scan.sql text eol=lf
+/server/migrations/202611140389_member_directory_order.sql text eol=lf
+/server/migrations/202611150390_mention_main_unread_covering.sql text eol=lf
