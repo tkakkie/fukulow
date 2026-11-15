@@ -15,18 +15,45 @@ function fixture(scenario:'main'|'held200'='main') {
       return [0,30000].map(offset=>({member,retained,at:from+offset,lanes:['delta','coverage','browse','recovery',retained?'held':'delta']}));
     }).flat()};
   });
-  const summary={offeredWork:{bucketMs:60000,coverage:.99,buckets},fullIntervals:[{start:core.from,end:core.to}]};
+  const summary={offeredWork:{bucketMs:60000,buckets},fullIntervals:[{start:core.from,end:core.to}]};
   return {core,summary,check:()=>concurrentBrowsingReasons(core,Array(10).fill(summary),summary,scenario)};
 }
 test('time buckets accept full main and held200 offered work',()=>{
   for(const scenario of ['main','held200'] as const)assert.deepEqual(fixture(scenario).check(),[]);
 });
-test('99% bucket coverage is inclusive, independently for each rate and mix component',()=>{
+for(const kind of ['send','resolve','create','renew','first','deep']) {
+  test(kind+': one-offer boundary deviation reconciled over core passes',()=>{
+    const {summary,check}=fixture();
+    summary.offeredWork.buckets[0]!.offered[kind]!--;
+    summary.offeredWork.buckets[1]!.offered[kind]!++;
+    assert.deepEqual(check(),[]);
+  });
+  test(kind+': one missing offer net over core is rejected',()=>{
+    const {summary,check}=fixture();
+    summary.offeredWork.buckets[0]!.offered[kind]!--;
+    assert.ok(check().some(r=>r.includes('whole-core offered '+kind+' below full adopted target')));
+  });
+  test(kind+': two-offer bucket deviation is rejected even if reconciled',()=>{
+    const {summary,check}=fixture();
+    summary.offeredWork.buckets[0]!.offered[kind]!-=2;
+    summary.offeredWork.buckets[1]!.offered[kind]!+=2;
+    assert.ok(check().some(r=>r.includes('offered '+kind+' outside one-offer')));
+  });
+}
+test('whole-core browsing mix permits only the alternation remainder',()=>{
   const {summary,check}=fixture();
-  for(const b of summary.offeredWork.buckets)Object.assign(b.offered,{send:11880,first:2970,deep:2970});
+  summary.offeredWork.buckets[0]!.offered.first!++;
   assert.deepEqual(check(),[]);
-  summary.offeredWork.buckets[0]!.offered.deep--;
-  assert.match(check().join(';'),/offered deep/);
+  summary.offeredWork.buckets[1]!.offered.first!++;
+  assert.match(check().join(';'),/beyond alternation remainder/);
+});
+test('O5 uses actual jittered Member schedule without a nominal round percentage',()=>{
+  const {core,summary,check}=fixture();
+  for(const b of summary.offeredWork.buckets)b.rounds=b.rounds.filter(r=>r.at===b.from);
+  const templates=summary.offeredWork.buckets[0]!.rounds;
+  const rounds=[33000,66000,99000].flatMap(offset=>templates.map(r=>({...r,at:core.from+offset})));
+  for(const b of summary.offeredWork.buckets)b.rounds=rounds.filter(r=>r.at>=b.from && r.at<b.to);
+  assert.deepEqual(check(),[]);
 });
 test('O5 jitter permits 33 seconds but rejects a larger cross-bucket gap',()=>{
   const {summary,check}=fixture();
