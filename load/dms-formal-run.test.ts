@@ -75,7 +75,7 @@ function stub(t:Parameters<typeof temporary>[0],interrupt:boolean) {
 test('preflight failure aborts before build, seeding or timing and cleans all hosts',async t=>{
   const {config,runtime,events}=stub(t,false);
   await assert.rejects(run(config,runtime),/failed/);
-  assert.equal(events.filter(event=>event.includes(' cleanup; else')).length,3);
+  assert.equal(events.filter(event=>event.includes(' cleanup && timeout')).length,3);
   assert.ok(!events.some(event=>event.includes("'generators'")||event.includes("'seed'")||event.includes("'build'")));
   assert.equal(events[0],'register:SIGINT');
   assert.equal(JSON.parse(readFileSync(`${config.output}/status.json`,'utf8')).phase,'failed');
@@ -86,7 +86,7 @@ for(const signal of ['SIGINT','SIGTERM'] as const) test(`cleanup registered befo
   let runtimeSignal=()=>{};
   if(signal==='SIGTERM') { const on=runtime.on;runtime.on=(s,f)=>{if(s==='SIGTERM')runtimeSignal=f;on(s,f);}; }
   await assert.rejects(run(config,runtime));
-  assert.equal(events.filter(event=>event.includes(' cleanup; else')).length,3);
+  assert.equal(events.filter(event=>event.includes(' cleanup && timeout')).length,3);
   assert.equal(events.filter(event=>event.startsWith('unregister:')).length,2);
   assert.ok(events.some(event=>event.includes('mkdir ')));
   assert.ok(!events.some(event=>event.includes("'generators'")));
@@ -185,7 +185,7 @@ test('successful full lifecycle reduces remotely and downloads bounded summaries
   assert.ok(events.filter(e=>e.includes("'reduce'")).every(e=>e.includes('generator')));
   assert.equal(events.filter(e=>e.includes('raw-') && e.includes('scp')).length,0);
   assert.equal(events.filter(e=>e.includes("'stop-copy'")).length,3);
-  assert.equal(events.filter(e=>e.includes(' cleanup; else')).length,3);
+  assert.equal(events.filter(e=>e.includes(' cleanup && timeout')).length,3);
   assert.ok(statuses.length>10);
   assert.ok(statuses.every(s=>typeof s==='object' && s!==null && 'operation' in s && 'outcome' in s));
 });
@@ -271,7 +271,7 @@ test('failure after app container creation still cleans every host before return
   };
   await assert.rejects(run(config,runtime),/failed/);
   assert.ok(events.includes('app container created; readiness failed'));
-  assert.equal(events.filter(e=>e.includes(' cleanup; else')).length,3);
+  assert.equal(events.filter(e=>e.includes(' cleanup && timeout')).length,3);
   assert.ok(!events.some(e=>e.includes("'generators'")));
 });
 test('config validates deadline timezone and raw opt-in',t=>{
@@ -298,4 +298,15 @@ test('reportAttempt rejects malformed raw points and missing files in an exact m
   }
   report=await reportAttempt(path,'smoke',execute);
   assert.ok(report.rows.every(row=>row.status==='NOT EVALUATED'));
+});
+test('unverified owned-process cleanup prevents retention and another restore',async t=>{
+  const {config,runtime,events}=lifecycle(t);const original=runtime.exec;
+  runtime.exec=async command=>{
+    if(command.args.join(' ').includes("'stop-workers'"))throw new Error('Owned processes remain after cleanup');
+    return original(command);
+  };
+  await assert.rejects(run(config,runtime),/Owned processes remain/);
+  assert.equal(events.filter(event=>event.includes("'restore'")).length,1);
+  assert.equal(events.filter(event=>event.includes("'retain-raw'")).length,0);
+  assert.equal(events.filter(event=>event.includes(' cleanup && timeout')).length,3);
 });

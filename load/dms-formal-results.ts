@@ -92,7 +92,7 @@ async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: 
       const latency=org.latencies[`dm_latency_ms:${shape}`];
       if (!latency) continue;
       found.push(latency[p]);
-      
+
     }
     evidence[`${kind}.${p}`]=found.length===organizations.length*shapes.length ? Math.max(...found) : null;
   }

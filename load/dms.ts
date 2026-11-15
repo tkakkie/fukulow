@@ -9,7 +9,7 @@ import type { Options } from 'k6/options';
 import type { DmChanges, DmList, Message, ServerEvent, SendMessageRequest } from '../web/src/api-schema.d.ts';
 import { createActivity, createActivityTarget } from '../web/src/activity.ts';
 import { dmListState, stepDmList } from '../web/src/dm-list.ts';
-import { retainedAssignment, demandFormalMix } from './dms-formal-mix.ts';
+import { retainedAssignment, demandFormalMix, retainFormalCohort, assertFormalCohort } from './dms-formal-mix.ts';
 import { senderFor, senderIndex, socketStop, peerWatched } from './dms-workload.ts';
 
 // k6 lacks browser clone/cancellation globals. State is JSON-only; HTTP uses
@@ -116,9 +116,9 @@ export async function sockets() {
         let state = dmListState();
         let epoch = 0;
         const retained=formal?retainedAssignment(index):200;
-        let heldIds:Set<string>|undefined;
+        let prepared=false;
         const prepare=async()=>{
-          if(!formal || heldIds)return;
+          if(!formal || prepared)return;
           let cursor:string|undefined;
           while(state.rows.length<retained) {
             const response=await get('/dms'+(cursor?'?cursor='+encodeURIComponent(cursor):''),member.token,'fixture');
@@ -127,7 +127,7 @@ export async function sockets() {
             cursor=data.next_cursor??undefined;
             if(!cursor && state.rows.length<retained)throw new Error('Insufficient authorized retained rows');
           }
-          state.rows=state.rows.slice(0,retained);heldIds=new Set(state.rows.map(row=>row.identity.id));
+          state=retainFormalCohort(state,retained);prepared=true;
         };
         const target = createActivityTarget<null>({
           async load() {
@@ -139,6 +139,7 @@ export async function sockets() {
               state = stepDmList(state, { type: 'wake', now: Date.now() }).state;
               const request = state.request;
               if (!request) break;
+              if(formal)assertFormalCohort(state,retained);
               used++; lanes.add(request.lane);
               try {
                 const discovery = request.lane === 'delta' || request.lane === 'coverage';
@@ -148,8 +149,8 @@ export async function sockets() {
                 if(request.generation!==state.generation)failures++;
                 state = stepDmList(state, { type: 'result', request, data: response.json() as unknown as DmChanges | DmList }).state;
                 if(formal) {
-                  state.rows=state.rows.filter(row=>heldIds!.has(row.identity.id));
-                  if(state.rows.length!==retained)throw new Error('Retained cohort changed');
+                  state=retainFormalCohort(state,retained);
+                  assertFormalCohort(state,retained);
                   mixSamples.add(1,{retained:String(retained),lane:request.lane,member:String(index)});
                 }
               } catch {
@@ -162,6 +163,8 @@ export async function sockets() {
             }
             attempts.add(used);
             const unfinished=epoch!==ownEpoch || !!state.request || Object.values(state.lanes).some(lane=>lane.pending);
+            // Pending describes traversal debt; completed5 describes five successful
+            // allocated requests, and can coexist with that debt.
             if (unfinished) pending.add(1);
             if(epoch===ownEpoch && !failures && !state.request && (formal?used>0:!unfinished)) {
               round.add(Date.now()-start,{attempts:String(used),retained:String(retained)});

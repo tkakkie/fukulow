@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { lines, parseSend } from './dms-formal-results.ts';
+import { currentGroup, stopRecordedGroups } from './dms-formal-groups.ts';
 import { checked, execute } from './dms-formal-exec.ts';
 import { quote } from './dms-formal-config.ts';
 import { statSync, renameSync } from 'node:fs';
@@ -226,17 +227,7 @@ async function durable(s: HostState, attempt: number) {
 }
 async function cleanup(s: HostState) {
   cleaning = true; save(`${root}/stopping`,'stopped');
-  for(const file of readdirSync(root).filter(file=>/^worker-\d+\.pid$/.test(file))) {
-    const pid=Number(readFileSync(`${root}/${file}`,'utf8'));
-    if(pid===process.pid || !Number.isSafeInteger(pid))continue;
-    try {
-      const cmd=readFileSync(`/proc/${pid}/cmdline`,'utf8');
-      if(!cmd.includes(`${root}/harness/load/dms-formal-host.ts`))continue;
-      await execute({program:'pkill',args:['-KILL','-P',String(pid)],timeout:5000});
-      process.kill(pid,'SIGKILL');
-    }catch { /* Worker already exited. */ }
-  }
-  await delay(1000);
+  await stopRecordedGroups(root);
   // Enumerate only exact run-owned labels plus the known Compose project label.
   for (const filter of [`label=dm-formal=${s.id}`,`label=com.docker.compose.project=${s.id}`]) {
     const ids = (await docker(['ps','-aq','--filter',filter])).split(/\s+/).filter(Boolean);
@@ -254,8 +245,10 @@ async function cleanup(s: HostState) {
 async function main() {
   const s = state(), phase = process.argv[2], attempt = Number(process.argv[3]), epoch = Number(process.argv[4]);
   if (!/^dm-formal-[a-f0-9-]+$/.test(s.id)) throw new Error('Invalid run identity');
-  const pidFile=`${root}/worker-${process.pid}.pid`;save(pidFile,String(process.pid));
-  try { switch(phase) {
+  // GNU timeout owns this group. Persist it before any command can start.
+  const pidFile=`${root}/worker-${process.pid}.pid`;save(pidFile,String(currentGroup()));
+  // Keep ownership records after exit for independent cleanup.
+  switch(phase) {
     case 'preflight': console.log(JSON.stringify(await preflight(s))); break;
     case 'rtt': {
       const target = s.role === 'app' ? s.dbAddress : s.appAddress;
@@ -271,6 +264,7 @@ async function main() {
     case 'database': await database(s); break;
     case 'app': await app(s); save(`${root}/image.json`,await docker(['image','inspect',image(s)])); break;
     case 'seed': await seed(s); break;
+    case 'stop-workers': await stopRecordedGroups(root); break;
     case 'stop-copy': await removeCopy(execute,`${s.id}-copy-${attempt}`); break;
     case 'ship': {
       const directory=`${root}/attempt-${attempt}`;
@@ -317,6 +311,6 @@ async function main() {
     case 'cleanup': await cleanup(s); break;
     case 'erase': rmSync(root,{recursive:true,force:true}); break;
     default: throw new Error('Unknown phase');
-  } } finally { rmSync(pidFile,{force:true}); }
+  }
 }
 if (process.argv[1] === import.meta.filename) main().catch(() => { console.error('Remote phase failed; private artifacts retained until collection'); process.exitCode=1; });

@@ -1,24 +1,31 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
+import { currentGroup, stopGroups } from './dms-formal-groups.ts';
 export type Command = { program: string; args: string[]; input?: string; timeout?: number; log?: string; signal?: AbortSignal };
 export type Result = { code: number; stdout: string };
 export type Executor = (command: Command) => Promise<Result>;
-// Each command owns a POSIX process group. Reap the leader via exit, then bound
-// inherited pipe/log teardown independently of descendant close events.
+// The outer executor owns the group; nested executors inherit it, including
+// seed/reduction workers. A nested timeout cancels the entire owning group.
 export const execute: Executor = async ({ program, args, input, timeout = 120_000, log, signal }) => new Promise((resolveRun, reject) => {
-  const child = spawn(program, args, { detached:true, stdio:['pipe','pipe','pipe'] });
+  const nested=!!process.env.DM_FORMAL_OWNED_GROUP;
+  const owner=nested?currentGroup():undefined;
+  const child = spawn(nested?program:'sh', nested?args:['-c','export DM_FORMAL_OWNED_GROUP=$$; exec "$@"','dm-command',program,...args], { detached:!nested, stdio:['pipe','pipe','pipe'] });
   const stream = log ? createWriteStream(log,{mode:0o600}) : undefined;
   let stdout='', failure:string|undefined, settled=false;
   let teardown:ReturnType<typeof setTimeout>|undefined;
-  const kill = () => { if(child.pid)try { process.kill(-child.pid,'SIGKILL'); } catch { /* Group already reaped. */ } };
+  const kill = () => { if(!nested && child.pid)try { process.kill(-child.pid,'SIGKILL'); } catch { /* Group already reaped. */ } };
   const finish = (code:number) => {
     if(settled)return; settled=true;clearTimeout(timer);clearTimeout(teardown);
     signal?.removeEventListener('abort',abort); kill();
     child.stdin.destroy();child.stdout.destroy();child.stderr.destroy();
     stream?.destroy();
-    if(failure)reject(new Error(`${program} ${failure}`));else resolveRun({code,stdout});
+    void (async()=>{
+      if(!nested && child.pid)await stopGroups([child.pid]);
+      if(failure)throw new Error(`${program} ${failure}`);
+      return {code,stdout};
+    })().then(resolveRun,reject);
   };
-  const stop = (reason:string) => { failure=reason;kill(); teardown ??= setTimeout(()=>finish(124),250); };
+  const stop = (reason:string) => { failure=reason;if(owner)process.kill(-owner,'SIGKILL');kill(); teardown ??= setTimeout(()=>finish(124),250); };
   const abort = () => stop('aborted');
   const timer=setTimeout(()=>stop('timeout/output limit'),timeout);
   signal?.addEventListener('abort',abort,{once:true});

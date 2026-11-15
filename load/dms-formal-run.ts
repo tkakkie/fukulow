@@ -21,12 +21,12 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const abort = new AbortController();
   const bounded=(timeout:number)=>phase==='cleanup'||config.deadline===undefined?timeout:Math.max(1000,Math.min(timeout,config.deadline-Date.now()-cleanupReserveMs));
   const remote=(host:string,command:string,timeout=120000,log?:string)=>checked(runtime.exec,{program:'ssh',args:[...sshOptions,host,command],timeout:bounded(timeout),log,signal:phase==='cleanup' ? undefined : abort.signal});
-  const worker=(host:string,op:string,n=attempt,epoch=0,timeout=120000)=>{operation=op;status();const limit=bounded(timeout);return remote(host,`timeout --signal=KILL ${Math.max(1,Math.ceil(limit/1000)-5)}s env NODE_EXTRA_CA_CERTS=${quote(root+'/ca.crt')} node ${quote(root+'/harness/load/dms-formal-host.ts')} ${quote(op)} ${n} ${epoch}`,limit,`${config.output}/host-${hosts.indexOf(host)}-${op}-${n}.log`);};
+  const worker=(host:string,op:string,n=attempt,epoch=0,timeout=120000)=>{operation=op;status();const limit=bounded(timeout);return remote(host,`timeout --signal=KILL ${Math.max(1,Math.ceil(limit/1000)-5)}s sh -c 'export DM_FORMAL_OWNED_GROUP=$PPID; exec "$@"' dm-worker env NODE_EXTRA_CA_CERTS=${quote(root+'/ca.crt')} node ${quote(root+'/harness/load/dms-formal-host.ts')} ${quote(op)} ${n} ${epoch}`,limit,`${config.output}/host-${hosts.indexOf(host)}-${op}-${n}.log`);};
   const hosts=[config.app,config.db,config.generator];
   let cleanupPromise:Promise<void>|undefined;
   const cleanup=()=>cleanupPromise ??= (async()=>{
     phase='cleanup';status();
-    const failures=await Promise.allSettled(hosts.map(host=>remote(host,`if test -f ${quote(root+'/harness/load/dms-formal-host.ts')} && test -f ${quote(root+'/state.json')}; then timeout --signal=KILL 180s env NODE_EXTRA_CA_CERTS=${quote(root+'/ca.crt')} node ${quote(root+'/harness/load/dms-formal-host.ts')} cleanup; else rm -rf ${quote(root)}; fi`,190000,`${config.output}/host-${hosts.indexOf(host)}-cleanup.log`)));
+    const failures=await Promise.allSettled(hosts.map(host=>remote(host,`if test -f ${quote(root+'/harness/load/dms-formal-host.ts')} && test -f ${quote(root+'/state.json')}; then timeout --signal=KILL 180s sh -c 'export DM_FORMAL_OWNED_GROUP=$PPID; exec "$@"' dm-worker env NODE_EXTRA_CA_CERTS=${quote(root+'/ca.crt')} node ${quote(root+'/harness/load/dms-formal-host.ts')} cleanup && timeout --signal=KILL 10s sh -c 'export DM_FORMAL_OWNED_GROUP=$PPID; exec "$@"' dm-worker env NODE_EXTRA_CA_CERTS=${quote(root+'/ca.crt')} node ${quote(root+'/harness/load/dms-formal-host.ts')} stop-workers; else rm -rf ${quote(root)}; fi`,190000,`${config.output}/host-${hosts.indexOf(host)}-cleanup.log`)));
     json('cleanup.json',failures.map((result,index)=>({role:['app','db','generator'][index],ok:result.status==='fulfilled',retained:result.status==='fulfilled'?'Private scratch/raw evidence and shared base images/cache (if bootstrapped)':'Removal failed; inspect host cleanup log'})));
     if (failures.some(result=>result.status==='rejected')) throw new Error('Remote cleanup incomplete; see cleanup.json and private state');
   })();
@@ -126,8 +126,11 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         results.push(failed);
       } finally {
         if(!interrupted) {
+          // Verify every previous command group is stopped before retention or retry.
+          await Promise.all(hosts.map(host=>worker(host,'stop-workers',attempt,0,60000)));
           await worker(config.db,'stop-copy',attempt,0,60000);
           const retained=await Promise.allSettled(hosts.map(host=>worker(host,'retain-raw',attempt,0,2400000)));
+          await Promise.all(hosts.map(host=>worker(host,'stop-workers',attempt,0,60000)));
           if(retained.some(row=>row.status==='rejected')) {infrastructureFailure=true;json(`attempt-${attempt}/raw-retention-failure.json`,{remoteRoot:root,operation:'retain-raw',roles:retained.map((row,i)=>({role:['app','db','generator'][i],ok:row.status==='fulfilled'})),retained:'Uncompressed remote evidence on failed hosts; compression failed'});}
         }
       }
