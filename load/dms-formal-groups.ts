@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -7,15 +8,22 @@ export function currentGroup():number {
   if(!Number.isSafeInteger(group)||group<=1)throw new Error('Missing owned process group');
   return group;
 }
+// Darwin can return EPERM for a just-reaped process group. Confirm absence
+// independently; an existing or uninspectable group still fails cleanup.
+function absentDarwinGroup(group:number,error:unknown):boolean {
+  if(process.platform!=='darwin'||(error as NodeJS.ErrnoException).code!=='EPERM')return false;
+  const groups=execFileSync('ps',['-A','-o','pgid='],{encoding:'utf8',timeout:1000,maxBuffer:1024*1024});
+  return !groups.trim().split(/\s+/).some(value=>Number(value)===group);
+}
 function groupExists(group:number):boolean {
-  try {process.kill(-group,0);return true;}catch(error){if((error as NodeJS.ErrnoException).code==='ESRCH')return false;throw error;}
+  try {process.kill(-group,0);return true;}catch(error){if((error as NodeJS.ErrnoException).code==='ESRCH'||absentDarwinGroup(group,error))return false;throw error;}
 }
 export async function stopGroups(groups:number[]):Promise<void> {
   const owned=new Set(groups);
   if(process.env.DM_FORMAL_OWNED_GROUP && owned.has(Number(process.env.DM_FORMAL_OWNED_GROUP)))throw new Error('Refusing to clean own process group');
   for(const group of owned) {
     if(!Number.isSafeInteger(group)||group<=1)throw new Error('Invalid owned process group');
-    try {process.kill(-group,'SIGKILL');}catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error;}
+    try {process.kill(-group,'SIGKILL');}catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH'&&!absentDarwinGroup(group,error))throw error;}
   }
   // Require the complete group to disappear (including unreaped children).
   // Failure prevents retention/retry rather than reporting cleanup success.

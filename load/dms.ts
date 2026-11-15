@@ -9,7 +9,7 @@ import type { Options } from 'k6/options';
 import type { DmChanges, DmList, Message, ServerEvent, SendMessageRequest } from '../web/src/api-schema.d.ts';
 import { createActivity, createActivityTarget } from '../web/src/activity.ts';
 import { dmListState, stepDmList } from '../web/src/dm-list.ts';
-import { formalCreatePair, type MixedScenario } from './dms-formal-scenarios.ts';
+import { arrivalRate, scaledSocketMember, formalCreatePair, type MixedScenario } from './dms-formal-scenarios.ts';
 import { retainedAssignment, demandFormalMix, retainFormalCohort, assertFormalCohort } from './dms-formal-mix.ts';
 import { senderFor, senderIndex, socketStop, peerWatched } from './dms-workload.ts';
 
@@ -54,9 +54,9 @@ const shapes = ['first', 'deep', 'refresh', 'delta', 'coverage', 'resolve', 'ren
 export const options: Options = {
   scenarios: {
     sockets: { executor: 'shared-iterations', exec: 'sockets', vus: 1, iterations: 1, maxDuration: `${seconds + ramp + 120}s` },
-    ...(rate ? { sends: { executor: 'constant-arrival-rate' as const, exec: 'send', rate, timeUnit: '1s', duration: `${seconds-5}s`, startTime: `${ramp}s`, preAllocatedVUs: 50, maxVUs: 150, gracefulStop: '10s' },
-      browsing: { executor: 'constant-arrival-rate' as const, exec: 'browse', rate: browseRate || 1, timeUnit: '1s', duration: `${seconds-5}s`, startTime: `${ramp}s`, preAllocatedVUs: 5, maxVUs: 20 },
-      opens: { executor: 'constant-arrival-rate' as const, exec: 'openDm', rate: openRate || 1, timeUnit: '1s', duration: `${seconds-5}s`, startTime: `${ramp}s`, preAllocatedVUs: 5, maxVUs: 20 } } : {}),
+    ...(rate ? { sends: { executor: 'constant-arrival-rate' as const, exec: 'send', ...arrivalRate(rate), duration: `${seconds-5}s`, startTime: `${ramp}s`, preAllocatedVUs: 50, maxVUs: 150, gracefulStop: '10s' },
+      browsing: { executor: 'constant-arrival-rate' as const, exec: 'browse', ...arrivalRate(browseRate || 1), duration: `${seconds-5}s`, startTime: `${ramp}s`, preAllocatedVUs: 5, maxVUs: 20 },
+      opens: { executor: 'constant-arrival-rate' as const, exec: 'openDm', ...arrivalRate(openRate || 1), duration: `${seconds-5}s`, startTime: `${ramp}s`, preAllocatedVUs: 5, maxVUs: 20 } } : {}),
   },
   summaryTrendStats: ['min', 'med', 'p(95)', 'p(99)', 'max'],
   systemTags: ['status', 'method', 'name', 'scenario', 'expected_response'],
@@ -66,7 +66,7 @@ export const options: Options = {
 };
 if (!browseRate) delete options.scenarios!.browsing;
 if (!openRate) delete options.scenarios!.opens;
-if (browserOnly) options.scenarios = { browsing: { executor: 'constant-arrival-rate', exec: 'browse', rate: browseRate, timeUnit: '1s', duration: `${seconds-5}s`, ...(formal ? { startTime: `${ramp}s` } : {}), preAllocatedVUs: 20, maxVUs: 100 } };
+if (browserOnly) options.scenarios = { browsing: { executor: 'constant-arrival-rate', exec: 'browse', ...arrivalRate(browseRate), duration: `${seconds-5}s`, ...(formal ? { startTime: `${ramp}s` } : {}), preAllocatedVUs: 20, maxVUs: 100 } };
 if (formal && !browserOnly && (renewals.length < Math.ceil(openRate*(seconds-5)/4) || Number(__ENV.DM_SENDERS) < rate)) throw new Error('Insufficient renewal pool or per-Member send interval');
 if (formal && browserOnly && !seed.deep) throw new Error('Missing Session-bound deep cursor');
 // Minute buckets align exactly with formal core/extension boundaries without per-send tag cardinality.
@@ -86,7 +86,7 @@ export async function sockets() {
   const clients: WebSocket[] = [], activities: ReturnType<typeof createActivity>[] = [];
   errors.add(0); accepted.add(0); duplicates.add(0); expectedPeer.add(0); receivedPeer.add(0);
   for (let i = 0; i < count; i++) {
-    const index = offset + i, member = members[index];
+    const index = offset + (__ENV.DM_LOAD_SCALE?scaledSocketMember(i,count,Number(__ENV.DM_SENDERS)):i), member = members[index];
     const watched = index % 2 === 1;
     const socket = new WebSocket(`${org.replace(/^http/, 'ws')}/ws`, null, { headers: headers(member.token) });
     clients.push(socket);
@@ -201,7 +201,7 @@ export async function sockets() {
         ownActivity?.notice(notice);
       }
     });
-    if ((i+1)%100 === 0) await pause(connectInterval);
+    if ((i+1)%(__ENV.DM_LOAD_SCALE?Math.max(1,count/10):100) === 0) await pause(connectInterval);
   }
   const deadline = Date.now()+60000;
   while (ready < count && Date.now() < deadline) await pause(100);
@@ -251,4 +251,4 @@ export function openDm() {
   calls.add(1, { shape }); latency.add(Date.now()-started, { shape });
   if (response.status !== (create ? 201 : 200)) errors.add(1, { shape, status: String(response.status) });
 }
-export function handleSummary(data: unknown) { return { '/output/summary.json': JSON.stringify({...(data as Record<string, unknown>),scenario:__ENV.DM_FORMAL_SCENARIO || 'main',label:formal ? (__ENV.DM_SMOKE === '1' ? 'NON-ACCEPTANCE' : 'FORMAL') : undefined}, null, 2) }; }
+export function handleSummary(data: unknown) { return { '/output/summary.json': JSON.stringify({...(data as Record<string, unknown>),scenario:__ENV.DM_FORMAL_SCENARIO || 'main',label:__ENV.DM_FORMAL_TARGET==='local'?'MAC-RELATIVE':formal ? (__ENV.DM_SMOKE === '1' ? 'NON-ACCEPTANCE' : 'FORMAL') : undefined}, null, 2) }; }

@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-pub(super) async fn wait_lock(pool: &PgPool, pattern: &str) {
+pub(crate) async fn wait_lock(pool: &PgPool, pattern: &str) {
     tokio::time::timeout(Duration::from_secs(5),async {
         loop {
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1")
@@ -9,6 +9,41 @@ pub(super) async fn wait_lock(pool: &PgPool, pattern: &str) {
             if count>0 {break}tokio::task::yield_now().await;
         }
     }).await.unwrap_or_else(|_|panic!("no matching lock waiter: {pattern}"));
+}
+
+#[fukulow_test::test]
+async fn reciprocal_sends_complete_without_deadlock_and_allocate_gap_free_seq(pool: PgPool) {
+    let f = Fixture::new(pool, "guest").await;
+    let c = f.dm().await;
+    let mut seqs = Vec::new();
+    for _ in 0..20 {
+        let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                f.send(&f.at, c, Uuid::new_v4()),
+                f.send(&f.bt, c, Uuid::new_v4())
+            )
+        })
+        .await
+        .expect("reciprocal DM sends must not deadlock");
+        for response in [a, b] {
+            assert_eq!(response.status(), StatusCode::CREATED);
+            seqs.push(body(response).await["seq"].as_i64().unwrap());
+        }
+    }
+    seqs.sort_unstable();
+    assert_eq!(seqs, (1..=40).collect::<Vec<_>>());
+    let history = f
+        .get(&f.at, &format!("/api/v1/channels/{c}/messages"))
+        .await;
+    let mut persisted: Vec<_> = history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["seq"].as_i64().unwrap())
+        .collect();
+    persisted.sort_unstable();
+    assert_eq!(persisted, seqs);
+    f.pools.app.close().await;
 }
 
 #[fukulow_test::test]

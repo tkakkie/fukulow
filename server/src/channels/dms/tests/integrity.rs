@@ -63,6 +63,8 @@ async fn lost_caller_revision_never_borrows_reactivated_authority_or_canonical_b
     let f = Fixture::new(pool, "guest").await;
     let c = f.dm().await;
     let key = Uuid::new_v4();
+    let active_key = Uuid::new_v4();
+    let active_sent = body(f.send(&f.at, c, active_key).await).await;
     let sent = body(f.send(&f.bt, c, key).await).await;
     let captured = extract_auth(f.state.clone(), &f.bt).await;
     f.deactivate(f.b).await;
@@ -125,6 +127,28 @@ async fn lost_caller_revision_never_borrows_reactivated_authority_or_canonical_b
                 .len(),
             1
         );
+        assert!(
+            f.get(&f.at, &format!("/api/v1/channels/{c}/messages"))
+                .await["messages"]
+                .as_array()
+                .unwrap()
+                .contains(&sent)
+        );
+        let retry = f.send(&f.at, c, active_key).await;
+        assert_eq!(retry.status(), StatusCode::CREATED);
+        assert_eq!(body(retry).await, active_sent);
+        let retry_key = Uuid::new_v4();
+        let denied = f.send(&f.at, c, retry_key).await;
+        assert_eq!(denied.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body(denied).await,
+            json!({"error": if active {
+                "dm_peer_access_lapsed"
+            } else {
+                "dm_peer_deactivated"
+            }})
+        );
+        assert_eq!(f.snapshot().await, before);
     }
     f.pools.app.close().await;
 }
