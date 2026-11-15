@@ -46,9 +46,9 @@ jobs:
           YAML
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build isolated image with existing CI layer cache
+        id: build-image
         # Run bake inside the action so the cache-writing runtime token reaches only
-        # this child process. Unlike ci.yml it is not exported to later steps,
-        # which run third-party npm and browser code.
+        # this child process, never later steps running npm and browser code.
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
