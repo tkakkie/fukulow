@@ -25,11 +25,20 @@ function checkInheritedEnv(scope: string, indent: number) {
     assert.match(line, new RegExp(`^ {${indent}}[\\w-]+:(?:[ \\t]|$)`),
       'inherited environment for cache credentials requires plain mapping keys')
   }
-  const blocks = new RegExp(`^ {${indent}}env:[^\\n]*(?:\\n(?: {${indent + 1},}[^\\n]*|[ \\t]*$))*`, 'gm')
-  for (const [block] of scope.matchAll(blocks)) {
-    const lines = block.split('\n').filter(line => line.trim() && !line.trimStart().startsWith('#'))
-    assert.match(lines[0], /^ *env: *(?:#.*)?$/, 'inherited environment for cache credentials must use a block mapping')
-    for (const line of lines.slice(1)) {
+  const lines = scope.split('\n')
+  for (let index = 0; index < lines.length; index++) {
+    if (!new RegExp(`^ {${indent}}env:`).test(lines[index])) continue
+    assert.match(lines[index], /^ *env: *(?:#.*)?$/, 'inherited environment for cache credentials must use a block mapping')
+    for (index++; index < lines.length; index++) {
+      const line = lines[index]
+      // YAML comments and blank lines never end a mapping, even when outdented.
+      if (!line.trim() || line.trimStart().startsWith('#')) continue
+      if (line.match(/^ */)![0].length <= indent) {
+        assert.match(line, /^ *[\w-]+:(?:[ \t]|$)/,
+          'inherited environment for cache credentials requires plain mapping keys')
+        index--
+        break
+      }
       const key = line.match(new RegExp(`^ {${indent + 2}}([A-Z_][A-Z0-9_]*): .+$`))?.[1]
       assert.ok(key && inheritedEnvKeys.has(key), 'inherited environment key for cache credentials must be allowlisted')
     }
@@ -196,6 +205,45 @@ test('startup restrictions leave unrelated steps and jobs alone and allow known 
     .replace('      - name: Fetch upgrade source\n',
       '      - run: node scripts/unrelated.ts\n        env: { BASH_ENV: ./unrelated.sh }\n      - name: Fetch upgrade source\n')
   assert.equal(checkWorkflow('ci.yml', workflow).size, 2)
+})
+
+test('inherited env scans past comments at every indent and fails closed on unclassified lines', () => {
+  for (const file of ['ci.yml', 'e2e-compose.yml']) {
+    const workflow = read(`.github/workflows/${file}`)
+    const job = file === 'ci.yml' ? 'docker' : 'acceptance'
+    const jobEnv = workflow.slice(workflow.indexOf(`  ${job}:\n`))
+      .match(/^    env:[^\n]*(?:\n(?: {6}[^\n]*|[ \t]*$))*/m)![0]
+    const expected = [...checkWorkflow(file, workflow).keys()]
+    for (const indent of [0, 4]) {
+      const prefix = ' '.repeat(indent)
+      const insert = (env: string) => indent === 0
+        ? workflow.replace('jobs:', `${env}jobs:`)
+        : workflow.replace(jobEnv, env)
+      // Cover workflow/job parent indentation, env indentation and entry indentation.
+      for (const commentIndent of new Set([0, Math.max(0, indent - 2), indent, indent + 2])) {
+        for (const betweenEntries of [false, true]) {
+          for (const trailingComment of ['', ' # startup settings']) {
+            const env = [
+              `${prefix}env:${trailingComment}`,
+              ...(betweenEntries ? [`${prefix}  COMPOSE_PROFILES: caddy`] : []),
+              '', ' \t', `${' '.repeat(commentIndent)}# Node startup settings`, '',
+              `${prefix}  NODE_OPTIONS: --import ./scripts/check-db-upgrade.ts`, '',
+            ].join('\n')
+            const context = `${file}, indent ${indent}, comment indent ${commentIndent}, between ${betweenEntries}, header ${trailingComment}`
+            assert.throws(() => checkWorkflow(file, insert(env)), /inherited environment/, context)
+            assert.deepEqual([...checkWorkflow(file, insert(env.replace(
+              'NODE_OPTIONS: --import ./scripts/check-db-upgrade.ts', 'FUKULOW_DOMAIN: localhost'))).keys()], expected, context)
+          }
+        }
+      }
+      for (const line of ['\tNODE_OPTIONS: --import ./scripts/check-db-upgrade.ts',
+        `${prefix}not-a-mapping`, `${prefix}  <<: *startup`,
+        `${prefix}   NODE_OPTIONS: --import ./scripts/check-db-upgrade.ts`]) {
+        const env = `${prefix}env: # startup settings\n# outdented comment\n${line}\n`
+        assert.throws(() => checkWorkflow(file, insert(env)), /inherited environment/)
+      }
+    }
+  }
 })
 
 type BuildCall = { command: string, args: string[], credentials: boolean }
