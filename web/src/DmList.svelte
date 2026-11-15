@@ -25,13 +25,15 @@
   {/if}
   <ul>
     {#each rows as row (row.identity.id)}
+      {@const unreadCount = unread ? unread(row.identity.id) : row.baseline?.unread_count ?? null}
+      {@const mentionCount = mentions ? mentions(row.identity.id) : row.baseline?.mention_unread_count ?? null}
       <li>
         <ListRow prefix="💬" name={`${row.identity.peer.name}${row.identity.peer.active ? '' : '（無効）'}`}
           selected={selectedId === row.identity.id}
-          unreadCount={row.baseline ? (unread?.(row.identity.id) ?? row.baseline.unread_count) : 0}
-          mentionUnreadCount={row.baseline ? (mentions?.(row.identity.id) ?? row.baseline.mention_unread_count) : 0}
+          unreadCount={unreadCount ?? 0}
+          mentionUnreadCount={mentionCount ?? 0}
           onclick={() => onselect(row.identity.id)} />
-        {#if !row.baseline}<span class="dm-list__unknown">未読を確認中</span>{/if}
+        {#if unreadCount === null || mentionCount === null}<span class="dm-list__unknown">未読を確認中</span>{/if}
       </li>
     {/each}
   </ul>

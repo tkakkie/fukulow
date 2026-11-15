@@ -72,5 +72,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [sync](sync.md): `DM access generations discard pending marks and a late old mark cannot replace the renewed baseline`, `P8 accepts one atomic winning tuple and rejects contradictory equal-position counts`, `DM discovery neither watches nor marks read and selection bootstraps the first Message through common sync`
 
 - [messages](messages.md): `dm_mentions_participant_roles_replies_mark_read_and_renewal_share_batched_counts`, `dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set`
-- [web](web.md): `DM Mention counts converge across live duplicate replay reconnect marks and access loss`, `Unread-only DM responses cannot cover Mention invalidations and retry through the shared schedule`
+- [web](web.md): `DM Mention counts converge across live duplicate replay reconnect marks and access loss`, `Unread-only DM responses cannot cover Mention invalidations and retry through the shared schedule`, `DM access loss hides both retained baseline badges until a renewed controller baseline arrives`
 - [realtime](realtime.md): `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`

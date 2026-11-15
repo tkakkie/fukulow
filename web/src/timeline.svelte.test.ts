@@ -7098,3 +7098,98 @@ it('DM lists show shared Mention badges beside Unread and DM timelines render ac
   expect(host.textContent).toContain(`@参加者 @{member:${denied}}`)
   await unmount(timeline); sync.close()
 })
+
+it('DM badges preserve unresolved controller counts until valid counts return and use baselines only without callbacks', async () => {
+  const { default: DmList } = await import('./DmList.svelte')
+  const { dm } = await import('./dm-test-helpers')
+  const baseline = dm('D', { unread_count: 8, mention_unread_count: 2 })
+  const counts = $state<{ unread: number | null; mentions: number | null }>({ unread: 3, mentions: 1 })
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const props = { rows: [{ identity: baseline, baseline, access: 1, used: 1 }], selectedId: 'D', onselect() {}, onmore() {}, onretry() {} }
+  const list = mount(DmList, { target: host as unknown as Element, props: {
+    ...props, unread: () => counts.unread, mentions: () => counts.mentions,
+  } })
+  const badge = (kind: string) => host.querySelector(`.ui-badge--${kind}`)?.getAttribute('aria-label')
+  await settle()
+  expect(badge('unread')).toBe('未読 3件'); expect(badge('mention')).toBe('メンションあり')
+  expect(host.textContent).not.toContain('未読を確認中')
+  counts.mentions = null; await settle()
+  expect(badge('mention')).toBeUndefined(); expect(badge('unread')).toBe('未読 3件')
+  expect(host.textContent).toContain('未読を確認中')
+  counts.unread = null; counts.mentions = 2; await settle()
+  expect(badge('unread')).toBeUndefined(); expect(badge('mention')).toBe('メンション 2件')
+  expect(host.textContent).toContain('未読を確認中')
+  counts.mentions = null; await settle()
+  expect(badge('unread')).toBeUndefined(); expect(badge('mention')).toBeUndefined()
+  counts.unread = 5; counts.mentions = 2; await settle()
+  expect(badge('unread')).toBe('未読 5件'); expect(badge('mention')).toBe('メンション 2件')
+  expect(host.textContent).not.toContain('未読を確認中')
+  counts.unread = 0; counts.mentions = 0; await settle()
+  expect(badge('unread')).toBeUndefined(); expect(badge('mention')).toBeUndefined()
+  expect(host.textContent).not.toContain('未読を確認中')
+  await unmount(list)
+  const fallback = mount(DmList, { target: host as unknown as Element, props })
+  await settle()
+  expect(badge('unread')).toBe('未読 8件'); expect(badge('mention')).toBe('メンション 2件')
+  expect(host.textContent).not.toContain('未読を確認中')
+  await unmount(fallback)
+  const unknown = mount(DmList, { target: host as unknown as Element, props: {
+    ...props, rows: [{ identity: baseline, access: 1, used: 1 }],
+  } })
+  await settle()
+  expect(badge('unread')).toBeUndefined(); expect(badge('mention')).toBeUndefined()
+  expect(host.textContent).toContain('未読を確認中')
+  await unmount(unknown)
+})
+
+it('DM access loss hides both retained baseline badges until a renewed controller baseline arrives', async () => {
+  vi.useFakeTimers()
+  const { default: DmList } = await import('./DmList.svelte')
+  const { dm } = await import('./dm-test-helpers')
+  const { dmsAdapter } = await import('./dms.svelte')
+  let baseline = dm('D', { as_of_seq: 1, read_seq: 0, unread_count: 1, main_unread_count: 1, mention_unread_count: 1 })
+  const net = fakeNetwork()
+  net.pages.D = ok({ messages: [{ ...record(1, 'D'), sender: 'peer', mentions: [{ member_id: 'me', name: 'Me' }] }], has_more: false })
+  const options = net.options()
+  const session = createSession({ ...options, selfId: 'me', organizationId: 'org', onEnded() {},
+    channelsApi: { listChannels: async () => ok({ channels: [] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    unreadApi: { ...options.unreadApi!, listChannels: async () => ok({ channels: [] }) },
+    dmsApi: {
+      changes: async ({ lane }) => ok({ dms: [baseline], next_cursor: lane, caught_up: true }),
+      list: async () => ok({ dms: [baseline], next_cursor: null }), open: async () => ok(baseline),
+    },
+  })
+  net.socket.onReady(); net.event({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000)
+  session.dms.select('D'); await settle(); net.subscribed('D', 1); await settle()
+  await vi.advanceTimersByTimeAsync(1000)
+  const dms = dmsAdapter(session.dms), unread = unreadAdapter(session.unread, 'D')
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const list = mount(DmList, { target: host as unknown as Element, props: {
+    get rows() { return dms.state.rows }, selectedId: 'D',
+    unread: () => unread.state.unreadCount, mentions: () => unread.state.mentionUnreadCount,
+    onselect() {}, onmore() {}, onretry() {},
+  } })
+  const badge = (kind: string) => host.querySelector(`.ui-badge--${kind}`)?.getAttribute('aria-label')
+  try {
+    await settle()
+    expect(badge('unread')).toBe('未読 1件'); expect(badge('mention')).toBe('メンションあり')
+    net.event({ type: 'channel_access_lost', channel_id: 'D' }); await settle()
+    expect(session.unread.get('D').unreadCount).toBeNull()
+    expect(session.unread.get('D').mentionUnreadCount).toBeNull()
+    expect(session.dms.get().rows[0]?.baseline?.unread_count).toBe(1)
+    expect(session.dms.get().rows[0]?.baseline?.mention_unread_count).toBe(1)
+    expect(badge('unread')).toBeUndefined(); expect(badge('mention')).toBeUndefined()
+    expect(host.textContent).toContain('未読を確認中')
+    baseline = dm('D', { as_of_seq: 3, read_seq: 1, unread_count: 2, main_unread_count: 2, mention_unread_count: 2 })
+    net.event({ type: 'channel_access_gained', channel_id: 'D' }); await vi.advanceTimersByTimeAsync(16_000)
+    await settle()
+    expect(session.unread.get('D').unreadCount).toBeNull()
+    expect(session.unread.get('D').mentionUnreadCount).toBeNull()
+    expect(badge('unread')).toBeUndefined(); expect(badge('mention')).toBeUndefined()
+    session.dms.select('D'); await settle(); net.subscribed('D', 3)
+    session.dms.refresh(); await vi.advanceTimersByTimeAsync(16_000)
+    await settle()
+    expect(badge('unread')).toBe('未読 2件'); expect(badge('mention')).toBe('メンション 2件')
+    expect(host.textContent).not.toContain('未読を確認中')
+  } finally { await unmount(list); session.close() }
+})
