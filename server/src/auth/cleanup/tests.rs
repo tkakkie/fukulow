@@ -1,6 +1,25 @@
 use super::*;
 use uuid::Uuid;
 
+#[tokio::test]
+async fn cleanup_database_failure_identifies_operation_without_raw_details() {
+    use tracing::instrument::WithSubscriber;
+    let output = crate::observability::tests::Capture::default();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://postgres:secret-cleanup-password@localhost/db")
+        .unwrap();
+    pool.close().await;
+    run(&pool).with_subscriber(output.subscriber()).await;
+    let events = output.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["fields"],
+        serde_json::json!({"event":"database_failure", "kind":"pool_closed"})
+    );
+    assert_eq!(events[0]["span"]["operation"], "session_cleanup");
+    assert!(!output.text().contains("secret-"));
+}
+
 async fn seed(pool: &PgPool, expired: i32) -> Uuid {
     let account = Uuid::new_v4();
     sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'unused')")

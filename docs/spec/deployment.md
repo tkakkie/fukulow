@@ -25,10 +25,71 @@ Related: [Setup token](accounts.md#setup).
 ## Deployment (#194 C)
 - The runtime image runs as UID/GID 10001, with a root-owned executable and no writable application data. Dockerfile base images and external deployment/load Compose images use a tag plus a registry-verified multi-platform sha256 digest. Dependabot checks Dockerfile and both Compose directories weekly; image updates still require review and deployment checks.
 - Every deployment and load service uses `json-file` logging with `max-size: 10m` and `max-file: 3`. These bounds apply to Docker's local logs per container; arrange separate retention if longer incident history is needed. Recreate existing containers to apply log options.
-- Caddy is the default production profile: use a public DNS name pointing at the VPS, reachable TCP ports 80/443, persistent `caddy_data` and valid HTTPS before setup or Sign in. The localhost certificate is for local checks; clients must trust it explicitly.
+- Caddy is the default production profile: use a public DNS name pointing at the VPS, reachable TCP ports 80/443 (or the restricted-access procedure below), persistent `caddy_data` and valid HTTPS before setup or Sign in. The localhost certificate is for local checks; clients must trust it explicitly.
 - The shipped nginx profile serves HTTP only and is **not production-safe alone**. Production requires an external TLS terminator with a valid certificate for the public domain, HTTP-to-HTTPS redirection, HSTS on HTTPS responses (including errors), and WebSocket upgrade support. Restrict nginx's HTTP ingress to that terminator using a firewall or a private/loopback port override; clients must never bypass TLS. Preserve the public Host and keep `FUKULOW_COOKIE_SECURE=true`. The stock nginx config derives HSTS from actual local TLS, so it cannot set HSTS for external TLS; the terminator must do so. Caddy handles the public HTTPS path directly.
 - An HTTP TLS terminator also becomes nginx's immediate client. To preserve per-client sign-in budgets, configure nginx real-IP handling to trust only that terminator's fixed IP and a client-IP header it overwrites; verify distinct client budgets. Never trust arbitrary forwarded headers. This deployment-specific configuration is outside the stock HTTP-only profile.
 - The binary remains PID 1 with Docker's default SIGTERM stop signal and the existing 75-second stop grace period; #195 handles shutdown. No init wrapper is needed because the server starts no child processes.
+
+### Restricted access through SSH (#392; preparation for #285)
+
+SSH tunnelling is the first candidate, pending maintainer deployment. Firewall public ingress to allow only SSH; close 80/443 on every public IPv4/IPv6 address, including Docker-published paths (host firewall rules alone may be bypassed by Docker). Keep app/DB unpublished. Caddy still terminates TLS for `FUKULOW_DOMAIN=<app-domain>` with a valid domain certificate and persistent `caddy_data`; the tunnel carries TLS unchanged to Caddy, never directly to app HTTP.
+
+**Loopback-only Caddy ports.** Docker publishes `80:80`/`443:443` on every host address and its rules can bypass the host firewall, so bind Caddy to loopback with a private Compose override kept outside the checkout:
+
+```yaml
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1:443:443"
+```
+
+Use `!override` (Compose 2.24.4 or later): a plain `ports:` list in an override is appended to the base list and leaves `80`/`443` public (verified with `docker compose config`). Pass it on every command (`docker compose -f compose.yml -f '<override>' --profile caddy ...`); a command that recreates Caddy without it republishes the public ports. Port 80 stays unpublished; the SSH tunnel needs only loopback 443. Verify on the VPS before and after each change:
+
+```sh
+docker compose -f compose.yml -f '<override>' --profile caddy port caddy 443   # expect 127.0.0.1:443
+ss -ltnH '( sport = :80 or sport = :443 )'                                    # expect only 127.0.0.1:443
+```
+
+The maintainer chooses certificate issuance/renewal:
+
+- DNS-01 keeps 80/443 closed, but needs a custom Caddy build with the DNS provider module (absent from the stock image), reviewed/pinned updates and a least-privilege DNS API token kept privately outside the checkout. DNS propagation and token custody add operational work; outbound DNS/ACME access is still needed.
+- HTTP-01 (80) or TLS-ALPN-01 (443) can use a short, deliberate public opening with correct public DNS. Run the window without the loopback override, then restore it immediately after issuance and rerun the restriction checks. This temporarily weakens isolation; renewal needs another approved window before expiry or a switch to DNS-01. A one-time opening does not provide unattended renewal while closed.
+
+After approval, on the operator machine (replace placeholders privately):
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8443:127.0.0.1:443 '<ssh-user>@<vps-host>'
+```
+
+Map `<app-domain>` to `127.0.0.1` in the operator's hosts file, then browse `https://<app-domain>:8443`; keep `<vps-host>` resolving to the VPS for SSH. Local 8443 avoids privileged binding. Preserve domain TLS SNI and HTTP Host (including `:8443`) through Caddy: browsing by loopback name/IP or changing only Host breaks certificate/SNI checks. Do not disable certificate verification. Keep `FUKULOW_COOKIE_SECURE=true` for `Secure`/`__Host-fukulow_session` cookies. Cookie WebSockets require the HTTPS same-Host Origin, including port, or an exact `FUKULOW_WS_ALLOWED_ORIGINS` match; forwarded headers do not decide it ([auth decisions](../decisions/auth.md)). If configured, allow `https://<app-domain>:8443` explicitly. The browser uses `wss://<app-domain>:8443` automatically.
+
+Restriction check, in one run with the tunnel and app healthy: from a non-allowlisted source outside the VPS, test each public address, bypassing local name overrides. Both ports must refuse or time out; DNS failure is not evidence. Any successful TCP connection fails the restriction check.
+
+```sh
+nc -4 -vz -w 5 '<vps-public-ipv4>' 80
+nc -4 -vz -w 5 '<vps-public-ipv4>' 443
+nc -6 -vz -w 5 '<vps-public-ipv6>' 80
+nc -6 -vz -w 5 '<vps-public-ipv6>' 443
+```
+
+Run the IPv6 pair from a source with IPv6 connectivity against every global VPS IPv6 address; skip it only when `ip -6 addr show scope global` on the VPS is empty, and record that. A source without IPv6 cannot prove refusal.
+
+In that same run, on the operator machine, require HTTPS 200 (`ok`) and a TLS WebSocket upgrade (`101 Switching Protocols`) through the tunnel:
+
+```sh
+curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 --max-time 10 -sS -D - 'https://<app-domain>:8443/api/v1/health'
+curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 --max-time 10 --http1.1 -sS -D - -o /dev/null \
+  --cookie '<private-cookie-jar>' -H 'Origin: https://<app-domain>:8443' \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: <base64-16-byte-nonce>' \
+  'https://<app-domain>:8443/api/v1/orgs/<organization-id>/ws'
+```
+
+Use a valid signed-in Member's cookie jar (0600, outside checkout) and a base64-encoded 16-byte handshake nonce; never paste credentials into commands/logs. HTTPS with Upgrade headers performs the `wss` handshake. The curl stream may time out after 101; require the observed 101, not curl exit success. No credential with an allowed Origin returns 401 before upgrade; missing/disallowed cookie Origin returns 403 (`origin_not_allowed`), not 101 (`server/src/realtime.rs`, `server/src/realtime/origin.rs`).
+
+**Client IP through the tunnel (operational note).** All tunnelled traffic reaches Caddy from the VPS itself through Docker's loopback port proxy, so the app sees one shared client IP (typically the Docker bridge gateway) for every operator. The per-IP sign-in failure budget (20 per IPv4 or IPv6 /64, 60 s) is therefore shared: one user's failed sign-ins can throttle every tunnel user, and logs/metrics cannot tell users apart by IP; identify them by Account instead. Do not add forwarded headers or widen `FUKULOW_TRUSTED_PROXIES` to recover the original IP. Lifting the restriction restores per-client IPs only for clients connecting directly to public Caddy; clients still using the SSH tunnel keep sharing one IP.
+
+#285 manual checks stay behind Caddy: two signed-in browsers exchange Messages over verified `wss`; restart app with `docker compose -f compose.yml -f '<override>' restart app` and verify reconnect/catch-up; interrupt then restore the tunnel/operator network and verify reconnect/catch-up again. A tunnel drop tests the client transport path, not loss of the VPS network; record that distinction privately. Inspect [application logs](#logs-and-aggregates-198-b) over SSH for startup, upgrade, disconnect and recovery; keep results private. R2 backup/alert/restore gates remain [#316](#operator-runbook-and-production-hold-316), without credentials, endpoints or account values here. Provisioning, contracts, DNS, certificates, credentials, deployment and lifting the restriction remain maintainer work ([workflow §12](../workflow.md#12-needs-the-maintainer)); #285 remains blocked.
 
 ## Send limit (#306)
 - `FUKULOW_SEND_BURST` (tokens, default 10) and `FUKULOW_SEND_REFILL_PER_SECOND` (tokens per second, default 1) size the per-(Organization, Member) send bucket (S6 in `docs/spec/realtime.md`). Each must be an integer from 1 to 1,000,000; unset uses the default; empty, zero or invalid values fail startup.
@@ -43,6 +104,17 @@ Related: [Setup token](accounts.md#setup).
 - Both proxies respond 404 for the exact `/api/v1/ready` path; `/api/v1/health` routing is unchanged. Compose probes go directly to the app and bypass the proxies. Proxy `depends_on: app` remains `service_started`. Unhealthy alone does not restart Compose; #163 abnormal-exit recovery and `restart: unless-stopped` are unchanged.
 - During graceful shutdown, new HTTP API requests return 503 with JSON `ErrorBody` (`error: "shutting_down"`), a jittered `Retry-After` of 1–5 seconds and `Cache-Control: no-store`. This instance is stopping; the outer middleware rejects requests before authentication, extraction or operation admission, including health checks and WebSocket handshakes.
 - Clients retry after `Retry-After`, preserving the same `client_message_id` for sends to retain idempotency (C6). Send-admission 503 (`send admission unavailable`) instead rejects one operation because its queue is full or its 30-second admission wait expired; persistence has not started. Projection-admission 503 (`projection admission unavailable`) is also an operation capacity rejection. Both admission responses use the same retry range and no-store policy.
+
+## Logs and aggregates (#198 B)
+
+Read application JSON lines from stderr with `docker compose -f compose.yml logs --no-log-prefix --since 10m app`. Existing Docker rotation bounds retained history; keep incident extracts private. No metrics endpoint, monitoring service or persistent metric storage is added.
+
+- `fields.event=http_completed` carries an `http_request` span with `request_id` (fresh UUID per request), `method`, matched `route` template, numeric `status` and `duration_ms` through response creation (not body streaming or WebSocket lifetime). Unknown routes use `<unmatched>` and extension methods use `OTHER`. Inbound `X-Request-Id` is ignored and no response header is added. Headers, raw paths/queries and bodies are never recorded.
+- WebSocket `websocket_opened`, `websocket_closed` and `websocket_disconnected` events retain the upgrade request span. `websocket_closed.code` is a fixed bucket. Counts represent server Close attempts, including failed/timed-out writes, not confirmed receipt. A peer Close or transport EOF/error is counted separately as `peer_or_transport_end`; peer reason/text and arbitrary peer codes are never logged. Disconnect includes task cancellation; an aborted task may have no Close attempt.
+- One `fields.event=metrics` line every 60 s (first after 60 s; missed ticks skipped) reports `active_websockets`, `close_1001`, `close_1011`, `close_4001`, `close_4003`, `close_4008`, `close_4029`, `close_other`, `peer_or_transport_end` and `admission_rejections`. Active counts established callbacks, excluding pending/failed handshakes, until callback exit/cancellation. Other counters are cumulative since process start. Each atomic read is safe; concurrent updates mean the whole line is an approximate snapshot. Restart resets all counters; a process dying before a tick can lose unreported counts.
+- Admission sites increment counters without per-rejection diagnostics. Each nonzero category emits at most one `fields.event=admission_rejected` line per tick with `kind` and cumulative `count`. Categories: `send_channel_queue`, `send_global_queue`, `send_channel`, `send_global`, `watermark_channel`, `watermark_global`, `notification_channel`, `notification_global`, `notification_organization`, `notification_execution`, `socket`, `password`. Compare successive counts to see growth. Categories and Close buckets are fixed; no Organization, Channel or Account labels. Ordinary HTTP completion and socket lifecycle logs still track individual requests/connections.
+- `database_failure.kind` is allowlisted: `pool_timeout`, `pool_closed`, `deadline`, `io`, `database`, `other`. Synthetic WouldBlock admission errors are counted at their admission site, not logged again. Existing SQLx error overloading (#290) still limits classification. Worker stop, cleanup/work deadlines and missing Unread positions have named events without raw errors or entity IDs. Only reviewed `fukulow` tracing events are enabled; `RUST_LOG` cannot enable SQL/parameter/dependency diagnostics. Never log cookies, bearer credentials, passwords, setup/Invite tokens or Message bodies.
+- Cleanup database failures include `span.operation=session_cleanup`. A payload-safe panic hook is installed before tracing setup and Tokio runtime construction; startup, task and thread panics emit only the fixed JSON `fields.event=panic` to stderr, without payloads or backtraces. Panics retain Rust/Tokio's normal unwind/termination behavior.
 
 ## Operations: backup and restore (#198 C)
 
@@ -59,17 +131,39 @@ node scripts/backup.ts /srv/fukulow-backups
 
 Use an operator-owned 0700 non-symlink directory under a trusted parent outside checkout/web root. Archives are 0600; only `fukulow-*.dump` is final after flush, dump and `pg_restore --list`. Failures preserve older archives. Never copy `.partial-*`; remove leftovers only when no backup runs. `--list` checks structure: also drill. Separately protect roles, server configuration, TLS keys and `.env`; record code revision/migration versions. Never migrate the only restored copy with newer code.
 
-Schedule daily (e.g. 02:15 UTC), provision capacity, check success/free space daily. Keep ≥14 successful daily archives on VPS, ≥30 off VPS, and latest drilled archive until replacement passes. Pruning is manual: only finals with verified off-VPS copies, never last good copy or merely because a job ran.
+Schedule daily (e.g. 02:15 UTC), provision capacity, check success/free space daily. Keep ≥14 successful daily archives on VPS, ≥30 off VPS, and latest drilled archive until replacement passes. VPS pruning is manual: only finals with verified off-VPS copies, never last good copy or merely because a job ran.
 
-Copy off VPS: operator-controlled host, 0700 directory, encrypted storage, existing SSH keys, recovery-operator access; same retention on workstations. Archives contain Messages, password/Session hashes and permissions; `pg_dump` has no encryption, SSH protects transport only. Substitute filenames/host:
+### Automated off-VPS backup (#316; mock implementation)
 
-```sh
-sha256sum /srv/fukulow-backups/fukulow-EXAMPLE.dump
-scp -p /srv/fukulow-backups/fukulow-EXAMPLE.dump backup@backup-host:/private/backups/.partial-EXAMPLE
-ssh backup@backup-host 'chmod 600 /private/backups/.partial-EXAMPLE && sha256sum /private/backups/.partial-EXAMPLE'
-```
+Round 5 replaces SSH copy with a dedicated R2 backup bucket, separate from the future images bucket. No lifecycle expiry. The VPS token is scoped to backup objects; image credentials never reach backups. The checker uses a backup read/delete binding and lists images only for capacity. Restore uses a separate read-only token held by the maintainer. Tokens/config files are user-owned 0600 outside the checkout, Compose environment and app container; diagnostics and notification events contain no private values.
 
-Compare hashes; rename remotely on the same filesystem to `fukulow-EXAMPLE.dump`, record success, drill that copy. Interrupted copies are never final; SCP alone is insufficient.
+The daily schedule is 02:15 UTC (systemd calendar, persistent catch-up); hourly independent checks use the injected checker. The tracked schedule contract in `scripts/backup-r2.ts` is inert: no timer, Worker, notification transport or production entry point is installed. Production wiring waits for approval. The daily flow takes a conservative capture timestamp after preflight immediately before the existing PostgreSQL 18 custom dump (a conservative snapshot-time bound), followed by its structural check, encrypts with age to an X25519 public recipient, and uploads only ciphertext. The private identity stays offline with the maintainer in at least two places. Local retention remains manual, at least 14 generations.
+
+Each attempt writes `backups/<capture-UTC>-<attempt>/archive.dump.age`, then `manifest.json`, then `verified.json`. The strict version-1 manifest records capture time, PostgreSQL major, plaintext/ciphertext SHA-256 and positive byte sizes, and SHA-256 of the recipient. The marker contains manifest SHA-256 and verification time. PUT includes hex SigV4 payload SHA-256 and base64 checksum; HEAD requires checksum mode ENABLED and matching size/checksum. Full GET read-back of archive and manifest must match before the marker is written. The marker is also checked. curl uses three retries, all errors and bounded time; uncertain PUTs are reconciled by HEAD. A mismatch abandons the generation and retries a fresh suffix (three attempts maximum), never overwriting an uncertain object.
+
+Only a parsed marker matching the manifest hash, strict manifest, capture matching the prefix and no more than five minutes ahead, and archive HEAD matching ciphertext size/checksum count as verified. All other prefixes are reported as malformed, excluded from freshness/counts and never selected for restore. The VPS daily flow re-reads the newest verified archive in full; the independent checker reads only small JSON objects and HEAD metadata, never archive bodies. Restore selection must use this same predicate and fully hash the download before decryption and the existing drill.
+
+The backup prefix has a 35-day lock; restore-verified has a 40-day lock. No age-based expiry is configured. Each checker run prunes at most five generations, only after every object is past lock, outside the newest 30 verified backups, and never the source capture of the latest restore-verified copy. Fewer than 30 verified backups, newest capture at least 24 h old, or malformed inventory freezes all deletion and alerts. Locked/protected candidates are retained. The newest restore-verified copy is never deleted; older copies require expiry of their lock and a newer copy. After a successful monthly drill the maintainer copies the whole verified generation to `restore-verified/<capture-UTC>/`; the latest copy is selected by completion time (the latest upload time of its three objects), which also measures drill age. Alert at 35 days without a new copy.
+
+The checker alerts on stale/missing backups, malformed inventory, insufficient generations, failed checks, overdue drills, and newest ciphertext below 50% or above 200% of the median of the previous seven verified archives. Daily alive messages include newest capture, backup bytes, image bytes, total bytes and percentage of the shared decimal 10 GB free tier, and supplied Class A/B operation usage. Alert at 70% and 90% capacity and 70% of 1M Class A/10M Class B operations. Production must supply account operation usage (not merely this process's requests) and persist alive-day state. The backup job never refuses a backup to save cost.
+
+### Operator runbook and production hold (#316)
+
+Before enabling anything, the maintainer must create production buckets and least-privilege tokens, confirm lock rules with no lifecycle, key custody, payment registration and any paid setting separately, confirm Discord webhook delivery privately, and approve deployment. All remain on hold, including wrangler and the first VPS restore drill. #285 stays blocked for first real-data operation until a full R2 cycle, a received forced-failure alert and a decrypting restore drill from R2 succeed on the VPS. Mock tests are not production evidence.
+
+After approval: measure a representative encrypted dump before fixing the proposed 5 GB backup budget; configure daily backup and hourly checker using the tracked schedules; retain private configuration outside the checkout. Run the daily newest full read-back and monthly download/hash/decrypt/disposable restore drill, then copy all three objects to restore-verified. A failure emits a sanitized event and preserves prior generations; investigate without printing raw diagnostics. A stale checker freezes pruning. Revoke a compromised VPS token promptly: locks protect recent objects, but unlocked objects and forged uploads remain risks; plausibility checks and decrypting drills provide additional evidence.
+
+An abandoned partial upload freezes pruning even after a successful retry. To clear it, pause backup/copy writers and automatic pruning, inspect the exact malformed prefix and confirm no upload is still active. Verify a separate complete replacement with the shared predicate and full archive hash read-back; preserve at least 30 verified backups, a fresh newest capture and the latest restore-verified copy and its source. Record the abandoned prefix and reason privately. If any object is still locked, resume scheduled backups while keeping pruning frozen, then repeat these checks after lock expiry. After every remaining object has passed its prefix lock (35 days for backups, 40 for restore-verified), remove only that abandoned prefix, marker first if present, then manifest and archive; never bypass a lock or fabricate a marker to make inventory pass. Re-list and validate inventory, resolve any other malformed prefixes, then resume writers and the checker and confirm the freeze alert clears. If any check fails, keep pruning frozen and investigate.
+
+No alert can arrive if the checker platform or notification channel is down, or a message is missed. Daily alive delivery plus weekly manual inspection of newest capture during early dogfooding mitigate this limit. At 70% capacity inspect growth; at 90% act promptly: reduce unused image originals/variants first, consider stronger backup compression or regenerable data exclusions, then seek separate paid-usage approval or a provider move. Never sacrifice retention or refuse backups for cost. R2 has no spending cap; alerts cannot enforce a billing ceiling. Use Standard storage only; no billable setting is enabled by this mock implementation.
+
+### Mock stage and production gates (#316)
+
+This PR stage is a mock implementation, not a completed production backup. #316 stays open until all gates pass and the first full restore from R2 on the VPS is verified; #285 real-data operation stays blocked until then.
+
+Production adapter (required for #316 Done when): complete R2 list pagination (continuation tokens, no silent truncation); account-level Class A/B operation usage from the provider API; persisted checker state (alive day, alerts) across runs; serialized checker and backup runs (no concurrent pruning or uploads).
+
+Real-R2 verification (required before production use, on approved buckets only): curl SigV4 authentication; PUT/HEAD/full GET with hex payload and base64 SHA-256 checksum verification, including a rejected bad checksum; Bucket Lock refusing overwrite and delete inside 35/40 days.
 
 ### Disposable restore drill
 
@@ -118,6 +212,6 @@ Run each command only after its predecessor succeeds; keep stderr private.
 
 ### Recovery window
 
-RPO target: 24 h, not a guarantee (#296), measured from the data capture (snapshot) time of the newest verified off-VPS backup, never from when its copy or verification finished; no RTO target. Daily backup, off-VPS copy, hash verification and alerts (failure, or that capture time 24 h old or older) are automated by #316; until then they are manual. WAL archiving and PITR are deferred beyond the first dogfooding deploy (#285). Daily gap: interval + dump/copy lag, longer with failures/lost VPS-only copies. Assess loss from newest verified accessible off-VPS snapshot, never job start; later writes may be lost. Measure representative recovery hardware before estimating downtime.
+RPO target: 24 h, not a guarantee (#296), measured from the data capture (snapshot) time of the newest verified off-VPS backup, never from when its copy or verification finished; no RTO target. Daily backup, off-VPS copy, hash verification and alerts (failure, or that capture time 24 h old or older) have a mock implementation in #316; production automation remains on hold. WAL archiving and PITR are deferred beyond the first dogfooding deploy (#285). Daily gap: interval + dump/copy lag, longer with failures/lost VPS-only copies. Assess loss from newest verified accessible off-VPS snapshot, never job start; later writes may be lost. Measure representative recovery hardware before estimating downtime.
 
 Initial drill conditions, result and timing limits: [measurements: backup restore drill](../measurements.md#backup-restore-drill-198-c).

@@ -111,8 +111,11 @@ async fn run(pool: &PgPool) {
     .await;
     match result {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("expired-session cleanup failed: {error}"),
-        Err(error) => eprintln!("expired-session cleanup timed out: {error}"),
+        Ok(Err(error)) => {
+            tracing::info_span!(target: "fukulow", "background", operation = "session_cleanup")
+                .in_scope(|| crate::observability::database_failure(&error));
+        }
+        Err(_) => tracing::warn!(target: "fukulow", event = "session_cleanup_deadline"),
     }
 }
 

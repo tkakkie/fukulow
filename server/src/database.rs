@@ -131,15 +131,37 @@ impl Drop for TransactionConnection {
 }
 
 pub async fn migrate_and_grant(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'fukulow_app')")
-            .fetch_one(pool)
-            .await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'fukulow_app')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        tracing::info_span!(target: "fukulow", "database", operation = "migrate_role_lookup")
+            .in_scope(|| crate::observability::database_failure(&error));
+        "Database migration failed (diagnostics suppressed)"
+    })?;
     if !exists {
         return Err("Database role fukulow_app is missing; run `migrate roles` first".into());
     }
-    migrate(pool).await?;
-    grants(pool).await?;
+    migrate(pool).await.map_err(|error| {
+        tracing::info_span!(target: "fukulow", "database", operation = "migrate").in_scope(|| {
+            match error {
+                MigrateError::Execute(error) | MigrateError::ExecuteMigration(error, _) => {
+                    crate::observability::database_failure(&error);
+                }
+                error => {
+                    crate::observability::database_failure(&sqlx::Error::Migrate(Box::new(error)))
+                }
+            }
+        });
+        "Database migration failed (diagnostics suppressed)"
+    })?;
+    grants(pool).await.map_err(|error| {
+        tracing::info_span!(target: "fukulow", "database", operation = "migrate_grants")
+            .in_scope(|| crate::observability::database_failure(&error));
+        "Database migration failed (diagnostics suppressed)"
+    })?;
     Ok(())
 }
 

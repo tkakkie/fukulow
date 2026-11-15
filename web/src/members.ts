@@ -1,3 +1,4 @@
+import { createInvites } from './invites'
 import { createActivityTarget } from './activity'
 import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
@@ -57,9 +58,10 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   // Standalone loads keep sequence fencing; held UI loads share the reconciliation queue.
   let activityManaged = false
   const listeners = new Set<() => void>()
+  const invites = createInvites(organizationId, onEnded, membershipLost)
   const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
-  function unavailable() { closed = true; loadSequence++; activityTarget.close(); authors.unavailable() }
+  function unavailable() { invites.close(); closed = true; loadSequence++; activityTarget.close(); authors.unavailable() }
   function membershipLost() {
     if (closed) return
     unavailable()
@@ -92,11 +94,11 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   })
   return {
     activityTarget: { ...activityTarget, held() { activityManaged = true } },
-    authors,
+    authors, invites,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
     unavailable,
-    close() { closed = true; activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
+    close() { invites.close(); closed = true; activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
     async load() {
       if (closed) return
       if (activityManaged) { await activityTarget.refresh(); return }
@@ -117,7 +119,10 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       set({ busy: true, error: '', inviteLink: '' })
       const r = await deps.createInvite(organizationId, { email, role })
       if (!r.ok) failed(r)
-      else set({ inviteLink: `${deps.baseUrl()}#invite=${encodeURIComponent(r.data.organization_id)}:${encodeURIComponent(r.data.token)}` })
+      else {
+        set({ inviteLink: `${deps.baseUrl()}#invite=${encodeURIComponent(r.data.organization_id)}:${encodeURIComponent(r.data.token)}` })
+        void invites.refreshIfLoaded()
+      }
       set({ busy: false })
     },
     async deactivate(id: string) {

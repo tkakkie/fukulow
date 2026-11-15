@@ -4,6 +4,13 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 | Rule | Test |
 |---|---|
+| Startup and task panics emit only a fixed JSON panic event, never payload text, secrets or backtraces | `server/tests/config.rs::startup_panics_never_echo_payloads_or_secrets`, `server/src/observability/tests.rs::task_panics_never_echo_payloads_or_secrets` |
+| Migrate keeps the missing-role recovery instruction/schema; role lookup, migration and grants failures emit one fixed kind/operation without raw DB details | `server/tests/config.rs::migrate_command_preserves_missing_role_instruction_and_suppresses_database_errors` |
+| Cleanup DB failures retain a fixed session_cleanup operation without raw details | `server/src/auth/cleanup/tests.rs::cleanup_database_failure_identifies_operation_without_raw_details` |
+| Real socket admission refusals and server Close attempts increment their counters exactly once; successful admission and allowed frames do not | `server/src/realtime/tests/limits.rs::socket_admission_and_close_counters_follow_production_paths` |
+| HTTP logs exclude credentials, tokens, bodies, raw paths/queries and inbound IDs; errors never format DB details or sources; dependency logs stay off | `server/src/observability/tests.rs::request_spans_redact_secrets_and_use_templates_and_generated_ids`, `server/src/observability/tests.rs::database_errors_never_format_sensitive_details_or_sources`, `server/tests/config.rs::startup_database_diagnostics_never_echo_sensitive_inputs` |
+| Aggregate fields and admission/close buckets are fixed; no Organization, Channel or Account labels; admission floods emit only 60 s aggregates | `server/src/observability/tests.rs::aggregates_have_fixed_cardinality_and_admission_flood_is_silent` |
+| Active WebSocket guards release on normal exit/cancellation; Close counters use fixed code buckets including 1011 and 4008 | `server/src/observability/tests.rs::active_socket_guard_releases_on_cancellation_and_normal_exit`, `server/src/observability/tests.rs::socket_close_counters_and_lifecycle_logs_use_only_fixed_codes` |
 | App pool defaults to 20/1000 ms; size outside 3..=100 or invalid size/acquire timeout fails startup; sizes and 1..5000 ms acquire deadlines apply | `server/src/database/pool/tests.rs::pool_configuration_defaults_bounds_and_overrides`, `server/tests/config.rs::startup_rejects_invalid_pool_configuration_before_database_access`, `server/src/database/pool/tests.rs::configured_pool_bounds_acquisition_and_sets_every_new_connection`, `server/src/database/pool/tests.rs::maximum_pool_constructs_and_next_size_is_rejected` |
 | Every new app connection has statement_timeout=10s; ordinary work times out with 57014 and rollback clears local RLS context on the same backend | `server/src/database/pool/tests.rs::ordinary_statement_timeout_fires_and_local_context_clears`, `server/src/database/pool/tests.rs::configured_pool_bounds_acquisition_and_sets_every_new_connection` |
 | Migrations disable statement/transaction timeouts; migration settings never leak to pooled connections after success, failure or cancellation; retry succeeds | `server/src/database/tests.rs::startup_migrations_succeed_and_keep_timeout_out_of_application_pool`, `server/src/database/tests.rs::startup_migrations_timeout_on_advisory_lock_and_can_retry`, `server/src/database/tests.rs::startup_migrations_timeout_on_ddl_lock_and_can_retry_without_partial_changes`, `server/src/database/tests/migrations.rs::startup_migrations_disable_incoming_statement_timeout`, `server/src/database/tests/migrations.rs::startup_migrations_disable_incoming_transaction_timeout`, `server/src/database/tests/migrations.rs::startup_migrations_cancellation_discards_settings_and_can_retry` |
@@ -36,6 +43,12 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 | App responses, including errors/fallbacks, carry strict CSP, nosniff and Referrer-Policy; CSP Host reflection cannot inject directives | `server/src/lib.rs::security_headers_cover_success_errors_and_fallbacks`, `server/src/lib.rs::csp_websocket_source_rejects_injected_or_ambiguous_hosts` |
 | Only Vite manifest assets get immutable caching; HTML/fallback/unhashed files revalidate; API remains no-store | `server/src/lib.rs::html_and_unhashed_files_revalidate_and_hashed_assets_are_immutable`, `server/src/lib.rs::security_headers_cover_success_errors_and_fallbacks` |
 | Membership/manager PATCH and Capabilities are generated; Channel members expose manager, no email/credentials; loss-event data is channel_id only | `server/tests/api_contract.rs::channel_membership_paths_capabilities_and_channel_only_loss_contract_are_generated` |
+| Only strict marked generations with matching capture and archive HEAD count for freshness, retention or restore selection | `scripts/backup-r2.test.ts::verified predicate rejects partial malformed unmarked and future generations` |
+| Lost upload responses require matching HEAD; uncertain generations retry fresh suffixes before any verification marker | `scripts/backup-r2.test.ts::upload verifies checksums readback and lost PUT response without overwriting`, `scripts/backup-r2.test.ts::mismatched HEAD or truncated GET abandons generation and retries new suffix` |
+| Stale or insufficient verified inventory freezes pruning, preserving at least thirty backups through an outage | `scripts/backup-r2.test.ts::long outage and insufficient or stale inventory freeze all pruning` |
+| Pruning keeps newest thirty, latest drilled copy/source and locked objects; each run deletes at most five generations | `scripts/backup-r2.test.ts::pruning keeps newest thirty latest drilled source locks and maximum five` |
+| Backup and image capabilities stay separate; the checker accesses images only by listing | `scripts/backup-r2.test.ts::backup and image capabilities cannot cross buckets and checker only lists images` |
+| Checker freshness uses capture time; capacity, operations, implausible sizes, overdue drill and daily alive are reported | `scripts/backup-r2.test.ts::capture time drives exact staleness boundary and independent checker alerts`, `scripts/backup-r2.test.ts::capacity operations plausibility overdue drill and daily alive alerts` |
 
 | Shared Message.mentions and Channel/Topic Mention counts are required in generated OpenAPI; counts are nonnegative; no Mention event exists | `server/tests/api_contract.rs::mention_contract_requires_one_shared_set_and_nonnegative_counts` |
 
@@ -43,6 +56,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
+- [realtime](realtime.md): `connection_database_failures_emit_once_with_fixed_operation_and_no_details`
 - [auth](auth.md): `startup_requires_setup_token_regardless_of_cookie_security`, `proxy_cidrs_match_only_peers_in_the_configured_networks`
 - [messages](messages.md): `send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort`, `send_context_cancelled_begin_setting_work_and_cleanup_discard`
 - [topics](topics.md): `topic_openapi_contract_includes_all_shapes_and_discriminators`
@@ -52,3 +66,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [auth](auth.md): `handlers_and_fanout_require_authenticated_context`, `deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled`
 
 - [auth](auth.md): `account_security_contract_records_paths_errors_and_account_lock_order`
+- [auth](auth.md): `invite_revocation_upgrade_backfills_existing_rows_and_pages_tied_expiries`

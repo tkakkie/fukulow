@@ -1156,6 +1156,7 @@ pub(super) mod access_loss;
 
 mod account_security;
 mod mentions;
+mod observability;
 mod round_trips;
 
 mod activity;

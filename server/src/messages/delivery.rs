@@ -166,6 +166,7 @@ impl Notification {
             .try_acquire_owned()
         else {
             // This Channel already has its bounded set of waiters; signal reconnect/replay.
+            crate::observability::admission(crate::observability::Admission::NotificationChannel);
             return;
         };
         let Ok(pending_slot) = self
@@ -175,12 +176,16 @@ impl Notification {
             .try_acquire_owned()
         else {
             // The message is committed: signal reconnect/replay instead of queuing work.
+            crate::observability::admission(crate::observability::Admission::NotificationGlobal);
             return;
         };
         // Global capacity is taken first so the per-Organization map stays bounded by it;
         // a rejected attempt holds one global permit only until this call returns.
         let Some(organization_slot) = self.delivery.reserve_organization(self.key.0, pending_slot)
         else {
+            crate::observability::admission(
+                crate::observability::Admission::NotificationOrganization,
+            );
             return;
         };
         let deadline = tokio::time::Instant::now() + NOTIFICATION_TIMEOUT;
@@ -202,7 +207,12 @@ impl Notification {
                     .publish(&pool, self.key.0, &message, &self.channel.fanout),
             )
             .await
-            .is_ok_and(|result| result.is_ok());
+            .is_ok_and(|result| {
+                if let Err(error) = &result {
+                    crate::observability::database_failure(error);
+                }
+                result.is_ok()
+            });
             drop(_slots);
             drop(self);
         });
@@ -338,7 +348,7 @@ impl Delivery {
         })
         .await
         .map_err(|_| {
-            eprintln!("work_deadline_expired operation=watermark organization={organization} channel={channel}");
+            tracing::warn!(target: "fukulow", event = "work_deadline_expired", operation = "watermark");
             sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
         })?
     }
@@ -431,7 +441,12 @@ impl Delivery {
             .notifications
             .clone()
             .try_acquire_owned()
-            .map_err(|_| sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into()))?;
+            .map_err(|_| {
+                crate::observability::admission(
+                    crate::observability::Admission::NotificationExecution,
+                );
+                sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into())
+            })?;
         let after = cursor
             .get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(message.seq) - 1);
         if message.seq <= *after {

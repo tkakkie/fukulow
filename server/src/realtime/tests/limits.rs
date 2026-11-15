@@ -79,6 +79,55 @@ async fn text(client: &mut Client, text: &str) {
     client.send(tungstenite::Message::text(text)).await.unwrap();
 }
 
+#[test]
+fn socket_admission_and_close_counters_follow_production_paths() {
+    // Process-global counters need an isolated test process for exact increments,
+    // so parallel tests cannot hide omitted or duplicate instrumentation.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "realtime::tests::limits::socket_counter_scenario",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[fukulow_test::test]
+#[ignore = "executed by socket_admission_and_close_counters_follow_production_paths in isolation"]
+async fn socket_counter_scenario(pool: PgPool) {
+    let f = limited(&pool, limits(1, 100, 1, 50)).await;
+    let before = crate::observability::socket_counts();
+    let mut socket = f.server.connect(&f.token).await;
+    assert_eq!(crate::observability::socket_counts(), before);
+    refused(f.server.handshake(Some(&f.token), None, None).await);
+    assert_eq!(
+        crate::observability::socket_counts(),
+        (before.0 + 1, before.1)
+    );
+    text(&mut socket, "one").await;
+    assert_eq!(event(&mut socket).await["code"], "invalid_input");
+    assert_eq!(
+        crate::observability::socket_counts(),
+        (before.0 + 1, before.1)
+    );
+    text(&mut socket, "two").await;
+    closed(&mut socket, CLOSE_RATE_LIMITED).await;
+    open_sockets(&f, 0).await;
+    assert_eq!(
+        crate::observability::socket_counts(),
+        (before.0 + 1, before.1 + 1)
+    );
+}
+
 #[fukulow_test::test]
 async fn the_account_cap_counts_every_organization_and_session_and_refuses_with_503(pool: PgPool) {
     let f = limited(&pool, limits(2, 100, 50, 50)).await;

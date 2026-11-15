@@ -807,3 +807,22 @@ describe('reconciliation with the cargo test list', () => {
     }
   })
 })
+
+
+describe('script invariant CI coverage', () => {
+  it('requires the CI glob and refuses skipped script tests', () => {
+    const root = mkdtempSync(join(tmpdir(), 'inv-scripts-'))
+    try {
+      for (const dir of ['server', 'web', 'scripts', '.github/workflows']) mkdirSync(join(root, dir), { recursive: true })
+      writeFileSync(join(root, 'scripts/x.test.ts'), "test('runs', () => {})\ntest.skip('skipped', () => {})\ntest('options', { skip: true }, () => {})\n")
+      const ref = 'scripts/x.test.ts::runs'
+      expect(collectKnownTests(root).get(ref)?.runs).toBe(false)
+      writeFileSync(join(root, '.github/workflows/ci.yml'), '  run: node --test scripts/*.test.ts\n')
+      expect(collectKnownTests(root).get(ref)?.runs).toBe(true)
+      expect(collectKnownTests(root).get('scripts/x.test.ts::skipped')?.runs).toBe(false)
+      expect(collectKnownTests(root).get('scripts/x.test.ts::options')?.runs).toBe(false)
+      writeFileSync(join(root, '.github/workflows/ci.yml'), '  run: node --test scripts/other.test.ts\n')
+      expect(collectKnownTests(root).get(ref)?.runs).toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})

@@ -1,3 +1,4 @@
+import { invitesAdapter } from './invites.svelte'
 import { createSubscriber } from 'svelte/reactivity'
 import { createMembers, createInviteAcceptance } from './members'
 import { authorsAdapter } from './authors.svelte'
@@ -6,6 +7,7 @@ export function membersAdapter(controller: ReturnType<typeof createMembers>) {
   const subscribe = createSubscriber(update => controller.subscribe(update))
   return {
     authors: authorsAdapter(controller.authors),
+    invites: invitesAdapter(controller.invites),
     get state() { subscribe(); return controller.get() },
     activityTarget: controller.activityTarget,
     load: controller.load, invite: controller.invite, role: controller.role, deactivate: controller.deactivate, unavailable: controller.unavailable, close: controller.close,
