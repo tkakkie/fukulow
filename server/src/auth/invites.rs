@@ -173,7 +173,7 @@ pub async fn accept_invite(
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE email=$1)")
                 .bind(&invited_email)
-                .fetch_one(&state.pool)
+                .fetch_one(&mut *crate::database::acquire(&state.pool).await?)
                 .await?;
         if exists {
             return Err(ApiError(

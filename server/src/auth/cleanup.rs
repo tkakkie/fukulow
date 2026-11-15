@@ -91,7 +91,7 @@ impl SessionCleanup {
 
 async fn run(pool: &PgPool) {
     let result = tokio::time::timeout(DEADLINE, async {
-        let mut tx = pool.begin().await?;
+        let mut tx = crate::database::begin(pool).await?;
         // Bound lock waits and SQL work as well as the number of deleted rows.
         sqlx::query("SET LOCAL statement_timeout = '1s'")
             .execute(&mut *tx)
