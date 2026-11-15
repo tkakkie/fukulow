@@ -73,6 +73,7 @@ test('first Unread pages beyond the main cap and read reporting survives trimmin
       while (el.scrollTop + el.clientHeight < el.scrollHeight - 1) {
         el.scrollTop += Math.floor(el.clientHeight * .7); el.dispatchEvent(new Event('scroll'))
         await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        el.dispatchEvent(new Event('scroll'))
       }
     })
     await main.getByRole('button', { name: '最新のメッセージを読み込む', exact: true }).click()
@@ -80,9 +81,11 @@ test('first Unread pages beyond the main cap and read reporting survives trimmin
     await scroll.evaluate(async el => {
       el.scrollTop = 0; el.dispatchEvent(new Event('scroll'))
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      el.dispatchEvent(new Event('scroll'))
       while (el.scrollTop + el.clientHeight < el.scrollHeight - 1) {
         el.scrollTop += Math.floor(el.clientHeight * .7); el.dispatchEvent(new Event('scroll'))
         await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        el.dispatchEvent(new Event('scroll'))
       }
     })
     await expect.poll(async () => {
