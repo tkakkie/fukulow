@@ -224,7 +224,10 @@ pub(crate) async fn select(
     } else {
         query
     };
-    let rows: Vec<(Uuid, Uuid, String)> = query.fetch_all(&mut *connection).await?;
+    let mut rows: Vec<(Uuid, Uuid, String)> = query.fetch_all(&mut *connection).await?;
+    if let Some(ids) = ids {
+        rows.sort_unstable_by_key(|row| ids.iter().position(|id| *id == row.0));
+    }
     identities(connection, auth, rows).await
 }
 

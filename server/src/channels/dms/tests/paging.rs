@@ -91,6 +91,69 @@ async fn changes(f: &Fixture, token: &str, lane: &str, cursor: Option<&str>) -> 
 }
 
 #[fukulow_test::test]
+async fn id_refresh_preserves_request_order_and_omits_inaccessible_ids(pool: PgPool) {
+    let f = Fixture::new(pool.clone(), "member").await;
+    let lapsed = f.dm().await;
+    f.deactivate(f.a).await;
+    f.reactivate(f.a).await;
+    let mut created = Vec::new();
+    for _ in 0..3 {
+        let peer = Uuid::new_v4();
+        member(&f.pools.admin, f.org, peer, "guest").await;
+        let response = f.open(&f.at, peer, false).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        created.push(Uuid::parse_str(body(response).await["id"].as_str().unwrap()).unwrap());
+    }
+    let foreign = Fixture::new(pool, "guest").await;
+    let foreign_id = foreign.dm().await;
+    let peer = Uuid::new_v4();
+    member(&f.pools.admin, f.org, peer, "guest").await;
+    let response = f.open(&f.bt, peer, false).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let non_participant = Uuid::parse_str(body(response).await["id"].as_str().unwrap()).unwrap();
+    let ids = |page: &Value| {
+        page["dms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| Uuid::parse_str(d["id"].as_str().unwrap()).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let creation_order = created.iter().rev().copied().collect::<Vec<_>>();
+    assert_eq!(ids(&f.get(&f.at, "/api/v1/dms").await), creation_order);
+    let mut results = Vec::new();
+    for (requested, expected) in [
+        (created.clone(), created.clone()),
+        (
+            vec![
+                foreign_id,
+                created[1],
+                lapsed,
+                created[2],
+                non_participant,
+                created[0],
+                Uuid::new_v4(),
+            ],
+            vec![created[1], created[2], created[0]],
+        ),
+    ] {
+        let query = requested
+            .iter()
+            .map(|id| format!("channel_id={id}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let page = f.get(&f.at, &format!("/api/v1/dms?{query}")).await;
+        assert!(page["next_cursor"].is_null());
+        results.push((ids(&page), expected));
+    }
+    for (actual, expected) in results {
+        assert_eq!(actual, expected);
+    }
+    foreign.pools.app.close().await;
+    f.pools.app.close().await;
+}
+
+#[fukulow_test::test]
 async fn creation_order_pages_and_id_refresh_authorize_before_cursor_validation(pool: PgPool) {
     let f = Fixture::new(pool, "guest").await;
     // Seed equal immutable timestamps at creation to exercise the UUID tie-breaker.
