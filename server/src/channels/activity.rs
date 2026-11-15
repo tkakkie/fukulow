@@ -2,7 +2,10 @@
 use super::*;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{Notify, Semaphore};
@@ -79,6 +82,12 @@ struct Pending {
     epoch: u64,
     directory_epoch: Option<u64>,
     proof: Option<Proof>,
+    valid: Arc<AtomicBool>,
+}
+struct InFlight {
+    channel: Option<Uuid>,
+    proof: Option<Proof>,
+    valid: Arc<AtomicBool>,
 }
 #[derive(Default)]
 struct Buffer {
@@ -87,13 +96,14 @@ struct Buffer {
     pending: VecDeque<Pending>,
     reset: bool,
     proofs: HashMap<Option<Uuid>, Proof>,
-    in_flight: HashMap<Uuid, (Option<Uuid>, Option<Proof>)>,
+    in_flight: HashMap<Uuid, InFlight>,
 }
 struct Authorization {
     entry: Arc<Entry>,
     epoch: u64,
     directory_epoch: Option<u64>,
     id: Uuid,
+    valid: Arc<AtomicBool>,
 }
 impl Authorization {
     fn new(
@@ -104,12 +114,20 @@ impl Authorization {
         expected_directory_epoch: Option<u64>,
     ) -> Self {
         let id = Uuid::new_v4();
+        let valid = Arc::new(AtomicBool::new(true));
         let directory_epoch = {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             let directory_epoch =
                 directory.then_some(expected_directory_epoch.unwrap_or(b.directory_epoch));
             if b.epoch == epoch {
-                b.in_flight.insert(id, (channel, None));
+                b.in_flight.insert(
+                    id,
+                    InFlight {
+                        channel,
+                        proof: None,
+                        valid: valid.clone(),
+                    },
+                );
             }
             directory_epoch
         };
@@ -118,6 +136,7 @@ impl Authorization {
             epoch,
             directory_epoch,
             id,
+            valid,
         }
     }
     fn proved(&self, proof: &Option<Proof>) {
@@ -127,9 +146,9 @@ impl Authorization {
                 || self
                     .directory_epoch
                     .is_none_or(|epoch| b.directory_epoch == epoch))
-            && let Some((_, captured)) = b.in_flight.get_mut(&self.id)
+            && let Some(captured) = b.in_flight.get_mut(&self.id)
         {
-            *captured = proof.clone();
+            captured.proof = proof.clone();
         }
     }
 }
@@ -464,6 +483,7 @@ impl Activity {
                         .then_some(authorization.directory_epoch)
                         .flatten(),
                     proof: Some(proof),
+                    valid: authorization.valid.clone(),
                 },
             );
         }
@@ -498,12 +518,17 @@ impl Activity {
 }
 fn enqueue(entry: &Entry, pending: Pending) {
     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-    if b.epoch != pending.epoch
+    if !pending.valid.load(Ordering::Relaxed)
+        || b.epoch != pending.epoch
         || pending
             .directory_epoch
             .is_some_and(|epoch| b.directory_epoch != epoch)
     {
         return;
+    }
+    b.pending.retain(|p| p.valid.load(Ordering::Relaxed));
+    if b.pending.is_empty() {
+        b.reset = false;
     }
     let channel = if matches!(pending.notice, Notice::ChannelAccessRevoked { .. }) {
         None
@@ -542,13 +567,12 @@ fn enqueue(entry: &Entry, pending: Pending) {
         .find(|p| p.notice.key() == pending.notice.key())
     {
         match (&mut old.notice, &pending.notice) {
-            (Notice::ChannelActivity { seq, .. }, Notice::ChannelActivity { seq: new, .. }) => {
-                *seq = (*seq).max(*new)
-            }
+            (Notice::ChannelActivity { seq, .. }, Notice::ChannelActivity { seq: new, .. })
+                if *seq >= *new => {}
             (
                 Notice::ReadPositionChanged { read_seq, .. },
                 Notice::ReadPositionChanged { read_seq: new, .. },
-            ) => *read_seq = (*read_seq).max(*new),
+            ) if *read_seq >= *new => {}
             _ => *old = pending,
         }
     } else if b.pending.len() == 256 {
@@ -583,11 +607,15 @@ impl Registration {
                 )
                 .await;
                 let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                if b.epoch != pending.epoch
+                if !pending.valid.load(Ordering::Relaxed)
+                    || b.epoch != pending.epoch
                     || pending
                         .directory_epoch
                         .is_some_and(|epoch| b.directory_epoch != epoch)
                 {
+                    if b.pending.is_empty() {
+                        b.reset = false;
+                    }
                     continue;
                 }
                 let event = if b.reset {
@@ -602,6 +630,7 @@ impl Registration {
                     epoch: pending.epoch,
                     directory_epoch: pending.directory_epoch,
                     event,
+                    valid: pending.valid,
                 });
             }
             notified.await;
@@ -613,6 +642,7 @@ pub(crate) struct NoticeFrame {
     epoch: u64,
     directory_epoch: Option<u64>,
     pub event: Notice,
+    valid: Arc<AtomicBool>,
 }
 impl NoticeFrame {
     pub(crate) async fn handoff<F: std::future::Future>(&self, future: F) -> Option<F::Output> {
@@ -620,7 +650,8 @@ impl NoticeFrame {
         let first = std::future::poll_fn(|cx| {
             let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             std::task::Poll::Ready(
-                if b.epoch == self.epoch
+                if self.valid.load(Ordering::Relaxed)
+                    && b.epoch == self.epoch
                     && self
                         .directory_epoch
                         .is_none_or(|epoch| b.directory_epoch == epoch)
@@ -994,7 +1025,9 @@ impl Activity {
         for (authorization, proof) in authorizations.iter().zip(&proofs) {
             authorization.proved(proof);
         }
-        for ((entry, epoch), proof) in captured.iter().zip(proofs) {
+        for (((entry, epoch), authorization), proof) in
+            captured.iter().zip(&authorizations).zip(proofs)
+        {
             if let Some(proof) = proof {
                 enqueue(
                     entry,
@@ -1005,6 +1038,7 @@ impl Activity {
                         epoch: *epoch,
                         directory_epoch: None,
                         proof: Some(proof),
+                        valid: authorization.valid.clone(),
                     },
                 );
             }
@@ -1032,16 +1066,28 @@ impl Activity {
         let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
         for entry in entries {
             let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            for (channel, proof) in b
+            for (channel, proof, valid) in b
                 .proofs
                 .iter()
-                .map(|(channel, proof)| (*channel, Some(proof.clone())))
-                .chain(b.in_flight.values().cloned())
+                .map(|(channel, proof)| (*channel, Some(proof.clone()), None))
+                .chain(
+                    b.in_flight
+                        .values()
+                        .filter(|authorization| authorization.valid.load(Ordering::Relaxed))
+                        .map(|authorization| {
+                            (
+                                authorization.channel,
+                                authorization.proof.clone(),
+                                Some(authorization.valid.clone()),
+                            )
+                        }),
+                )
             {
                 organizations.entry(entry.organization).or_default().push((
                     (entry.clone(), channel),
                     b.epoch,
                     proof,
+                    valid,
                 ));
             }
         }
@@ -1049,7 +1095,7 @@ impl Activity {
             for chunk in rows.chunks(1000) {
                 let selected: Vec<_> = chunk
                     .iter()
-                    .map(|(selected, _, _)| selected.clone())
+                    .map(|(selected, _, _, _)| selected.clone())
                     .collect();
                 #[cfg(test)]
                 for (entry, channel) in &selected {
@@ -1062,7 +1108,7 @@ impl Activity {
                     .await;
                 }
                 let result = authorize_batch(pool, &selected).await;
-                for (index, ((entry, _), epoch, proof)) in chunk.iter().enumerate() {
+                for (index, ((entry, channel), epoch, proof, valid)) in chunk.iter().enumerate() {
                     let current = result.as_ref().ok().and_then(|rows| rows[index].as_ref());
                     // An unproved snapshot cannot establish the in-flight grant's lifetime.
                     if proof.as_ref().is_some_and(|proof| current == Some(proof)) {
@@ -1070,6 +1116,36 @@ impl Activity {
                     }
                     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
                     if b.epoch == *epoch {
+                        // Unknown provenance fences only that query. A current grant
+                        // proves no loss for independently authorized work on this socket.
+                        // Keep the fence through enqueue and first handoff: the query
+                        // may already have completed since this fallback's snapshot.
+                        if proof.is_none()
+                            && current.is_some()
+                            && let Some(valid) = valid
+                        {
+                            let changed = b
+                                .proofs
+                                .get(channel)
+                                .is_some_and(|known| current != Some(known))
+                                || b.in_flight.values().any(|authorization| {
+                                    authorization.channel == *channel
+                                        && authorization
+                                            .proof
+                                            .as_ref()
+                                            .is_some_and(|known| current != Some(known))
+                                });
+                            if !changed {
+                                valid.store(false, Ordering::Relaxed);
+                                for authorization in b.in_flight.values().filter(|authorization| {
+                                    authorization.channel == *channel
+                                        && authorization.proof.is_none()
+                                }) {
+                                    authorization.valid.store(false, Ordering::Relaxed);
+                                }
+                                continue;
+                            }
+                        }
                         b.epoch = b.epoch.wrapping_add(1);
                         b.pending.clear();
                         b.proofs.clear();
@@ -1176,6 +1252,7 @@ mod tests {
                 role: Role::Member,
                 grant: None,
             }),
+            valid: Arc::new(AtomicBool::new(true)),
         }
     }
     #[test]
@@ -1269,6 +1346,7 @@ mod tests {
             epoch: 0,
             directory_epoch: None,
             event: Notice::MembersChanged,
+            valid: Arc::new(AtomicBool::new(true)),
         };
         entry.buffer.lock().unwrap().epoch = 2;
         let polled = std::sync::atomic::AtomicBool::new(false);
@@ -1281,6 +1359,81 @@ mod tests {
             None
         );
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn retired_query_fences_enqueue_buffer_reset_and_handoff_without_retiring_other_work() {
+        for phase in ["enqueue", "buffer", "reset", "handoff", "coalesce"] {
+            let entry = entry();
+            let channel = Uuid::new_v4();
+            let retired = pending(channel, None);
+            let mut allowed = pending(channel, Some(Uuid::new_v4()));
+            if phase == "coalesce" {
+                allowed.notice = Notice::ReadPositionChanged {
+                    channel_id: channel,
+                    topic_id: None,
+                    read_seq: 5,
+                };
+            }
+            let registration = Registration {
+                id: entry.id,
+                registry: Weak::new(),
+                entry: entry.clone(),
+            };
+            if phase == "reset" {
+                for _ in 0..257 {
+                    let mut contribution = retired.clone();
+                    contribution.notice = Notice::ReadPositionChanged {
+                        channel_id: channel,
+                        topic_id: Some(Uuid::new_v4()),
+                        read_seq: 10,
+                    };
+                    enqueue(&entry, contribution);
+                }
+                assert!(entry.buffer.lock().unwrap().reset);
+            } else if phase != "enqueue" {
+                enqueue(&entry, retired.clone());
+            }
+            let frame = if phase == "handoff" {
+                registration.next().await
+            } else {
+                None
+            };
+            if phase == "buffer" {
+                enqueue(&entry, allowed.clone());
+            }
+            {
+                let _gate = entry.buffer.lock().unwrap();
+                retired.valid.store(false, Ordering::Relaxed);
+            }
+            if phase == "enqueue" {
+                enqueue(&entry, retired);
+                assert!(entry.buffer.lock().unwrap().pending.is_empty());
+            }
+            if let Some(frame) = frame {
+                let polled = AtomicBool::new(false);
+                assert!(
+                    frame
+                        .handoff(async { polled.store(true, Ordering::Relaxed) })
+                        .await
+                        .is_none(),
+                    "phase={phase}"
+                );
+                assert!(!polled.load(Ordering::Relaxed));
+            }
+            if phase != "buffer" {
+                enqueue(&entry, allowed.clone());
+            }
+            let frame = tokio::time::timeout(Duration::from_secs(1), registration.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(frame.event, allowed.notice, "phase={phase}");
+            assert_eq!(frame.handoff(async { true }).await, Some(true));
+            let b = entry.buffer.lock().unwrap();
+            assert_eq!(b.epoch, 0, "phase={phase}");
+            assert!(b.pending.is_empty(), "phase={phase}");
+            assert!(!b.reset, "phase={phase}");
+        }
     }
     #[test]
     fn two_sender_maxima_keep_each_recipients_other_sender_seq_in_both_orders() {
