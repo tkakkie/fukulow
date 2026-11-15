@@ -1,7 +1,7 @@
 # fukulow
 
 Business chat app (Zulip-like: channels, topics, reply chains), built mostly by AI. Goals: high concurrency, fast display; product quality.
-Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (past measurement records), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13). Each doc's header says how to write it.
+Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (current method, latest baselines, evidence for current decisions), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13). Each doc's header says how to write it.
 
 ## What to read
 Always this file. Default: search headings/keywords, read only matches; split doc: index, then matching parts (cross-area: every related part). Nothing found: try other keywords (spec terms, modules, error values) and related Issues/PRs before assuming no constraint.
