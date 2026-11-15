@@ -40,6 +40,6 @@ INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES('${
 INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${channel}','${topic}','Topic',1,1,1);
 INSERT INTO messages(organization_id,channel_id,id,seq,sender,client_message_id,body,topic_id) VALUES('${org}','${channel}','${id('message', 0)}',1,'${members[0].id}','${id('client', 0)}','seed','${topic}');
 COMMIT; ANALYZE;`);
-execFileSync('docker', ['exec', '-i', container, 'psql', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1'], { input: sql.join('\n'), stdio: ['pipe', 'ignore', 'inherit'], maxBuffer: 16*1024*1024 });
+execFileSync('docker', ['exec', '-i', container, 'psql', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1'], { input: sql.join('\n'), stdio: ['pipe', 'ignore', 'inherit'], timeout: 3_600_000, maxBuffer: 16*1024*1024 });
 writeFileSync(output, JSON.stringify({ organization: org, channel, topic, members }), { mode: 0o600 });
 console.log('Seeded 10,000 distinct Members/Sessions, 14,998 DM pairs, focal 9,999 DMs; zero DM history, no Guests or Mentions');

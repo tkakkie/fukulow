@@ -7,11 +7,11 @@ const output = process.env.DM_OUTPUT!;
 const seedPath = process.env.DM_SEED_OUT!;
 const seed = JSON.parse(readFileSync(seedPath, 'utf8')) as { organization: string; members: { id: string; token: string; peer: string; channel: string }[]; deep?: string; ids?: string[] };
 const focal = seed.members[9999], org = seed.organization;
-const sql = (query: string) => execFileSync('docker', ['exec', '-i', process.env.DM_DB_CONTAINER!, 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1', '-At'], { input: query, encoding: 'utf8', maxBuffer: 64*1024*1024 }).trim();
+const sql = (query: string) => execFileSync('docker', ['exec', '-i', process.env.DM_DB_CONTAINER!, 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1', '-At'], { input: query, encoding: 'utf8', timeout: 3_600_000, maxBuffer: 64*1024*1024 }).trim();
 const base = `${process.env.BASE_URL}/api/v1/orgs/${org}`;
 async function request(path: string, body?: unknown, member = focal) {
   const start = performance.now();
-  const response = await fetch(base+path, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${member.token}`, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  const response = await fetch(base+path, { signal: AbortSignal.timeout(10000), method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${member.token}`, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
   const bytes = await response.text();
   const ms = performance.now()-start;
   if (!response.ok) throw new Error(`Probe ${path.split('?')[0]}: ${response.status}`);
@@ -83,12 +83,12 @@ const appLogs = (logged?.stdout || '') + (logged?.stderr || '');
 const directory = /event=measure_directory_sql sql=([^\n]+)/.exec(appLogs)?.[1];
 if (directory) plans.push(['directory', directory, `'${org}','${focal.id}',0`]);
 else console.log('Directory EXPLAIN omitted: instrumented image and DM_APP_CONTAINER required');
-for (const mode of ['force_custom_plan','force_generic_plan']) for (const [name, query, args] of plans) {
+for (const mode of ['force_custom_plan','force_generic_plan','auto']) for (const [name, query, args] of plans) {
   const report = sql(`SET ROLE fukulow_app; BEGIN; SELECT set_config('fukulow.organization_id','${org}',true); SET LOCAL jit=off; SET LOCAL plan_cache_mode=${mode}; PREPARE probe AS ${query}; EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE probe(${args}); ROLLBACK;`);
   writeFileSync(`${output}/plan-${name}-${mode}.txt`, report);
 }
 if (process.env.DM_DIRECTORY_INDEX_PROBE === '1' && !directory) throw new Error('Directory index diagnostic requires the instrumented image');
-if (process.env.DM_DIRECTORY_INDEX_PROBE === '1') for (const mode of ['force_custom_plan','force_generic_plan']) {
+if (process.env.DM_DIRECTORY_INDEX_PROBE === '1') for (const mode of ['force_custom_plan','force_generic_plan','auto']) {
   const report = sql(`BEGIN; CREATE INDEX users_directory_probe ON users(organization_id,name,id) INCLUDE(role,membership_revision,account_id) WHERE deactivated_at IS NULL; ANALYZE users; SET LOCAL ROLE fukulow_app; SELECT set_config('fukulow.organization_id','${org}',true); SET LOCAL jit=off; SET LOCAL plan_cache_mode=${mode}; PREPARE probe AS ${directory}; EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE probe('${org}','${focal.id}',0); ROLLBACK;`);
   writeFileSync(`${output}/plan-directory-index-${mode}.txt`, report);
 }

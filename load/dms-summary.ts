@@ -6,6 +6,8 @@ import { percentile } from './dms-workload.ts';
 const directory = resolve(process.argv[2] || process.env.LOAD_RESULT_DIR || '');
 const shards = Number(process.env.DM_SHARDS || 4);
 const from = Number(process.env.DM_WINDOW_FROM || 0), to = Number(process.env.DM_WINDOW_TO || Number.MAX_SAFE_INTEGER);
+const mix:Record<string,number>={};
+const mixMembers=new Map<string,Set<string>>();
 const closeCodes: Record<string, number> = {};
 const values = new Map<string, number[]>(), counters: Record<string, number> = {}, connections: { at: number; shard: number; value: number }[] = [];
 for (let shard = 0; shard < shards; shard++) {
@@ -16,15 +18,24 @@ for (let shard = 0; shard < shards; shard++) {
     try { point = JSON.parse(line); } catch { throw new Error(`Incomplete metric line in shard ${shard}`); }
     if (point.type !== 'Point') continue;
     const { metric, data } = point;
+    if(typeof metric!=='string' || !data || !Number.isFinite(data.value) || !Number.isFinite(Date.parse(data.time)) || !data.tags || typeof data.tags!=='object')throw new Error(`Malformed metric point in shard ${shard}`);
     if (metric === 'dm_connections') connections.push({ at: Date.parse(data.time), shard, value: data.value });
-    if (Date.parse(data.time) < from || Date.parse(data.time) >= to) continue;
+    const sentAt = data.tags.sentBucket || data.tags.sent;
+    const sampleAt = sentAt && ['dm_expected_peer','dm_received_peer','dm_receipt_ms'].includes(metric) ? Number(sentAt) : Date.parse(data.time);
+    if (sampleAt < from || sampleAt >= to) continue;
+    if(metric==='dm_mix') {const key=data.tags.retained+':'+data.tags.lane;mix[key]=(mix[key]||0)+data.value;if(data.value>0 && data.tags.member!==undefined){if(!mixMembers.has(key))mixMembers.set(key,new Set());mixMembers.get(key)!.add(data.tags.member);}}
     if (metric === 'dm_errors' && data.tags.shape === 'close') closeCodes[data.tags.code || 'unknown'] = (closeCodes[data.tags.code || 'unknown'] || 0) + data.value;
     if (metric === 'dm_errors' || metric === 'dropped_iterations') { const key = metric+':'+(data.tags.shape || data.tags.scenario || '')+':'+(data.tags.status || ''); counters[key] = (counters[key] || 0)+data.value; }
     else if (['dm_accepted','dm_ready','dm_subscribed','dm_expected_peer','dm_received_peer','dm_duplicate_frames','dm_pending_rounds'].includes(metric)) counters[metric] = (counters[metric] || 0)+data.value;
     if (['dm_latency_ms','dm_receipt_ms','dm_round_ms','dm_round_attempts'].includes(metric)) {
-      const key = metric+(data.tags.shape ? ':'+data.tags.shape : '');
+      const key = metric+(data.tags.shape ? ':'+data.tags.shape : '')+(metric === 'dm_round_ms' && data.tags.attempts ? ':attempts='+data.tags.attempts : '');
       if (!values.has(key)) values.set(key, []);
       values.get(key)!.push(data.value);
+      if(metric==='dm_round_ms' && data.tags.attempts) {
+        const aggregate=metric+(data.tags.shape?':'+data.tags.shape:'');
+        if(!values.has(aggregate))values.set(aggregate,[]);
+        values.get(aggregate)!.push(data.value);
+      }
     }
   }
 }
@@ -61,7 +72,7 @@ if (existsSync(`${directory}/resources.json`)) for (const sample of JSON.parse(r
   if (sample.dbRssKiB) dbRss.push(sample.dbRssKiB); if (sample.dbPssKiB) dbPss.push(sample.dbPssKiB);
   if (sample.activity) lockSamples.push(Number(JSON.parse(sample.activity).locks));
 }
-const report = { window: { from,to }, peakConnections: peak, fullIntervals, counters, closeCodes, peerMissing: counters.dm_expected_peer === undefined ? null : counters.dm_expected_peer-(counters.dm_received_peer || 0), latencies,
+const report = { label: process.env.DM_FORMAL_MODE === 'smoke' ? 'NON-ACCEPTANCE' : process.env.DM_FORMAL_MODE === 'formal' ? 'FORMAL' : undefined, window: { from,to }, peakConnections: peak, mix, mixMembers:Object.fromEntries([...mixMembers].map(([key,ids])=>[key,ids.size])), fullIntervals, counters, closeCodes, peerMissing: counters.dm_expected_peer === undefined ? null : counters.dm_expected_peer-(counters.dm_received_peer || 0), latencies,
   pool: { samples: pool.length, p95: percentile(pool,.95), p99: percentile(pool,.99), errors: poolErrors, activeP95: percentile(active,.95), activePeak: active.length ? Math.max(...active) : null },
   resources: Object.fromEntries(Object.entries(resources).map(([k,v]) => [k, { samples: v.cpu.length, cpuMean: v.cpu.reduce((a,b) => a+b,0)/v.cpu.length, cpuP99: percentile(v.cpu,.99), memoryLast: v.memory.at(-1) }])),
   memoryKiB: { appRssPeak: percentile(rss,1), dbRssPeak: percentile(dbRss,1), dbPssPeak: percentile(dbPss,1) }, lockSamplePeak: percentile(lockSamples,1) };

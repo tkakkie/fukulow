@@ -1,4 +1,4 @@
-// Short preliminary probe, not the complete formal-acceptance runner.
+// Shared DM workload; dms-formal-run.ts supplies isolated hosts and acceptance evidence.
 import http from 'k6/http';
 import execution from 'k6/execution';
 import { SharedArray } from 'k6/data';
@@ -9,6 +9,7 @@ import type { Options } from 'k6/options';
 import type { DmChanges, DmList, Message, ServerEvent, SendMessageRequest } from '../web/src/api-schema.d.ts';
 import { createActivity, createActivityTarget } from '../web/src/activity.ts';
 import { dmListState, stepDmList } from '../web/src/dm-list.ts';
+import { retainedAssignment, demandFormalMix } from './dms-formal-mix.ts';
 import { senderFor, senderIndex, socketStop, peerWatched } from './dms-workload.ts';
 
 // k6 lacks browser clone/cancellation globals. State is JSON-only; HTTP uses
@@ -29,12 +30,21 @@ const count = Number(__ENV.DM_SOCKETS || 2500), offset = Number(__ENV.DM_OFFSET 
 const seconds = Number(__ENV.DM_SECONDS || 95), ramp = Number(__ENV.DM_SEND_START || 40);
 const connectInterval = Number(__ENV.DM_CONNECT_INTERVAL_MS || 500);
 const rate = Number(__ENV.DM_RATE || 500), shard = Number(__ENV.DM_SHARD || 0);
+const formal = __ENV.DM_FORMAL === '1';
+const epoch = Number(__ENV.DM_EPOCH || 0);
+export async function setup() {
+  if (!formal) return;
+  if (!epoch || Date.now() >= epoch) throw new Error('Missed scheduled epoch before timing');
+  errors.add(0); duplicates.add(0);
+  await pause(epoch-Date.now());
+}
 const browserOnly = __ENV.DM_BROWSER_ONLY === '1';
 const browseRate = Number(__ENV.DM_BROWSE_RATE || (browserOnly ? 100 : 25)), openRate = Number(__ENV.DM_OPEN_RATE || 5);
 const errors = new Counter('dm_errors'), calls = new Counter('dm_calls'), accepted = new Counter('dm_accepted');
 const connected = new Gauge('dm_connections'), readyMetric = new Counter('dm_ready');
 const subscribed = new Counter('dm_subscribed'), expectedPeer = new Counter('dm_expected_peer'), receivedPeer = new Counter('dm_received_peer'), duplicates = new Counter('dm_duplicate_frames');
 const latency = new Trend('dm_latency_ms', true), receipt = new Trend('dm_receipt_ms', true), round = new Trend('dm_round_ms', true);
+const mixSamples=new Counter('dm_mix');
 const attempts = new Trend('dm_round_attempts'), pending = new Counter('dm_pending_rounds');
 const shapes = ['first', 'deep', 'refresh', 'delta', 'coverage', 'resolve', 'renew', 'create', 'send', 'channels', 'me', 'members', 'channel-members', 'topics', 'topic'];
 export const options: Options = {
@@ -52,7 +62,11 @@ export const options: Options = {
 };
 if (!browseRate) delete options.scenarios!.browsing;
 if (!openRate) delete options.scenarios!.opens;
-if (browserOnly) options.scenarios = { browsing: { executor: 'constant-arrival-rate', exec: 'browse', rate: browseRate, timeUnit: '1s', duration: `${seconds-5}s`, preAllocatedVUs: 20, maxVUs: 100 } };
+if (browserOnly) options.scenarios = { browsing: { executor: 'constant-arrival-rate', exec: 'browse', rate: browseRate, timeUnit: '1s', duration: `${seconds-5}s`, ...(formal ? { startTime: `${ramp}s` } : {}), preAllocatedVUs: 20, maxVUs: 100 } };
+if (formal && !browserOnly && (renewals.length < Math.ceil(openRate*(seconds-5)/4) || Number(__ENV.DM_SENDERS) < rate)) throw new Error('Insufficient renewal pool or per-Member send interval');
+if (formal && browserOnly && !seed.deep) throw new Error('Missing Session-bound deep cursor');
+// Minute buckets align exactly with formal core/extension boundaries without per-send tag cardinality.
+const receiptTags = (sent: number): Record<string, string> => formal ? { sentBucket: String(epoch+Math.floor((sent-epoch)/60000)*60000) } : {};
 const headers = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 async function get(path: string, token: string, shape: string) {
@@ -63,9 +77,10 @@ async function get(path: string, token: string, shape: string) {
   return response;
 }
 export async function sockets() {
+  if(formal)console.log('DM_SCHEDULE '+JSON.stringify({epoch,actual:execution.scenario.startTime,kind:'sockets'}));
   let live = 0, ready = 0, stopping = false;
   const clients: WebSocket[] = [], activities: ReturnType<typeof createActivity>[] = [];
-  errors.add(0); accepted.add(0);
+  errors.add(0); accepted.add(0); duplicates.add(0); expectedPeer.add(0); receivedPeer.add(0);
   for (let i = 0; i < count; i++) {
     const index = offset + i, member = members[index];
     const watched = index % 2 === 1;
@@ -86,7 +101,7 @@ export async function sockets() {
           let data: { sent?: number; phase?: string };
           try { data = JSON.parse(notice.message.body) as typeof data; }
           catch { return; } // Seed/history bodies have no generator timestamp.
-          if (data.sent && data.phase === 'mixed') { receipt.add(Date.now() - data.sent); receivedPeer.add(1); }
+          if (data.sent && data.phase === 'mixed') { receipt.add(Date.now() - data.sent, receiptTags(data.sent)); receivedPeer.add(1, receiptTags(data.sent)); }
         }
         return;
       }
@@ -100,21 +115,45 @@ export async function sockets() {
         activities.push(activity);
         let state = dmListState();
         let epoch = 0;
+        const retained=formal?retainedAssignment(index):200;
+        let heldIds:Set<string>|undefined;
+        const prepare=async()=>{
+          if(!formal || heldIds)return;
+          let cursor:string|undefined;
+          while(state.rows.length<retained) {
+            const response=await get('/dms'+(cursor?'?cursor='+encodeURIComponent(cursor):''),member.token,'fixture');
+            const data=response.json() as unknown as DmList;
+            for(const dm of data.dms)if(!state.rows.some(row=>row.identity.id===dm.id))state.rows.push({identity:{id:dm.id,kind:dm.kind,peer:dm.peer},baseline:dm,access:++state.serial,used:++state.clock});
+            cursor=data.next_cursor??undefined;
+            if(!cursor && state.rows.length<retained)throw new Error('Insufficient authorized retained rows');
+          }
+          state.rows=state.rows.slice(0,retained);heldIds=new Set(state.rows.map(row=>row.identity.id));
+        };
         const target = createActivityTarget<null>({
           async load() {
-            const start = Date.now(), ownEpoch = epoch; let used = 0;
+            await prepare();
+            if(formal)state=demandFormalMix(state,member.id);
+            const start = Date.now(), ownEpoch = epoch; let used = 0, failures=0;
+            const lanes=new Set<string>();
             for (;;) {
               state = stepDmList(state, { type: 'wake', now: Date.now() }).state;
               const request = state.request;
               if (!request) break;
-              used++;
+              used++; lanes.add(request.lane);
               try {
                 const discovery = request.lane === 'delta' || request.lane === 'coverage';
                 const path = discovery ? `/dms/changes?lane=${request.lane}${request.cursor ? `&cursor=${encodeURIComponent(request.cursor)}` : ''}`
                   : `/dms${request.ids ? '?' + request.ids.map(id => `channel_id=${id}`).join('&') : request.cursor ? '?cursor=' + encodeURIComponent(request.cursor) : ''}`;
                 const response = await get(path, member.token, discovery ? request.lane : 'refresh');
+                if(request.generation!==state.generation)failures++;
                 state = stepDmList(state, { type: 'result', request, data: response.json() as unknown as DmChanges | DmList }).state;
+                if(formal) {
+                  state.rows=state.rows.filter(row=>heldIds!.has(row.identity.id));
+                  if(state.rows.length!==retained)throw new Error('Retained cohort changed');
+                  mixSamples.add(1,{retained:String(retained),lane:request.lane,member:String(index)});
+                }
               } catch {
+                failures++;
                 state = stepDmList(state, { type: 'failure', request, retryAt: Date.now()+1000, terminal: false }).state;
               }
               // A scheduled replenishment during a slow request starts another
@@ -122,8 +161,12 @@ export async function sockets() {
               if (epoch !== ownEpoch) break;
             }
             attempts.add(used);
-            if (epoch !== ownEpoch || state.request || state.lanes.delta.pending || state.lanes.coverage.pending || state.lanes.held.pending) pending.add(1);
-            else round.add(Date.now() - start);
+            const unfinished=epoch!==ownEpoch || !!state.request || Object.values(state.lanes).some(lane=>lane.pending);
+            if (unfinished) pending.add(1);
+            if(epoch===ownEpoch && !failures && !state.request && (formal?used>0:!unfinished)) {
+              round.add(Date.now()-start,{attempts:String(used),retained:String(retained)});
+              if(formal && used===5 && (!retained || lanes.size===5))mixSamples.add(1,{retained:String(retained),lane:'completed5',member:String(index)});
+            }
             return { ok: true, data: null };
           }, accept() {},
         });
@@ -165,7 +208,7 @@ export function send() {
   const body: SendMessageRequest = { client_message_id: 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const n = Math.floor(Math.random()*16); return (c === 'x' ? n : (n&3)|8).toString(16); }), body: JSON.stringify({ sent: started, phase: 'mixed', text: 'x'.repeat(976) }) };
   const response = http.post(`${org}/channels/${member.channel}/messages`, JSON.stringify(body), { headers: headers(member.token), timeout: '10s', tags: { name: 'send' } });
   calls.add(1, { shape: 'send' }); latency.add(Date.now()-started, { shape: 'send' });
-  if (response.status === 201) { accepted.add(1); if (peerWatched(i, offset, count)) expectedPeer.add(1); } else errors.add(1, { shape: 'send', status: String(response.status) });
+  if (response.status === 201) { accepted.add(1); if (peerWatched(i, offset, count)) expectedPeer.add(1, receiptTags(started)); } else errors.add(1, { shape: 'send', status: String(response.status) });
   if (__ENV.DM_LEDGER === '1') {
     const message = response.status === 201 ? response.json() as unknown as Message : undefined;
     if (message && (message.client_message_id !== body.client_message_id || message.channel_id !== member.channel)) errors.add(1, { shape: 'response_contract' });
@@ -177,6 +220,7 @@ export function send() {
   }
 }
 export async function browse() {
+  if(formal && browserOnly && execution.scenario.iterationInTest===0)console.log('DM_SCHEDULE '+JSON.stringify({epoch,actual:execution.scenario.startTime,kind:'browser'}));
   const deep = execution.scenario.iterationInTest%2 === 1;
   if (deep && !seed.deep) throw new Error('Deep browsing requires a prepared 5,000-row continuation');
   await get('/dms' + (deep ? '?cursor='+encodeURIComponent(seed.deep!) : ''), members[members.length-1].token, deep ? 'deep' : 'first');
@@ -193,4 +237,4 @@ export function openDm() {
   calls.add(1, { shape }); latency.add(Date.now()-started, { shape });
   if (response.status !== (create ? 201 : 200)) errors.add(1, { shape, status: String(response.status) });
 }
-export function handleSummary(data: unknown) { return { '/output/summary.json': JSON.stringify(data, null, 2) }; }
+export function handleSummary(data: unknown) { return { '/output/summary.json': JSON.stringify({...(data as Record<string, unknown>),label:formal ? (__ENV.DM_SMOKE === '1' ? 'NON-ACCEPTANCE' : 'FORMAL') : undefined}, null, 2) }; }

@@ -11,7 +11,7 @@ const container = process.env.DM_DB_CONTAINER;
 if (!container) throw new Error('DM_DB_CONTAINER required');
 mkdirSync(output, { recursive: true });
 const uuid = (label: string) => { const s = createHash('md5').update(`dm151-formal:${label}`).digest('hex'); return `${s.slice(0,8)}-${s.slice(8,12)}-${s.slice(12,16)}-${s.slice(16,20)}-${s.slice(20)}`; };
-const sql = (input: string) => execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'], { input, stdio: ['pipe','ignore','inherit'], maxBuffer: 64*1024*1024 });
+const sql = (input: string) => execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'], { input, stdio: ['pipe','ignore','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 });
 const pairs = regularPairs(1000,100);
 const smoke = process.env.DM_FORMAL_SMOKE === '1';
 const history = smoke ? 1 : 100;
@@ -31,24 +31,28 @@ for (let o = 0; o < (smoke ? 1 : 10); o++) {
   }
   // Prepare a current revision with some genuinely historical grants for the
   // timed renewal pool. Watched reciprocal pairs always retain current grants.
+  const existing=new Set(pairs.map(([a,b])=>a+':'+b));
+  const extraPairs=regularPairs(1000,300).filter(([a,b])=>!existing.has(a+':'+b));
   sql(`UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id='${org}'; UPDATE users SET deactivated_at=NULL WHERE organization_id='${org}';`);
-  for (let start = 0; start < pairs.length; start += 250) {
-    const batch = pairs.slice(start,start+250), ids = batch.map(([a,b]) => channelId(a,b));
+  const allPairs=[...pairs,...extraPairs];
+  for (let start = 0; start < allPairs.length; start += 250) {
+    const batch = allPairs.slice(start,start+250), ids = batch.map(([a,b]) => channelId(a,b));
     sql('BEGIN;\n'+batch.map(([a,b]) => `INSERT INTO channels(organization_id,id,kind,lower_member_id,higher_member_id,created_at) VALUES('${org}','${channelId(a,b)}','dm',least('${members[a].id}'::uuid,'${members[b].id}'::uuid),greatest('${members[a].id}'::uuid,'${members[b].id}'::uuid),'2026-01-01');`).join('\n')+`\nINSERT INTO channel_members(organization_id,channel_id,member_id,membership_revision) SELECT organization_id,id,m,1 FROM channels CROSS JOIN LATERAL unnest(ARRAY[lower_member_id,higher_member_id]) m WHERE organization_id='${org}' AND id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]) ORDER BY m,id; COMMIT;`);
   }
   const renewals = pairs.filter(([a,b]) => a < 900 && (a^1) !== b).slice(0,10000).map(([a,b]) => ({ caller: a, peer: b, channel: channelId(a,b) }));
   for (let start = 0; start < renewals.length; start += 100) sql('BEGIN;\n'+renewals.slice(start,start+100).map(r => `UPDATE channel_members SET membership_revision=0 WHERE organization_id='${org}' AND channel_id='${r.channel}' AND member_id='${members[r.peer].id}';`).join('\n')+'\nCOMMIT;');
   sql(`DELETE FROM channel_read_positions p USING channel_members cm WHERE cm.organization_id='${org}' AND cm.membership_revision=0 AND p.organization_id=cm.organization_id AND p.channel_id=cm.channel_id AND p.member_id=cm.member_id;
 INSERT INTO channel_members(organization_id,channel_id,member_id,membership_revision) SELECT '${org}','${ordinary}',id,1 FROM users WHERE organization_id='${org}' AND (role='guest' OR id='${members[0].id}');
-INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT '${org}',id,1,10100 FROM users WHERE organization_id='${org}';
+INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT '${org}',id,1,10300 FROM users WHERE organization_id='${org}';
 INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) SELECT organization_id,member_id,1,channel_id,grant_id,row_number() OVER(PARTITION BY member_id ORDER BY channel_id),10000+row_number() OVER(PARTITION BY member_id ORDER BY channel_id) FROM channel_members WHERE organization_id='${org}' AND dm_created_at IS NOT NULL AND membership_revision=1;
-INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${org}',id,${history} FROM channels WHERE organization_id='${org}' AND kind='dm';`);
+INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${org}',id,0 FROM channels WHERE organization_id='${org}' AND kind='dm';`);
+  sql(`UPDATE channel_message_sequences SET seq=${history} WHERE organization_id='${org}' AND channel_id=ANY(ARRAY[${pairs.map(([a,b])=>"'"+channelId(a,b)+"'::uuid").join(',')}]);`);
   for (let start = 0; start < pairs.length; start += 250) {
     const ids = pairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
     sql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);`);
   }
   sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');`);
-  writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals }), { mode: 0o600 });
-  console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, 50,000 DMs, ${50000*history} Messages; current revision 1, 90,000 usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals`);
+  writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, heldAssignment:[0,50,200] }), { mode: 0o600 });
+  console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, 150,000 DMs (100,000 supplemental empty pairs), ${50000*history} Messages; current revision 1, 290,000 usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals`);
 }
 sql('VACUUM(ANALYZE);');
