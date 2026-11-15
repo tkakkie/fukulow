@@ -9,9 +9,9 @@ pub use context::{account, account_read_only, organization, organization_read_on
 pub(crate) use context::{organization_statement, organization_statement_sql};
 pub use pool::PoolConfig;
 pub use stats::report_pool_periodically;
-#[cfg(test)]
-pub(crate) use stats::test_acquisitions;
 pub(crate) use stats::{acquire, begin};
+#[cfg(test)]
+pub(crate) use stats::{test_acquisitions, test_inherit_acquisitions};
 
 pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);

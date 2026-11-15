@@ -198,3 +198,17 @@ pub(crate) async fn test_acquisitions<T>(body: impl std::future::Future<Output =
     assert_eq!(stats.waiting.load(Relaxed), 0);
     (result, stats.success.load(Relaxed))
 }
+
+// Capture before spawning: Tokio task-local values are not inherited by child tasks.
+#[cfg(test)]
+pub(crate) fn test_inherit_acquisitions<T>(
+    body: impl std::future::Future<Output = T>,
+) -> impl std::future::Future<Output = T> {
+    let stats = TEST_STATS.try_with(std::sync::Arc::clone).ok();
+    async move {
+        match stats {
+            Some(stats) => TEST_STATS.scope(stats, body).await,
+            None => body.await,
+        }
+    }
+}

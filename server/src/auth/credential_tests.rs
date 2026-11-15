@@ -160,3 +160,82 @@ async fn formerly_implicit_executor_and_begin_acquisitions_are_counted(pool: sql
     .await;
     assert_eq!(count, 3);
 }
+
+#[fukulow_test::test]
+async fn setup_status_and_both_setup_checks_use_measured_acquisitions(pool: sqlx::PgPool) {
+    let state = AppState::for_test(pool).await;
+    for setup_required in [true, false] {
+        let (response, count) =
+            crate::database::test_acquisitions(setup_status(State(state.clone()))).await;
+        assert_eq!(count, 1);
+        let response = response.unwrap();
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"setup_required": setup_required})
+        );
+        let (result, count) = crate::database::test_acquisitions(setup_with_workers(
+            state.clone(),
+            SetupRequest {
+                setup_token: Some("setup-token-test-only".into()),
+                organization_name: "Measured setup".into(),
+                name: "Owner".into(),
+                email: "owner@example.com".into(),
+                password: "correct horse battery staple".into(),
+            },
+            &PASSWORD_WORKERS,
+        ))
+        .await;
+        if setup_required {
+            assert_eq!(result.unwrap().status(), StatusCode::CREATED);
+            // One fast-path checkout plus the transaction checkout. The locked
+            // existence recheck must continue using that transaction's connection.
+            assert_eq!(count, 2);
+        } else {
+            assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+            assert_eq!(count, 1);
+        }
+    }
+}
+
+#[fukulow_test::test]
+async fn sign_out_spawned_revocation_acquisition_is_counted(pool: sqlx::PgPool) {
+    use axum::extract::FromRequestParts;
+    let state = fixture(pool.clone()).await;
+    let response = sign_in_request(app_with_entropy(
+        state.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        false,
+        false,
+    ))
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let session: Value = serde_json::from_slice(&body).unwrap();
+    let (mut parts, ()) = Request::builder()
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", session["token"].as_str().unwrap()),
+        )
+        .body(())
+        .unwrap()
+        .into_parts();
+    // Resolve AccountAuth outside the counter scope so the assertion observes
+    // only the checkout inside the detached revocation task.
+    let auth = AccountAuth::from_request_parts(&mut parts, &state)
+        .await
+        .unwrap();
+    let hash = auth.token_hash.clone();
+    let (response, count) =
+        crate::database::test_acquisitions(sign_out(State(state), Ok(auth))).await;
+    assert_eq!(response.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(count, 1);
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM account_sessions WHERE token_hash = $1)")
+            .bind(hash)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!exists);
+}

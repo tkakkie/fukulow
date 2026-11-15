@@ -253,9 +253,9 @@ fn email(value: &str) -> Result<String, ApiError> {
 
 // Global bootstrap is a tenant-scope exception: RLS hides other Organizations,
 // so a SECURITY DEFINER function exposes only whether any exists (#314).
-async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<bool, sqlx::Error> {
+async fn organization_exists(connection: &mut sqlx::PgConnection) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT NOT fukulow_setup_required()")
-        .fetch_one(executor)
+        .fetch_one(connection)
         .await
 }
 
@@ -267,7 +267,8 @@ async fn organization_exists<'e>(executor: impl sqlx::PgExecutor<'e>) -> Result<
     (status = 500, description = "Database failure while checking whether an Organization exists", body = ErrorBody)))]
 pub async fn setup_status(State(state): State<AppState>) -> Result<Response, ApiError> {
     authorization::require(Actor::Anonymous, Action::Public, Resource::Global)?;
-    let setup_required = !organization_exists(&state.pool).await?;
+    let setup_required =
+        !organization_exists(&mut *crate::database::acquire(&state.pool).await?).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(SetupStatus { setup_required }),
@@ -337,7 +338,7 @@ async fn setup_with_hash<Hash: std::future::Future<Output = Result<String, ApiEr
     }
     // Global bootstrap fast path: completed setup never consumes password workers
     // or takes the setup lock. The transactional check below still closes the race.
-    if organization_exists(&state.pool).await? {
+    if organization_exists(&mut *crate::database::acquire(&state.pool).await?).await? {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "setup already completed",
@@ -869,16 +870,19 @@ pub async fn sign_out(
     let pool = state.pool.clone();
     let changes = state.session_changes.clone();
     // Finish revocation + notification even if the HTTP caller disconnects.
-    tokio::spawn(async move {
+    let revocation = async move {
         sqlx::query("DELETE FROM account_sessions WHERE token_hash = $1")
             .bind(&auth.token_hash)
-            .execute(&pool)
+            .execute(&mut *crate::database::acquire(&pool).await?)
             .await?;
         changes.revoked(auth.token_hash);
         Ok::<_, sqlx::Error>(())
-    })
-    .await
-    .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    };
+    #[cfg(test)]
+    let revocation = crate::database::test_inherit_acquisitions(revocation);
+    tokio::spawn(revocation)
+        .await
+        .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     let mut response = (
         StatusCode::NO_CONTENT,
         [
