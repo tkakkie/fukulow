@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test'
+import { setTimeout } from 'node:timers/promises'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import type { ClientMessage, ServerEvent } from '../src/api-schema.d.ts'
 import {
   type ChannelList,
@@ -24,6 +25,48 @@ const topicNameInput = (page: Page) =>
   page.locator('#main-content').getByRole('textbox', { name: 'トピック名', exact: true })
 const replyComposer = (page: Page) =>
   page.locator('#panel-content').getByRole('textbox', { name: 'メッセージ', exact: true })
+
+async function sendFixtureMessage(...args: Parameters<typeof sendApiMessage>): Promise<Message> {
+  // S6: burst 10, refill 1/s per Member across Channels and sessions. Earlier UI
+  // sends may have spent the burst, so allow one token to refill before every POST.
+  // Include a small timer margin; sendApiMessage still asserts 201 without retries.
+  await setTimeout(1_010)
+  return sendApiMessage(...args)
+}
+
+async function expectVirtualTotal(container: Locator, total: number): Promise<void> {
+  await expect(container.locator('[aria-posinset]').first()).toHaveAttribute('aria-setsize', String(total))
+}
+
+// Scroll the real viewport until the requested logical row is mounted, then reveal it.
+async function revealVirtualRow(container: Locator, position: number): Promise<Locator> {
+  await expect.poll(async () => container.evaluate(async (el, position) => {
+    const row = el.querySelector<HTMLElement>(`[aria-posinset="${position}"]`)
+    if (row) {
+      row.scrollIntoView({ block: 'nearest' })
+      return true
+    }
+    const first = Number(el.querySelector('[aria-posinset]')?.getAttribute('aria-posinset'))
+    el.scrollTop += (position < first ? -1 : 1) * el.clientHeight * 0.7
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    return false
+  }, position), { intervals: [16, 32, 50] }).toBe(true)
+  const row = container.locator(`[aria-posinset="${position}"]`)
+  await expect(row).toBeInViewport()
+  return row
+}
+
+async function readVirtualRows(container: Locator, total: number) {
+  await expectVirtualTotal(container, total)
+  const rows: Array<{ id: string | null; text: string }> = []
+  for (let position = 1; position <= total; position++) {
+    const row = await revealVirtualRow(container, position)
+    await expect(row).toHaveAttribute('aria-setsize', String(total))
+    rows.push({ id: await row.getAttribute('data-message-id'), text: await row.innerText() })
+  }
+  expect(new Set(rows.map(row => row.id)).size).toBe(total)
+  return rows
+}
 
 test('Invite and Guest visibility', async ({ browser, baseURL }) => {
   const suffix = crypto.randomUUID().slice(0, 8)
@@ -212,6 +255,7 @@ test('Topics (P1-P5)', async ({ browser, baseURL }) => {
 })
 
 test('Main-timeline paging (P2, P5)', async ({ browser, baseURL }) => {
+  test.setTimeout(120_000)
   const suffix = crypto.randomUUID().slice(0, 8)
   const ownerContext = await browser.newContext({ baseURL, ignoreHTTPSErrors: true })
   let peerContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
@@ -231,19 +275,21 @@ test('Main-timeline paging (P2, P5)', async ({ browser, baseURL }) => {
     // - 50 newer plain Messages (at positions 6..55), filling the initial page (limit 50)
     const movedTopicName = `移動トピック-${suffix}`
     const staticTopicName = `固定トピック-${suffix}`
-    const movedTopicFirst = await sendApiMessage(ownerPage.request, orgId, channel.id, {
+    const movedTopicFirst = await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
       body: `移動トピック初回-${suffix}`,
       topic_name: movedTopicName,
     })
-    const staticTopicFirst = await sendApiMessage(ownerPage.request, orgId, channel.id, {
+    const staticTopicFirst = await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
       body: `固定トピック初回-${suffix}`,
       topic_name: staticTopicName,
     })
+    const seededMessages: Message[] = []
     let lastSeededMsg: Message | undefined
     for (let i = 1; i <= 53; i++) {
-      lastSeededMsg = await sendApiMessage(ownerPage.request, orgId, channel.id, {
+      lastSeededMsg = await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
         body: `ページング発言-${String(i).padStart(2, '0')}-${suffix}`,
       })
+      seededMessages.push(lastSeededMsg)
     }
 
     const initialTimelineRespPromise = ownerPage.waitForResponse(
@@ -267,7 +313,9 @@ test('Main-timeline paging (P2, P5)', async ({ browser, baseURL }) => {
     // Initial page (limit 50) shows messages 04..53 (50 items) and has "以前のメッセージを読み込む".
     const loadOlderBtn = ownerPage.locator('#main-content').getByRole('button', { name: '以前のメッセージを読み込む', exact: true })
     await expect(loadOlderBtn).toBeVisible()
-    await expect(ownerPage.locator('#main-content .timeline-list__item')).toHaveCount(50)
+    expect(initialTimelinePage.items).toHaveLength(50)
+    const timelineScroll = ownerPage.locator('#main-content .timeline-scroll')
+    await expectVirtualTotal(timelineScroll, 50)
 
     // Before paging with the initial as_of_seq, the second context posts to movedTopic (moving it above W)
     // and also posts a new plain Message through the UI.
@@ -283,7 +331,11 @@ test('Main-timeline paging (P2, P5)', async ({ browser, baseURL }) => {
     await peerPage.locator('#main-content').getByRole('button', { name: '送信', exact: true }).click()
 
     // Wait for Owner's stream to receive both live posts before clicking "以前のメッセージを読み込む".
-    await expect(ownerPage.locator('#main-content').getByText(liveMainBody)).toBeVisible()
+    await expectVirtualTotal(timelineScroll, 52)
+    await revealVirtualRow(timelineScroll, 52)
+    const liveMainRow = ownerPage.locator('#main-content .ui-message-row').filter({ hasText: liveMainBody })
+    await expect(liveMainRow).toBeVisible()
+    const liveMainId = await liveMainRow.locator('..').getAttribute('data-message-id')
     await expect(ownerPage.locator(`#main-content button[data-topic-id="${movedTopicFirst.topic_id}"]`)).toContainText(liveMovedTopicBody)
 
     // Now Owner pages older items using the initial as_of_seq.
@@ -317,23 +369,20 @@ test('Main-timeline paging (P2, P5)', async ({ browser, baseURL }) => {
     // Verify P2 & P5:
     // - Total lines: 53 seeded plain messages + 1 live plain message + 2 Topics = 56 lines
     // - No line is omitted and none is shown twice.
-    const allItems = ownerPage.locator('#main-content .timeline-list__item')
-    await expect(allItems).toHaveCount(56)
-    await expect(ownerPage.locator(`#main-content button[data-topic-id="${movedTopicFirst.topic_id}"]`)).toHaveCount(1)
-    await expect(ownerPage.locator(`#main-content button[data-topic-id="${movedTopicFirst.topic_id}"]`)).toContainText('2件›')
-    await expect(ownerPage.locator(`#main-content button[data-topic-id="${movedTopicFirst.topic_id}"]`)).toContainText(liveMovedTopicBody)
-    await expect(ownerPage.locator(`#main-content button[data-topic-id="${staticTopicFirst.topic_id}"]`)).toHaveCount(1)
-    await expect(ownerPage.locator(`#main-content button[data-topic-id="${staticTopicFirst.topic_id}"]`)).toContainText('1件›')
-
-    for (const i of [1, 2, 3, 4, 53]) {
-      const text = `ページング発言-${String(i).padStart(2, '0')}-${suffix}`
-      await expect(ownerPage.locator('#main-content .ui-message-row').filter({ hasText: text })).toHaveCount(1)
+    const rows = await readVirtualRows(timelineScroll, 56)
+    expect(rows.map(row => row.id)).toEqual([
+      `topic:${staticTopicFirst.topic_id}`,
+      ...seededMessages.map(message => message.id),
+      `topic:${movedTopicFirst.topic_id}`,
+      liveMainId,
+    ])
+    expect(rows[0].text).toContain('1件›')
+    expect(rows[54].text).toContain('2件›')
+    expect(rows[54].text).toContain(liveMovedTopicBody)
+    for (const [index, message] of seededMessages.entries()) {
+      expect(rows[index + 1].text).toContain(message.body)
     }
-    await expect(ownerPage.locator('#main-content .ui-message-row').filter({ hasText: liveMainBody })).toHaveCount(1)
-
-    // Also verify no duplicate data-message-id attributes in the rendered list.
-    const itemIds = await allItems.evaluateAll((els) => els.map((el) => el.getAttribute('data-message-id')))
-    expect(new Set(itemIds).size).toBe(56)
+    expect(rows[55].text).toContain(liveMainBody)
   } finally {
     await peerContext?.close()
     await ownerContext.close()
@@ -341,6 +390,7 @@ test('Main-timeline paging (P2, P5)', async ({ browser, baseURL }) => {
 })
 
 test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
+  test.setTimeout(180_000)
   const suffix = crypto.randomUUID().slice(0, 8)
   const ownerContext = await browser.newContext({ baseURL, ignoreHTTPSErrors: true })
   let peerContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
@@ -357,34 +407,35 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     // requires paging ("さらに返信を読み込む", limit 50: root + 49 replies, leaving 2 for the second page),
     // plus 50 plain Messages after them so the initial unfiltered /messages page does not pre-populate all replies.
     const topicName = `返信トピック-${suffix}`
-    const rootMsg = await sendApiMessage(ownerPage.request, orgId, channel.id, {
+    const rootMsg = await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
       body: `トピック親メッセージ-${suffix}`,
       topic_name: topicName,
     })
     expect(rootMsg.topic_id).toBeTruthy()
-    const childA = await sendApiMessage(ownerPage.request, orgId, channel.id, {
+    const childA = await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
       body: `子返信A-01-${suffix}`,
       reply_to: rootMsg.id,
     })
-    const siblingB = await sendApiMessage(ownerPage.request, orgId, channel.id, {
+    const siblingB = await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
       body: `兄弟返信B-02-${suffix}`,
       reply_to: rootMsg.id,
     })
-    const grandchildA1 = await sendApiMessage(ownerPage.request, orgId, channel.id, {
+    const grandchildA1 = await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
       body: `孫返信A1-03-${suffix}`,
       reply_to: childA.id,
     })
     expect(grandchildA1.reply_root_id).toBe(rootMsg.id)
     expect(grandchildA1.topic_id).toBe(rootMsg.topic_id)
 
+    const chainMessages = [rootMsg, childA, siblingB, grandchildA1]
     for (let i = 4; i <= 51; i++) {
-      await sendApiMessage(ownerPage.request, orgId, channel.id, {
+      chainMessages.push(await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
         body: `連鎖返信-${String(i).padStart(2, '0')}-${suffix}`,
         reply_to: i % 2 === 0 ? childA.id : siblingB.id,
-      })
+      }))
     }
     for (let i = 1; i <= 50; i++) {
-      await sendApiMessage(ownerPage.request, orgId, channel.id, {
+      await sendFixtureMessage(ownerPage.request, orgId, channel.id, {
         body: `後続メイン発言-${String(i).padStart(2, '0')}-${suffix}`,
       })
     }
@@ -395,10 +446,13 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     await expect(ownerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(peerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
 
-    // Open the Reply chain from the visible latest Message in the Topic view (without loading older Topic messages first,
-    // so only the Reply chain endpoint pages the 52 chain messages: 50 on page 1, then 2 more via "さらに返信を読み込む").
+    // Open from the latest Message without loading older Topic history. The chain
+    // starts around that descendant; its older-history action restarts at the root.
     for (const p of [ownerPage, peerPage]) {
-      const visibleTopicRow = p.locator('#main-content .topic-view__item').last()
+      const topicScroll = p.locator('#main-content .topic-view__scroll')
+      const total = Number(await topicScroll.locator('[aria-setsize]').first().getAttribute('aria-setsize'))
+      await revealVirtualRow(topicScroll, total)
+      const visibleTopicRow = p.locator(`#main-content [data-message-id="${chainMessages[51].id}"]`)
       await expect(visibleTopicRow).toBeVisible()
       await visibleTopicRow.getByRole('button', { name: /返信/ }).click()
     }
@@ -407,20 +461,24 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     const peerPanel = peerPage.locator('#panel-content')
     for (const panel of [ownerPanel, peerPanel]) {
       await expect(panel.getByRole('heading', { level: 2, name: '返信のつながり', exact: true })).toBeVisible()
-      await expect(panel.locator(`[data-message-id="${rootMsg.id}"]`)).toContainText(`トピック親メッセージ-${suffix}`)
-      await expect(panel.locator(`[data-message-id="${childA.id}"]`)).toContainText(`子返信A-01-${suffix}`)
-      await expect(panel.locator(`[data-message-id="${siblingB.id}"]`)).toContainText(`兄弟返信B-02-${suffix}`)
-      await expect(panel.locator(`[data-message-id="${grandchildA1.id}"]`)).toContainText(`孫返信A1-03-${suffix}`)
-      // Page 1 of the chain (50 items: root + replies 1..49) + the anchor message (reply 51) = 51 items before paging;
-      // reply 50 (`連鎖返信-50-${suffix}`) is only loaded after clicking "さらに返信を読み込む".
-      await expect(panel.locator('[data-message-id]')).toHaveCount(51)
-      await expect(panel).not.toContainText(`連鎖返信-50-${suffix}`)
+      const scroll = panel.locator('.reply-panel__scroll')
+      const contextRows = await readVirtualRows(scroll, 25)
+      expect(contextRows.map(row => row.id)).toEqual(chainMessages.slice(27).map(message => message.id))
+      await panel.getByRole('button', { name: '以前の返信を読み込む', exact: true }).click()
+      // The first page plus the latest navigation anchor omits reply 50 only.
+      const before = await readVirtualRows(scroll, 51)
+      expect(before.map(row => row.id)).toEqual([
+        ...chainMessages.slice(0, 50).map(message => message.id), chainMessages[51].id,
+      ])
+      expect(before.some(row => row.text.includes(`連鎖返信-50-${suffix}`))).toBe(false)
       const loadMoreBtn = panel.getByRole('button', { name: 'さらに返信を読み込む', exact: true })
       await expect(loadMoreBtn).toBeVisible()
       await loadMoreBtn.click()
-      await expect(panel.locator('[data-message-id]')).toHaveCount(52)
-      await expect(panel).toContainText(`連鎖返信-50-${suffix}`)
-      await expect(panel).toContainText(`連鎖返信-51-${suffix}`)
+      const after = await readVirtualRows(scroll, 52)
+      expect(after.map(row => row.id)).toEqual(chainMessages.map(message => message.id))
+      for (const [index, message] of chainMessages.entries()) {
+        expect(after[index].text).toContain(message.body)
+      }
       await expect(loadMoreBtn).toHaveCount(0)
     }
 
@@ -443,6 +501,7 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     await expect(peerPage.locator(`#main-content [data-message-id="${ownerReplyMsg.id}"]`)).toContainText(ownerReplyBody)
 
     // Peer replies to a descendant (grandchildA1) through the panel Composer; verify it inherits the same Topic and root, and appears live in Owner's panel.
+    await revealVirtualRow(peerPanel.locator('.reply-panel__scroll'), 4)
     await peerPanel.locator(`[data-message-id="${grandchildA1.id}"]`).getByRole('button', { name: '返信', exact: true }).click()
     const peerReplyBody = `ピア子孫返信-${suffix}`
     const peerPostPromise = peerPage.waitForResponse(
@@ -550,11 +609,11 @@ test('Reconnect and reload (C1-C4, P1)', async ({ browser, baseURL }) => {
 
     const duringDropTopicBody = `切断中トピック発言2-${suffix}`
     const duringDropMainBody = `切断中メイン発言-${suffix}`
-    const duringDropTopicMsg = await sendApiMessage(peerPage.request, orgId, channel.id, {
+    const duringDropTopicMsg = await sendFixtureMessage(peerPage.request, orgId, channel.id, {
       body: duringDropTopicBody,
       topic_name: topicName,
     })
-    const duringDropMainMsg = await sendApiMessage(peerPage.request, orgId, channel.id, {
+    const duringDropMainMsg = await sendFixtureMessage(peerPage.request, orgId, channel.id, {
       body: duringDropMainBody,
     })
 
@@ -623,6 +682,7 @@ test('Reconnect and reload (C1-C4, P1)', async ({ browser, baseURL }) => {
 })
 
 test('Unread (P8)', async ({ browser, baseURL }) => {
+  test.setTimeout(90_000)
   const suffix = crypto.randomUUID().slice(0, 8)
   const ownerContext = await browser.newContext({ baseURL, ignoreHTTPSErrors: true })
   let guestContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
@@ -670,18 +730,18 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     // - 1 Reply to that Topic Message (inherits the Topic)
     const mainMessages: import('./helpers.ts').Message[] = []
     for (let i = 1; i <= 14; i++) {
-      const m = await sendApiMessage(ownerPage.request, orgId, targetChannel.id, {
+      const m = await sendFixtureMessage(ownerPage.request, orgId, targetChannel.id, {
         body: `未読メイン発言-${i}-${suffix}\n2行目-${i}\n3行目-${i}\n4行目-${i}`,
       })
       mainMessages.push(m)
     }
     const topicName = `未読トピック-${suffix}`
-    const topicMsg = await sendApiMessage(ownerPage.request, orgId, targetChannel.id, {
+    const topicMsg = await sendFixtureMessage(ownerPage.request, orgId, targetChannel.id, {
       body: `未読トピック親発言-${suffix}`,
       topic_name: topicName,
     })
     expect(topicMsg.topic_id).toBeTruthy()
-    const topicReplyMsg = await sendApiMessage(ownerPage.request, orgId, targetChannel.id, {
+    const topicReplyMsg = await sendFixtureMessage(ownerPage.request, orgId, targetChannel.id, {
       body: `未読トピック返信発言-${suffix}`,
       reply_to: topicMsg.id,
     })
@@ -738,11 +798,11 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     await expect(guestPage.locator(`#main-content [data-message-id="${mainMessages[0].id}"]`)).toBeVisible()
 
     // While hidden, Owner posts one more live main-timeline Message (15th main message, total 17 Unread).
-    const hiddenLiveMsg = await sendApiMessage(ownerPage.request, orgId, targetChannel.id, {
+    const hiddenLiveMsg = await sendFixtureMessage(ownerPage.request, orgId, targetChannel.id, {
       body: `バックグラウンド着信メイン-15-${suffix}\n2行目\n3行目\n4行目`,
     })
     mainMessages.push(hiddenLiveMsg)
-    await expect(guestPage.locator('#main-content .ui-message-row')).toHaveCount(15)
+    await expectVirtualTotal(guestPage.locator('#main-content .timeline-scroll'), 16)
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 17件')
     expect(markReadRequestsWhileHidden).toEqual([])
     guestPage.off('request', onReq)
@@ -758,7 +818,12 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     const offscreenBelowMain: Message[] = []
     for (const m of mainMessages) {
       const row = scrollContainer.locator(`[data-message-id="${m.id}"][data-confirmed-seq="${m.seq}"]`)
-      await expect(row).toHaveCount(1)
+      // Unmounted rows are outside the viewport. At first-Unread entry every
+      // Message after the visible prefix (mounted or virtual) must remain unread.
+      if (await row.count() === 0) {
+        offscreenBelowMain.push(m)
+        continue
+      }
       const box = await row.boundingBox()
       expect(box).not.toBeNull()
       if (box!.height > 0 && box!.width > 0 && box!.y + box!.height > viewTop && box!.y < viewBottom) {
@@ -834,14 +899,11 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
         return body.read_seq === hiddenLiveMsg.seq
       },
     )
-    await scrollContainer.evaluate(async (el) => {
-      const step = Math.max(100, Math.floor(el.clientHeight * 0.7))
-      while (el.scrollTop + el.clientHeight < el.scrollHeight) {
-        el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step)
-        el.dispatchEvent(new Event('scroll'))
-        await new Promise((r) => setTimeout(r, 30))
-      }
-    })
+    for (const [index, message] of mainMessages.entries()) {
+      const row = await revealVirtualRow(scrollContainer, index < 14 ? index + 1 : 16)
+      await expect(row).toHaveAttribute('data-message-id', message.id)
+      await expect(row).toContainText(message.body)
+    }
     const scrollBottomMarkRes = await scrollBottomMarkPromise
     expect(scrollBottomMarkRes.ok()).toBe(true)
     const channelPosBeforeOwnSend = ((await secretSafe(() => scrollBottomMarkRes.json())) as { read_seq: number }).read_seq
@@ -849,6 +911,7 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
 
     // Main timeline Unread is now 0; only the 2 hidden Topic Messages (Topic root + Reply) stay Unread.
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 2件')
+    await revealVirtualRow(scrollContainer, 15)
     const timelineTopicSummary = guestPage.locator(`#main-content button.ui-topic-summary[data-topic-id="${topicMsg.topic_id}"]`)
     await expect(timelineTopicSummary.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 2件')
 
@@ -908,10 +971,17 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
         new URL(res.url()).pathname.endsWith(`/channels/${targetChannel.id}/topics/${topicMsg.topic_id}/read`),
     )
     const channelsRefreshAfterTopicMarkPromise = guestPage.waitForResponse(
-      (res) =>
-        res.request().method() === 'GET' &&
-        new URL(res.url()).pathname.endsWith(`/orgs/${orgId}/channels`),
+      async (res) => {
+        if (res.request().method() !== 'GET' ||
+          !new URL(res.url()).pathname.endsWith(`/orgs/${orgId}/channels`)) return false
+        expect(res.ok()).toBe(true)
+        const body = (await secretSafe(() => res.json())) as ChannelList
+        // Activity notices can race an older baseline with the mark-read refresh.
+        // Await the baseline covering Topic presentation; stale counts may not win.
+        return body.channels.find(c => c.id === targetChannel.id)?.unread_count === 0
+      },
     )
+    await revealVirtualRow(scrollContainer, 15)
     await timelineTopicSummary.click()
     await expect(guestPage.getByRole('heading', { level: 1, name: topicName, exact: true })).toBeVisible()
     const topicMarkReadRes = await topicMarkReadPromise
@@ -979,10 +1049,10 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     await expect(memberPanel.getByRole('button', { name: `${guest.name}を追加`, exact: true })).toBeVisible()
 
     // Messages posted while the grant is removed precede the new grant's committed-seq baseline.
-    await sendApiMessage(ownerPage.request, orgId, targetChannel.id, {
+    await sendFixtureMessage(ownerPage.request, orgId, targetChannel.id, {
       body: `権限剥奪中のメイン発言-${suffix}`,
     })
-    await sendApiMessage(ownerPage.request, orgId, targetChannel.id, {
+    await sendFixtureMessage(ownerPage.request, orgId, targetChannel.id, {
       body: `権限剥奪中のトピック発言-${suffix}`,
       topic_name: topicName,
     })
@@ -998,7 +1068,7 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveCount(0)
 
     // Messages posted after the re-grant become Unread normally.
-    await sendApiMessage(ownerPage.request, orgId, targetChannel.id, {
+    await sendFixtureMessage(ownerPage.request, orgId, targetChannel.id, {
       body: `再付与後の新着発言-${suffix}`,
     })
     await closePageSockets(guestPage, guestSockets)
