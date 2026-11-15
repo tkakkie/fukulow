@@ -14,6 +14,39 @@ const action = 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'
 const allowed = new Set(['ci.yml/docker/build-image', 'ci.yml/docker/build-upgrade-image',
   'e2e-compose.yml/acceptance/build-image'])
 const guard = 'if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {'
+const inheritedEnvKeys = new Set(['COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'POSTGRES_PASSWORD',
+  'POSTGRES_APP_PASSWORD', 'FUKULOW_SETUP_TOKEN', 'FUKULOW_COOKIE_SECURE', 'FUKULOW_DOMAIN'])
+
+function checkInheritedEnv(scope: string, indent: number) {
+  // Reject quoted/merged mapping keys at these scopes rather than miss an env
+  // alias or an alternate YAML spelling. Unrelated steps/jobs are not inspected.
+  for (const [line] of scope.matchAll(new RegExp(`^ {${indent}}\\S[^\\n]*$`, 'gm'))) {
+    if (line.trimStart().startsWith('#')) continue
+    assert.match(line, new RegExp(`^ {${indent}}[\\w-]+:(?:[ \\t]|$)`),
+      'inherited environment for cache credentials requires plain mapping keys')
+  }
+  const blocks = new RegExp(`^ {${indent}}env:[^\\n]*(?:\\n(?: {${indent + 1},}[^\\n]*|[ \\t]*$))*`, 'gm')
+  for (const [block] of scope.matchAll(blocks)) {
+    const lines = block.split('\n').filter(line => line.trim() && !line.trimStart().startsWith('#'))
+    assert.match(lines[0], /^ *env: *(?:#.*)?$/, 'inherited environment for cache credentials must use a block mapping')
+    for (const line of lines.slice(1)) {
+      const key = line.match(new RegExp(`^ {${indent + 2}}([A-Z_][A-Z0-9_]*): .+$`))?.[1]
+      assert.ok(key && inheritedEnvKeys.has(key), 'inherited environment key for cache credentials must be allowlisted')
+    }
+  }
+}
+
+function checkActionInputs(step: string, body: string) {
+  const seen = new Set<string>()
+  for (const line of step.replace(body, '').split('\n')) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue
+    const key = line.match(/^(?:      - |        )(name|id|uses|if|timeout-minutes|continue-on-error): .+$/)?.[1]
+      ?? (line === '        with:' ? 'with' : undefined)
+      ?? (line === '          script: |' ? 'script' : undefined)
+    assert.ok(key && !seen.has(key), 'credential build steps allow only metadata and the script input; no step env')
+    seen.add(key)
+  }
+}
 
 // Deliberately accepts only the repo's block-style steps/scripts at these three
 // locations. Other YAML forms containing credential references fail closed.
@@ -21,10 +54,11 @@ const guard = 'if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNT
 function checkWorkflow(file: string, workflow: string) {
   const scripts = new Map<string, string>()
   let remaining = workflow
-  for (const match of workflow.matchAll(/^      - [^\n]*(?:\n(?: {8}[^\n]*|[ \t]*))*/gm)) {
+  for (const match of workflow.matchAll(/^      - [^\n]*(?:\n(?: {8}[^\n]*|[ \t]*$))*/gm)) {
     const step = match[0]
     if (!credentials.test(step) && !privilegedAction.test(step)) continue
-    const job = [...workflow.slice(0, match.index).matchAll(/^  ([\w-]+):/gm)].at(-1)?.[1]
+    const jobMatch = [...workflow.slice(0, match.index).matchAll(/^  ([\w-]+):/gm)].at(-1)
+    const job = jobMatch?.[1]
     const id = step.match(/^        id: ([\w-]+)$/m)?.[1]
     const key = `${file}/${job}/${id}`
     assert.ok(allowed.has(key), 'cache credentials may only appear in allowed build steps')
@@ -32,6 +66,11 @@ function checkWorkflow(file: string, workflow: string) {
     assert.ok(step.includes(`        uses: ${action} # v9.0.0`), 'credential build action must stay pinned')
     const body = step.match(/^          script: \|\n((?: {12}[^\n]*(?:\n|$)|\n)+)/m)?.[1]
     assert.ok(body, 'credential build must use a block script')
+    checkActionInputs(step, body)
+    checkInheritedEnv(workflow, 0)
+    const jobStart = jobMatch!.index
+    const jobEnd = workflow.slice(jobStart + 1).search(/^  [\w-]+:/m)
+    checkInheritedEnv(workflow.slice(jobStart, jobEnd < 0 ? undefined : jobStart + 1 + jobEnd), 4)
     assert.ok(!credentials.test(step.replace(body, '')), 'credentials must stay inside the build script')
     const script = body.replace(/^ {12}/gm, '').trim()
     assert.ok(script.includes(guard), 'build must require both cache credentials')
@@ -105,10 +144,66 @@ test('rejects job/workflow env, unrelated steps, renamed actions, and credential
   ]) assert.throws(() => checkWorkflow('ci.yml', `${workflow}\n${source}\n`), /allowed build steps/)
 })
 
+test('credential actions reject startup env at every scope and inputs other than script', () => {
+  const preloads = [
+    ...['--import', '--require', '--loader', '--experimental-loader', '-r']
+      .map(flag => ['NODE_OPTIONS', `${flag} ./scripts/check-db-upgrade.ts`]),
+    ['NODE_PATH', './scripts'], ['LD_PRELOAD', './repository.so'],
+    ['BASH_ENV', './repository.sh'], ['ENV', './repository.sh'],
+    ['PYTHONPATH', './scripts'], ['PATH', './scripts'],
+  ]
+  for (const file of ['ci.yml', 'e2e-compose.yml']) {
+    const workflow = read(`.github/workflows/${file}`)
+    const job = file === 'ci.yml' ? 'docker' : 'acceptance'
+    const jobEnv = workflow.slice(workflow.indexOf(`  ${job}:\n`))
+      .match(/^    env:[^\n]*(?:\n(?: {6}[^\n]*|[ \t]*$))*/m)![0]
+    for (const [variable, value] of preloads) {
+      for (const env of [`env:\n          ${variable}: ${value}`, `env: { ${variable}: "${value}" }`]) {
+        for (const id of file === 'ci.yml' ? ['build-image', 'build-upgrade-image'] : ['build-image']) {
+          assert.throws(() => checkWorkflow(file, workflow.replace(`id: ${id}\n`, `id: ${id}\n        ${env}\n`)), /no step env/)
+        }
+      }
+      for (const env of [`env:\n  ${variable}: ${value}\n`, `env: { ${variable}: "${value}" }\n`]) {
+        assert.throws(() => checkWorkflow(file, workflow.replace('jobs:', `${env}jobs:`)), /inherited environment/)
+      }
+      for (const env of [`env:\n      ${variable}: ${value}\n`, `env: { ${variable}: "${value}" }\n`]) {
+        assert.throws(() => checkWorkflow(file, workflow.replace(jobEnv, `    ${env}`)), /inherited environment/)
+      }
+    }
+    for (const extra of ['env: {}', 'env: *startup', 'env: ${{ vars.STARTUP }}',
+      'with: { require: ./scripts/check-db-upgrade.ts }']) {
+      assert.throws(() => checkWorkflow(file, workflow.replace('id: build-image\n', `id: build-image\n        ${extra}\n`)), /no step env/)
+    }
+    for (const input of ['require', 'pre-script', 'post-script', 'github-token']) {
+      assert.throws(() => checkWorkflow(file, workflow.replace('          script: |',
+        `          ${input}: ./scripts/check-db-upgrade.ts\n          script: |`)), /only metadata and the script input/)
+    }
+    for (const env of ['env: *startup', 'env: ${{ vars.STARTUP }}', 'env:\n  <<: *startup',
+      'env:\n  "NODE_OPTIONS": --import ./scripts/check-db-upgrade.ts',
+      '"env": { NODE_OPTIONS: "--import ./scripts/check-db-upgrade.ts" }', '<<: *startup']) {
+      assert.throws(() => checkWorkflow(file, workflow.replace('jobs:', `${env}\njobs:`)), /inherited environment/)
+      assert.throws(() => checkWorkflow(file, workflow.replace(jobEnv,
+        `    ${env.replaceAll('\n', '\n    ')}\n`)), /inherited environment/)
+    }
+  }
+})
+
+test('startup restrictions leave unrelated steps and jobs alone and allow known inherited settings', () => {
+  const workflow = read('.github/workflows/ci.yml')
+    .replace('jobs:', 'env:\n  COMPOSE_PROFILES: caddy\njobs:')
+    .replace('  web:\n', '  web:\n    env: { NODE_OPTIONS: "--import ./web-check.ts" }\n')
+    .replace('    steps:\n', '    steps:\n      - uses: unrelated/action@v1\n        env: { NODE_PATH: ./scripts }\n        with: { require: ./scripts/unrelated.ts }\n')
+    .replace('      - name: Fetch upgrade source\n',
+      '      - run: node scripts/unrelated.ts\n        env: { BASH_ENV: ./unrelated.sh }\n      - name: Fetch upgrade source\n')
+  assert.equal(checkWorkflow('ci.yml', workflow).size, 2)
+})
+
+type BuildCall = { command: string, args: string[], credentials: boolean }
+
 async function buildCalls(script: string, eventName: string) {
   const env = { PATH: '/test/bin', RUNNER_TEMP: '/test/tmp',
     ACTIONS_RUNTIME_TOKEN: 'test-only-token', ACTIONS_RESULTS_URL: 'https://cache.invalid' }
-  const calls: { command: string, args: string[], credentials: boolean }[] = []
+  const calls: BuildCall[] = []
   const fs = { mkdtempSync: () => '/test/source', rmSync: () => {} }
   const modules: Record<string, unknown> = { 'node:fs': fs, 'node:path': { join }, 'node:os': { tmpdir: () => '/test/tmp' } }
   await runInNewContext(`(async () => { ${script}\n })()`, {
@@ -128,6 +223,26 @@ async function buildCalls(script: string, eventName: string) {
   })
   return calls
 }
+
+function checkOldImageBuild(calls: BuildCall[]) {
+  assert.deepEqual(calls.map(call => [call.command, call.credentials]), [['git', false], ['tar', false], ['docker', true]])
+  assert.deepEqual(calls[0].args, ['archive', '--format=tar', '--output', '/test/source.tar', 'origin/main'],
+    'old-image archive must use origin/main')
+  assert.equal(calls[2].args[calls[2].args.indexOf('-t') + 1], 'fukulow-upgrade-main')
+}
+
+function checkOldImageCleanup(calls: { args: string[] }[], image: string) {
+  assert.deepEqual(calls.filter(call => call.args[0] === 'image' && call.args[1] === 'rm').map(call => call.args),
+    [['image', 'rm', image]], 'cleanup must remove the supplied old-image tag')
+}
+
+test('old-image identity guard rejects a changed archive revision or build tag', async () => {
+  const script = checkWorkflow('ci.yml', read('.github/workflows/ci.yml')).get('ci.yml/docker/build-upgrade-image')!
+  for (const [from, to] of [['"origin/main"', '"HEAD"'], ['"fukulow-upgrade-main"', '"wrong-image"']]) {
+    const calls = await buildCalls(script.replace(from, to), 'push')
+    assert.throws(() => checkOldImageBuild(calls), /origin\/main|fukulow-upgrade-main/)
+  }
+})
 
 test('child-environment guard rejects implicit credentials on archive helpers and non-build docker commands', async () => {
   const scripts = checkWorkflow('ci.yml', read('.github/workflows/ci.yml'))
@@ -150,8 +265,7 @@ test('PR and push builds retain cache policy; old-image helpers never receive cr
         const writes = build.args.includes('app.cache-to=type=gha,scope=docker,mode=max')
         assert.equal(writes, key.endsWith('build-upgrade-image') ? false : file === 'e2e-compose.yml' || event === 'push')
         if (key.endsWith('build-upgrade-image')) {
-          assert.deepEqual(calls.map(call => [call.command, call.credentials]), [['git', false], ['tar', false], ['docker', true]])
-          assert.ok(build.args.includes('fukulow-upgrade-main'))
+          checkOldImageBuild(calls)
         }
       }
     }
@@ -194,6 +308,15 @@ if (args.includes('up')) process.exit(88);
     assert.ok(calls.some(call => call.args.includes('up')), 'must reach container startup after the build')
     const builds = calls.filter(call => call.args[0] === 'build' || call.args[0] === 'buildx')
     assert.equal(builds.length, scenario === 'prebuilt' ? 0 : 1)
+    if (scenario === 'prebuilt') {
+      checkOldImageCleanup(calls, 'fukulow-upgrade-main')
+      for (const mutation of ['omit', 'wrong-tag']) {
+        const broken = calls.flatMap(call => call.args[0] === 'image' && call.args[1] === 'rm'
+          ? mutation === 'omit' ? [] : [{ ...call, args: ['image', 'rm', 'wrong-image'] }]
+          : [call])
+        assert.throws(() => checkOldImageCleanup(broken, 'fukulow-upgrade-main'), /supplied old-image tag/)
+      }
+    }
     for (const call of calls) {
       const build = builds.includes(call)
       assert.equal(call.token, build && cached)
