@@ -855,14 +855,111 @@ describe('Playwright invariant PR CI coverage', () => {
     expect(check(root)).toEqual([])
   }))
 
+  it.each(['skip', 'fixme', 'fail'])('refuses testInfo.%s and destructured callback methods', method => fixture((root, put) => {
+    for (const callback of [
+      `async ({ page }, testInfo) => { testInfo.${method}(true) }`,
+      `async ({ page }, { ${method} }) => { ${method}(true) }`,
+      `async ({ page }, info) => { const { ${method}: annotate } = info; annotate(true) }`,
+    ]) {
+      put('web/e2e/x.spec.ts', `import { test } from '@playwright/test'\ntest('runs', ${callback})`)
+      expect(check(root)[0]).toContain('at most one parameter')
+    }
+  }))
+
+  it('refuses even an unused second callback parameter', () => fixture((root, put) => {
+    put('web/e2e/x.spec.ts', plain.replace('async ()', 'async ({ page }, unused)'))
+    expect(check(root)[0]).toContain('at most one parameter')
+  }))
+
+  it.each([
+    "{ annotation: { type: 'skip' } }",
+    "{ annotation: { type: 'fixme' } }",
+    "{ annotation: { type: 'fail' } }",
+    "{ tag: '@slow' }",
+  ])('refuses three-argument test and describe details: %s', details => fixture((root, put) => {
+    put('web/e2e/x.spec.ts', plain.replace("'runs',", `'runs', ${details},`))
+    expect(check(root)[0]).toContain('literal title and inline callback')
+    put('web/e2e/x.spec.ts', `import { test } from '@playwright/test'\ntest.describe('suite', ${details}, () => { test('runs', () => {}) })`)
+    expect(check(root)[0]).toContain('literal title and inline callback')
+  }))
+
+  it.each([
+    "import { test as t } from '@playwright/test'; t.skip(true)",
+    "import { test, test as t } from '@playwright/test'; t.skip(true)",
+    "import { test as t } from '@playwright/test'; t.describe.configure({ mode: 'serial' })",
+    "import * as pw from '@playwright/test'; pw.test.skip(true)",
+    "import pw from '@playwright/test'; pw.test.skip(true)",
+    "import '@playwright/test'",
+    'const t = test; t.skip(true)',
+    'const { skip } = test; skip(true)',
+    'register(test)',
+    'const describe = test.describe; register(describe)',
+    'register(test.describe)',
+  ])('refuses import/local aliases and escaped test values: %s', code => fixture((root, put) => {
+    for (const file of ['web/e2e/x.spec.ts', 'web/e2e/helpers.ts']) {
+      put(file, plain + code)
+      expect(check(root)[0]).toContain('entire smoke suite unverifiable')
+      put(file, plain)
+    }
+  }))
+
+  it.each(['ts', 'mts', 'cts', 'js', 'mjs', 'tsx', 'cjs', 'jsx', 'custom'])('scans helper modifier access and bindings in .%s files', extension => fixture((root, put) => {
+    for (const modifier of ['skip', 'fixme', 'fail', 'only', 'configure', 'slow']) {
+      for (const code of [
+        `test.${modifier}(true)`,
+        `test['${modifier}'](true)`,
+        `test[\`${modifier}\`](true)`,
+        `const f = alias.${modifier}; f(true)`,
+        `const { ${modifier} } = alias`,
+        `const { ${modifier}: f } = alias; f(true)`,
+        `const { ['${modifier}']: f } = alias`,
+        `const { [\`${modifier}\`]: f } = alias`,
+        `let f; ({ ${modifier}: f } = alias)`,
+        `let ${modifier}; ({ ${modifier} } = alias)`,
+      ]) {
+        put(`web/e2e/nested/helpers.${extension}`, code)
+        expect(check(root)[0], code).toContain('entire smoke suite unverifiable')
+      }
+    }
+    put(`web/e2e/nested/helpers.${extension}`, "export const skipOnCi = () => test.skip(true)")
+    expect(check(root)[0]).toContain('entire smoke suite unverifiable')
+    put(`web/e2e/nested/helpers.${extension}`, "test.describe.configure({ mode: 'serial' })")
+    expect(check(root)[0]).toContain('entire smoke suite unverifiable')
+  }))
+
+  it.each(['dist', 'target', 'node_modules'])('also checks helpers in normally excluded %s directories', directory => fixture((root, put) => {
+    put(`web/e2e/${directory}/helper.js`, 'alias.only("focus", () => {})')
+    expect(check(root)[0]).toContain('entire smoke suite unverifiable')
+  }))
+
+  it.each([
+    'test[`only`]("focus", () => {})',
+    'const f = test.only; f("focus", () => {})',
+    'const { only } = test; only("focus", () => {})',
+  ])('refuses focus in another spec: %s', code => fixture((root, put) => {
+    put('web/e2e/other.spec.ts', code)
+    expect(check(root)[0]).toContain('entire smoke suite unverifiable')
+  }))
+
+  it('keeps serial configuration local to its spec', () => fixture((root, put) => {
+    put('web/e2e/serial.spec.ts', plain + "test.describe.configure({ mode: 'serial' })")
+    expect(check(root)).toEqual([])
+    expect(check(root, 'web/e2e/serial.spec.ts')[0]).toContain('unsupported Playwright')
+  }))
+
+  it('still refuses Vitest files importing Playwright types', () => fixture((root, put) => {
+    put('web/src/vitest.test.ts', "import type { Page } from '@playwright/test'\nit('runs', () => {})")
+    expect(check(root, 'web/src/vitest.test.ts')[0]).toContain('outside smoke testDir')
+  }))
+
   it.each(['skip', 'fixme', 'fail'])('refuses a Playwright %s declaration', modifier => fixture((root, put) => {
     put('web/e2e/x.spec.ts', plain.replace("test('runs'", `test.${modifier}('runs'`))
-    expect(check(root)[0]).toContain(`Playwright ${modifier} declaration`)
+    expect(check(root)[0]).toContain(`Playwright .${modifier} access or binding`)
   }))
 
   it.each(['skip', 'fixme'])('refuses every title inside describe.%s', modifier => fixture((root, put) => {
     put('web/e2e/x.spec.ts', `import { test } from '@playwright/test'\ntest.describe.${modifier}('outer', () => { test.describe('inner', () => { test('runs', () => {}) }) })`)
-    expect(check(root)[0]).toContain('inside a skipped Playwright describe')
+    expect(check(root)[0]).toContain(`Playwright .${modifier} access or binding`)
   }))
 
   it.each([
@@ -905,7 +1002,7 @@ describe('Playwright invariant PR CI coverage', () => {
 
   it('refuses duplicate titles when a definition is skipped', () => fixture((root, put) => {
     put('web/e2e/x.spec.ts', plain + "test.skip('runs', () => {})")
-    expect(check(root)[0]).toContain('Playwright skip declaration')
+    expect(check(root)[0]).toContain('Playwright .skip access or binding')
   }))
 
   it('refuses a browser file outside testDir', () => fixture((root, put) => {

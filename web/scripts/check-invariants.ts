@@ -34,7 +34,8 @@
 //     literal single-project discovery config. Compose acceptance is not PR CI and never counts.
 //     Refuses skip/fixme/fail declarations and skipped suites; runtime skip/fixme, .only, mode changes,
 //     conditional declarations and unsupported test APIs make the whole file unverifiable.
-//     A focused .only call anywhere in the smoke directory refuses all smoke references (focus is suite-wide).
+//     Across all smoke-directory files, modifier access/binding and aliases are refused conservatively.
+//     Focus, aliases and unsafe helpers refuse all smoke references; other spec modifiers stay file-local.
 // A test title that is defined twice in one file counts only if no definition of it is skipped.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -225,8 +226,11 @@ export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playw
         if (playwright) {
           if (c.words.some(w => !['describe', 'skip', 'fixme', 'fail', 'only'].includes(w)))
             unverifiable ??= 'unsupported Playwright modifier or suite mode'
-          const callback = node.arguments[node.arguments.length - 1]
-          const declaration = literal && callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+          const callback = node.arguments[1]
+          const inline = callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+          const declaration = node.arguments.length === 2 && literal && inline
+          if (inline && callback.parameters.length > 1)
+            unverifiable ??= 'Playwright inline callback must have at most one parameter (no testInfo)'
           if (c.words.includes('only')) unverifiable = 'Playwright .only cannot be verified'
           if (c.words.some(w => w === 'skip' || w === 'fixme' || w === 'fail') && !declaration)
             unverifiable ??= 'runtime/conditional Playwright skip/fixme/fail makes the file unverifiable'
@@ -258,6 +262,7 @@ export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playw
     && ts.isNamedImports(s.importClause.namedBindings)
     && s.importClause.namedBindings.elements.some(e => !e.propertyName && e.name.text === 'test')))
     unverifiable ??= 'Playwright test must be imported directly without an alias from @playwright/test'
+  if (playwright) unverifiable ??= playwrightSafety(sf)?.reason
   if (playwright && unverifiable) return out.map(t => ({ ...t, skipped: true, reason: unverifiable }))
   return out
 }
@@ -472,21 +477,44 @@ function playwrightConfig(root: string): string | null {
   return null
 }
 
-/** Focus can suppress tests in other files too, including when declared by an imported helper or alias. */
-function playwrightFocus(src: string): boolean {
-  const sf = ts.createSourceFile('x.ts', src, ts.ScriptTarget.Latest, true)
-  const visit = (node: ts.Node): boolean => {
-    if (ts.isCallExpression(node)) {
-      let e = node.expression
-      while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
-        if (ts.isPropertyAccessExpression(e) ? e.name.text === 'only'
-          : e.argumentExpression && ts.isStringLiteral(e.argumentExpression) && e.argumentExpression.text === 'only') return true
-        e = e.expression
-      }
-    }
-    return ts.forEachChild(node, visit) ?? false
+/** Receiver-independent checks: helper effects and escaped test values cannot be confined to one spec. */
+function playwrightSafety(sf: ts.SourceFile): { reason: string; suiteWide: boolean } | undefined {
+  const modifiers = new Set(['skip', 'fixme', 'fail', 'only', 'configure', 'slow'])
+  let refusal: { reason: string; suiteWide: boolean } | undefined
+  const refuse = (reason: string, suiteWide: boolean) => {
+    if (!refusal || suiteWide) refusal = { reason, suiteWide }
   }
-  return visit(sf)
+  const nameOf = (node: ts.Node): string | undefined => {
+    if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text
+    if (ts.isComputedPropertyName(node)) return nameOf(node.expression)
+  }
+  const visit = (node: ts.Node) => {
+    let name: string | undefined
+    if (ts.isPropertyAccessExpression(node)) name = node.name.text
+    else if (ts.isElementAccessExpression(node)) name = nameOf(node.argumentExpression)
+    else if (ts.isBindingElement(node)) name = nameOf(node.propertyName ?? node.name)
+    else if (ts.isShorthandPropertyAssignment(node) || ts.isPropertyAssignment(node)) name = nameOf(node.name)
+    if (name && modifiers.has(name))
+      refuse(`unsupported Playwright .${name} access or binding`, name === 'only')
+    if (isPlaywrightImport(node)) {
+      const clause = node.importClause
+      if (!clause || clause.name || !clause.namedBindings || !ts.isNamedImports(clause.namedBindings)
+        || clause.namedBindings.elements.some(e => e.propertyName))
+        refuse('Playwright imports must be plain unaliased named imports', true)
+    }
+    if (ts.isIdentifier(node) && node.text === 'test') {
+      const p = node.parent
+      let target: ts.Node = node
+      while ((ts.isPropertyAccessExpression(target.parent) || ts.isElementAccessExpression(target.parent)) && target.parent.expression === target)
+        target = target.parent
+      const direct = ts.isCallExpression(target.parent) && target.parent.expression === target
+      const imported = ts.isImportSpecifier(p) && !p.propertyName && p.name === node
+      if (!direct && !imported) refuse('Playwright test used as a value cannot be verified', true)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return refusal
 }
 
 /** Collects every test definition in the repository, keyed by `path::name`, with whether CI runs it. */
@@ -507,9 +535,20 @@ export function collectKnownTests(root: string): Known {
       record(known, `${file}::${t.name}`, status)
     }
   const webFiles = walk(join(root, 'web'), skip)
-  const focused = webFiles.find(f => rel(f).startsWith('web/e2e/') && f.endsWith('.ts') && playwrightFocus(readFileSync(f, 'utf8')))
+  let unsafeSmoke: string | undefined
+  const smokeDir = join(root, 'web/e2e')
+  for (const f of existsSync(smokeDir) ? walk(smokeDir, new Set()) : []) {
+    // Never inspect environment files, even if one is accidentally placed in the smoke directory.
+    if (/(?:^|\/)\.env(?:\.|$)/.test(rel(f))) {
+      unsafeSmoke ??= 'environment file in web/e2e makes the entire smoke suite unverifiable'
+      continue
+    }
+    const safety = playwrightSafety(ts.createSourceFile(f, readFileSync(f, 'utf8'), ts.ScriptTarget.Latest, true))
+    if (safety && (safety.suiteWide || !/\.(test|spec)\.ts$/.test(f)))
+      unsafeSmoke ??= `${safety.reason} in ${rel(f)} makes the entire smoke suite unverifiable`
+  }
   const playwrightRefusal = playwrightCI(root) ?? playwrightConfig(root)
-    ?? (focused ? `Playwright .only in ${rel(focused)} makes the entire smoke suite unverifiable` : null)
+    ?? unsafeSmoke
   for (const f of webFiles) {
     if (!/\.(test|spec)\.ts$/.test(f)) continue
     const src = readFileSync(f, 'utf8')
