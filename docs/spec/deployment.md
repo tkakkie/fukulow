@@ -34,10 +34,26 @@ Related: [Setup token](accounts.md#setup).
 
 SSH tunnelling is the first candidate, pending maintainer deployment. Firewall public ingress to allow only SSH; close 80/443 on every public IPv4/IPv6 address, including Docker-published paths (host firewall rules alone may be bypassed by Docker). Keep app/DB unpublished. Caddy still terminates TLS for `FUKULOW_DOMAIN=<app-domain>` with a valid domain certificate and persistent `caddy_data`; the tunnel carries TLS unchanged to Caddy, never directly to app HTTP.
 
+**Loopback-only Caddy ports.** Docker publishes `80:80`/`443:443` on every host address and its rules can bypass the host firewall, so bind Caddy to loopback with a private Compose override kept outside the checkout:
+
+```yaml
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1:443:443"
+```
+
+Use `!override`: a plain `ports:` list in an override is appended to the base list and leaves `80`/`443` public (verified with `docker compose config`). Pass it on every command (`docker compose -f compose.yml -f '<override>' --profile caddy ...`); a command without it recreates Caddy with public ports. Port 80 stays unpublished; the SSH tunnel needs only loopback 443. Verify on the VPS before and after each change:
+
+```sh
+docker compose -f compose.yml -f '<override>' --profile caddy port caddy 443   # expect 127.0.0.1:443
+ss -ltnH '( sport = :80 or sport = :443 )'                                    # expect only 127.0.0.1:443
+```
+
 The maintainer chooses certificate issuance/renewal:
 
 - DNS-01 keeps 80/443 closed, but needs a custom Caddy build with the DNS provider module (absent from the stock image), reviewed/pinned updates and a least-privilege DNS API token kept privately outside the checkout. DNS propagation and token custody add operational work; outbound DNS/ACME access is still needed.
-- HTTP-01 (80) or TLS-ALPN-01 (443) can use a short, deliberate public opening with correct public DNS. Close it immediately after issuance and rerun restriction checks. This temporarily weakens isolation; renewal needs another approved window before expiry or a switch to DNS-01. A one-time opening does not provide unattended renewal while closed.
+- HTTP-01 (80) or TLS-ALPN-01 (443) can use a short, deliberate public opening with correct public DNS. Run the window without the loopback override, then restore it immediately after issuance and rerun the restriction checks. This temporarily weakens isolation; renewal needs another approved window before expiry or a switch to DNS-01. A one-time opening does not provide unattended renewal while closed.
 
 After approval, on the operator machine (replace placeholders privately):
 
@@ -50,9 +66,13 @@ Map `<app-domain>` to `127.0.0.1` in the operator's hosts file, then browse `htt
 Restriction check, in one run with the tunnel and app healthy: from a non-allowlisted source outside the VPS, test each public address, bypassing local name overrides. Both ports must refuse or time out; DNS failure is not evidence. Any successful TCP connection fails the restriction check.
 
 ```sh
-nc -vz -w 5 '<vps-public-address>' 80
-nc -vz -w 5 '<vps-public-address>' 443
+nc -4 -vz -w 5 '<vps-public-ipv4>' 80
+nc -4 -vz -w 5 '<vps-public-ipv4>' 443
+nc -6 -vz -w 5 '<vps-public-ipv6>' 80
+nc -6 -vz -w 5 '<vps-public-ipv6>' 443
 ```
+
+Run the IPv6 pair from a source with IPv6 connectivity against every global VPS IPv6 address; skip it only when `ip -6 addr show scope global` on the VPS is empty, and record that. A source without IPv6 cannot prove refusal.
 
 In that same run, on the operator machine, require HTTPS 200 (`ok`) and a TLS WebSocket upgrade (`101 Switching Protocols`) through the tunnel:
 
@@ -67,7 +87,9 @@ curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 -
 
 Use a valid signed-in Member's cookie jar (0600, outside checkout) and a base64-encoded 16-byte handshake nonce; never paste credentials into commands/logs. HTTPS with Upgrade headers performs the `wss` handshake. The curl stream may time out after 101; require the observed 101, not curl exit success. No credential with an allowed Origin returns 401 before upgrade; missing/disallowed cookie Origin returns 403 (`origin_not_allowed`), not 101 (`server/src/realtime.rs`, `server/src/realtime/origin.rs`).
 
-#285 manual checks stay behind Caddy: two signed-in browsers exchange Messages over verified `wss`; restart app with `docker compose -f compose.yml restart app` and verify reconnect/catch-up; interrupt then restore the tunnel/operator network and verify reconnect/catch-up again. A tunnel drop tests the client transport path, not loss of the VPS network; record that distinction privately. Inspect [application logs](#logs-and-aggregates-198-b) over SSH for startup, upgrade, disconnect and recovery; keep results private. R2 backup/alert/restore gates remain [#316](#operator-runbook-and-production-hold-316), without credentials, endpoints or account values here. Provisioning, contracts, DNS, certificates, credentials, deployment and lifting the restriction remain maintainer work ([workflow §12](../workflow.md#12-needs-the-maintainer)); #285 remains blocked.
+**Client IP through the tunnel (operational note).** All tunnelled traffic reaches Caddy from the VPS itself through Docker's loopback port proxy, so the app sees one shared client IP (typically the Docker bridge gateway) for every operator. The per-IP sign-in failure budget (20 per IPv4 or IPv6 /64, 60 s) is therefore shared: one user's failed sign-ins can throttle every tunnel user, and logs/metrics cannot tell users apart by IP; identify them by Account instead. Do not add forwarded headers or widen `FUKULOW_TRUSTED_PROXIES` to recover the original IP. Lifting the restriction restores per-client IPs.
+
+#285 manual checks stay behind Caddy: two signed-in browsers exchange Messages over verified `wss`; restart app with `docker compose -f compose.yml -f '<override>' restart app` and verify reconnect/catch-up; interrupt then restore the tunnel/operator network and verify reconnect/catch-up again. A tunnel drop tests the client transport path, not loss of the VPS network; record that distinction privately. Inspect [application logs](#logs-and-aggregates-198-b) over SSH for startup, upgrade, disconnect and recovery; keep results private. R2 backup/alert/restore gates remain [#316](#operator-runbook-and-production-hold-316), without credentials, endpoints or account values here. Provisioning, contracts, DNS, certificates, credentials, deployment and lifting the restriction remain maintainer work ([workflow §12](../workflow.md#12-needs-the-maintainer)); #285 remains blocked.
 
 ## Send limit (#306)
 - `FUKULOW_SEND_BURST` (tokens, default 10) and `FUKULOW_SEND_REFILL_PER_SECOND` (tokens per second, default 1) size the per-(Organization, Member) send bucket (S6 in `docs/spec/realtime.md`). Each must be an integer from 1 to 1,000,000; unset uses the default; empty, zero or invalid values fail startup.
