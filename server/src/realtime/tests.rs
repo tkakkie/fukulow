@@ -1159,5 +1159,6 @@ mod account_security;
 mod mentions;
 mod observability;
 mod round_trips;
+mod shared_frame;
 
 mod activity;

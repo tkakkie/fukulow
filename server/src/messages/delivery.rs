@@ -2,6 +2,7 @@ use super::Message;
 use super::admission::{Admission, WORK_TIMEOUT};
 use super::failure::{FailureWatch, Failures};
 use crate::channels;
+use axum::extract::ws::Utf8Bytes;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock},
@@ -84,14 +85,45 @@ pub(crate) const LIVE_QUEUE_CAPACITY: usize = 256;
 #[derive(Clone)]
 struct Sender {
     member: (Uuid, i64),
-    events: mpsc::Sender<Arc<Message>>,
+    events: mpsc::Sender<Arc<LiveMessage>>,
     overflow: watch::Sender<bool>,
 }
 impl Sender {
-    fn send(&self, message: Arc<Message>) {
+    fn send(&self, message: Arc<LiveMessage>) {
         if self.events.try_send(message).is_err() {
             self.overflow.send_replace(true);
         }
+    }
+}
+
+/// One canonical payload and wire frame shared by every live recipient.
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct LiveMessage {
+    message: Message,
+    #[serde(skip)]
+    pub frame: Utf8Bytes,
+}
+
+impl std::ops::Deref for LiveMessage {
+    type Target = Message;
+
+    fn deref(&self) -> &Message {
+        &self.message
+    }
+}
+
+impl LiveMessage {
+    pub(crate) fn new(message: Message) -> Result<Self, serde_json::Error> {
+        // Messages cannot depend on realtime. Keep this borrowed wire envelope
+        // byte-compatible with ServerEvent::Message (guarded by the raw-frame test).
+        #[derive(serde::Serialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Event<'a> {
+            Message { message: &'a Message },
+        }
+        let frame = serde_json::to_string(&Event::Message { message: &message })?.into();
+        Ok(Self { message, frame })
     }
 }
 
@@ -111,6 +143,8 @@ pub struct Delivery {
     pub(super) send_limiter: super::limiter::SendLimiter,
     #[cfg(test)]
     pub(crate) live_refills: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) message_serializations: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -139,6 +173,8 @@ impl Default for Delivery {
             send_limiter: Default::default(),
             #[cfg(test)]
             live_refills: Default::default(),
+            #[cfg(test)]
+            message_serializations: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
         }
@@ -242,7 +278,7 @@ pub(crate) struct LiveQueue {
     organization: Uuid,
     sender: Sender,
     channels: HashMap<Uuid, ChannelLease>,
-    pub events: mpsc::Receiver<Arc<Message>>,
+    pub events: mpsc::Receiver<Arc<LiveMessage>>,
     pub overflow: watch::Receiver<bool>,
     pub notification_failed: FailureWatch,
 }
@@ -540,7 +576,18 @@ impl Delivery {
             .iter()
             .filter(|s| allowed.contains(&s.member))
             .collect();
+        if recipients.is_empty() {
+            return;
+        }
         for message in messages {
+            let key = (organization, message.channel_id);
+            #[cfg(test)]
+            self.message_serializations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Ok(message) = LiveMessage::new(message) else {
+                self.failures.signal(key);
+                return;
+            };
             let message = Arc::new(message);
             for sender in &recipients {
                 sender.send(message.clone());
@@ -1123,19 +1170,7 @@ mod tests {
         let mut queue = delivery.queue(Uuid::new_v4(), (Uuid::new_v4(), 0), 1);
         let channel = Uuid::new_v4();
         queue.subscribe(channel);
-        let message = Arc::new(Message {
-            id: Uuid::new_v4(),
-            channel_id: channel,
-            seq: 1,
-            client_message_id: Uuid::new_v4(),
-            sender: Uuid::new_v4(),
-            body: "hello".into(),
-            created_at: "now".into(),
-            topic_id: None,
-            reply_to: None,
-            reply_root_id: None,
-            mentions: Vec::new(),
-        });
+        let message = Arc::new(LiveMessage::new(committed_message(channel)).unwrap());
         queue.sender.send(message.clone());
         queue.sender.send(message);
         assert!(*queue.overflow.borrow());
