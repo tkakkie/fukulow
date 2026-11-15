@@ -2,9 +2,11 @@ import { createReadStream, readFileSync, existsSync, mkdirSync, symlinkSync, wri
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { checked, type Executor } from './dms-formal-exec.ts';
-import { commonWindow, judge, reconcile, type LedgerRow, type Evidence } from './dms-formal-judgment.ts';
+import { commonWindow, judge, judgeLatencies, reconcile, type LedgerRow, type Evidence } from './dms-formal-judgment.ts';
 import { percentile } from './dms-workload.ts';
 import { productionPoolEvidence } from './dms-formal-pool.ts';
+import { heldCohorts, type MixedScenario } from './dms-formal-scenarios.ts';
+import { retainedAssignment } from './dms-formal-mix.ts';
 export type SendRow = LedgerRow & { started:number; completed:number; status:number; bodyBytes:number };
 export async function* lines(path: string) { for await (const line of createInterface({input:createReadStream(path),crlfDelay:Infinity})) yield line; }
 export function parseSend(line: string): SendRow | undefined {
@@ -13,22 +15,28 @@ export function parseSend(line: string): SendRow | undefined {
   // Formal k6 uses --log-format raw. Do not silently swallow malformed ledger records.
   return JSON.parse(line.slice(marker+8)) as SendRow;
 }
-async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: Executor) {
+async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: Executor, scenario:MixedScenario) {
   const exits = JSON.parse(readFileSync(`${directory}/exits.json`,'utf8')) as {shard:number;code:number}[];
   const expected=mode==='smoke'?[0,10]:Array.from({length:11},(_,i)=>i);
   if(!Array.isArray(exits) || exits.length!==expected.length || new Set(exits.map(row=>row.shard)).size!==expected.length || expected.some(shard=>!exits.some(row=>row.shard===shard && Number.isInteger(row.code))))throw new Error('Invalid expected shard manifest');
   for(const {shard} of exits)for(const file of ['metrics.json','run.log','summary.json'])if(!existsSync(`${directory}/shard-${shard}/${file}`))throw new Error('Missing shard evidence');
   const {from,to} = commonWindow(JSON.parse(readFileSync(`${directory}/window-starts.json`,'utf8')),mode);
-  const envArgs = [`DM_FORMAL_MODE=${mode}`,'DM_SHARDS=11',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,`DM_SOCKETS=${mode === 'smoke' ? 20 : 10000}`];
+  const envArgs = [`DM_FORMAL_SCENARIO=${scenario}`,`DM_FORMAL_MODE=${mode}`,'DM_SHARDS=11',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to}`,`DM_SOCKETS=${mode === 'smoke' ? 20 : 10000}`];
   await checked(exec,{program:'env',args:[...envArgs,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),directory],timeout:600000,log:`${directory}/summary.log`});
   const combined = JSON.parse(readFileSync(`${directory}/combined.json`,'utf8'));
   let sampleSummary=combined;
   if(mode==='formal') {
     const extended=`${directory}/extended`;mkdirSync(extended,{mode:0o700});
     for(let i=0;i<11;i++)if(existsSync(`${directory}/shard-${i}`))symlinkSync(`${directory}/shard-${i}`,`${extended}/shard-${i}`,'dir');
-    await checked(exec,{program:'env',args:['DM_FORMAL_MODE=formal','DM_SHARDS=11',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to+240000}`,'DM_SOCKETS=10000',process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),extended],timeout:600000,log:`${extended}/summary.log`});
+    await checked(exec,{program:'env',args:[`DM_FORMAL_SCENARIO=${scenario}`,'DM_FORMAL_MODE=formal','DM_SHARDS=11',`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${to+240000}`,'DM_SOCKETS=10000',process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),extended],timeout:600000,log:`${extended}/summary.log`});
     sampleSummary=JSON.parse(readFileSync(`${extended}/combined.json`,'utf8'));
   }
+  // The separate deep-browsing Organization cannot supply samples on behalf
+  // of any of the ten mixed-load Organizations (or their aggregate).
+  const aggregateDirectory=`${directory}/ten-organizations`;mkdirSync(aggregateDirectory,{mode:0o700});
+  for(let i=0;i<(mode==='smoke'?1:10);i++)symlinkSync(`${directory}/shard-${i}`,`${aggregateDirectory}/shard-${i}`,'dir');
+  await checked(exec,{program:'env',args:[`DM_FORMAL_SCENARIO=${scenario}`,`DM_FORMAL_MODE=${mode}`,`DM_SHARDS=${mode==='smoke'?1:10}`,`DM_WINDOW_FROM=${from}`,`DM_WINDOW_TO=${mode==='formal'?to+240000:to}`,process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),aggregateDirectory],timeout:600000,log:`${aggregateDirectory}/summary.log`});
+  const aggregateTen=JSON.parse(readFileSync(`${aggregateDirectory}/combined.json`,'utf8'));
   const organizations: unknown[] = [];
   const organizationsCore:unknown[]=[];
   for (let i=0;i<(mode === 'smoke' ? 1 : 10);i++) {
@@ -84,33 +92,14 @@ async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: 
   }
   offered = (mode === 'smoke' ? 2 : 2000)*(to-from)/1000;
   Object.assign(evidence,{'errors':errors,'dropped':dropped,'send.bodyByteFailures':byteFailures,'offered.deficit':Math.max(0,offered-issuedTimed),'send.uncommittedPercent':100*(1-accepted/offered),'send.undrained':missing+Math.max(0,offered-issuedTimed),'ledger.missing':missing,'ledger.duplicates':duplicates,'ledger.unexpected':unexpected,'peer.missing':combined.peerMissing == null ? null : Math.abs(combined.peerMissing),'duplicates':duplicateFrames});
-  const classes = {open:['resolve','create','renew'],page:['refresh','delta'],ack:['send']} as const;
-  let sampleDeficit=0;
-  for (const [kind,shapes] of Object.entries(classes)) for(const p of ['p95','p99']) {
-    const found: number[]=[];
-    for(const org of organizations as typeof combined[]) for(const shape of shapes) {
-      const latency=org.latencies[`dm_latency_ms:${shape}`];
-      if (!latency) continue;
-      found.push(latency[p]);
-
-    }
-    evidence[`${kind}.${p}`]=found.length===organizations.length*shapes.length ? Math.max(...found) : null;
+  const latencyJudgment=judgeLatencies(aggregateTen.latencies,(organizations as typeof combined[]).map(org=>org.latencies));
+  for(const budget of ['open','page','ack','peer','fiveAttemptRound'])for(const p of ['p95','p99']) {
+    const rows=latencyJudgment.rows.filter(row=>row.budget===budget && row.percentile===p);
+    const values=rows.map(row=>row.value).filter((value):value is number=>value!==null && Number.isFinite(value));
+    evidence[budget+'.'+p]=values.length?Math.max(...values):null;
   }
-  for(const shape of ['resolve','create','renew','refresh','delta','send','first','deep']) sampleDeficit+=Math.max(0,10000-(sampleSummary.latencies[`dm_latency_ms:${shape}`]?.samples || 0));
-  for (const shape of ['first','deep']) {
-    const latency=sampleSummary.latencies[`dm_latency_ms:${shape}`];
-    if (!latency) { evidence['page.p95']=null; evidence['page.p99']=null; }
-    else { for(const p of ['p95','p99']) if(evidence[`page.${p}`]!=null) evidence[`page.${p}`]=Math.max(evidence[`page.${p}`]!,latency[p]); }
-  }
-  for(const [name,key] of [['peer','dm_receipt_ms'],['fiveAttemptRound','dm_round_ms:attempts=5']]) {
-    sampleDeficit+=Math.max(0,10000-(sampleSummary.latencies[key]?.samples || 0));
-    for(const p of ['p95','p99']) {
-      const values=(organizations as typeof combined[]).map(org=>org.latencies[key]?.[p]);
-      evidence[`${name}.${p}`]=values.every(Number.isFinite)?Math.max(...values):null;
-    }
-  }
-  evidence.sampleDeficit=sampleDeficit;
-  evidence['mix.missing']=(organizationsCore as typeof combined[]).reduce((sum,org)=>sum+[0,50,200].reduce((n,held)=>n+['delta','coverage','browse','recovery',...(held?['held']:[]),'completed5'].filter(lane=>(org.mixMembers?.[held+':'+lane]??0)<Array.from({length:mode==='smoke'?20:1000},(_,i)=>[0,50,200][i%3]).filter(value=>value===held).length).length,0),0);
+  evidence.sampleDeficit=latencyJudgment.rows.filter(row=>row.organization==='aggregate' && row.percentile==='p95').reduce((sum,row)=>sum+Math.max(0,row.minimum-row.samples),0);
+  evidence['mix.missing']=(organizationsCore as typeof combined[]).reduce((sum,org)=>sum+heldCohorts(scenario).reduce((n,held)=>n+['delta','coverage','browse','recovery',...(held?['held']:[]),'completed5'].filter(lane=>(org.mixMembers?.[held+':'+lane]??0)<Array.from({length:mode==='smoke'?20:1000},(_,i)=>retainedAssignment(i,scenario)).filter(value=>value===held).length).length,0),0);
   Object.assign(evidence,productionPoolEvidence(existsSync(`${directory}/app.log`)?readFileSync(`${directory}/app.log`,'utf8').split('\n'):[],from,to));
   evidence['connections.deficit']=combined.fullIntervals.some((interval:{start:number;end:number})=>interval.start<=from && interval.end>=to) ? 0 : 1;
   for(const role of ['app','db']) {
@@ -130,18 +119,18 @@ async function reduceAttempt(directory: string, mode: 'formal' | 'smoke', exec: 
       if(mode==='formal' && bins(from,from+300000)>=297 && bins(to-300000,to)>=297) { const avg=(v:number[])=>v.reduce((a,b)=>a+b,0)/v.length; evidence['app.rssGrowthPercent']=100*(avg(last)/avg(first)-1); }
     }
   }
-  const judgment=judge(evidence,mode);
-  const report={...judgment,window:{from,to},offered,issuedTimed,acceptedInWindow:accepted,drain:existsSync(`${directory}/drain.json`) ? JSON.parse(readFileSync(`${directory}/drain.json`,'utf8')) : null,reconciliation:{missing,duplicates,unexpected},evidence,organizations,organizationsCore,core:combined,sampleExtension:mode==='formal'?{from,to:to+240000,latencies:sampleSummary.latencies}:null,limitations:['Missing pool acquisition telemetry is NOT EVALUATED for an unmodified production image.','Plan/SQL qualification and deferred scenarios require separate evidence; raw probes are not an automatic plan PASS.','Counts and latency judgments use the same extended population; fixed core retained separately. RSS needs 99% distinct one-second bins and growth needs 297 bins in each five-minute endpoint.']};
+  const judgment=judge(evidence,mode,scenario,latencyJudgment);
+  const report={...judgment,latencyJudgment,window:{from,to},offered,issuedTimed,acceptedInWindow:accepted,drain:existsSync(`${directory}/drain.json`) ? JSON.parse(readFileSync(`${directory}/drain.json`,'utf8')) : null,reconciliation:{missing,duplicates,unexpected},evidence,organizations,organizationsCore,core:combined,sampleExtension:mode==='formal'?{from,to:to+240000,latencies:sampleSummary.latencies,aggregateTen:aggregateTen.latencies}:null,limitations:['Per-Organization minimum 10,000/class conservatively awaits maintainer confirmation. Insufficient samples require additional measurement.','First/deep browser samples belong to a separate Organization; absent first/deep samples in the ten mixed-load Organizations remain NOT EVALUATED.','Missing pool acquisition telemetry is NOT EVALUATED for an unmodified production image.','Plan/SQL qualification and deferred scenarios require separate evidence; raw probes are not an automatic plan PASS.','Counts and latency judgments use the same extended population; fixed core retained separately. RSS needs 99% distinct one-second bins and growth needs 297 bins in each five-minute endpoint.']};
   writeFileSync(`${directory}/judgment.json`,JSON.stringify(report,null,2),{mode:0o600});
-  writeFileSync(`${directory}/judgment.md`,`${judgment.label}\n\nAcceptance: ${judgment.acceptance ? 'PASSED' : 'NOT PASSED'}\n\n| Budget | Limit | Observed | Judgment |\n|---|---:|---:|---|\n${judgment.rows.map(row=>`| ${row.budget} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} |`).join('\n')}\n`,{mode:0o600});
+  writeFileSync(`${directory}/judgment.md`,`${judgment.label} — scenario: ${scenario}\n\nAcceptance: ${judgment.acceptance ? 'PASSED' : 'NOT PASSED'}\n\n| Budget | Limit | Observed | Judgment |\n|---|---:|---:|---|\n${judgment.rows.map(row=>`| ${row.budget} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} |`).join('\n')}\n\n| Organization | Class | Percentile | Samples | Minimum | Limit | Observed | Judgment | Additional measurement |\n|---|---|---|---:|---:|---:|---:|---|---|\n${latencyJudgment.rows.map(row=>`| ${row.organization} | ${row.shape} | ${row.percentile} | ${row.samples} | ${row.minimum} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} | ${row.additionalMeasurement ? 'required' : ''} |`).join('\n')}\n`,{mode:0o600});
   return report;
 }
-export async function reportAttempt(directory:string,mode:'formal'|'smoke',exec:Executor) {
-  try { return await reduceAttempt(directory,mode,exec); }
+export async function reportAttempt(directory:string,mode:'formal'|'smoke',exec:Executor,scenario:MixedScenario='main') {
+  try { return await reduceAttempt(directory,mode,exec,scenario); }
   catch(error) {
-    const report={...judge({},mode),infrastructureFailure:true,evidence:{},error:error instanceof Error?error.message:'Malformed evidence'};
+    const report={...judge({},mode,scenario),infrastructureFailure:true,evidence:{},error:error instanceof Error?error.message:'Malformed evidence'};
     writeFileSync(`${directory}/judgment.json`,JSON.stringify(report,null,2),{mode:0o600});
-    writeFileSync(`${directory}/judgment.md`,report.label+'\n\nAcceptance: NOT PASSED; evidence reduction failed. All budgets NOT EVALUATED.\n',{mode:0o600});
+    writeFileSync(`${directory}/judgment.md`,report.label+' — scenario: '+scenario+'\n\nAcceptance: NOT PASSED; evidence reduction failed. All budgets NOT EVALUATED.\n',{mode:0o600});
     return report;
   }
 }

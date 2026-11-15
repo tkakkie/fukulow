@@ -1,8 +1,9 @@
 import { existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { outsideCheckout } from './dms-workload.ts';
+import { requiredScenarios, deferredNames, type Scenario } from './dms-formal-scenarios.ts';
 
-export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: 'main'; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; downloadRaw?: boolean };
+export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: Scenario; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; downloadRaw?: boolean };
 export const quote = (s: string) => "'" + s.replaceAll("'", "'\\''") + "'";
 export function external(path: string, checkout: string): string {
   if (!isAbsolute(path)) throw new Error('Paths must be absolute');
@@ -32,10 +33,10 @@ export function readConfig(path: string, checkout: string): Config {
   const mode = entries.DM_FORMAL_MODE || 'formal', scenario = entries.DM_FORMAL_SCENARIO || 'main';
   const attempts = Number(entries.DM_FORMAL_ATTEMPTS || 3);
   if (mode !== 'smoke' && mode !== 'formal') throw new Error('Mode must be formal or smoke');
-  if (scenario !== 'main') throw new Error('Only main scenario is implemented');
+  if (![...requiredScenarios,...deferredNames].includes(scenario as Scenario)) throw new Error('Unknown formal scenario');
   if (!Number.isSafeInteger(attempts) || attempts < (mode === 'formal' ? 3 : 1) || attempts > 10) throw new Error('Formal mode requires at least three consecutive attempts (maximum ten)');
   const deadline = entries.DM_FORMAL_DEADLINE ? Date.parse(entries.DM_FORMAL_DEADLINE) : undefined;
   if (deadline !== undefined && (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(entries.DM_FORMAL_DEADLINE) || !Number.isFinite(deadline) || deadline<=Date.now())) throw new Error('Deadline must be a future ISO time with timezone');
   if(entries.DM_FORMAL_DOWNLOAD_RAW && !['0','1'].includes(entries.DM_FORMAL_DOWNLOAD_RAW))throw new Error('DOWNLOAD_RAW must be 0 or 1');
-  return { app, db, generator, sha, output, mode, scenario, attempts, deadline, downloadRaw:entries.DM_FORMAL_DOWNLOAD_RAW==='1' };
+  return { app, db, generator, sha, output, mode, scenario:scenario as Scenario, attempts, deadline, downloadRaw:entries.DM_FORMAL_DOWNLOAD_RAW==='1' };
 }

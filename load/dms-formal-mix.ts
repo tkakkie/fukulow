@@ -1,5 +1,6 @@
 import { stepDmList, type DmListState } from '../web/src/dm-list.ts';
-export const retainedAssignment=(index:number)=>[0,50,200][index%3]!;
+import { heldCohorts, type MixedScenario } from './dms-formal-scenarios.ts';
+export const retainedAssignment=(index:number,scenario:MixedScenario='main')=>{const cohorts=heldCohorts(scenario);return cohorts[index%cohorts.length]!;};
 export function demandFormalMix(state:DmListState,peer:string):DmListState {
   // Repeated independent browse/recovery traversals; exhausted traversals start
   // again, while unfinished immutable continuations retain their own progress.

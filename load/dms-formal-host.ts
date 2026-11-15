@@ -6,13 +6,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { lines, parseSend } from './dms-formal-results.ts';
 import { currentGroup, stopRecordedGroups } from './dms-formal-groups.ts';
 import { checked, execute } from './dms-formal-exec.ts';
+import { mixedLoad, fixturePairs, type MixedScenario } from './dms-formal-scenarios.ts';
 import { quote } from './dms-formal-config.ts';
 import { statSync, renameSync } from 'node:fs';
 import { copyVolume, removeCopy } from './dms-formal-copy.ts';
 import { requireHeadroom, directoryBytes, GiB, summaryLimit } from './dms-formal-storage.ts';
 import { histogramsSql } from './dms-formal-histograms.ts';
 import { reportAttempt } from './dms-formal-results.ts';
-export type HostState = { id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
+export type HostState = { id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
 const root = resolve(import.meta.dirname,'../..');
 const statePath = `${root}/state.json`;
 let cleaning = false;
@@ -105,7 +106,7 @@ async function app(s: HostState) {
 }
 async function seed(s: HostState) {
   const started = Date.now();
-  const env = { ...process.env, DM_DB_CONTAINER:`${s.id}-db-1`, DM_FORMAL_SEED:'1', DM_FORMAL_SMOKE:s.mode === 'smoke' ? '1' : '0', DM_FORMAL_OUT:`${root}/formal`, DM_SEED_OUT:`${root}/deep.json`, DM_OUTPUT:root, BASE_URL:`https://${s.appAddress}`, NODE_EXTRA_CA_CERTS:`${root}/ca.crt`, DM_QUERY_SOURCE:`${root}/source`, DM_PROBE_SAMPLES:'1', DM_SEND_PROBE_SAMPLES:'1' };
+  const env = { ...process.env, DM_DB_CONTAINER:`${s.id}-db-1`, DM_FORMAL_SEED:'1', DM_FORMAL_SCENARIO:s.scenario, DM_FORMAL_SMOKE:s.mode === 'smoke' ? '1' : '0', DM_FORMAL_OUT:`${root}/formal`, DM_SEED_OUT:`${root}/deep.json`, DM_OUTPUT:root, BASE_URL:`https://${s.appAddress}`, NODE_EXTRA_CA_CERTS:`${root}/ca.crt`, DM_QUERY_SOURCE:`${root}/source`, DM_PROBE_SAMPLES:'1', DM_SEND_PROBE_SAMPLES:'1' };
   const run = async (script: string) => {
     // Spawned seed/probe children inherit only this private configuration; their output is private.
     const old = process.env; process.env = env;
@@ -132,7 +133,8 @@ async function seed(s: HostState) {
   save(`${root}/fixture-histograms.json`,await sql(s,histogramsSql));
   await sql(s,'VACUUM(ANALYZE);');
   const seeded=await sql(s,countsSql), actual=JSON.parse(seeded), orgs=s.mode==='smoke'?1:10;
-  const expected={organizations:orgs+1,members:orgs*1000+10000,dms:orgs*150000+14999,grants:orgs*300000+29998,messages:orgs*(s.mode==='smoke'?50000:5000000)+3*orgs+2};
+  const {historical,supplemental}=fixturePairs(s.scenario),pairCount=historical.length+supplemental.length;
+  const expected={organizations:orgs+1,members:orgs*1000+10000,dms:orgs*pairCount+14999,grants:orgs*pairCount*2+29998,messages:orgs*(s.mode==='smoke'?50000:5000000)+3*orgs+2};
   save(`${root}/fixture-count-check.json`,{actual,expected});
   if(Object.entries(expected).some(([key,value])=>actual[key]!==value))throw new Error('Seed row counts differ from the explicit fixture/probe additions');
   save(`${root}/seed-counts.json`,seeded);
@@ -188,7 +190,7 @@ async function generators(s: HostState, attempt: number, epoch: number) {
   try { results = await Promise.all(Array.from({length:orgs+1},async(_,index) => {
     const browser = index === orgs, shard = browser ? 10 : index;
     const out = `${directory}/shard-${shard}`; mkdirSync(out,{recursive:true,mode:0o700});
-    const settings = { BASE_URL:`https://${s.appAddress}`, DM_FORMAL:'1', DM_EPOCH:String(epoch), DM_SOCKETS:smoke ? '20' : '1000', DM_SENDERS:smoke ? '10' : '200', DM_OFFSET:'0', DM_SHARD:'0', DM_RATE:browser ? '0' : smoke ? '2' : '200', DM_OPEN_RATE:browser ? '0' : smoke ? '1' : '2', DM_BROWSE_RATE:browser ? smoke ? '2' : '100' : '0', DM_LEDGER:'1', DM_BROWSER_ONLY:browser ? '1' : '0', DM_CONNECT_INTERVAL_MS:smoke ? '1000' : '30000', DM_SEND_START:smoke ? '30' : '300', DM_SECONDS:smoke ? '95' : '2345', SSL_CERT_FILE:'/ca.crt', DM_SMOKE:smoke ? '1' : '0' };
+    const settings = { BASE_URL:`https://${s.appAddress}`, DM_FORMAL:'1', DM_FORMAL_SCENARIO:s.scenario, DM_EPOCH:String(epoch), DM_SOCKETS:smoke ? '20' : String(mixedLoad.socketsPerOrganization), DM_SENDERS:smoke ? '10' : '200', DM_OFFSET:'0', DM_SHARD:'0', DM_RATE:browser ? '0' : smoke ? '2' : String(mixedLoad.sendsPerOrganization), DM_OPEN_RATE:browser ? '0' : smoke ? '1' : '2', DM_BROWSE_RATE:browser ? smoke ? '2' : '100' : '0', DM_LEDGER:'1', DM_BROWSER_ONLY:browser ? '1' : '0', DM_CONNECT_INTERVAL_MS:smoke ? '1000' : String(mixedLoad.rampSeconds*100), DM_SEND_START:smoke ? '30' : '300', DM_SECONDS:smoke ? '95' : '2345', SSL_CERT_FILE:'/ca.crt', DM_SMOKE:smoke ? '1' : '0' };
     const args = ['run','--rm','--name',`${s.id}-k6-${shard}`,'--label',`dm-formal=${s.id}`,'--user',`${process.getuid?.()}:${process.getgid?.()}`,'--ulimit','nofile=65536:65536','--sysctl','net.ipv4.ip_local_port_range=1024 65535','-v',`${root}/harness:/work:ro`,'-v',`${browser ? root+'/deep.json' : root+`/formal/org-${index}.json`}:/seed.json:ro`,'-v',`${out}:/output`,'-v',`${root}/ca.crt:/ca.crt:ro`,...Object.entries(settings).flatMap(([key,value])=>['-e',`${key}=${value}`]),s.k6,'run','--log-format','raw','--out','json=/output/metrics.json','/work/load/dms.ts'];
     const result = await execute({program:'docker',args,timeout:(smoke ? 360 : 3000)*1000,log:`${out}/run.log`}).catch(() => ({code:124,stdout:''}));
     save(`${out}/exit.json`,{code:result.code}); return {shard,code:result.code};
@@ -279,7 +281,7 @@ async function main() {
       const directory=`${root}/attempt-${attempt}`;
       requireHeadroom(root,directoryBytes(directory)+(s.mode==='smoke'?GiB:20*GiB));
       await command('gzip',['-df',directory+'/durable.jsonl.gz'],900000);
-      await reportAttempt(directory,s.mode,execute);
+      await reportAttempt(directory,s.mode,execute,s.scenario);
       rmSync(directory+'/ledger-buckets',{recursive:true,force:true});
       await command('tar',['-czf',`${root}/raw-${attempt}.tgz.tmp`,'-C',directory,...readdirSync(directory).filter(file=>file!=='extended' && !file.startsWith('organization-'))],1800000);
       renameSync(`${root}/raw-${attempt}.tgz.tmp`,`${root}/raw-${attempt}.tgz`);

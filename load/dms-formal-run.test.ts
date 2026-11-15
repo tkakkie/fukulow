@@ -110,9 +110,11 @@ test('common-window report retains outside-window errors and reconciles the full
     writeFileSync(`${directory}/shard-${shard}/metrics.json`,points.map(point=>JSON.stringify(point)).join('\n')+'\n');
   }
   writeFileSync(`${directory}/durable.jsonl`,JSON.stringify(row)+'\n');
-  const report=await reportAttempt(directory,'smoke',execute);
+  const report=await reportAttempt(directory,'smoke',execute,'held200');
   assert.ok('reconciliation' in report,JSON.stringify(report));
   assert.equal(report.acceptance,false);assert.equal(report.label,'NON-ACCEPTANCE');
+  assert.equal(report.scenario,'held200');
+  assert.equal(JSON.parse(readFileSync(`${directory}/combined.json`,'utf8')).scenario,'held200');
   assert.deepEqual(report.reconciliation,{missing:0,duplicates:0,unexpected:0});
   assert.equal(report.evidence.errors,1);assert.equal(report.evidence.dropped,1);
   assert.equal(report.evidence['ack.p99'],10);
@@ -223,7 +225,7 @@ test('reportAttempt judges slow extension on the population supplying samples, s
   const reducer:Runtime['exec']=async command=>{
     const dest=command.args.at(-1)!;
     const extended=command.args.some(arg=>arg==='DM_WINDOW_TO='+String(epoch+2640000));
-    const latencies=Object.fromEntries([...['resolve','create','renew','refresh','delta','send','first','deep'].map(s=>'dm_latency_ms:'+s),'dm_receipt_ms','dm_round_ms:attempts=5'].map(key=>[key,{samples:extended?10200:9000,p95:extended?500:10,p99:extended?700:10}]));
+    const latencies=Object.fromEntries([...['resolve','create','renew','refresh','delta','coverage','send','first','deep'].map(s=>'dm_latency_ms:'+s),'dm_receipt_ms','dm_round_ms:attempts=5'].map(key=>[key,{samples:extended?10200:9000,p95:extended?500:10,p99:extended?700:10}]));
     writeFileSync(dest+'/combined.json',JSON.stringify({latencies,mix:{},peerMissing:0,pool:{samples:0},fullIntervals:[]}));
     return {code:0,stdout:''};
   };
@@ -246,7 +248,8 @@ test('reportAttempt judges slow extension on the population supplying samples, s
 test('held assignment and explicit traversal demand make the five-lane mix eligible',async()=>{
   const {retainedAssignment,demandFormalMix}=await import('./dms-formal-mix.ts');
   const {dmListState,stepDmList}=await import('../web/src/dm-list.ts');
-  assert.deepEqual(Array.from({length:6},(_,i)=>retainedAssignment(i)),[0,50,200,0,50,200]);
+  assert.deepEqual(Array.from({length:6},(_,i)=>retainedAssignment(i)),[0,50,0,50,0,50]);
+  assert.deepEqual(Array.from({length:6},(_,i)=>retainedAssignment(i,'held200')),[0,50,200,0,50,200]);
   for(const held of [0,50,200]) {
     let state=dmListState();
     state.rows=Array.from({length:held},(_,i)=>({identity:{id:String(i),kind:'dm' as const,peer:{id:'peer',name:'Peer',active:true}},access:i,used:i}));
@@ -309,4 +312,21 @@ test('unverified owned-process cleanup prevents retention and another restore',a
   assert.equal(events.filter(event=>event.includes("'restore'")).length,1);
   assert.equal(events.filter(event=>event.includes("'retain-raw'")).length,0);
   assert.equal(events.filter(event=>event.includes(' cleanup && timeout')).length,3);
+});
+
+test('scenario config selects main, held200 and explicit deferred stubs',t=>{
+  const path=temporary(t),file=path+'/private.env';
+  for(const scenario of ['main','held200','hot-DM']) {
+    writeFileSync(file,env(path,`DM_FORMAL_SCENARIO=${scenario}\n`),{mode:0o600});
+    assert.equal(readConfig(file,checkout).scenario,scenario);
+  }
+});
+test('deferred selection records its scenario as NOT EVALUATED without contacting hosts',async t=>{
+  const path=temporary(t);
+  const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',scenario:'hot-DM',attempts:3,mode:'formal'};
+  const unused=()=>{throw new Error('Deferred stub contacted a host');};
+  const result=await run(config,{exec:unused,transfer:unused,on:unused,off:unused});
+  assert.equal(result.acceptance,false);
+  const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
+  assert.equal(summary.scenario,'hot-DM');assert.equal(summary.status,'NOT EVALUATED');
 });

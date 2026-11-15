@@ -3,7 +3,8 @@ import { randomBytes, createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { outsideCheckout, regularPairs } from './dms-workload.ts';
+import { outsideCheckout } from './dms-workload.ts';
+import { fixturePairs, heldCohorts, type MixedScenario } from './dms-formal-scenarios.ts';
 if (process.env.DM_FORMAL_SEED !== '1') throw new Error('Set DM_FORMAL_SEED=1 only on the dedicated disposable DB host (50M Messages)');
 const output = resolve(process.env.DM_FORMAL_OUT || '');
 if (!process.env.DM_FORMAL_OUT || !outsideCheckout(output, resolve('.'))) throw new Error('DM_FORMAL_OUT must be outside checkout');
@@ -12,7 +13,9 @@ if (!container) throw new Error('DM_DB_CONTAINER required');
 mkdirSync(output, { recursive: true });
 const uuid = (label: string) => { const s = createHash('md5').update(`dm151-formal:${label}`).digest('hex'); return `${s.slice(0,8)}-${s.slice(8,12)}-${s.slice(12,16)}-${s.slice(16,20)}-${s.slice(20)}`; };
 const sql = (input: string) => execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'], { input, stdio: ['pipe','ignore','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 });
-const pairs = regularPairs(1000,100);
+const scenario=process.env.DM_FORMAL_SCENARIO || 'main';
+if(scenario!=='main' && scenario!=='held200')throw new Error('Seed requires main or held200 scenario');
+const {historical:pairs,supplemental:extraPairs}=fixturePairs(scenario);
 const smoke = process.env.DM_FORMAL_SMOKE === '1';
 const history = smoke ? 1 : 100;
 for (let o = 0; o < (smoke ? 1 : 10); o++) {
@@ -31,8 +34,6 @@ for (let o = 0; o < (smoke ? 1 : 10); o++) {
   }
   // Prepare a current revision with some genuinely historical grants for the
   // timed renewal pool. Watched reciprocal pairs always retain current grants.
-  const existing=new Set(pairs.map(([a,b])=>a+':'+b));
-  const extraPairs=regularPairs(1000,300).filter(([a,b])=>!existing.has(a+':'+b));
   sql(`UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id='${org}'; UPDATE users SET deactivated_at=NULL WHERE organization_id='${org}';`);
   const allPairs=[...pairs,...extraPairs];
   for (let start = 0; start < allPairs.length; start += 250) {
@@ -52,7 +53,7 @@ INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${
     sql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);`);
   }
   sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');`);
-  writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, heldAssignment:[0,50,200] }), { mode: 0o600 });
-  console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, 150,000 DMs (100,000 supplemental empty pairs), ${50000*history} Messages; current revision 1, 290,000 usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals`);
+  writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, scenario, heldAssignment:heldCohorts(scenario as MixedScenario), fixture:{pairs:pairs.length+extraPairs.length,historicalPairs:pairs.length,messages:pairs.length*history} }), { mode: 0o600 });
+  console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} scenario=${scenario} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, ${pairs.length+extraPairs.length} DMs (${extraPairs.length} supplemental empty pairs), ${50000*history} Messages; current revision 1, ${2*(pairs.length+extraPairs.length)-10000} usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals`);
 }
 sql('VACUUM(ANALYZE);');

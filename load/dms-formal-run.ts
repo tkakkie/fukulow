@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { readConfig, quote, type Config } from './dms-formal-config.ts';
 import { execute, checked, transferImage, type Executor } from './dms-formal-exec.ts';
 import { requireHeadroom, GiB, summaryLimit } from './dms-formal-storage.ts';
+import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
 export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void };
@@ -12,8 +13,14 @@ export const cleanupReserveMs=10*60*1000;
 export const attemptBudgetMs=(mode:'formal'|'smoke')=>mode==='formal'?150*60*1000:30*60*1000;
 export const canStartAttempt=(config:Config,now=Date.now())=>config.deadline===undefined || config.deadline-now>=attemptBudgetMs(config.mode)+cleanupReserveMs;
 export async function run(config:Config, runtime:Runtime=defaultRuntime) {
+  if(!isMixedScenario(config.scenario)) {
+    mkdirSync(config.output,{mode:0o700});
+    const summary={scenario:config.scenario,label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',status:'NOT EVALUATED',acceptance:false,reason:'Deferred scenario; not implemented.'};
+    writeFileSync(`${config.output}/summary.json`,JSON.stringify(summary,null,2),{mode:0o600});
+    return {...summary,infrastructureFailure:false,attempts:[]};
+  }
   const id=`dm-formal-${randomUUID()}`, root=`/tmp/${id}`, checkout=resolve(import.meta.dirname,'..');
-  const json=(name:string,value:unknown)=>{const path=`${config.output}/${name}`,temp=path+'.tmp';writeFileSync(temp,JSON.stringify(value,null,2),{mode:0o600});renameSync(temp,path);};
+  const json=(name:string,value:unknown)=>{const path=`${config.output}/${name}`,temp=path+'.tmp';writeFileSync(temp,JSON.stringify(Array.isArray(value)?value:{scenario:config.scenario,...value as object},null,2),{mode:0o600});renameSync(temp,path);};
   let phase='initializing', attempt=0, lastError:string|null=null, interrupted=false;
   const start=new Date().toISOString();
   let operation='initializing',outcome='running',infrastructureFailure=false,statusWriteFailed=false;
@@ -36,7 +43,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const heartbeat=setInterval(status,15000);
   const deadlineTimer=config.deadline===undefined?undefined:setTimeout(()=>{lastError='Configured deadline cleanup reserve reached';signal();},Math.max(0,config.deadline-Date.now()-cleanupReserveMs));
   const checkpoint=()=>{if(interrupted)throw new Error('Interrupted');};
-  const change=(next:string)=>{checkpoint();phase=next;status();console.log(`DM formal: ${phase}${attempt ? ` (attempt ${attempt})` : ''}`);};
+  const change=(next:string)=>{checkpoint();phase=next;status();console.log(`DM formal ${config.scenario}: ${phase}${attempt ? ` (attempt ${attempt})` : ''}`);};
   const artifact=async(host:string,path:string,local:string,raw=false)=>{
     operation='transfer:'+path;status();
     if(!raw) { const size=Number(await remote(host,`du -sb ${quote(root+'/'+path)} | cut -f1`,10000));if(!Number.isFinite(size)||size>summaryLimit)throw new Error('Artifact exceeds bounded 32 MiB transfer'); }
@@ -57,7 +64,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     };
     const [appAddress,dbAddress]=await Promise.all([address(config.app),address(config.db)]);
     const pin=(file:string,pattern:RegExp)=>{const value=pattern.exec(readFileSync(`${checkout}/${file}`,'utf8'))?.[1];if(!value)throw new Error('Missing repository image pin');return value;};
-    const common={id,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:config.attempts,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
+    const common={id,scenario:config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:config.attempts,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
     json('private-state.json',{...common,hosts});
     await checked(runtime.exec,{program:'tar',args:['--exclude=node_modules','-czf',`${config.output}/harness.tgz`,'-C',checkout,'load','web/src','deploy/Caddyfile'],timeout:120000});
     chmodSync(`${config.output}/harness.tgz`,0o600);
@@ -120,9 +127,9 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       } catch(error) {
         if(interrupted)throw error;
         infrastructureFailure=true;outcome='infrastructure-failed';lastError=error instanceof Error?error.message:'Attempt infrastructure/evidence failure';status();
-        const failed={attempt,...judge({},config.mode),operation,error:lastError};
+        const failed={attempt,...judge({},config.mode,config.scenario),operation,error:lastError};
         json(`attempt-${attempt}/judgment.json`,failed);
-        writeFileSync(`${directory}/judgment.md`,`${failed.label}\n\nAcceptance: NOT PASSED\n\n| Budget | Limit | Observed | Judgment |\n|---|---:|---:|---|\n${failed.rows.map(row=>`| ${row.budget} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} |`).join('\n')}\n`,{mode:0o600});
+        writeFileSync(`${directory}/judgment.md`,`${failed.label} — scenario: ${config.scenario}\n\nAcceptance: NOT PASSED\n\n| Budget | Limit | Observed | Judgment |\n|---|---:|---:|---|\n${failed.rows.map(row=>`| ${row.budget} | ${row.limit} | ${row.value ?? 'missing'} | ${row.status} |`).join('\n')}\n`,{mode:0o600});
         results.push(failed);
       } finally {
         if(!interrupted) {
@@ -143,12 +150,12 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       await remote(host,`find ${quote(root)} -maxdepth 1 -type f ! -name '*.tgz' -print0 | tar --null -T - -czf ${quote(root+'/evidence.tgz')}`,120000);
       try {await artifact(host,'evidence.tgz',`${destination}/evidence.tgz`);}catch {infrastructureFailure=true;json(`host-${index}/transfer-failure.json`,{operation:'retain',remoteRoot:root});}
     }
-    json('summary.json',{label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',acceptance:false,attempts:results,deferredScenarios,reason:'Acceptance requires all adopted budgets and deferred scenarios; missing evidence is NOT EVALUATED.'});
+    json('summary.json',{label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',acceptance:false,attempts:results,deferredScenarios,requiredScenarios:['main','held200'],scenarioAcceptance:scenarioAcceptance(results.map((row)=>({...row as {attempt:number;acceptance:boolean},scenario:config.scenario,mode:config.mode})),deferredScenarios),reason:'Acceptance requires main and held200, each with three consecutive passing formal attempts, and all deferred scenarios; missing evidence is NOT EVALUATED.'});
   } catch(error) {lastError=error instanceof Error?error.message:'Runner failed';json('failure.json',{label:config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL',phase,attempt,lastError,acceptance:false});throw error;}
   finally {
     try {await cleanup();}catch(error){lastError='Remote cleanup incomplete';throw error;}finally {clearInterval(heartbeat);clearTimeout(deadlineTimer);runtime.off('SIGINT',signal);runtime.off('SIGTERM',signal);phase=lastError?'failed':'complete';outcome=lastError?'infrastructure-failed':'complete';status();}
   }
-  return {acceptance:false,infrastructureFailure:infrastructureFailure||statusWriteFailed,attempts:results};
+  return {scenario:config.scenario,acceptance:false,infrastructureFailure:infrastructureFailure||statusWriteFailed,attempts:results};
 }
 if(process.argv[1]===import.meta.filename) {
   try {const config=readConfig(process.argv[2]||'',resolve(import.meta.dirname,'..'));run(config).then(result=>{process.exitCode=result.infrastructureFailure?1:2;}).catch(()=>{console.error('DM formal run failed; inspect private status.json and failure.json');process.exitCode=1;});}

@@ -13,6 +13,8 @@ Load testing and measurement rules. Writing rules and the other parts: [index](.
 
 - #151 adopts DM performance acceptance (2026-11-14): 10,000 connections, 2,000 sends/s and spec/dms.md latency/DB/memory budgets. Reason: validate combined O5/write load; include hot bursts, notice loss, bootstrap, bounded backlog/drain and storage/WAL/lock/backup/restore cost.
 
+- #151: keep main at exactly 100 DMs/Member; measure held200 separately under full mixed load. Samples sum over ten Organizations; judge each Organization too. Reason: preserve fixture comparability and prevent aggregate tails from hiding an Organization failure.
+
 ## Entries in other parts
 
 Entries that also govern this area, listed by the start of the entry in that part.

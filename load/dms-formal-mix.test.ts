@@ -31,3 +31,45 @@ for(const retained of [0,50,200])test(`successful multi-page discovery and concu
   }
   for(const lane of ['delta','coverage','browse','recovery',...(retained?['held']:[])])assert.ok(lanes.has(lane));
 });
+
+test('main has exactly 100 DMs per Member and no supplemental empty pairs',async()=>{
+  const {fixturePairs}=await import('./dms-formal-scenarios.ts');
+  const {historical,supplemental}=fixturePairs('main');
+  const degrees=Array<number>(1000).fill(0);
+  for(const [a,b] of [...historical,...supplemental]){degrees[a]++;degrees[b]++;}
+  assert.equal(supplemental.length,0);assert.equal(historical.length*10,500000);
+  assert.equal(historical.length*10*100,50000000);
+  assert.ok(degrees.every(degree=>degree===100));
+  for(const [,peer] of historical.filter(([a,b])=>a<900 && (a^1)!==b).slice(0,10000))degrees[peer]--;
+  assert.ok(degrees.every(degree=>degree>=50),'the main fixture supplies its 50-held cohort after prepared grant lapses');
+});
+test('held200 supplies at least 200 current authorized rows for every held Member under full mixed load',async()=>{
+  const {fixturePairs,mixedLoad}=await import('./dms-formal-scenarios.ts');
+  const {retainedAssignment}=await import('./dms-formal-mix.ts');
+  const {historical,supplemental}=fixturePairs('held200');
+  const usable=Array<number>(1000).fill(0);
+  for(const [a,b] of [...historical,...supplemental]){usable[a]++;usable[b]++;}
+  const renewals=historical.filter(([a,b])=>a<900 && (a^1)!==b).slice(0,10000);
+  for(const [,peer] of renewals)usable[peer]--;
+  assert.equal(supplemental.length*10,1000000);
+  assert.ok(usable.every((count,index)=>count>=retainedAssignment(index,'held200')));
+  assert.equal(mixedLoad.organizations*mixedLoad.socketsPerOrganization,10000);
+  assert.equal(mixedLoad.organizations*mixedLoad.sendsPerOrganization,2000);
+  assert.deepEqual([mixedLoad.rampSeconds,mixedLoad.warmSeconds,mixedLoad.measuredSeconds],[300,300,1800]);
+  assert.ok(Array.from({length:1000},(_,i)=>retainedAssignment(i,'main')).every(rows=>rows===0 || rows===50));
+  assert.ok(Array.from({length:1000},(_,i)=>retainedAssignment(i,'held200')).includes(200));
+});
+test('formal creates stay unused and distinct throughout the mixed window in both fixtures',async()=>{
+  const {fixturePairs,formalCreatePair,mixedLoad}=await import('./dms-formal-scenarios.ts');
+  // Two opens/s, a quarter creates, including warm-up, core and extension.
+  const creates=Math.ceil((mixedLoad.warmSeconds+mixedLoad.measuredSeconds+mixedLoad.extensionSeconds)*2/4);
+  for(const scenario of ['main','held200'] as const) {
+    const {historical,supplemental}=fixturePairs(scenario);
+    const used=new Set([...historical,...supplemental].map(([a,b])=>a+':'+b));
+    for(let i=0;i<creates;i++) {
+      const [a,b]=formalCreatePair(i),key=Math.min(a,b)+':'+Math.max(a,b);
+      assert.ok(a<900 && b<900);assert.ok(!used.has(key),`${scenario} create ${i}`);used.add(key);
+    }
+  }
+  assert.throws(()=>formalCreatePair(40000),/exhausted/);
+});

@@ -1,3 +1,4 @@
+import { deferredNames, type Scenario } from './dms-formal-scenarios.ts';
 export type Verdict = 'PASS' | 'FAIL' | 'NOT EVALUATED';
 export type Evidence = Record<string, number | undefined | null>;
 // Values are the adopted spec/dms.md budgets; absent evidence can never pass.
@@ -19,13 +20,38 @@ export const budgets: Record<string, number> = {
   'preDm.p95RegressionPercent':10, 'preDm.p99RegressionPercent':10, 'preDm.cpuRegressionPercent':10,
   'exactCounts.failures':0, 'discovery.failures':0, 'storage.failures':0, 'restore.failures':0,
 };
-export function judge(evidence: Evidence, mode: 'formal' | 'smoke') {
+export function judge(evidence: Evidence, mode: 'formal' | 'smoke', scenario: Scenario = 'main', latency?: ReturnType<typeof judgeLatencies>) {
   const rows = Object.entries(budgets).map(([budget, limit]) => {
     const value = evidence[budget];
-    const status: Verdict = value == null || !Number.isFinite(value) ? 'NOT EVALUATED' : value <= limit ? 'PASS' : 'FAIL';
+    const base: Verdict = value == null || !Number.isFinite(value) ? 'NOT EVALUATED' : value <= limit ? 'PASS' : 'FAIL';
+    const latencyStatuses=latency?.rows.filter(row=>`${row.budget}.${row.percentile}`===budget).map(row=>row.status) ?? [];
+    const status = combineVerdicts(latencyStatuses.length?latencyStatuses:[base]);
     return { budget, limit, value: value ?? null, status };
   });
-  return { label: mode === 'smoke' ? 'NON-ACCEPTANCE' : 'FORMAL (partial scenario coverage)', acceptance: mode === 'formal' && rows.every(row => row.status === 'PASS'), rows };
+  return { scenario, label: mode === 'smoke' ? 'NON-ACCEPTANCE' : 'FORMAL (partial scenario coverage)', acceptance: mode === 'formal' && rows.every(row => row.status === 'PASS'), rows };
+}
+export const aggregateMinimum=10000;
+// No per-Organization minimum was adopted. Conservative rule, pending maintainer confirmation.
+export const organizationMinimum=10000;
+export const latencyClasses = {
+  resolve:['open','dm_latency_ms:resolve'],create:['open','dm_latency_ms:create'],renew:['open','dm_latency_ms:renew'],
+  refresh:['page','dm_latency_ms:refresh'],delta:['page','dm_latency_ms:delta'],coverage:['page','dm_latency_ms:coverage'],first:['page','dm_latency_ms:first'],deep:['page','dm_latency_ms:deep'],
+  send:['ack','dm_latency_ms:send'],peer:['peer','dm_receipt_ms'],fiveAttemptRound:['fiveAttemptRound','dm_round_ms:attempts=5'],
+} as const;
+export type Latencies = Record<string,{samples:number;p95:number;p99:number} | undefined>;
+export const combineVerdicts=(statuses:Verdict[]):Verdict=>statuses.includes('FAIL')?'FAIL':statuses.includes('NOT EVALUATED')?'NOT EVALUATED':'PASS';
+export function judgeLatencies(aggregate:Latencies, organizations:Latencies[]) {
+  const populations=[{organization:'aggregate',latencies:aggregate,minimum:aggregateMinimum},...Array.from({length:10},(_,i)=>({organization:String(i),latencies:organizations[i] ?? {},minimum:organizationMinimum}))];
+  const rows=populations.flatMap(({organization,latencies,minimum})=>Object.entries(latencyClasses).flatMap(([shape,[budget,key]])=>{
+    const latency=latencies[key],samples=latency?.samples ?? 0;
+    return (['p95','p99'] as const).map(percentile=>{
+      const value=latency?.[percentile],limit=budgets[`${budget}.${percentile}`];
+      const insufficient=!Number.isSafeInteger(samples) || samples<minimum;
+      const status:Verdict=insufficient || value==null || !Number.isFinite(value)?'NOT EVALUATED':value>limit?'FAIL':'PASS';
+      return {organization,shape,budget,percentile,minimum,samples,value:value ?? null,limit,status,additionalMeasurement:insufficient};
+    });
+  }));
+  return {aggregateMinimum,organizationMinimum,minimumNeedsMaintainerConfirmation:true,status:combineVerdicts(rows.map(row=>row.status)),rows};
 }
 export function commonWindow(starts: number[], mode: 'formal' | 'smoke') {
   if (starts.length !== 11 || starts.some(start => !Number.isFinite(start))) throw new Error('All eleven generator start timestamps required');
@@ -46,4 +72,4 @@ export function reconcile(issued: LedgerRow[], durable: LedgerRow[]) {
   for (const k of expected.keys()) if (!seen.has(k)) missing++;
   return { missing, duplicates, unexpected };
 }
-export const deferredScenarios = ['ten-sockets-per-Member','single-Organization-10000','scale-and-cold-cache','history-and-Mention-shapes','hot-DM','fault-and-backlog-recovery','storage-1M-10M','backup-restore','pre-DM-regression'].map(scenario => ({ scenario, status: 'not run' }));
+export const deferredScenarios = deferredNames.map(scenario => ({ scenario, status: 'NOT EVALUATED' }));

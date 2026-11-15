@@ -9,6 +9,7 @@ import type { Options } from 'k6/options';
 import type { DmChanges, DmList, Message, ServerEvent, SendMessageRequest } from '../web/src/api-schema.d.ts';
 import { createActivity, createActivityTarget } from '../web/src/activity.ts';
 import { dmListState, stepDmList } from '../web/src/dm-list.ts';
+import { formalCreatePair, type MixedScenario } from './dms-formal-scenarios.ts';
 import { retainedAssignment, demandFormalMix, retainFormalCohort, assertFormalCohort } from './dms-formal-mix.ts';
 import { senderFor, senderIndex, socketStop, peerWatched } from './dms-workload.ts';
 
@@ -115,7 +116,7 @@ export async function sockets() {
         activities.push(activity);
         let state = dmListState();
         let epoch = 0;
-        const retained=formal?retainedAssignment(index):200;
+        const retained=formal?retainedAssignment(index,(__ENV.DM_FORMAL_SCENARIO || 'main') as MixedScenario):200;
         let prepared=false;
         const prepare=async()=>{
           if(!formal || prepared)return;
@@ -232,12 +233,13 @@ export function openDm() {
   const i = execution.scenario.iterationInTest;
   const renewal = i%4 === 3 && renewals.length ? renewals[Math.floor(i/4)] : undefined;
   if (i%4 === 3 && renewals.length && !renewal) throw new Error('Prepared renewal pool exhausted');
-  const member = members[renewal ? renewal.caller : members.length >= 10000 ? 2000+shard*500+i%500 : 500+(i%4 === 2 ? Math.floor(i/4)%400 : i%400)];
   const renew = i%4 === 3, create = i%4 === 2;
-  const peer = renewal ? members[renewal.peer].id : create ? members[members.length >= 10000 ? 4000+shard*1000+Math.floor(i/4)%1000 : Math.floor(i/1600)%400].id : member.peer;
+  const created=formal && create?formalCreatePair(Math.floor(i/4)):undefined;
+  const member = members[renewal ? renewal.caller : created ? created[0] : members.length >= 10000 ? 2000+shard*500+i%500 : 500+(i%4 === 2 ? Math.floor(i/4)%400 : i%400)];
+  const peer = renewal ? members[renewal.peer].id : create ? members[created ? created[1] : members.length >= 10000 ? 4000+shard*1000+Math.floor(i/4)%1000 : Math.floor(i/1600)%400].id : member.peer;
   const shape = create ? 'create' : renew ? 'renew' : 'resolve', started = Date.now();
   const response = http.post(`${org}/dms`, JSON.stringify({ member_id: peer, renew }), { headers: headers(member.token), timeout: '10s', tags: { name: shape } });
   calls.add(1, { shape }); latency.add(Date.now()-started, { shape });
   if (response.status !== (create ? 201 : 200)) errors.add(1, { shape, status: String(response.status) });
 }
-export function handleSummary(data: unknown) { return { '/output/summary.json': JSON.stringify({...(data as Record<string, unknown>),label:formal ? (__ENV.DM_SMOKE === '1' ? 'NON-ACCEPTANCE' : 'FORMAL') : undefined}, null, 2) }; }
+export function handleSummary(data: unknown) { return { '/output/summary.json': JSON.stringify({...(data as Record<string, unknown>),scenario:__ENV.DM_FORMAL_SCENARIO || 'main',label:formal ? (__ENV.DM_SMOKE === '1' ? 'NON-ACCEPTANCE' : 'FORMAL') : undefined}, null, 2) }; }
