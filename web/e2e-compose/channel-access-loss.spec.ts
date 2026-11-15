@@ -5,7 +5,7 @@ import {
   ensureOwnerAndSignIn,
   inviteAndSignInPeerViaUi,
   secretSafe,
-  sendApiMessage,
+  sendFixtureMessage,
 } from './helpers.ts'
 
 const mainComposer = (page: Page) =>
@@ -106,12 +106,12 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
     const targetPublic = await createChannelApi(ownerPage.request, orgId, `c9-guest-pub-${suffix}`, 'public')
     const controlPublic = await createChannelApi(ownerPage.request, orgId, `c9-control-pub-${suffix}`, 'public')
 
-    const topicRoot = await sendApiMessage(ownerPage.request, orgId, targetPublic.id, {
+    const topicRoot = await sendFixtureMessage(ownerPage.request, orgId, targetPublic.id, {
       body: `初期トピック親-${suffix}`,
       topic_name: `議題-${suffix}`,
     })
     expect(topicRoot.topic_id).toBeTruthy()
-    const plainMsg = await sendApiMessage(ownerPage.request, orgId, targetPublic.id, {
+    const plainMsg = await sendFixtureMessage(ownerPage.request, orgId, targetPublic.id, {
       body: `初期メイン発言-${suffix}`,
     })
 
@@ -192,7 +192,7 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
     )
 
     // Prove targetPublic publication finished on the authorized Owner socket before posting the control Message.
-    const postAfterRevokeWhileOpen = await sendApiMessage(ownerPage.request, orgId, targetPublic.id, {
+    const postAfterRevokeWhileOpen = await sendFixtureMessage(ownerPage.request, orgId, targetPublic.id, {
       body: `剥奪後の秘匿発言1-${suffix}`,
     })
     await expect
@@ -201,7 +201,7 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
       )
       .toBe(true)
     const activeControlBody = `既存購読コントロール発言-${suffix}`
-    const activeControlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, {
+    const activeControlMsg = await sendFixtureMessage(ownerPage.request, orgId, controlPublic.id, {
       body: activeControlBody,
     })
     await expect(
@@ -228,7 +228,7 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
     await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(mainComposer(guestPage)).toBeEnabled()
 
-    const postAfterRevokeAfterSwitch = await sendApiMessage(ownerPage.request, orgId, targetPublic.id, {
+    const postAfterRevokeAfterSwitch = await sendFixtureMessage(ownerPage.request, orgId, targetPublic.id, {
       body: `剥奪後の秘匿発言2-${suffix}`,
     })
     await expect
@@ -237,7 +237,7 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
       )
       .toBe(true)
     const liveControlBody = `コントロールチャンネルライブ発言-${suffix}`
-    const liveControlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, { body: liveControlBody })
+    const liveControlMsg = await sendFixtureMessage(ownerPage.request, orgId, controlPublic.id, { body: liveControlBody })
     await expect(guestPage.locator('#main-content .ui-message-row').filter({ hasText: liveControlBody })).toHaveCount(1)
     await expect
       .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === liveControlMsg.id))
@@ -274,11 +274,11 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
     const targetPrivate = await createChannelApi(ownerPage.request, orgId, `c9-priv-${suffix}`, 'private')
     const controlPublic = await createChannelApi(ownerPage.request, orgId, `c9-priv-ctrl-${suffix}`, 'public')
 
-    const topicRoot = await sendApiMessage(ownerPage.request, orgId, targetPrivate.id, {
+    const topicRoot = await sendFixtureMessage(ownerPage.request, orgId, targetPrivate.id, {
       body: `秘密トピック親-${suffix}`,
       topic_name: `秘密議題-${suffix}`,
     })
-    const plainMsg = await sendApiMessage(ownerPage.request, orgId, targetPrivate.id, {
+    const plainMsg = await sendFixtureMessage(ownerPage.request, orgId, targetPrivate.id, {
       body: `秘密メイン発言-${suffix}`,
     })
 
@@ -366,7 +366,7 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
     )
 
     // Prove targetPrivate publication finished on the authorized Owner socket before posting the control Message.
-    const postAfterPrivateRevoke1 = await sendApiMessage(ownerPage.request, orgId, targetPrivate.id, {
+    const postAfterPrivateRevoke1 = await sendFixtureMessage(ownerPage.request, orgId, targetPrivate.id, {
       body: `プライベート剥奪後秘匿発言1-${suffix}`,
     })
     await expect
@@ -375,7 +375,7 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
       )
       .toBe(true)
     const activeControlBody = `プライベート剥奪中も継続購読-${suffix}`
-    const activeControlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, {
+    const activeControlMsg = await sendFixtureMessage(ownerPage.request, orgId, controlPublic.id, {
       body: activeControlBody,
     })
     await expect(
@@ -399,7 +399,7 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
     await memberPage.locator('#channel-content .channel-list button').filter({ hasText: controlPublic.name }).click()
     await expect(memberPage.getByRole('heading', { level: 1, name: controlPublic.name, exact: true })).toBeVisible()
     await expect(memberPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
-    const postAfterPrivateRevoke2 = await sendApiMessage(ownerPage.request, orgId, targetPrivate.id, {
+    const postAfterPrivateRevoke2 = await sendFixtureMessage(ownerPage.request, orgId, targetPrivate.id, {
       body: `プライベート剥奪後秘匿発言2-${suffix}`,
     })
     await expect
@@ -408,7 +408,7 @@ test('Channel access loss: removing a private-Channel grant', async ({ browser, 
       )
       .toBe(true)
     const controlBody = `プライベート剥奪後パブリック発言-${suffix}`
-    const controlMsg = await sendApiMessage(ownerPage.request, orgId, controlPublic.id, { body: controlBody })
+    const controlMsg = await sendFixtureMessage(ownerPage.request, orgId, controlPublic.id, { body: controlBody })
     await expect(memberPage.locator('#main-content .ui-message-row').filter({ hasText: controlBody })).toHaveCount(1)
     await expect
       .poll(() => wsObs.receivedEvents.some((e) => e.type === 'message' && e.message_id === controlMsg.id))
@@ -450,11 +450,11 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
     const ungrantedPublic = await createChannelApi(ownerPage.request, orgId, `c9-demote-ungranted-${suffix}`, 'public')
     const grantedPublic = await createChannelApi(ownerPage.request, orgId, `c9-demote-granted-${suffix}`, 'public')
 
-    const topicRoot = await sendApiMessage(ownerPage.request, orgId, ungrantedPublic.id, {
+    const topicRoot = await sendFixtureMessage(ownerPage.request, orgId, ungrantedPublic.id, {
       body: `降格テストトピック親-${suffix}`,
       topic_name: `降格議題-${suffix}`,
     })
-    const plainMsg = await sendApiMessage(ownerPage.request, orgId, ungrantedPublic.id, {
+    const plainMsg = await sendFixtureMessage(ownerPage.request, orgId, ungrantedPublic.id, {
       body: `降格テストメイン発言-${suffix}`,
     })
 
@@ -492,7 +492,7 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
 
     // Control 3 assertion: removing a redundant grant from a non-Guest on a public Channel does NOT cause C9; Channel stays live.
     const afterRedundantRemoveBody = `冗長権限削除後も有効-${suffix}`
-    await sendApiMessage(ownerPage.request, orgId, ungrantedPublic.id, { body: afterRedundantRemoveBody })
+    await sendFixtureMessage(ownerPage.request, orgId, ungrantedPublic.id, { body: afterRedundantRemoveBody })
     await expect(peerPage.locator('#main-content .ui-message-row').filter({ hasText: afterRedundantRemoveBody })).toHaveCount(1)
     await expect(mainComposer(peerPage)).toBeEnabled()
 
@@ -549,7 +549,7 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
     )
 
     // Prove ungrantedPublic publication finished on the authorized Owner socket before posting the control Message.
-    const postAfterDemote1 = await sendApiMessage(ownerPage.request, orgId, ungrantedPublic.id, {
+    const postAfterDemote1 = await sendFixtureMessage(ownerPage.request, orgId, ungrantedPublic.id, {
       body: `降格後の秘匿発言1-${suffix}`,
     })
     await expect
@@ -558,7 +558,7 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
       )
       .toBe(true)
     const activeGrantedBody = `既存購読で明示権限あり降格後もライブ-${suffix}`
-    const activeGrantedMsg = await sendApiMessage(ownerPage.request, orgId, grantedPublic.id, {
+    const activeGrantedMsg = await sendFixtureMessage(ownerPage.request, orgId, grantedPublic.id, {
       body: activeGrantedBody,
     })
     await expect(
@@ -586,7 +586,7 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
     await expect(peerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(mainComposer(peerPage)).toBeEnabled()
 
-    const postAfterDemote2 = await sendApiMessage(ownerPage.request, orgId, ungrantedPublic.id, {
+    const postAfterDemote2 = await sendFixtureMessage(ownerPage.request, orgId, ungrantedPublic.id, {
       body: `降格後の秘匿発言2-${suffix}`,
     })
     await expect
@@ -595,7 +595,7 @@ test('Channel access loss: demoting a Member to Guest on a public Channel withou
       )
       .toBe(true)
     const grantedControlBody = `切替後の明示権限あり降格後もライブ-${suffix}`
-    const grantedControlMsg = await sendApiMessage(ownerPage.request, orgId, grantedPublic.id, {
+    const grantedControlMsg = await sendFixtureMessage(ownerPage.request, orgId, grantedPublic.id, {
       body: grantedControlBody,
     })
     await expect(peerPage.locator('#main-content .ui-message-row').filter({ hasText: grantedControlBody })).toHaveCount(1)
