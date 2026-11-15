@@ -9,10 +9,11 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-const runner = new URL('./run.ts',import.meta.url).href;
+const runners = ['./run.ts','./quality/run.ts'];
 const version = readFileSync(new URL('../../.node-version',import.meta.url),'utf8').trim();
 
-function start(t: TestContext, mode: string, existing = false) {
+function start(t: TestContext, runnerPath: string, mode: string, existing = false) {
+  const runner = new URL(runnerPath,import.meta.url).href;
   const dir = mkdtempSync(join(tmpdir(),'search-lifecycle-'));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
   const log = join(dir,'docker.jsonl');
@@ -40,7 +41,7 @@ if (args[0] === 'rm' && process.env.STUB_MODE === 'absent') {
     `Object.defineProperty(process,'version',{value:${JSON.stringify('v'+version)}}); await import(${JSON.stringify(runner)});`],{
     cwd:fileURLToPath(new URL('../..',import.meta.url)),
     env:{...process.env,PATH:dir+':'+process.env.PATH,SEARCH_RESULT_DIR:out,
-      SEARCH_SKIP_BUILD:'1',STUB_LOG:log,STUB_MODE:mode},
+      SEARCH_QUALITY_DIR:out,SEARCH_SKIP_BUILD:'1',STUB_LOG:log,STUB_MODE:mode},
     stdio:['ignore','ignore','pipe'],
   });
   let stderr = '';
@@ -60,37 +61,39 @@ function assertCleanup(calls: string[][]) {
   assert.deepEqual(calls.filter(args=>args[0]==='rm'),[['rm','-fv',name]]);
 }
 
-for (const mode of ['partial','absent']) {
-  test(`startup failure cleans up once, including ${mode} container`,{timeout:10000},async t=>{
-    const run = start(t,mode);
+for (const runner of runners) {
+  for (const mode of ['partial','absent']) {
+    test(`${runner}: startup failure cleans up once, including ${mode} container`,{timeout:10000},async t=>{
+      const run = start(t,runner,mode);
+      assert.deepEqual(await run.closed,[1,null]);
+      assert.match(run.stderr(),/stub startup failure/);
+      assert.doesNotMatch(run.stderr(),/Container\/volume cleanup failed/);
+      assertCleanup(run.calls());
+    });
+  }
+
+  for (const [signal,code] of [['SIGINT',130],['SIGTERM',143]] as const) {
+    test(`${runner}: ${signal} cleans up and exits ${code}`,{timeout:10000},async t=>{
+      const run = start(t,runner,'signal');
+      // SELECT returns no readiness value, yielding in the real startup loop.
+      while (!run.calls().some(args=>args[0]==='exec')) {
+        t.signal.throwIfAborted();
+        assert.equal(run.child.exitCode,null,run.stderr());
+        await setTimeout(10);
+      }
+      assert.equal(run.child.kill(signal),true);
+      assert.deepEqual(await run.closed,[code,null]);
+      assertCleanup(run.calls());
+    });
+  }
+
+  test(`${runner}: existing output is rejected before Docker or artifact writes`,{timeout:10000},async t=>{
+    const run = start(t,runner,'partial',true);
+    const before = readdirSync(run.out).sort();
     assert.deepEqual(await run.closed,[1,null]);
-    assert.match(run.stderr(),/stub startup failure/);
-    assert.doesNotMatch(run.stderr(),/Container\/volume cleanup failed/);
-    assertCleanup(run.calls());
+    assert.match(run.stderr(),/EEXIST/);
+    assert.deepEqual(run.calls(),[]);
+    assert.deepEqual(readdirSync(run.out).sort(),before);
+    assert.equal(readFileSync(join(run.out,'metadata.json'),'utf8'),'retained artifact\n');
   });
 }
-
-for (const [signal,code] of [['SIGINT',130],['SIGTERM',143]] as const) {
-  test(`${signal} cleans up and exits ${code}`,{timeout:10000},async t=>{
-    const run = start(t,'signal');
-    // SELECT returns no readiness value, yielding in the real startup loop.
-    while (!run.calls().some(args=>args[0]==='exec')) {
-      t.signal.throwIfAborted();
-      assert.equal(run.child.exitCode,null,run.stderr());
-      await setTimeout(10);
-    }
-    assert.equal(run.child.kill(signal),true);
-    assert.deepEqual(await run.closed,[code,null]);
-    assertCleanup(run.calls());
-  });
-}
-
-test('existing output is rejected before Docker or artifact writes',{timeout:10000},async t=>{
-  const run = start(t,'partial',true);
-  const before = readdirSync(run.out).sort();
-  assert.deepEqual(await run.closed,[1,null]);
-  assert.match(run.stderr(),/EEXIST/);
-  assert.deepEqual(run.calls(),[]);
-  assert.deepEqual(readdirSync(run.out).sort(),before);
-  assert.equal(readFileSync(join(run.out,'metadata.json'),'utf8'),'retained artifact\n');
-});
