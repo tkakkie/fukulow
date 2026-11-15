@@ -1231,3 +1231,28 @@ Four concurrent Owner-list bursts per operation, 100 successful Router requests 
 Tradeoff control, two other Organizations each with 1k expired + 270 mixed rows: 100k all-live Invites, first-page transaction p50/p95/p99 1.56/1.69/4.15 -> 39.77/41.19/41.58 ms. Dropping the creation-order index makes work depend on the live set; page size does not bound scan work. This supports fixing expired-history lock amplification here while documenting the live-sort cost; #223 remains storage cleanup and must preserve existing cursor anchors.
 
 Reproduce both probes and optional #385-first migration test with INVITE_DM_MIGRATIONS=/path/to/codex-151/server/migrations node load/invite-scan.ts, using pinned Node; requires Docker, sqlx CLI and Rust. The script owns/removes its randomly named/ported DB container and anonymous volumes. INVITE_SAMPLES defaults to 100; INVITE_COUNTS to 10000,100000,1000000. Exact production after SQL, original before SQL, trimmed/full plans and distributions come from ignored Rust probes. Main raw artifacts: /var/folders/_0/jyg6ltzd6rd3k10yg_bp97x00000gn/T/fukulow-invite-scan-KnHEHt; live control: /private/tmp/invite-303-live.log. Limits: one warm/OS-cached shared-host run, ordered variants, 100-sample approximate tails, up to four lists per burst rather than sustained saturation; separate list/Router pools; no own concurrent builds during timing, other host activity uncontrolled. No VPS, disk-cold, production-capacity or fixed latency guarantee.
+
+## #378 production-domain crate split: Mac build reference (2026-11-15)
+
+2026-11-15, source `9237a90865319c819d6a6faf986fa6c2192f1b38` (local `origin/main`). Mac reference only, not a formal performance record: Apple M5, 10 physical / 10 logical CPU cores, 32 GiB RAM, macOS 27.0.1, native `aarch64-apple-darwin`. `rust-toolchain.toml` pins Rust 1.99.0; installed rustc 1.99.0 (b940084d7, LLVM 23.1.1). Default dev/test profiles (unoptimized + debuginfo, incremental enabled; workspace Argon2/blake2 opt-level 3 overrides); default release profile (optimized, incremental disabled). Cargo default jobs=10; no RUSTFLAGS, compiler wrapper, build-target, jobs or incremental environment override.
+
+Wall time measured around sequential Cargo child processes with Node performance.now; no test execution or database setup. Every clean command used a different initially absent CARGO_TARGET_DIR under `/private/tmp/codex-378-target` (`dev`, `release`, `test`, `timings`); registry/source caches were reused and OS filesystem caches were not flushed. Existing production/test workspace selection was unchanged. Real SPA assets were prebuilt (locked npm install; also rebuilt with pinned Node 26.13.0 before incremental samples). Incremental commands reused their own clean dev/test directories. Before each of three runs per file/command, only that file's mtime was touched; content was unchanged and original atime/mtime were restored afterward. No untimed incremental warm-up or discarded runs; logs confirm fukulow-server recompiled in all 18 samples.
+
+| Clean command (one run each, seconds) | Wall time |
+| --- | ---: |
+| `cargo build --locked` (dev) | 20.751 |
+| `cargo build --release --locked` | 32.961 |
+| `cargo test --no-run --locked` | 52.792 |
+
+| Touched file | Cargo command (+ `--locked`) | Three runs (s) | Median (s) |
+| --- | --- | --- | ---: |
+| `server/src/auth/password.rs` | build | 2.064, 1.155, 1.124 | 1.155 |
+| `server/src/auth/password.rs` | test --no-run | 6.795, 5.775, 6.867 | 6.795 |
+| `server/src/realtime/origin.rs` | build | 1.195, 1.181, 1.147 | 1.181 |
+| `server/src/realtime/origin.rs` | test --no-run | 5.978, 5.853, 5.399 | 5.853 |
+| `server/src/lib.rs` | build | 1.217, 1.151, 1.281 | 1.217 |
+| `server/src/lib.rs` | test --no-run | 5.435, 5.470, 5.369 | 5.435 |
+
+Separate clean `cargo build --timings --locked`: 18.982 s process wall time (Cargo chart 18.9 s; 275 dirty units, zero fresh, jobs=10). Server library: start 12.66 s, duration 5.50 s = 3.22 s frontend + 2.28 s codegen (59%/41%). Server binary 0.79 s and OpenAPI binary 0.18 s start together at 18.16 s; server work occupies a 6.29 s tail, about 33% of the chart span, with a 12.66 s dependency/startup prefix. Aggregate overlapping unit durations: external dependencies 104.13 s, server targets 6.47 s, test macro 0.39 s (110.99 s total); these sums are neither wall time nor CPU time. Largest dependency units include Tokio 3.68 s (2.97 frontend/0.71 codegen), rustls 3.65 s (2.30/1.35), and syn 3.13 s (2.15/0.98).
+
+Limits: one clean sample per command, three touch-only samples per incremental cell, one Mac, shared host/background activity uncontrolled. A brief web-asset rebuild occurred while the sequential measurement suite was active; no other Rust build/test/load command was launched by this task during the matrix. A separate #153 search-engine measurement (PostgreSQL in Docker) may have run on the same host at the same time, so absolute values can be inflated. Touching is not a semantic implementation/API edit and can substantially understate real refactor costs. No Linux runner/VPS, split prototype, runtime performance, test execution, statistical confidence or split speedup was measured. Raw logs, results.json, runner and Cargo timing HTML remain outside Git under `/private/tmp/codex-378-target`; do not compare these values directly with earlier checker-cost records.
