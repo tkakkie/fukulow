@@ -61,6 +61,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #151 DMs reject Topic intent and member/grant APIs; all management Capabilities deny. Exclude DMs from RoleChangeGuard and last-manager/grant counts. Reason: fixed two-person participation must neither confer management nor block Role changes.
 - #151 reclaim only discovery revisions below the Member's committed revision: revisions never reset. Lock one old counter (SKIP LOCKED), then delete at most 1,000 index rows and its empty counter; never lock Members/grants, so cleanup cannot reverse the writer order or truncate a usable feed.
 - Mention unread is a separate displayed count derived from existing Channel/Topic read positions, with no separate read state (#148, #152); repeated Mentions of one Member in a Message count once and own Messages never count.
+- #142/#143 client baseline selection (larger as_of_seq, then read_seq, then smaller counts, within one access generation) needs no server change. Reason: positions only advance within a generation, so counts at equal as_of_seq never rise with read progress.
 
 ## Mentions (#152, specification for approval)
 
@@ -111,7 +112,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
 - [auth](auth.md): `#151 maintenance enumerates one Organization UUID`
-- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
+- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`, `#151 discovery rows coalesce per DM`, `#151 bootstrap: a zero coverage cursor`
 - [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
 
 - [auth](auth.md): `#314 single-statement hot reads use`
