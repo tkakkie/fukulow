@@ -144,7 +144,7 @@ try {
         const at=Date.now();
         pending=Promise.all([
           exec('docker',['exec',app,'cat','/proc/1/stat','/proc/1/status'],{env}),
-          exec('docker',[...compose,'exec','-T','db','psql','-X','-U','fukulow','-d','fukulow','-Atc',"SELECT count(*),count(*) FILTER (WHERE state='active') FROM pg_stat_activity WHERE datname=current_database() AND usename='fukulow_app' AND backend_type='client backend' AND pid<>pg_backend_pid()"],{env}),
+          exec('docker',['exec',db,'psql','-X','-U','fukulow','-d','fukulow','-Atc',"SELECT count(*),count(*) FILTER (WHERE state='active') FROM pg_stat_activity WHERE datname=current_database() AND usename='fukulow_app' AND backend_type='client backend' AND pid<>pg_backend_pid()"],{env}),
         ]).then(([proc,pg])=> {
           const fields=proc.stdout.slice(proc.stdout.indexOf(')')+2).split(/\s+/);
           const cpuTicks=Number(fields[11])+Number(fields[12]);
