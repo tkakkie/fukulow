@@ -1,0 +1,53 @@
+name: proxy-measure
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: 'Comma-separated scenarios 1..6 (6 collects resources during 2..4)'
+        required: true
+        default: '1,2,3,4,5,6'
+        type: string
+      preset:
+        description: 'smoke validates the harness; full uses the approved comparison sizes'
+        required: true
+        default: smoke
+        type: choice
+        options: [smoke, full]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - run: npm --prefix load ci
+      - run: npm --prefix web ci
+      - run: npm --prefix web exec -- playwright install --with-deps chromium
+      # No Actions cache credentials or cache-enabled build action in this job.
+      - name: Build one image for both proxies
+        run: docker build --tag fukulow-proxy-measure-app .
+      - name: Run both proxies sequentially on this runner
+        env:
+          PROXY_SCENARIOS: ${{ inputs.scenarios }}
+          PROXY_PRESET: ${{ inputs.preset }}
+          PROXY_RESULT_DIR: ${{ runner.temp }}/proxy-measure
+          LOAD_APP_IMAGE: fukulow-proxy-measure-app
+        run: node load/proxy-compare.ts
+      # Allowlist only structured metrics. Never upload TLS fixture directories,
+      # container logs, generator output, source patches or browser storage state.
+      - name: Upload comparison metrics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: proxy-measure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/proxy-measure/summary.json
+            ${{ runner.temp }}/proxy-measure/**/results.json
+            ${{ runner.temp }}/proxy-measure/**/metadata.json
+            ${{ runner.temp }}/proxy-measure/**/tls.json
+          retention-days: 3
+          if-no-files-found: warn

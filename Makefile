@@ -1,4 +1,4 @@
-.PHONY: api load load-record load-throughput load-image load-signin
+.PHONY: api load load-record load-throughput load-image load-signin load-proxy-compare
 api:
 	cargo run --locked --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
@@ -25,7 +25,7 @@ load:
 		-v $(call shell_quote,$(CURDIR):/work:ro) -w /work \
 		-e $(call shell_quote,BASE_URL=$(BASE_URL)) -e LOAD_EMAIL -e LOAD_PASSWORD -e LOAD_ORGANIZATION_ID \
 		-e LOAD_BOOTSTRAP -e LOAD_SETUP_TOKEN -e CHANNELS -e SUBSCRIBERS -e PUBLISHERS \
-		-e K6_INSECURE_SKIP_TLS_VERIFY \
+		-e K6_INSECURE_SKIP_TLS_VERIFY -e GODEBUG -e LOAD_PROXY -e LOAD_CONNECTIONS_ONLY \
 		-e DURATION_SECONDS -e PUBLISH_INTERVAL_MS -e READY_TIMEOUT_SECONDS -e DRAIN_TIMEOUT_SECONDS \
 		-e CHANNEL_VISIBILITY -e SOCKETS_PER_SESSION -e LOAD_MEASURE \
 		-e LOAD_LEGACY -e LOAD_ALLOW_REJECTIONS -e LOAD_RECONNECT -e LOAD_RECONNECT_STORM -e CONNECT_BATCH \
@@ -60,3 +60,7 @@ load-image:
 # DB in-use = app-role client connections incl. idle; active is also reported, sampler excluded.
 load-signin:
 	node load/signin.ts
+
+# Both proxies, fresh per-run stacks; PROXY_PRESET=smoke for harness validation.
+load-proxy-compare:
+	node load/proxy-compare.ts
