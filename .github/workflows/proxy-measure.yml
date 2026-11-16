@@ -30,6 +30,9 @@ jobs:
       # No Actions cache credentials or cache-enabled build action in this job.
       - name: Build one image for both proxies
         run: docker build --tag fukulow-proxy-measure-app .
+      # A fresh runner has no k6 image; every run records its image id before starting.
+      - name: Pull the pinned k6 image
+        run: docker pull "$(make -s load-image)"
       - name: Run both proxies sequentially on this runner
         env:
           PROXY_SCENARIOS: ${{ inputs.scenarios }}
