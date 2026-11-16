@@ -19,6 +19,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #401: deployment/load app and migrate use read-only roots, drop ALL capabilities and forbid new privileges. Embedded assets/SQL and DB-only persistence need no writable mount; fresh and populated-upgrade checks guard this.
 - #194 C: no init wrapper or STOPSIGNAL override: the server spawns no child processes to reap, and #195 registers SIGTERM/SIGINT before serving and drains work. Exec-form CMD keeps the binary as PID 1; SIGTERM is already Docker's default.
 - #465: Rust owns shared native/web sync State; wasm-bindgen exposes deltas and bounded accessors. OpenAPI remains generated and diff-checked for every client; sharing policy avoids a separate KMP implementation.
+- #467 interim (#467 deletes it with the TS rollback): sync protocol behaviour/spec changes update Rust and `web/src/protocol.ts` in one PR; differential and contract tests prove equivalence. Rust-only changes without observable behaviour change need no TS edit. No permanent dual implementation.
 - `organization_id` on every table from day one. Reason: multi-organization later without retrofit.
 - Public repo. Reason: free CI minutes.
 - #194 B: one-shot `migrate` holds owner credentials; app waits for success and only validates migration versions/checksums/state. Owner credentials stay out of app. PostgreSQL 18 persists under `/var/lib/postgresql`.
