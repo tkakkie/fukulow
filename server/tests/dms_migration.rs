@@ -16,7 +16,9 @@ async fn existing_channels_grants_messages_and_unread_survive_dm_migration(pool:
     )))
     .await
     .unwrap();
-    for migration in migrator.iter().filter(|m| m.version != 202611140370) {
+    // Data predates the DM migration; later migrations run at the end, in order,
+    // since they may depend on the DM columns.
+    for migration in migrator.iter().filter(|m| m.version < 202611140370) {
         pool.execute(migration.sql.as_ref()).await.unwrap();
     }
     let org = Uuid::new_v4();
@@ -106,4 +108,7 @@ async fn existing_channels_grants_messages_and_unread_survive_dm_migration(pool:
     }
     assert!(sqlx::query("INSERT INTO channel_members(organization_id,channel_id,member_id,manager) VALUES($1,$2,$3,true)").bind(org).bind(dm).bind(a).execute(&pool).await.is_err());
     assert!(sqlx::query("UPDATE channels SET created_at=created_at+interval '1 second' WHERE organization_id=$1 AND id=$2").bind(org).bind(dm).execute(&pool).await.is_err());
+    for migration in migrator.iter().filter(|m| m.version > 202611140370) {
+        pool.execute(migration.sql.as_ref()).await.unwrap();
+    }
 }
