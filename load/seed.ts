@@ -1,14 +1,17 @@
 import { check, fail } from 'k6';
 import { randomBytes } from 'k6/crypto';
 import http, { type Params, type Response } from 'k6/http';
-import type { Channel, CreateChannelRequest, NativeSessionResponse, SetupRequest, SignInRequest } from '../web/src/api-schema.d.ts';
+import type { AcceptInviteRequest, Channel, CreateChannelRequest, CreateInviteRequest, InviteResponse, NativeSessionResponse, SetupRequest, SignInRequest } from '../web/src/api-schema.d.ts';
 import { positiveInteger } from './delivery.ts';
 import { revokeSessions } from './sessions.ts';
 import { legacyOrganization, organizationPath, signInPath } from './compat.ts';
+import { accountCount } from './scheduler.ts';
 export const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const requestTimeout = positiveInteger(__ENV.REQUEST_TIMEOUT_SECONDS, 45);
 export type Setup = { token: string; tokens: string[]; channelIds: string[]; organizationId: string };
-type SeedConfig = { channels: number; subscribers: number; socketsPerSession: number; visibility: Channel['visibility']; legacy: boolean };
+type SeedConfig = { channels: number; subscribers: number; socketsPerSession: number; visibility: Channel['visibility']; legacy: boolean;
+  /** 0 keeps every socket on the Owner's Account (pre-#196 baselines). */
+  socketsPerAccount?: number };
 
 export function params(operation: string, token?: string): Params {
   return { timeout: `${requestTimeout}s`, redirects: 0, tags: { name: operation, operation },
@@ -53,17 +56,35 @@ export function seed(config: SeedConfig): Setup {
   const organizationId = legacy ? legacyOrganization(identity) : (__ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id);
   if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
   const tokens = [token];
+  const socketsPerAccount = config.socketsPerAccount ?? 0;
+  if (socketsPerAccount && (legacy || socketsPerSession !== socketsPerAccount || visibility !== 'public')) {
+    fail('SOCKETS_PER_ACCOUNT needs the current API, public Channels and SOCKETS_PER_SESSION equal to it');
+  }
   try {
-    for (let i = 1; i < Math.ceil(channels * subscribers / socketsPerSession); i++) {
-      const session = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
-      requireStatus(session, 200, 'sign_in');
-      tokens.push((session.json() as NativeSessionResponse).token);
+    if (socketsPerAccount) {
+      const run = uuid().slice(0, 8);
+      for (let i = 1; i < accountCount(channels * subscribers, socketsPerAccount); i++) tokens.push(member(organizationId, token, run, i));
+    } else {
+      for (let i = 1; i < Math.ceil(channels * subscribers / socketsPerSession); i++) {
+        const session = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
+        requireStatus(session, 200, 'sign_in');
+        tokens.push((session.json() as NativeSessionResponse).token);
+      }
     }
     const channelIds = Array.from({ length: channels }, (_, index) => {
       const body: CreateChannelRequest = { name: `load-${Date.now()}-${index}`, visibility };
       const response = http.post(`${baseUrl}${organizationPath(organizationId, legacy)}/channels`, JSON.stringify(body), params('create_channel', token));
       requireStatus(response, 201, 'create_channel');
       return (response.json() as Channel).id;
+    });
+    // Prove before measuring that every Account may read each Channel its sockets subscribe to.
+    if (socketsPerAccount) tokens.forEach((accountToken, account) => {
+      const first = account * socketsPerAccount;
+      const last = Math.min(first + socketsPerAccount, channels * subscribers) - 1;
+      for (let channel = Math.floor(first / subscribers); channel <= Math.floor(last / subscribers); channel++) {
+        requireStatus(http.get(`${baseUrl}${organizationPath(organizationId, false)}/channels/${channelIds[channel]}/messages?limit=1`,
+          params('channel_access', accountToken)), 200, 'channel_access');
+      }
     });
     return { token, tokens, channelIds, organizationId };
   } catch (error) {
@@ -75,6 +96,24 @@ export function seed(config: SeedConfig): Setup {
     }
     throw error;
   }
+}
+
+// A separate Account (not another Account Session) in the Organization, signed in once.
+function member(organizationId: string, ownerToken: string, run: string, index: number): string {
+  const email = `load-${run}-${index}@example.invalid`;
+  const password = uuid();
+  const path = `${baseUrl}${organizationPath(organizationId, false)}`;
+  const invite: CreateInviteRequest = { email, role: 'member' };
+  const response = http.post(`${path}/invites`, JSON.stringify(invite), params('invite', ownerToken));
+  requireStatus(response, 201, 'invite');
+  const accept: AcceptInviteRequest = { email, password, name: `Load Member ${index}`, token: (response.json() as InviteResponse).token };
+  requireStatus(http.post(`${path}/invites/accept`, JSON.stringify(accept), params('accept_invite')), 200, 'accept_invite');
+  const signIn: SignInRequest = { email, password };
+  const session = http.post(`${baseUrl}${signInPath(false)}`, JSON.stringify(signIn), params('sign_in'));
+  requireStatus(session, 200, 'sign_in');
+  const { token, identity } = session.json() as NativeSessionResponse;
+  if (!identity.organizations.some(organization => organization.organization_id === organizationId)) fail('Invited Account lacks the Organization membership');
+  return token;
 }
 
 export function uuid(): string {

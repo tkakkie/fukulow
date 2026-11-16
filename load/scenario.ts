@@ -26,6 +26,10 @@ const interval = positiveInteger(__ENV.PUBLISH_INTERVAL_MS, 250);
 const readyTimeout = positiveInteger(__ENV.READY_TIMEOUT_SECONDS, 5);
 const drainTimeout = positiveInteger(__ENV.DRAIN_TIMEOUT_SECONDS, 5);
 const socketsPerSession = positiveInteger(__ENV.SOCKETS_PER_SESSION, 1);
+// 0 (default) keeps the pre-#196 single-Account baselines; otherwise one Account per this many sockets.
+const socketsPerAccount = __ENV.SOCKETS_PER_ACCOUNT ? positiveInteger(__ENV.SOCKETS_PER_ACCOUNT, 1) : 0;
+// Each Account Session (or invited Account: invite, accept, sign-in, access check) gets 10 s.
+const sessionsToProvision = Math.max(1, Math.ceil(channels * subscribers / socketsPerSession));
 const legacy = __ENV.LOAD_LEGACY === '1';
 const allowRejections = __ENV.LOAD_ALLOW_REJECTIONS === '1';
 const connectionsOnly = __ENV.LOAD_CONNECTIONS_ONLY === '1';
@@ -70,8 +74,8 @@ export const options: Options = {
       maxDuration: `${readyTimeout * (storm ? 2 : 1) + duration + drainTimeout + requestTimeout + Math.ceil(channels * subscribers / connectBatch) * connectInterval / 1000 + 10}s`, gracefulStop: '0s' },
   },
   // Reserve time for provisioning and revoking every session if setup fails.
-  setupTimeout: `${Math.max(1, Math.ceil(channels * subscribers / socketsPerSession)) * 10 + channels * 5 + 25}s`,
-  teardownTimeout: `${Math.max(1, Math.ceil(channels * subscribers / socketsPerSession)) * 5 + 10}s`,
+  setupTimeout: `${sessionsToProvision * 10 + channels * 5 + 25}s`,
+  teardownTimeout: `${sessionsToProvision * 5 + 10}s`,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   systemTags: ['status', 'method', 'name', 'scenario', 'expected_response'],
   thresholds: {
@@ -96,7 +100,10 @@ export const options: Options = {
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function setup(): Setup {
-  return seed({ channels, subscribers, socketsPerSession, visibility, legacy });
+  const data = seed({ channels, subscribers, socketsPerSession, socketsPerAccount, visibility, legacy });
+  // A k6 exit 99 is a capacity result only after provisioning succeeded (load/proxy-results.ts).
+  console.log('LOAD_SETUP_COMPLETE ' + JSON.stringify({ sessions: data.tokens.length, accounts: socketsPerAccount ? data.tokens.length : 1 }));
+  return data;
 }
 
 export default async function (data: Setup): Promise<void> {
@@ -290,7 +297,7 @@ export default async function (data: Setup): Promise<void> {
       accepted, refusals, acceptedSendRate: accepted / (Math.max(result.elapsedMs, sendCompletedAt - result.startedAt) / 1000),
       legacy, allowRejections, reconnect, connectBatch, connectInterval, requestTimeout,
       configuredSendRate: publishers * 1000 / interval, peakConnections, peakPublishes,
-      channels, publishChannels, subscribers, publishers, duration, interval, socketsPerSession, sessions: data.tokens.length, visibility,
+      channels, publishChannels, subscribers, publishers, duration, interval, socketsPerSession, socketsPerAccount, sessions: data.tokens.length, accounts: socketsPerAccount ? data.tokens.length : 1, visibility,
       readyTimeout, drainTimeout }));
     const drainDeadline = Date.now() + drainTimeout * 1000;
     while (!failed && deliveries.missing > 0 && Date.now() < drainDeadline) await pause(10);

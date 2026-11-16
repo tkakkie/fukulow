@@ -16,7 +16,9 @@ const firstPaint = process.env.LOAD_FIRST_PAINT === '1';
 const throughputMode = process.env.LOAD_SCRIPT === 'load/throughput.ts';
 
 // Artifacts belong outside the checkout: they contain machine-specific measurements.
-const project = `fukulow-load-${Date.now()}-${randomUUID().slice(0, 8)}`;
+// A caller that may have to clean up after a killed run (load/proxy-compare.ts) chooses the name.
+const project = process.env.LOAD_PROJECT_NAME || `fukulow-load-${Date.now()}-${randomUUID().slice(0, 8)}`;
+if (!/^fukulow-load-[a-z0-9-]+$/.test(project)) throw new Error('LOAD_PROJECT_NAME must match fukulow-load-[a-z0-9-]+');
 const port = process.env.LOAD_PORT || '18057';
 if (!/^\d+$/.test(port) || Number(port) < 1024 || Number(port) > (proxy ? 65534 : 65535) || ['8080', '55432'].includes(port)) {
   throw new Error('LOAD_PORT must be a non-default unprivileged host port');
@@ -73,6 +75,7 @@ let storm: unknown;
 let restart: Promise<void> | undefined;
 let restartMs: number | undefined;
 let progress: unknown;
+let setupComplete: unknown;
 let rate: { startedAt?: number; offered: number; [key: string]: unknown } | undefined;
 let measurementError: unknown;
 let exitCode = 1;
@@ -112,13 +115,13 @@ try {
   const metadata = {
     hostNode: process.version,
     harness: Object.fromEntries(['Makefile', 'Dockerfile', 'compose.yml', 'deploy/Caddyfile', 'deploy/nginx.conf', 'deploy/nginx-acme.sh', 'web/scripts/first-paint.ts', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
-      'load/seed.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
+      'load/seed.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
       [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
     serverDirty: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'status', '--porcelain']),
     configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
-      'SOCKETS_PER_SESSION', 'CONNECT_BATCH', 'CONNECT_INTERVAL_MS', 'READY_TIMEOUT_SECONDS', 'DRAIN_TIMEOUT_SECONDS',
+      'SOCKETS_PER_SESSION', 'SOCKETS_PER_ACCOUNT', 'CONNECT_BATCH', 'CONNECT_INTERVAL_MS', 'READY_TIMEOUT_SECONDS', 'DRAIN_TIMEOUT_SECONDS',
       'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'LOAD_RECONNECT_STORM', 'REQUEST_TIMEOUT_SECONDS',
       'LOAD_CONNECTIONS_ONLY', 'LOAD_SEND_BURST', 'LOAD_SEND_REFILL_PER_SECOND', 'LOAD_SCRIPT', 'THROUGHPUT_SCENARIO', 'THROUGHPUT_RATES', 'THROUGHPUT_STEP_SECONDS', 'THROUGHPUT_MEMBERS', 'THROUGHPUT_VUS', 'THROUGHPUT_MAX_VUS'].map(key => [key, env[key as keyof typeof env] ?? null])),
     proxy, tls, k6HttpVersion: proxy ? 'HTTP/1.1 (GODEBUG=http2client=0; response assertions)' : undefined, insecureSkipTlsVerify: proxy ? true : undefined,
@@ -195,6 +198,7 @@ try {
         if (typeof message === 'string' && message.startsWith('LOAD_TLS ')) clientTls.add(message.slice(9));
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
         if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) progress = JSON.parse(message.slice(14));
+        if (typeof message === 'string' && message.startsWith('LOAD_SETUP_COMPLETE ')) setupComplete = JSON.parse(message.slice(20));
         if (line.startsWith('LOAD_THROUGHPUT ')) {
           throughput = JSON.parse(line.slice(16));
           if (throughput) rate = { offered: throughput.offered, accepted: throughput.accepted };
@@ -266,7 +270,7 @@ try {
         ...(firstPaint ? { generator: hostGeneratorSamples.length ? Math.max(...hostGeneratorSamples.map(s => s.cpuPercent)) : null } : {}) },
       generatorCpuSource: firstPaint ? 'host ps lifetime %CPU summed over runner and browser descendants' : 'docker stats; instantaneous sampled CPU',
       cpuSamplingScope: 'whole generator run including provisioning, boundaries, idle/drain and teardown; 100% is one core',
-      progress, measurementError }, null, 2));
+      progress, setupComplete, measurementError }, null, 2));
   });
   if (!proxy) attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));
   if (!proxy) attempt(() => writeFileSync(`${output}/database.log`, docker(...compose, 'logs', '--no-color', 'db')));

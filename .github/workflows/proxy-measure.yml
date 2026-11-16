@@ -8,18 +8,48 @@ on:
         default: '1,2,3,4,5,6'
         type: string
       preset:
-        description: 'smoke validates the harness; full uses the approved comparison sizes'
+        description: 'smoke validates the harness; preflight runs one full-size warm-up per proxy per scenario and stops at the first failure; full uses the approved comparison sizes'
         required: true
         default: smoke
         type: choice
-        options: [smoke, full]
+        options: [smoke, preflight, full]
 permissions:
   contents: read
 jobs:
-  compare:
+  # One job per scenario: a full scenario (2 warm-ups + 10 measured runs, both proxies on one runner in ABBA
+  # order) needs most of a hosted job's 6 h, so scenarios cannot share one job. 6 expands to 2, 3 and 4.
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 5
+    outputs:
+      scenarios: ${{ steps.plan.outputs.scenarios }}
+      # One value for both the job limit and the harness deadline (load/proxy-run.ts jobDeadlineMs).
+      minutes: ${{ inputs.preset == 'smoke' && 90 || inputs.preset == 'preflight' && 240 || 355 }}
     steps:
+      - id: plan
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          node -e '
+            const listed = process.env.SCENARIOS.split(",").map(Number);
+            if (!listed.length || !listed.every(n => Number.isInteger(n) && n >= 1 && n <= 6)) throw new Error("scenarios must be comma-separated 1..6");
+            const expanded = [...new Set(listed.flatMap(n => n === 6 ? [2, 3, 4] : [n]))].sort();
+            require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "scenarios=" + JSON.stringify(expanded) + "\n");
+          '
+  compare:
+    needs: plan
+    runs-on: ubuntu-latest
+    # Per-run hard timeouts stop a hung run; a run that could not finish (with cleanup) before this
+    # limit is not started and is recorded invalid, so Actions never cancels a run midway.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
+    strategy:
+      # A preflight stops at its first failure; a full comparison keeps other scenarios' evidence.
+      fail-fast: ${{ inputs.preset == 'preflight' }}
+      matrix:
+        scenario: ${{ fromJSON(needs.plan.outputs.scenarios) }}
+    steps:
+      - name: Record the job start for the harness deadline
+        run: echo "PROXY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
@@ -35,7 +65,8 @@ jobs:
         run: docker pull "$(make -s load-image)"
       - name: Run both proxies sequentially on this runner
         env:
-          PROXY_SCENARIOS: ${{ inputs.scenarios }}
+          PROXY_SCENARIOS: ${{ matrix.scenario }}
+          PROXY_JOB_MINUTES: ${{ needs.plan.outputs.minutes }}
           PROXY_PRESET: ${{ inputs.preset }}
           PROXY_RESULT_DIR: ${{ runner.temp }}/proxy-measure
           LOAD_APP_IMAGE: fukulow-proxy-measure-app
@@ -46,7 +77,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: proxy-measure-${{ github.run_id }}-${{ github.run_attempt }}
+          name: proxy-measure-${{ inputs.preset }}-${{ matrix.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/proxy-measure/summary.json
             ${{ runner.temp }}/proxy-measure/**/results.json

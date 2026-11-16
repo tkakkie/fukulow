@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { schedule, sessionIndex } from './scheduler.ts';
+import { accountCount, schedule, sessionIndex } from './scheduler.ts';
 
 test('slow HTTP neither lowers nor raises offered rate and requests overlap', async () => {
   async function run(latency: number) {
@@ -68,4 +68,15 @@ test('early timer wakes cannot start a batch or end the window prematurely', asy
   }, async () => { starts.push(now); });
   assert.deepEqual(starts, Array.from({ length: 10 }, (_, i) => i * 100));
   assert.equal(result.elapsedMs, 1000);
+});
+
+test('Account allocation never exceeds the per-Account socket cap', () => {
+  for (const [sockets, accounts] of [[1000, 32], [5000, 157], [10000, 313], [200, 7], [4, 1], [32, 1], [33, 2]]) {
+    assert.equal(accountCount(sockets, 32), accounts);
+    const perAccount = Array<number>(accounts).fill(0);
+    for (let socket = 0; socket < sockets; socket++) perAccount[sessionIndex(socket, 32)]++;
+    assert.ok(perAccount.every(count => count >= 1 && count <= 32), `${sockets} sockets`);
+  }
+  assert.throws(() => accountCount(0, 32));
+  assert.throws(() => accountCount(10, 0));
 });
