@@ -47,4 +47,7 @@ test('missing, rotated, restarted or late pool samples make the evidence incompl
   assert.match(reasons([...pools(6), line(1500, { event: 'database_failure', kind: 'new' })]), /unknown database_failure kind/);
   assert.match(reasons([...pools(6), '{"fields":{"event":"websocket_closed"'] ), /unparseable/);
   assert.match(appEvidence(pools(6).join('\n'), ...window, 'docker logs exited 1').reasons.join(), /docker logs exited 1/);
+  // The panic hook writes no timestamp: counted, never silently dropped.
+  const panic = appEvidence([...pools(6), '{"level":"ERROR","target":"fukulow","fields":{"event":"panic"}}'].join('\n'), ...window);
+  assert.equal(panic.panics, 1);
 });

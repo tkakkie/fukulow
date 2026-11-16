@@ -19,6 +19,8 @@ export type AppEvidence = {
   sockets: { opened: number; disconnected: number; peakConcurrent: number; peakOpenedPerSecond: number;
     openedPerSecond: number | null };
   http5xx: number;
+  /** Panic lines carry no timestamp (observability::init hook): counted over the whole app log. */
+  panics: number;
 };
 
 type Row = { at: number; fields: Record<string, unknown>; span?: Record<string, unknown> };
@@ -37,12 +39,13 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
   const closes = Object.fromEntries(closeCodes.map(code => [code, { count: 0, firstMs: null, lastMs: null, perSecond: [] } as Close])) as AppEvidence['closes'];
   const databaseFailures = Object.fromEntries(failureKinds.map(kind => [kind, 0])) as AppEvidence['databaseFailures'];
   const opened: number[] = [];
-  let active = 0, peakConcurrent = 0, disconnected = 0, http5xx = 0;
+  let active = 0, peakConcurrent = 0, disconnected = 0, http5xx = 0, panics = 0;
   const samples: Row[] = [];
   if (!(endedAt > startedAt)) reasons.push('invalid generator window');
   const inWindow = (at: number) => at >= startedAt && at <= endedAt;
   for (const line of log.split('\n')) {
     if (!line.trim()) continue;
+    if (/"event":"panic"/.test(line)) { panics++; continue; }
     const row = parse(line);
     // Other targets are disabled in the app; an unreadable line naming one of our events is lost evidence.
     if (!row) { if (/pool_stats|database_failure|websocket_/.test(line)) reasons.push('unparseable app event line'); continue; }
@@ -78,7 +81,7 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
   return { complete: reasons.length === 0, reasons: [...new Set(reasons)], windowMs: endedAt - startedAt, pool, databaseFailures, closes,
     sockets: { opened: opened.length, disconnected, peakConcurrent, peakOpenedPerSecond,
       openedPerSecond: span > 0 ? Math.round(opened.length / (span / 1000)) : null },
-    http5xx };
+    http5xx, panics };
 }
 
 // The fresh stack's first sample is sequence 1: a later first sample means rotation or a restart lost evidence.

@@ -93,7 +93,7 @@ test('connection ceilings are attributed to the app, the proxy or unknown from a
   const app1011 = (count: number) => ({ ...clean, closes: { ...clean.closes, '1011': { count, firstMs: 0, lastMs: 0, perSecond: [] } } });
   const client = (count: number): RunResult['summary'] => ({ metrics: { 'socket_closes{code:1011}': { values: { count } } } });
   const failures = { ...clean.databaseFailures, pool_timeout: 4 };
-  const cause = (summary: RunResult['summary'], appEvidence?: RunResult['appEvidence']) => ceilingCause({ exitCode: 1, summary, appEvidence });
+  const cause = (summary: RunResult['summary'], appEvidence?: RunResult['appEvidence']) => ceilingCause({ exitCode: 1, summary, appEvidence }, 2000);
   // Every client 1011 was sent by the app, with the database cause.
   assert.deepEqual(cause(client(499), { ...app1011(499), databaseFailures: failures }),
     { cause: 'app', reasons: ['app sent 499 closes with 1011', 'database_failure pool_timeout: 4'] });
@@ -108,8 +108,13 @@ test('connection ceilings are attributed to the app, the proxy or unknown from a
   assert.equal(cause(client(0)).cause, 'unknown');
   assert.equal(cause(client(0), { ...clean, complete: false, reasons: ['missing pool_stats'] }).cause, 'unknown');
   assert.equal(cause({ metrics: {} }, clean).cause, 'unknown');
-  // Only complete, clean app evidence puts the limit at the proxy.
-  assert.equal(cause(client(0), clean).cause, 'proxy');
+  // The proxy is named only with positive evidence: requested sockets that never reached a failure-free app.
+  assert.deepEqual(cause(client(0), { ...clean, sockets: { ...clean.sockets, opened: 1500 } }),
+    { cause: 'proxy', reasons: ['app opened 1500 of 2000 requested sockets, with no app-side failure'] });
+  // No app events at all is not proxy evidence: an app limit can leave none.
+  assert.equal(cause(client(0), { ...clean, sockets: { ...clean.sockets, opened: 2000 } }).cause, 'unknown');
+  // A panic (no timestamp, counted over the whole log) is an app-side signal, never a proxy limit.
+  assert.equal(cause(client(0), { ...clean, panics: 1 }).cause, 'unknown');
 
   const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }], cpuPeakPercent: { generator: 20 },
     resources: [{ rows: [] }], setupComplete: { sessions: 63, accounts: 63 } };

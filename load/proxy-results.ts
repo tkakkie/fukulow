@@ -63,7 +63,7 @@ export function offeredShortfall(result: RunResult): string | undefined {
 // #469: where a failed connection step's limit was. A 1011 the client saw is app-side only if the app itself
 // sent at least as many 1011 closes in the window; 'proxy' needs complete app evidence with no app-side failure.
 // Anything else, including missing evidence or app failures not tied to the client's failure, is 'unknown'.
-export function ceilingCause(result: RunResult): Pick<Ceiling, 'cause' | 'reasons'> {
+export function ceilingCause(result: RunResult, requestedSockets: number): Pick<Ceiling, 'cause' | 'reasons'> {
   const evidence = result.appEvidence;
   if (!evidence) return { cause: 'unknown', reasons: ['missing app evidence'] };
   if (!evidence.complete) return { cause: 'unknown', reasons: evidence.reasons.map(reason => `incomplete app evidence: ${reason}`) };
@@ -78,12 +78,18 @@ export function ceilingCause(result: RunResult): Pick<Ceiling, 'cause' | 'reason
       .filter(key => evidence.pool?.deltas[key]).map(key => `pool ${key}: ${evidence.pool!.deltas[key]}`),
     ...(evidence.pool?.acquireWaitsOver1s ? [`pool acquire waits over 1 s: ${evidence.pool.acquireWaitsOver1s}`] : []),
     ...(evidence.http5xx ? [`app HTTP 5xx: ${evidence.http5xx}`] : []),
+    ...(evidence.panics ? [`app panics: ${evidence.panics}`] : []),
   ];
   if (client1011! > app1011) return { cause: 'unknown', reasons: [`client saw ${client1011} closes with 1011, app sent ${app1011}`, ...signals] };
   if (client1011! > 0) return { cause: 'app', reasons: [...signals, ...(signals.some(signal => /database_failure|pool /.test(signal)) ? []
     : ['no database_failure or pool failure in the window: the app-side cause is not identified'])] };
   if (signals.length) return { cause: 'unknown', reasons: ['app-side failures present, but no client 1011 ties them to the failure', ...signals] };
-  return { cause: 'proxy', reasons: ['complete app evidence shows no app-side failure'] };
+  // Absence of app events alone is not proxy evidence (an app limit can leave none): the proxy is named only
+  // when some requested sockets never reached the app while the app logged no failure or rejection.
+  const opened = evidence.sockets.opened;
+  if (opened < requestedSockets) return { cause: 'proxy',
+    reasons: [`app opened ${opened} of ${requestedSockets} requested sockets, with no app-side failure`] };
+  return { cause: 'unknown', reasons: [`the app opened all ${requestedSockets} requested sockets and logged no failure; no proxy-side evidence`] };
 }
 
 // Highest passing step. Exit 99 (k6 thresholds, e.g. missing_deliveries) is capacity; anything else is a harness error.
@@ -105,7 +111,7 @@ export function stepMetric(proxy: Proxy, results: RunResult[], steps: number[], 
   const passing = results.flatMap((result, i) => result.exitCode === 0 && !validate(result) ? [steps[i]] : []);
   const failed = results.findIndex(result => result.exitCode !== 0);
   const ceiling = attributeCeiling && failed >= 0 && capacityFailure(results[failed])
-    ? { failedStep: steps[failed], ...ceilingCause(results[failed]) } : undefined;
+    ? { failedStep: steps[failed], ...ceilingCause(results[failed], steps[failed]) } : undefined;
   return { kind: 'step', observation: { proxy, value: Math.max(0, ...passing), tls: first?.tls ?? [], ...(ceiling ? { ceiling } : {}),
     generatorCpu: results.some(r => r.cpuPeakPercent?.generator == null) ? null : Math.max(...results.map(r => r.cpuPeakPercent!.generator!)),
     error: errors.length ? errors.join('; ') : undefined } };

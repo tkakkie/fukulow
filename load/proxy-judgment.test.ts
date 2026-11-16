@@ -85,6 +85,9 @@ test('connection ladders ended by an app-side or unattributed limit are lower bo
   // One side unattributed: still not decided, in either direction.
   assert.equal(judge(rows('proxy', 'unknown'), 'step', true).verdict, 'inconclusive');
   assert.equal(judge(rows('app', 'proxy', 4000, 1000), 'step', true).verdict, 'inconclusive');
+  // Lower bounds stay visible with fewer than five valid runs (preflight: one run per proxy).
+  const one = judge([row('caddy', 1000, 'app'), row('nginx', 1000, 'app')], 'step', true);
+  assert.equal(one.verdict, 'inconclusive'); assert.equal(one.lowerBounds?.ceilings.length, 2);
   // Control: proxy-attributed ceilings keep the unchanged run-for-run rule.
   assert.equal(judge(rows('proxy', 'proxy'), 'step', true).verdict, 'pass');
   assert.equal(judge(rows('proxy', 'proxy', 4000, 1000), 'step', true).verdict, 'fail');
