@@ -76,6 +76,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #442: measurement aims to find bottlenecks, not exact capacity numbers. Reason: a bottleneck can be fixed and remeasured; a precise capacity figure from a Mac or one run would be false precision.
 - #442: add no new files under `load/` unless a milestone measurement needs them. Reason: unused harness code costs review and maintenance without adding evidence.
 - #442 (maintainer, 2026-11-16): the milestone cadence exempts no gate: #431's formal performance evaluation after the first rented-server deploy and #153's search-engine selection gate still apply. Reason: the cadence only batches heavy runs; it does not lower acceptance.
+- #475: server tests run as 3 nextest shards behind a `server` aggregator (required check name kept); `ci.yml` saves Rust caches only from `main`. Reason: tests set PR wall time, and PR-ref caches (readable only by that PR) overflowed the 10 GB limit and evicted `main`'s.
 
 ## Entries in other parts
 

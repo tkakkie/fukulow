@@ -39,6 +39,8 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
+        # PR-ref caches are readable only by that PR; saving them evicts main's (10 GB repository limit).
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: mkdir -p web/dist
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -50,9 +52,14 @@ jobs:
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: load/package-lock.json }
       - run: npm --prefix load ci --ignore-scripts
       - run: npm --prefix load run check && npm --prefix load test
-  # server and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
-  server:
+  # server-tests and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
+  # The server tests run as 3 nextest partitions in parallel; every test still runs on every PR.
+  server-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgres:18
@@ -74,12 +81,25 @@ jobs:
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
+        # Shards build the same target; one main save is enough (PR-ref saves would evict main's, 10 GB limit).
+        with: { save-if: "${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}" }
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with: { tool: cargo-nextest@0.9.151 }
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
-      - run: cargo nextest run --locked --no-fail-fast
-      - run: cargo test --locked --doc # nextest does not run doctests
-      - run: node web/scripts/check-invariants.ts # reuses the test build of `cargo nextest run --locked` above (no extra cold build); fails if cargo is missing
+      - run: cargo nextest run --locked --no-fail-fast --partition count:${{ matrix.shard }}/3
+      - if: matrix.shard == 1
+        run: cargo test --locked --doc # nextest does not run doctests
+      - if: matrix.shard == 1
+        run: node web/scripts/check-invariants.ts # reuses the test build of `cargo nextest run --locked` above (no extra cold build); fails if cargo is missing
+  # Keeps the required `server` check: it passes only when every shard passed (failed, cancelled or skipped fails).
+  server:
+    needs: server-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULT: ${{ needs.server-tests.result }}
+        run: test "$RESULT" = success
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -90,6 +110,8 @@ jobs:
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
+        # PR-ref caches are readable only by that PR; saving them evicts main's (10 GB repository limit).
+        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: rustup component add rustc-dev
       # Ubuntu's age package (approved encryption tool, #316); REQUIRE_AGE turns the roundtrip skip into a failure.
       - name: Install age for the backup encryption roundtrip
