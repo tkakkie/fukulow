@@ -8,6 +8,121 @@ use sqlx::PgPool;
 use std::{panic::AssertUnwindSafe, time::Duration};
 use test_support::TestPools;
 
+async fn assert_app_backends_closed(admin: &PgPool, apps: &[PgPool], timeout_ms: i64) {
+    // Check the harness before signalling anything: an open pool must fail, not
+    // have its connections cleaned up by pg_terminate_backend.
+    for app in apps {
+        assert!(app.is_closed(), "harness left an app pool open");
+        assert_eq!(app.size(), 0);
+    }
+    // SQLx sends Terminate and closes its socket without a server acknowledgement.
+    // A positive timeout waits for actual backend exit, including exit callbacks.
+    // Restrict signals to this test database's app role; admin pools stay separate.
+    let waits: Vec<(i32, bool)> = sqlx::query_as(
+        "SELECT pid, pg_terminate_backend(pid, $1) FROM pg_stat_activity
+         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
+    )
+    .bind(timeout_ms)
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    // A false result can also mean the backend exited before receiving the signal.
+    // Use a new statement/snapshot to establish the postcondition in either case.
+    let remaining: Vec<i32> = sqlx::query_scalar(
+        "SELECT pid FROM pg_stat_activity
+         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
+    )
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    assert!(
+        remaining.is_empty(),
+        "app backends did not exit within {timeout_ms}ms per backend; remaining PIDs: \
+         {remaining:?}; termination waits: {waits:?}"
+    );
+}
+
+#[fukulow_test::test]
+async fn backend_exit_can_outlive_pool_close(pool: PgPool) {
+    let app = TestPools::new(pool.clone()).await.app;
+    // Test-only fault injection: temporary-table cleanup runs during backend exit.
+    // Keep ownership on admin: TestPools rejects app-owned objects cluster-wide,
+    // including temporary objects in concurrently running tests' databases.
+    sqlx::raw_sql(
+        "CREATE FUNCTION create_exit_barrier() RETURNS text
+         LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+         BEGIN
+             CREATE TEMP TABLE exit_barrier (id int);
+             RETURN pg_my_temp_schema()::regnamespace::text;
+         END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut connection = app.acquire().await.unwrap();
+    let (pid, schema): (i32, String) =
+        sqlx::query_as("SELECT pg_backend_pid(), create_exit_barrier()")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+    let mut barrier = pool.begin().await.unwrap();
+    sqlx::query(&format!(
+        "LOCK TABLE {schema}.exit_barrier IN ACCESS SHARE MODE"
+    ))
+    .execute(&mut *barrier)
+    .await
+    .unwrap();
+    drop(connection);
+    app.close().await;
+    assert!(app.is_closed());
+    assert_eq!(app.size(), 0);
+    let remaining: Vec<i32> = sqlx::query_scalar(
+        "SELECT pid FROM pg_stat_activity
+         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // The old immediate zero-backend assertion deterministically fails here.
+    assert_eq!(remaining, [pid]);
+    let failure = AssertUnwindSafe(assert_app_backends_closed(
+        &pool,
+        std::slice::from_ref(&app),
+        20,
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_err();
+    let message = failure.downcast_ref::<String>().unwrap();
+    assert!(message.contains("remaining PIDs"));
+    assert!(message.contains(&pid.to_string()));
+    barrier.rollback().await.unwrap();
+    assert_app_backends_closed(&pool, &[app], 5_000).await;
+}
+
+#[fukulow_test::test]
+async fn backend_exit_assertion_rejects_an_open_app_pool(pool: PgPool) {
+    let app = TestPools::new(pool.clone()).await.app;
+    let mut connection = app.acquire().await.unwrap();
+    let failure = AssertUnwindSafe(assert_app_backends_closed(
+        &pool,
+        std::slice::from_ref(&app),
+        5_000,
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_err();
+    assert_eq!(
+        failure.downcast_ref::<&str>(),
+        Some(&"harness left an app pool open")
+    );
+    // The assertion must fail before killing an open pool's backend.
+    sqlx::query("SELECT 1")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+}
+
 #[fukulow_test::test]
 async fn repeated_app_construction_keeps_one_database_connection_budget(pool: PgPool) {
     let mut retained = Vec::new();
@@ -62,18 +177,7 @@ async fn harness_closes_all_app_pools_with_retained_handles(pool: PgPool) {
     })
     .await;
     other_admin.close().await;
-    assert!(apps.0.is_closed());
-    assert!(apps.1.is_closed());
-    assert_eq!(apps.0.size(), 0);
-    assert_eq!(apps.1.size(), 0);
-    let remaining: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_stat_activity
-         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(remaining, 0);
+    assert_app_backends_closed(&pool, &[apps.0, apps.1], 5_000).await;
 }
 
 #[fukulow_test::test]
