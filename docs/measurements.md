@@ -826,8 +826,8 @@ Raw structured artifacts and machine-readable `summary.json` stay outside Git; o
 
 ## Web Rust/wasm sync core evaluation (#466, 2026-11-16 JST)
 
-- Decision: pending maintainer review on #466 (first display on a throttled cold load is a severe regression; the other misses are small in absolute terms). `SYNC_CORE=ts` is retained for one sprint (#467).
-- Compared builds: B = `main` (`4659869`, TS protocol), W = PR #484 (`117e75a`, `SYNC_CORE=wasm` default), R = PR #484 (`117e75a`, `SYNC_CORE=ts` rollback). Images `fukulow-466:{main,wasm,ts}` built once before timing.
+- Decision (maintainer on #466, 2026-11-16): merge held for the first-display fix, re-measured below at `d2fc5ea`; final merge approval pending. `step()`, sustained 100 msg/s, bulk receipt and steady memory conditionally accepted as minor misses (not counted as met), tracked in #487 (typed deltas), #488 (JS merge) and #489 (memory); Brotli precompression #486, wasm-opt #490 (tool not approved). `SYNC_CORE=ts` is retained for one sprint (#467).
+- Compared builds: B = `main` (`4659869`, TS protocol), W = PR #484 (`117e75a`, `SYNC_CORE=wasm` default), R = PR #484 (`117e75a`, `SYNC_CORE=ts` rollback). Images `fukulow-466:{main,wasm,ts}` built once before timing. First display was re-measured with W and R at `d2fc5ea` (startup change only; the sync and memory rows below are `117e75a`, whose sync core code is unchanged).
 - Conditions: Apple M5 (`Mac17,2`), 10 CPUs, 32 GiB, macOS 27.0.1 arm64; Docker Desktop 29.9.3 (10 CPUs / 7.748 GiB VM), PostgreSQL 18.6, Caddy 2.11.9, nginx 1.31.8 + acme 0.4.1; Rust 1.99.1, wasm-bindgen 0.2.130, Playwright 1.65.0 Chromium. Node 26.8.1 for every arm (the pinned 26.13.1 was not installed on this Mac; all arms share the runtime). Five interleaved rounds (B/W/R cyclic Latin square), first display then sync, no competing jobs, AC power (checked before and after every arm), no thermal limit recorded, load average 1.07–3.66. Output is **MAC-RELATIVE**.
 - Reproduce:
   - Gates: `cargo test --locked && npm --prefix web run check && npm --prefix web test && SYNC_CORE=ts npm --prefix web test && CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`
@@ -856,20 +856,26 @@ Raw structured artifacts and machine-readable `summary.json` stay outside Git; o
 
 Raw/compressed sizes are the host build; transfers are the W image (its wasm is 424,339 B raw). Both proxies send `application/wasm` and `public, max-age=31536000, immutable`. Before the size tuning (12b8c9e) the wasm was 676,822 / 172,157 gzip / 132,701 Brotli.
 
-### First display (#345 conditions, 25 runs/cell across 5 interleaved rounds, median of round p50 / p95 ms)
+### First display (#345 conditions, re-measured at `d2fc5ea`, 45 runs/cell across 9 interleaved rounds, median of round p50 / p95 ms)
+
+Re-run 2026-11-16 21:35–23:00 JST after the startup fix (shell mounts while the core loads; sync starts after it). Same plan, conditions, runner and criteria; images `fukulow-466:{wasm,ts}` rebuilt at `d2fc5ea`, B unchanged. Five rounds left INCONCLUSIVE cells, so the pre-committed extension to 9 rounds ran. Load average 1.10–2.70, AC power on every arm. One R arm (round 6, first cell) hit the runner's 60 s Timeline timeout; its log is kept and the arm was rerun whole in the same order position. The 9-round table uses the aggregator's evaluation and seeds (its combined check needs as many sync rounds, which stay at 5).
 
 | Cell | B (`main`) p50 / p95 | W (`wasm`) p50 / p95 (change vs B) | R (`ts`) p50 / p95 (change vs B) | Target | Status |
 |---|---:|---:|---:|---|---|
-| `/` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 403.3/408.7 | FCP 56.0/84.0 (+53.3%); TL 431.7/436.0 (+6.8%) | FCP 52.0/52.0 (+0.0%); TL 403.1/423.9 (+3.3%) | <= +5.0% | MISSED |
-| `/` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 399.9/410.5 | FCP 64.0/76.0 (+46.2%); TL 420.7/427.2 (+4.3%) | FCP 48.0/48.0 (+0.0%); TL 399.2/405.1 (-0.6%) | <= +5.0% | MISSED |
-| `/o/:org/c/:channel` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 425.8/461.2 | FCP 56.0/84.0 (+61.5%); TL 432.0/433.8 (-5.9%) | FCP 52.0/52.0 (+0.0%); TL 425.0/431.1 (-0.4%) | <= +5.0% | MISSED |
-| `/o/:org/c/:channel` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 424.6/462.9 | FCP 64.0/76.0 (+58.3%); TL 423.6/427.3 (-7.6%) | FCP 48.0/48.0 (+0.0%); TL 422.3/425.8 (-8.3%) | <= +5.0% | MISSED |
-| `/` throttled cold (FCP; Timeline) | FCP 952.0/960.0; TL 2794.8/2801.3 | FCP 1728.0/1740.0 (+80.5%); TL 3576.6/3584.6 (+27.7%) | FCP 956.0/956.0 (-0.4%); TL 2794.0/2808.1 (+0.2%) | <= +5.0% | MISSED |
-| `/` throttled warm (FCP; Timeline) | FCP 236.0/244.0; TL 2081.3/2089.3 | FCP 236.0/244.0 (+1.6%); TL 2089.9/2099.1 (+0.2%) | FCP 236.0/244.0 (+0.0%); TL 2089.3/2105.5 (+0.8%) | <= +5.0% | MET |
-| `/o/:org/c/:channel` throttled cold (FCP; Timeline) | FCP 952.0/960.0; TL 2786.9/2801.3 | FCP 1728.0/1736.0 (+81.3%); TL 3566.4/3574.2 (+27.6%) | FCP 956.0/968.0 (+0.8%); TL 2793.3/2802.6 (+0.0%) | <= +5.0% | MISSED |
-| `/o/:org/c/:channel` throttled warm (FCP; Timeline) | FCP 236.0/244.0; TL 2074.1/2087.1 | FCP 236.0/244.0 (+0.0%); TL 2082.3/2108.2 (+0.8%) | FCP 236.0/244.0 (+0.0%); TL 2081.9/2093.9 (+0.3%) | <= +5.0% | MET |
+| `/` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 406.5/413.2 | FCP 52.0/52.0 (+0.0%); TL 427.3/432.6 (+5.2%) | FCP 52.0/52.0 (+0.0%); TL 405.0/413.1 (+0.5%) | <= +5.0% | INCONCLUSIVE |
+| `/` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 401.3/406.8 | FCP 48.0/48.0 (+0.0%); TL 406.2/426.0 (+1.4%) | FCP 48.0/52.0 (+0.0%); TL 399.6/406.5 (+1.0%) | <= +5.0% | INCONCLUSIVE |
+| `/o/:org/c/:channel` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 426.6/452.4 | FCP 52.0/52.0 (+0.0%); TL 429.8/433.9 (-3.0%) | FCP 52.0/52.0 (+0.0%); TL 426.4/470.3 (-0.4%) | <= +5.0% | INCONCLUSIVE |
+| `/o/:org/c/:channel` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 424.4/428.3 | FCP 48.0/48.0 (+0.0%); TL 426.2/429.5 (-0.1%) | FCP 48.0/48.0 (+0.0%); TL 422.9/427.5 (-0.3%) | <= +5.0% | INCONCLUSIVE |
+| `/` throttled cold (FCP; Timeline) | FCP 952.0/960.0; TL 2792.7/2806.7 | FCP 944.0/960.0 (+0.0%); TL 3246.1/3260.3 (+16.4%) | FCP 952.0/964.0 (+0.4%); TL 2799.9/2808.2 (+0.1%) | <= +5.0% | MISSED |
+| `/` throttled warm (FCP; Timeline) | FCP 232.0/244.0; TL 2082.7/2095.4 | FCP 236.0/244.0 (+0.0%); TL 2090.3/2102.2 (+0.3%) | FCP 236.0/244.0 (+0.0%); TL 2073.8/2089.9 (-0.2%) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold (FCP; Timeline) | FCP 952.0/964.0; TL 2787.6/2803.7 | FCP 952.0/964.0 (+0.0%); TL 3245.2/3261.8 (+16.2%) | FCP 956.0/968.0 (+0.4%); TL 2779.9/2801.9 (-0.1%) | <= +5.0% | MISSED |
+| `/o/:org/c/:channel` throttled warm (FCP; Timeline) | FCP 236.0/244.0; TL 2080.6/2088.7 | FCP 236.0/244.0 (+0.0%); TL 2082.2/2094.1 (+0.1%) | FCP 236.0/236.0 (+0.0%); TL 2076.4/2082.4 (-0.3%) | <= +5.0% | MET |
 
-Waterfall (round 1, cold, p50 ms, B → W): unthrottled JS end 29.9 → 29.7, wasm end — → 41.0, app mount 39.4 → 44.4; throttled JS end 901.6 → 908.8, wasm end — → 1,688.6, app mount 921.9 → 1,698.7, first API request 917 → 1,694. The wasm is requested only after the entry JS runs, and mount and every API request wait for it.
+INCONCLUSIVE causes (paired round deltas, 95% CI): `/` unthrottled cold Timeline p50 +5.1% [+3.6, +6.2] and p95 +5.2% [-2.9, +6.0] (+19–21 ms); the other three unthrottled cells have medians -0.1% to +1.4% but a CI straddling +5% or B spread above 10% (single slow rounds), FCP difference 0 ms.
+
+Waterfall (round 1, `/` cold, p50 ms, B → W): throttled JS end 910.6 → 909.7, app mount 932.6 → 929.4, FCP 956 → 952, first API request 927 → 925, Organization check end 1,254 → 1,255, wasm end — → 1,698, Channel list request start 1,260 → 1,709, Timeline 2,793 → 3,246; unthrottled mount 39.4 → 39.3, wasm end — → 41.0, Timeline 406 → 430. The shell and the REST Organization check no longer wait; the session (Channel list, Members, socket) starts when the core is ready.
+
+Earlier first display at `117e75a` (5 rounds, shell waited for the core; throttled cold FCP 952 → 1,728 ms): moved to #466 (https://github.com/tkakkie/fukulow/issues/466#issuecomment-6918560096), superseded by this re-measurement.
 
 ### Sync processing and memory (5 interleaved rounds, median of round percentiles [min–max])
 
@@ -887,8 +893,9 @@ Waterfall (round 1, cold, p50 ms, B → W): unthrottled JS end 29.9 → 29.7, wa
 Per class (round 3, µs, B → W): stream append p50 2.5–4.8 → 58–60; duplicate 2.4–6.2 → 10–12; send + ACK 3.0–7.0 → 26–55; history 50 p50 20–28 → 349–470; mixed trace p99 64 → 1,208.
 
 - Missed targets, user impact, and improvement options (cause from exploratory profiling, not part of the formal run):
-  - First display, throttled cold: FCP +776 ms (952 → 1,728 ms), Timeline +780 ms. The page stays blank while ~121 KB (Caddy) of wasm downloads after the JS. Severe. Options: mount and start API requests without waiting for the wasm, preload it, serve precompressed Brotli.
-  - First display, unthrottled: FCP p95 +32 ms, Timeline +7% on `/` cold (wasm fetch + compile ≈ 11 ms + 22 ms instantiate). Same options.
+  - First display, throttled cold (after the fix, `d2fc5ea`): FCP equal to B (no blank-screen delay); Timeline +0.45 s (2,793 → 3,246 ms, +16%), MISSED. A first visit on a 1.6 Mbps link shows the shell at the same time as B, and the Messages about 0.45 s later; cached visits are within +0.3%. Cause: the 121,552 B wasm (Caddy zstd) needs ~0.61 s at 200 KB/s; ~0.15 s of it overlaps the Organization check, the rest delays the session. Starting the Channel list before the core is ready would only share the saturated link, so only fewer bytes help: Brotli precompression (#486, −25.6 KB ≈ −0.13 s, still above +5%) and wasm-opt (#490). A `<link rel=preload>` was tried and dropped: it competed with the entry JS (exploratory FCP ~1,456 ms).
+  - First display, unthrottled (after the fix): FCP equal; `/` cold Timeline +19–21 ms (+5.1–5.2%, INCONCLUSIVE after 9 rounds), other cells −3.0% to +1.4%.
+  - Minor misses accepted on #466 (not met), the four items below; follow-ups #487–#489.
   - `step()`: append ~59 µs vs 2.5–4.8 µs, p99 1.15 ms vs 35 µs. Natively `Core::step` takes 1.6–2.2 µs while the whole `WasmCore::step` takes 18–27 µs: about 90% is building the JSON delta (`serde_json::Value` trees, linear body interning, session on every step). In the browser the wasm call is ~37 µs of ~58 µs; `JSON.parse`, body expansion and the view merge add ~20 µs. Options: serialise typed deltas directly, op-based message deltas, Map lookups in the JS merge. A JS/wasm boundary keeps a fixed cost (the no-op duplicate path is 10–12 µs), so +10% of TS is unlikely to be reachable by optimisation alone.
   - Sustained 100 msg/s: p95 +0.39 ms (1.39 → 1.78 ms), queue 0, max rate 8,000 msg/s. Small; follows from `step()`.
   - Bulk receipt: 1,000-message catch-up 9.7 ms vs 1.1 ms; history pages 3.4–3.7 ms vs 0.14–0.25 ms. Under one frame; follows from `step()`.
