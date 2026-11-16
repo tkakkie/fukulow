@@ -40,3 +40,13 @@ export async function schedule(
 export function sessionIndex(socket: number, socketsPerSession: number): number {
   return Math.floor(socket / socketsPerSession);
 }
+
+// #469: the server caps open sockets per Account (#196 A), across all its Account Sessions,
+// so each Account gets one Account Session holding at most `socketsPerAccount` consecutive sockets.
+export const accountAllocation = 'socket i -> Account floor(i / SOCKETS_PER_ACCOUNT); one Account Session per Account; Account 0 is the Owner, the rest are invited Members';
+export function accountCount(sockets: number, socketsPerAccount: number): number {
+  if (!Number.isInteger(sockets) || sockets < 1 || !Number.isInteger(socketsPerAccount) || socketsPerAccount < 1) {
+    throw new Error('sockets and SOCKETS_PER_ACCOUNT must be positive integers');
+  }
+  return Math.ceil(sockets / socketsPerAccount);
+}

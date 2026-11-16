@@ -1,6 +1,5 @@
 // #469 part 3: sequential single-host comparison. No result is a default-proxy decision.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,12 +7,16 @@ import { resolve } from 'node:path';
 import { abba, judge, type Proxy } from './proxy-judgment.ts';
 import { metricsFor, offeredShortfall, stepMetric, type Metric, type RunResult } from './proxy-results.ts';
 import { createCertificate, outsideCheckout } from './proxy-target.ts';
+import { dockerCleanup, runBudgetMs, runBounded, timeoutReason } from './proxy-run.ts';
+import { accountAllocation, accountCount } from './scheduler.ts';
 
 const preset = process.env.PROXY_PRESET ?? 'full';
-assert.ok(['smoke', 'full'].includes(preset), 'PROXY_PRESET must be smoke or full');
+assert.ok(['smoke', 'preflight', 'full'].includes(preset), 'PROXY_PRESET must be smoke, preflight or full');
 const smoke = preset === 'smoke';
-const repeats = Number(process.env.PROXY_RUNS ?? (smoke ? 1 : 5));
-assert.ok(Number.isInteger(repeats) && repeats > 0 && (smoke || repeats === 5), 'full comparisons require five measured runs per proxy');
+// #469 C: full-size settings, one discarded warm-up per proxy per scenario, nothing measured; stops at the first failure.
+const preflight = preset === 'preflight';
+const repeats = preflight ? 0 : Number(process.env.PROXY_RUNS ?? (smoke ? 1 : 5));
+assert.ok(preflight || (Number.isInteger(repeats) && repeats > 0 && (smoke || repeats === 5)), 'full comparisons require five measured runs per proxy');
 const selected = (process.env.PROXY_SCENARIOS ?? '1,2,3,4,5,6').split(',').map(Number);
 assert.ok(selected.length && selected.every(n => Number.isInteger(n) && n >= 1 && n <= 6), 'PROXY_SCENARIOS must be comma-separated 1..6');
 const scenarios = [...new Set(selected.flatMap(n => n === 6 ? [2, 3, 4] : [n]))];
@@ -26,7 +29,10 @@ const runs: { scenario: number; proxy: Proxy; warmup: boolean; directory: string
 const settings = {
   LOAD_LEGACY: '0', LOAD_ALLOW_REJECTIONS: '0', CHANNEL_VISIBILITY: 'public', THROUGHPUT_MEMBERS: '4', LOAD_NOFILE: '65536',
   LOAD_SEND_BURST: '1000000', LOAD_SEND_REFILL_PER_SECOND: '1000000',
-  CHANNELS: '1', SUBSCRIBERS: smoke ? '4' : '1000', SOCKETS_PER_SESSION: '500',
+  CHANNELS: '1', SUBSCRIBERS: smoke ? '4' : '1000',
+  // #469 A: separate Accounts within the product's per-Account socket cap (#196 A, 32; not changed here).
+  // Smoke uses 2 so its few sockets still exercise more than one invited Account.
+  SOCKETS_PER_ACCOUNT: smoke ? '2' : '32', SOCKETS_PER_SESSION: smoke ? '2' : '32',
   CONNECT_BATCH: '100', CONNECT_INTERVAL_MS: '100', READY_TIMEOUT_SECONDS: '120', DRAIN_TIMEOUT_SECONDS: '30',
   REQUEST_TIMEOUT_SECONDS: '45', PUBLISHERS: '1', PUBLISH_INTERVAL_MS: smoke ? '200' : '20',
   DURATION_SECONDS: smoke ? '3' : '60', LOAD_RECONNECT: '0', LOAD_RECONNECT_STORM: '0',
@@ -41,36 +47,51 @@ const sendInterval = smoke ? 500 : 20;
 const sendRates = smoke ? [2, 4] : [50, 100, 200, 400, 800];
 const sendSettings = { CHANNELS: '4', SUBSCRIBERS: smoke ? '2' : '50', PUBLISH_INTERVAL_MS: String(sendInterval),
   DURATION_SECONDS: smoke ? '3' : '30', DRAIN_TIMEOUT_SECONDS: '15' };
+const socketsPerAccount = Number(settings.SOCKETS_PER_ACCOUNT);
 const tlsDirectory = createCertificate();
 function save() {
-  writeFileSync(`${output}/summary.json`, JSON.stringify({ preset, purpose: smoke ? 'harness-validation' : 'comparison',
-    gateEligible: !smoke && repeats === 5 && process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_OS === 'Linux',
-    repetitions: repeats, warmupsPerProxyPerScenario: 1, order: abba(repeats), scenarios, settings, stepSizes,
+  writeFileSync(`${output}/summary.json`, JSON.stringify({ preset,
+    purpose: smoke ? 'harness-validation' : preflight ? 'full-size preflight; never a measured run' : 'comparison',
+    gateEligible: preset === 'full' && repeats === 5 && process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_OS === 'Linux',
+    repetitions: repeats, warmupsPerProxyPerScenario: 1, order: preflight ? [] : abba(repeats), scenarios, settings, stepSizes,
+    accounts: { socketsPerAccount, allocation: accountAllocation, sameForBothProxies: true },
+    hardTimeout: 'per record run: k6 setup + scenario + teardown limits + Compose allowance; on expiry SIGTERM, SIGKILL after grace, Docker cleanup, run invalid',
     resourceScope: 'sampled whole generator lifetime including provisioning and teardown; 100% CPU is one core',
     throughputDeliveryScope: 'load/scenario.ts steps: every offered send accepted (201) and delivered to every subscriber of its Channel within the drain; no unexpected close or gap',
     sendSettings, sendRates,
-    runs, metrics: Object.fromEntries(Object.entries(collected).map(([name, metric]) => [name,
+    runs, conditions, metrics: Object.fromEntries(Object.entries(collected).map(([name, metric]) => [name,
       { ...judge(metric.rows, metric.kind, name.startsWith('1/') || name.startsWith('2/')), observations: metric.rows }])) }, null, 2));
 }
-let active: ReturnType<typeof spawn> | undefined;
+let stopActive: (() => void) | undefined;
 let interrupted = false;
-const stop = () => { interrupted = true; process.exitCode = 1; active?.kill('SIGTERM'); };
+const stop = () => { interrupted = true; process.exitCode = 1; stopActive?.(); };
+const graceMs = 180_000;
 process.on('SIGINT', stop); process.on('SIGTERM', stop);
 async function record(directory: string, proxy: Proxy, extra: Record<string, string>): Promise<RunResult> {
   if (interrupted) throw new Error('Comparison interrupted');
   mkdirSync(directory, { recursive: true });
-  const code = await new Promise<number>((done, reject) => {
-    active = spawn(process.execPath, ['load/record.ts'], { env: { ...process.env, ...settings, ...extra,
-      LOAD_PROXY: proxy, LOAD_TLS_DIR: tlsDirectory, LOAD_RESULT_DIR: directory }, stdio: ['ignore', 'inherit', 'inherit'] });
-    active.on('error', reject); active.on('close', code => done(code ?? 1));
-  });
-  active = undefined;
-  try { return JSON.parse(readFileSync(`${directory}/results.json`, 'utf8')); }
-  catch { return { exitCode: code || 1, measurementError: 'runner did not produce results' }; }
+  const project = `fukulow-load-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const env = { ...process.env, ...settings, ...extra, LOAD_PROJECT_NAME: project,
+    LOAD_PROXY: proxy, LOAD_TLS_DIR: tlsDirectory, LOAD_RESULT_DIR: directory };
+  const budgetMs = runBudgetMs(env);
+  const accounts = env.LOAD_FIRST_PAINT === '1' ? undefined
+    : accountCount(Number(env.CHANNELS) * Number(env.SUBSCRIBERS), socketsPerAccount);
+  const bounded = await runBounded({ command: process.execPath, args: ['load/record.ts'], env, timeoutMs: budgetMs, graceMs,
+    cleanup: () => dockerCleanup(project), onStart: terminate => { stopActive = terminate; } });
+  stopActive = undefined;
+  const reason = timeoutReason(bounded, budgetMs);
+  let result: RunResult;
+  try { result = JSON.parse(readFileSync(`${directory}/results.json`, 'utf8')); }
+  catch { result = { exitCode: bounded.code || 1, measurementError: 'runner did not produce results' }; }
+  if (reason) result = { ...result, exitCode: result.exitCode || 1, measurementError: [reason, result.measurementError].filter(Boolean).join('; ') };
+  conditions.push({ directory, accounts, socketsPerAccount: accounts === undefined ? undefined : socketsPerAccount,
+    budgetSeconds: budgetMs / 1000, elapsedSeconds: Math.round(bounded.elapsedMs / 1000), timedOut: bounded.timedOut });
+  return result;
 }
+const conditions: { directory: string; accounts?: number; socketsPerAccount?: number; budgetSeconds: number; elapsedSeconds: number; timedOut: boolean }[] = [];
 async function run(scenario: number, proxy: Proxy, warmup: boolean) {
   const directory = `${output}/${runs.length + 1}-${scenario}-${proxy}-${warmup ? 'warmup' : 'measured'}`;
-  const entry = { scenario, proxy, warmup, directory };
+  const entry: (typeof runs)[number] = { scenario, proxy, warmup, directory };
   runs.push(entry);
   console.log(`Proxy comparison: scenario ${scenario}, ${proxy}, ${warmup ? 'discarded warm-up' : 'measured'}; ${directory}`);
   let metrics: Record<string, Metric>;
@@ -110,6 +131,10 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
     if (!Object.keys(metrics).length) metrics.missing = { kind: 'latency', observation: {
       proxy, value: NaN, tls: result.tls ?? [], generatorCpu: null, error: 'missing scenario metrics' } };
   }
+  // A full-size preflight passes only if every run is valid and each ladder's first step passes.
+  if (preflight && !entry.error && Object.values(metrics).some(metric => metric.kind === 'step' && !(metric.observation.value > 0))) {
+    Object.assign(entry, { error: 'preflight: the first step did not pass' });
+  }
   if (!warmup) for (const [name, metric] of Object.entries(metrics)) {
     const key = `${scenario}/${name}`;
     collected[key] ??= { kind: metric.kind, rows: [] };
@@ -119,9 +144,15 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
 }
 try {
   console.log(`Comparison artifacts: ${output}`);
-  for (const scenario of scenarios) {
-    for (const proxy of ['caddy', 'nginx'] as const) await run(scenario, proxy, true);
-    for (const proxy of abba(repeats)) await run(scenario, proxy, false);
+  plan: for (const scenario of scenarios) {
+    for (const proxy of ['caddy', 'nginx'] as const) {
+      await run(scenario, proxy, true);
+      if (preflight && runs.at(-1)?.error) {
+        console.error(`Preflight stopped: scenario ${scenario}, ${proxy}: ${runs.at(-1)?.error}`);
+        break plan;
+      }
+    }
+    if (!preflight) for (const proxy of abba(repeats)) await run(scenario, proxy, false);
   }
   // Failure evidence stays available, but a harness error fails the dispatch.
   if (runs.some(run => run.error)) process.exitCode = 1;
