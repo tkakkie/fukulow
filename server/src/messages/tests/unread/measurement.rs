@@ -163,15 +163,19 @@ async fn covering_range_vacuum_reports_held_same_database_transaction(pool: PgPo
     vacuum_messages_visible(&mut connection).await.unwrap();
 }
 
-// Messages rows a plan reads (returned plus filtered, over every loop), and any
-// sequential Messages scan. A full scan from initial_seq reads every Topic.
+// Messages rows a plan reads (returned, filtered or rejected by a lossy bitmap
+// recheck, over every loop), and any sequential Messages scan. A full scan from
+// initial_seq reads every Topic.
 fn message_work(node: &Value, work: &mut f64) -> Result<(), String> {
     if node["Relation Name"] == "messages" {
         if node["Node Type"] == "Seq Scan" {
             return Err(format!("sequential Messages scan: {node}"));
         }
         *work += (node["Actual Rows"].as_f64().unwrap_or(0.0)
-            + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+            + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0)
+            + node["Rows Removed by Index Recheck"]
+                .as_f64()
+                .unwrap_or(0.0))
             * node["Actual Loops"].as_f64().unwrap_or(1.0);
     }
     for child in node["Plans"].as_array().into_iter().flatten() {
@@ -187,6 +191,19 @@ fn bounded_message_work(plan: &Value, bound: f64) -> Result<f64, String> {
         return Err(format!("Unread count read {work} Messages, bound {bound}"));
     }
     Ok(work)
+}
+
+// A lossy Bitmap Heap Scan returning 25 rows and filtering 25 can still reject
+// more history in its recheck: that work counts toward the bound (#498 review).
+#[test]
+fn message_work_counts_lossy_bitmap_recheck() {
+    let plan = serde_json::json!([{ "Plan": { "Node Type": "Aggregate", "Plans": [{
+        "Node Type": "Bitmap Heap Scan", "Relation Name": "messages", "Actual Rows": 25.0,
+        "Rows Removed by Filter": 25.0, "Rows Removed by Index Recheck": 900.0, "Actual Loops": 1.0,
+        "Plans": [{ "Node Type": "Bitmap Index Scan", "Index Name": "messages_pkey", "Actual Rows": 950.0 }]
+    }] } }]);
+    let error = bounded_message_work(&plan, 50.0).unwrap_err();
+    assert!(error.contains("read 950 Messages"), "{error}");
 }
 
 // Always-on guard for #220's ranges (#225): fully read Topics never touch Messages,
