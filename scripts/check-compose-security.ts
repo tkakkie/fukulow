@@ -120,7 +120,7 @@ async function check(profile: string) {
     // This helper joins only backend for the test. Its socket peer is untrusted even
     // though the configured header is present; changing spoofed IPs cannot escape 429.
     run(['run', '--rm', '--name', helper, '-i', '--network', `${project}_backend`,
-      'node:26.13.0-slim', 'node', '--input-type=module'], `
+      'node:26.13.1-slim', 'node', '--input-type=module'], `
       import assert from 'node:assert/strict';
       const request = async (email, ip, password = 'wrong-password-test-only') => {
         const response = await fetch('http://app:8080/api/v1/session', { method: 'POST',
@@ -143,7 +143,7 @@ async function check(profile: string) {
     // Temporarily attach test clients to edge; the shipped topology has no such services.
     for (const [host, exhaust] of [[5, true], [6, false]] as const) {
       run(['run', '--rm', '--name', helper, '-i', '--network', `${project}_edge`, '--ip', `${env.FUKULOW_EDGE_PREFIX}.${host}`,
-        'node:26.13.0-slim', 'node', '--input-type=module'], `
+        'node:26.13.1-slim', 'node', '--input-type=module'], `
         import assert from 'node:assert/strict';
         import { request } from 'node:${profile === 'caddy' ? 'https' : 'http'}';
         const signIn = (input) => new Promise((resolve, reject) => {
