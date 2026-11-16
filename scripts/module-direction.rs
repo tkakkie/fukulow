@@ -183,6 +183,17 @@ impl<'tcx> Direction<'tcx> {
                     },
                     item,
                 );
+            } else if self.tcx.def_kind(target) == DefKind::TyAlias && !target.is_local() {
+                // External aliases have no local HIR. Metadata exposes their
+                // expanded type, including alias chains and generic containers.
+                self.inferred_type(
+                    owner,
+                    self.tcx
+                        .type_of(target)
+                        .instantiate_identity()
+                        .skip_normalization(),
+                    span,
+                );
             }
         }
     }

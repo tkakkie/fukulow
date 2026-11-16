@@ -140,6 +140,16 @@ pub mod messages {
     pub fn make() -> Item { Item { count: 1 } }
     pub use crate::empty;
 }
+pub type Alias = messages::Item;
+pub type Chain = Alias;
+pub type Wrapped = Option<Vec<Chain>>;
+pub type Generic<T> = (T, Wrapped);
+pub type Allowed = std::string::String;
+pub type AllowedChain = Allowed;
+pub type AllowedWrapped = Option<Vec<AllowedChain>>;
+pub type AllowedGeneric<T> = (T, AllowedWrapped);
+pub struct RootWrapper(pub messages::Item);
+pub type Opaque = RootWrapper;
 #[macro_export] macro_rules! empty { () => {}; }
 `)
     for (const tests of [false, true]) {
@@ -182,6 +192,27 @@ pub mod messages {
           true, tests, ['--extern', 'domain_crate=' + server], undefined, 'fukulow_api')
         assert.equal(renamed.status, 1, renamed.stderr)
         assert.match(renamed.stderr, /module direction: fukulow_api must not reference messages/)
+      }
+      for (const alias of ['Alias', 'Chain', 'Wrapped', 'Generic<u8>']) {
+        const body = `fn f(_: fukulow_server::${alias}) {}`
+        for (const from of ['fukulow_api', 'realtime']) {
+          const source = from === 'fukulow_api'
+            ? (tests ? '#[cfg(test)] mod tests { ' + body + ' }' : body)
+            : 'mod realtime { ' + (tests ? '#[cfg(test)] mod tests { ' + body + ' }' : body) + ' }'
+          const extra = ['--extern', 'fukulow_server=' + server]
+          const crateName = from === 'fukulow_api' ? from : 'fixture'
+          const baseline = compile(source, false, tests, extra, undefined, crateName)
+          assert.equal(baseline.status, 0, `invalid ${alias} fixture: ${baseline.stderr}`)
+          const result = compile(source, true, tests, extra, undefined, crateName)
+          assert.equal(result.status, from === 'fukulow_api' ? 1 : 0, `${alias}: ${result.stderr}`)
+          if (from === 'fukulow_api') assert.match(result.stderr, /module direction: fukulow_api must not reference messages/)
+        }
+      }
+      for (const alias of ['Allowed', 'AllowedChain', 'AllowedWrapped', 'AllowedGeneric<u8>', 'Opaque']) {
+        const body = `fn f(_: fukulow_server::${alias}) {}`
+        const source = tests ? '#[cfg(test)] mod tests { ' + body + ' }' : body
+        const result = compile(source, true, tests, ['--extern', 'fukulow_server=' + server], undefined, 'fukulow_api')
+        assert.equal(result.status, 0, `${alias}: ${result.stderr}`)
       }
       // The leaf's own root and nested code are checked, while external std remains allowed.
       const valid = compile('pub struct Item; mod nested { fn f(_: crate::Item, _: std::string::String) {} }',
