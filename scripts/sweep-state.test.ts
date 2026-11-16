@@ -141,5 +141,6 @@ test('Read-only: every gh call the script builds is a read, and writes are refus
   assert.match(format(report), /api-calls: \d+$/)
   for (const write of [['pr', 'edit', '1', '--add-label', 'x'], ['issue', 'comment', '1'], ['pr', 'merge', '1'],
     ['api', 'repos/{owner}/{repo}/issues/1/labels', '-f', 'labels=x'], ['api', '-X', 'POST', 'graphql'],
-    ['api', '-X', 'GET', 'x', '--input', 'file'], ['label', 'list']]) assert.ok(!isReadOnly(write), write.join(' '))
+    ['api', '-X', 'GET', 'x', '--input', 'file'], ['api', '-X', 'GET', 'x', '--input=file'],
+    ['api', '-X', 'GET', 'x', '-f=k=v'], ['api', '-X', 'GET', 'x', '-Fk=v'], ['api', '-X', 'GET', 'x', '--raw-field=k=v'], ['label', 'list']]) assert.ok(!isReadOnly(write), write.join(' '))
 })

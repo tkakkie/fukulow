@@ -24,7 +24,9 @@ export function isReadOnly(args: string[]): boolean {
   if (group === 'issue') return ['list', 'view'].includes(verb)
   if (group === 'api') {
     const method = args.indexOf('-X')
-    return method > 0 && args[method + 1] === 'GET' && !args.some(a => ['--input', '-F', '--field', '-f', '--raw-field'].includes(a))
+    // Prefix match also refuses attached values such as `-f=k=v` or `--input=file`.
+    const body = (a: string) => ['--input', '--field', '--raw-field', '-F', '-f'].some(flag => a === flag || a.startsWith(flag.length === 2 ? flag : `${flag}=`))
+    return method > 0 && args[method + 1] === 'GET' && !args.some(body)
   }
   return false
 }
