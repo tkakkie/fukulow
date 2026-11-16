@@ -21,11 +21,6 @@ export default defineConfig(({ mode }) => {
         checkCoreBundle(implementation, Object.values(bundle).flatMap(chunk => chunk.type === 'chunk' ? Object.keys(chunk.modules) : []),
           Object.values(bundle).filter(chunk => chunk.type === 'asset').map(asset => asset.fileName))
       } },
-      // Start the core download with the entry JS instead of after it; the shell no longer waits for it (#466).
-      { name: 'preload-sync-wasm', transformIndexHtml: { order: 'post', handler(_html, ctx) {
-        const wasm = Object.values(ctx.bundle ?? {}).find(file => file.type === 'asset' && file.fileName.endsWith('.wasm'))
-        return wasm ? [{ tag: 'link', injectTo: 'head', attrs: { rel: 'preload', href: '/' + wasm.fileName, as: 'fetch', type: 'application/wasm', crossorigin: '' } }] : []
-      } } },
       svelte({
         // Vitest runs in Node, which Vite treats as SSR: `.svelte.ts` modules would compile with `generate: 'server'`,
         // where `$effect` never runs. Compile for the client instead, so adapters run like in the browser.
