@@ -3,6 +3,14 @@
 	header >Cross-Origin-Opener-Policy "same-origin"
 }
 
+http://{$FUKULOW_DOMAIN:localhost} {
+	import browser_headers
+	route {
+		respond /.well-known/acme-challenge/* 404
+		redir https://{host}{uri} 308
+	}
+}
+
 {$FUKULOW_DOMAIN:localhost} {
 	import browser_headers
 	@static not path /api /api/*
@@ -15,6 +23,11 @@
 	respond /api/v1/ready 404
 	reverse_proxy app:8080 {
 		flush_interval -1
+		transport http {
+			dial_timeout 5s
+			read_timeout 3600s
+			write_timeout 3600s
+		}
 	}
 	# Upstream connection errors execute a separate route chain.
 	handle_errors {

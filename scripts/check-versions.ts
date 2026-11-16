@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 export function checkVersions(files: {
   rust: string, node: string, webNode: string, loadNode: string, dockerfile: string,
   playwright: string, webLock: string, e2e: string,
+  compose: string, acme: string,
 }): void {
   const rust = files.rust.match(/^channel = "([^"]+)"$/m)?.[1]
   const node = files.node.trim()
@@ -29,6 +30,16 @@ export function checkVersions(files: {
   const playwrightImage = images[0][1]
   assert.equal(playwrightImage.split('@')[0], `mcr.microsoft.com/playwright:v${files.playwright}-noble`, 'Playwright image must agree with package.json and use Noble')
   assert.match(playwrightImage, /^[^@]+@sha256:[a-f0-9]{64}$/, 'Playwright image digest must be sha256 with 64 hex digits')
+  const nginxImages = [...files.compose.matchAll(/^\s+image: (nginx:\S+)$/gm)]
+  assert.equal(nginxImages.length, 1, 'Compose must have exactly one nginx image')
+  const nginx = nginxImages[0][1]
+  assert.match(nginx, /^nginx:\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/, 'nginx image must pin exact tag and digest')
+  const modules = [...files.compose.matchAll(/^\s+NGINX_ACME_PACKAGE_VERSION: (\S+)$/gm)]
+  assert.equal(modules.length, 1, 'Compose must have exactly one ACME package version')
+  const module = modules[0][1].match(/^(\d+\.\d+\.\d+)\+(\d+\.\d+\.\d+)-\d+~trixie$/)
+  assert.ok(module, 'ACME package must pin exact nginx, module and distribution versions')
+  assert.equal(`nginx:${module[1]}`, nginx.split('@')[0], 'ACME package nginx ABI version must agree with image')
+  assert.match(files.acme, /^export const pebbleImage = 'ghcr\.io\/letsencrypt\/pebble:\d+\.\d+\.\d+@sha256:[a-f0-9]{64}'$/m, 'Pebble must pin exact tag and digest')
 }
 
 if (import.meta.main) {
@@ -37,5 +48,6 @@ if (import.meta.main) {
     webNode: JSON.parse(read('web/package.json')).engines.node,
     loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
     playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
-    webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml') })
+    webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
+    compose: read('compose.yml'), acme: read('scripts/compose-acme.ts') })
 }

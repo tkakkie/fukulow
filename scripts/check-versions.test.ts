@@ -8,7 +8,8 @@ const files = { rust: read('rust-toolchain.toml'), node: read('.node-version'),
   webNode: JSON.parse(read('web/package.json')).engines.node,
   loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
   playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
-  webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml') }
+  webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
+  compose: read('compose.yml'), acme: read('scripts/compose-acme.ts') }
 
 test('versions agree with tag-only and tag-plus-digest Docker bases', () => {
   checkVersions(files)
@@ -55,5 +56,19 @@ test('Playwright manifest and installed lockfile versions cannot drift', () => {
     const changed = JSON.parse(files.webLock)
     changed.packages[`node_modules/${name}`].version = '0.0.0'
     assert.throws(() => checkVersions({ ...files, webLock: JSON.stringify(changed) }), /lockfile version must agree/)
+  }
+})
+
+test('nginx ACME ABI and Pebble require exact matching pins', () => {
+  for (const image of ['nginx:latest', 'nginx:1.31.8', `nginx:1.31.8@sha256:bad`]) {
+    assert.throws(() => checkVersions({ ...files, compose: files.compose.replace(/nginx:\d+\.\d+\.\d+@sha256:[a-f0-9]+/, image) }), /nginx image must pin/)
+  }
+  for (const version of ['1.0.0+0.4.1-1~trixie', '1.31.8+latest-1~trixie', 'latest']) {
+    assert.throws(() => checkVersions({ ...files, compose: files.compose.replace(/NGINX_ACME_PACKAGE_VERSION: \S+/, `NGINX_ACME_PACKAGE_VERSION: ${version}`) }), /ACME package/)
+  }
+  assert.throws(() => checkVersions({ ...files, compose: files.compose.replace(/\s+NGINX_ACME_PACKAGE_VERSION: \S+/, '') }), /exactly one ACME/)
+  assert.throws(() => checkVersions({ ...files, compose: files.compose + '\n    NGINX_ACME_PACKAGE_VERSION: duplicate\n' }), /exactly one ACME/)
+  for (const pin of ['latest', '2.8.0', '2.8.0@sha256:bad', `2.8.0@sha256:${'a'.repeat(65)}`]) {
+    assert.throws(() => checkVersions({ ...files, acme: files.acme.replace(/ghcr\.io\/letsencrypt\/pebble:[^']+/, `ghcr.io/letsencrypt/pebble:${pin}`) }), /Pebble must pin/)
   }
 })
