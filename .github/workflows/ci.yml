@@ -29,7 +29,9 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
-      - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      # Prebuilt, checksum-verified binary: `cargo install` compiled it for 60-90 s in every job.
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci
       # Before any wasm build: the TS rollback must not need the wasm toolchain or web/wasm.
       - run: SYNC_CORE=ts npm --prefix web run build -- --outDir ../target/web-ts --emptyOutDir
@@ -84,7 +86,9 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
-      - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      # Prebuilt, checksum-verified binary: `cargo install` compiled it for 60-90 s in every job.
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci # also for the invariants check, which imports typescript
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
@@ -115,7 +119,9 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
-      - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      # Prebuilt, checksum-verified binary: `cargo install` compiled it for 60-90 s in every job.
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
@@ -179,8 +185,17 @@ jobs:
               args.push("--set", "app.cache-to=type=gha,scope=docker,mode=max");
             }
             await exec.exec("docker", args);
+      # The profiles run side by side as separate Compose projects with ephemeral ports (~130 s in sequence).
+      # Distinct edge subnets keep the two projects apart.
       - name: Both proxy profiles reject forwarded-IP spoofing
-        run: node scripts/check-compose-security.ts
+        run: |
+          CHECK_COMPOSE_PROFILE=caddy CHECK_EDGE_PREFIX="10.140.$((RANDOM % 256))" node scripts/check-compose-security.ts > "$RUNNER_TEMP/security-caddy.log" 2>&1 & caddy=$!
+          CHECK_COMPOSE_PROFILE=nginx CHECK_EDGE_PREFIX="10.141.$((RANDOM % 256))" node scripts/check-compose-security.ts > "$RUNNER_TEMP/security-nginx.log" 2>&1 & nginx=$!
+          status=0
+          wait "$caddy" || status=1
+          wait "$nginx" || status=1
+          for profile in caddy nginx; do echo "::group::$profile"; cat "$RUNNER_TEMP/security-$profile.log"; echo "::endgroup::"; done
+          exit "$status"
         env:
           CHECK_COMPOSE_IMAGE: fukulow-app
       - name: Database roles fail closed and never export passwords to logs or SQL snapshots

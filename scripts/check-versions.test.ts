@@ -82,8 +82,14 @@ test('wasm target must stay pinned in the Rust toolchain', () => {
 test('wasm-bindgen library and locked CLI installs must agree', () => {
   assert.throws(() => checkVersions({ ...files, core: files.core.replace('=0.2.130', '^0.2.130') }), /exact version/)
   for (const name of ['dockerfile', 'ci', 'e2e'] as const) {
-    assert.throws(() => checkVersions({ ...files, [name]: files[name].replaceAll('--version 0.2.130', '--version 0.2.129') }), /CLI must agree/)
-    assert.throws(() => checkVersions({ ...files, [name]: files[name].replaceAll(/cargo install wasm-bindgen-cli[^\n]+/g, '') }), /must install/)
+    const source = files[name]
+    assert.throws(() => checkVersions({ ...files, [name]: source.replaceAll('--version 0.2.130', '--version 0.2.129').replaceAll('wasm-bindgen@0.2.130', 'wasm-bindgen@0.2.129') }), /CLI must agree/)
+    assert.throws(() => checkVersions({ ...files, [name]: source.replaceAll(/cargo install wasm-bindgen-cli[^\n]+/g, '').replaceAll(/tool: wasm-bindgen@[^\n]+/g, '') }), /must install/)
+  }
+  for (const name of ['ci', 'e2e'] as const) {
+    // An unpinned tool or a leftover source build must not hide behind one pinned install.
+    assert.throws(() => checkVersions({ ...files, [name]: files[name].replace('tool: wasm-bindgen@0.2.130 }', 'tool: wasm-bindgen }') }), /must install|pinned form/)
+    assert.throws(() => checkVersions({ ...files, [name]: `${files[name]}\n      - run: cargo install wasm-bindgen-cli` }), /pinned form/)
   }
   assert.throws(() => checkVersions({ ...files, wasmBuild: files.wasmBuild.replaceAll("'--locked'", '') }), /must use --locked/)
 })

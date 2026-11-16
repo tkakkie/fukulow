@@ -35,10 +35,14 @@ export function checkVersions(files: {
   assert.match(playwrightImage, /^[^@]+@sha256:[a-f0-9]{64}$/, 'Playwright image digest must be sha256 with 64 hex digits')
   const bindgen = files.core.match(/wasm-bindgen = \{ version = "=(\d+\.\d+\.\d+)"/)?.[1]
   assert.ok(bindgen, 'wasm-bindgen must pin an exact version')
-  for (const [name, source] of [['Dockerfile', files.dockerfile], ['CI', files.ci], ['E2E', files.e2e]]) {
-    const installs = [...source.matchAll(/cargo install wasm-bindgen-cli --version (\S+) --locked/g)]
-    assert.ok(installs.length, name + ' must install wasm-bindgen-cli with --locked')
+  // The image compiles the CLI with --locked; workflows install the checksum-pinned prebuilt release.
+  const cliInstalls = [['Dockerfile', files.dockerfile, /cargo install wasm-bindgen-cli --version (\S+) --locked/g],
+    ['CI', files.ci, /tool: wasm-bindgen@(\S+?) \}/g], ['E2E', files.e2e, /tool: wasm-bindgen@(\S+?) \}/g]] as const
+  for (const [name, source, pattern] of cliInstalls) {
+    const installs = [...source.matchAll(pattern)]
+    assert.ok(installs.length, name + ' must install a pinned wasm-bindgen CLI')
     for (const install of installs) assert.equal(install[1], bindgen, name + ' wasm-bindgen CLI must agree with crate')
+    assert.equal([...source.matchAll(/wasm-bindgen-cli|tool: wasm-bindgen/g)].length, installs.length, name + ' must install wasm-bindgen CLI only in the pinned form')
   }
   assert.match(files.wasmBuild, /cargo.*|run\('cargo'/, 'wasm build uses Cargo')
   assert.match(files.wasmBuild, /'--locked'/, 'wasm build must use --locked')
