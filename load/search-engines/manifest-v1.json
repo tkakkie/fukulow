@@ -1,5 +1,5 @@
 {
-  "sha256": "c7ce2aaba5fa7eaf74fff83f93eeff06eb3739d1ea1e4b347301d38597846537",
+  "sha256": "19927163c604379ea19f48402e9a7f5d67263472159bc3e0a1f2a53c60f4537b",
   "frozen": {
     "version": 1,
     "date": "2026-11-15",
@@ -8,7 +8,7 @@
       "seed": 153202611,
       "clock": "2026-11-15T00:00:00.000Z"
     },
-    "node": "26.13.0",
+    "node": "26.13.1",
     "sourceHashes": [
       {
         "path": ".gitattributes",
@@ -16,7 +16,7 @@
       },
       {
         "path": ".node-version",
-        "sha256": "6e775beae185bb3f5837d2f6d3fbe910e6f60e18fa507e661e312e84d707a92f"
+        "sha256": "5c293036fc0a61ad76e15d85f454c3c7cec157e181e035b69f95058a2c239144"
       },
       {
         "path": "deploy/db-grants.sql",
@@ -32,7 +32,7 @@
       },
       {
         "path": "load/package-lock.json",
-        "sha256": "544fd87c278f2336ba8256a421b09cf50f3619a25b82b8d94e86315b3b03c480"
+        "sha256": "0fe702c4d80fc33548b71b144f29f7d7945c73323245e66986e86b42eb51d20c"
       },
       {
         "path": "load/search-engines/Dockerfile",
