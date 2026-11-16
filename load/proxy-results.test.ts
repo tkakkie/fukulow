@@ -25,6 +25,11 @@ test('throughput steps pass only with every send delivered at the offered rate',
   assert.match(capacity([{ ...ok, rate: undefined }]).error ?? '', /missing offered send rate/);
   assert.equal(capacity([{ ...ok, rate: { offeredSendRate: 95, configuredSendRate: 100 } }]).value, 50);
   assert.ok(capacity([ok, { ...undelivered, generatorExitCode: 1 }]).error);
+  // An exit 99 counts as capacity only with the offered rate proven; otherwise the run is inconclusive.
+  for (const rate of [{ offeredSendRate: 90, configuredSendRate: 100 }, undefined]) {
+    const run = capacity([ok, { ...undelivered, rate }]);
+    assert.ok(run.error); assert.equal(judge([...Array(5)].map(() => run), 'step').verdict, 'inconclusive');
+  }
 });
 test('latency, recovery and every first-display cell propagate missing evidence', () => {
   const result: RunResult = { exitCode: 0, summary: { metrics: { delivery_latency: { values: { 'p(95)': 12, 'p(99)': 15 } } } }, storm: { allSubscribedMs: 100 } };

@@ -47,10 +47,10 @@ export function metricsFor(proxy: Proxy, scenario: number, result: RunResult): R
   return metrics;
 }
 
-// A step that exits 0 below 95% of its configured rate measured the generator, not the proxy.
+// Every step, including a k6 exit 99, needs offered-rate evidence: below 95% of the configured rate
+// (or no evidence) the generator, not the proxy, set the limit, so the run is inconclusive, never a capacity result.
 export function offeredShortfall(result: RunResult): string | undefined {
   const { offeredSendRate: offered, configuredSendRate: configured } = result.rate ?? {};
-  if (result.exitCode !== 0) return undefined;
   if (!(typeof offered === 'number' && typeof configured === 'number' && configured > 0)) return 'missing offered send rate';
   return offered < configured * 0.95 ? `generator offered ${offered.toFixed(1)}/s, below 95% of ${configured}/s` : undefined;
 }

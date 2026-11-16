@@ -46,7 +46,7 @@ export function judge(rows: Observation[], kind: 'latency' | 'step' | 'descripti
 type Distribution = ReturnType<typeof distribution>;
 // Non-inferiority is confirmed only run-for-run (#469 criteria, revised before measuring):
 // latency/first display: every nginx run <= every Caddy run * 1.05, with both spreads <= 5%;
-// connections/throughput: every nginx run reaches at least every Caddy run's step.
+// connections/throughput: every nginx run reaches at least every Caddy run's step (discrete: no spread limit).
 // Fail only when every nginx run is beyond the margin; anything between is inconclusive.
 export function nonInferiority(kind: 'latency' | 'step' | 'descriptive', caddy: Distribution, nginx: Distribution) {
   if (kind === 'descriptive') return 'descriptive';

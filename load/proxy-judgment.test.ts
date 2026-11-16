@@ -39,6 +39,8 @@ test('step metrics pass only when every nginx run reaches every Caddy run', () =
   assert.equal(judge(rows(five(2), [2,3,3,3,3]), 'step').verdict, 'pass');
   assert.equal(judge(rows([2,2,2,2,3], five(2)), 'step').verdict, 'inconclusive');
   assert.equal(judge(rows(five(2), [1,2,2,2,2]), 'step').verdict, 'inconclusive');
+  // Discrete steps: the 5% spread limit does not apply (spread here is 100% and 50%).
+  assert.equal(judge(rows([1,1,1,2,2], [2,2,3,3,3]), 'step').verdict, 'pass');
 });
 test('invalid runs are excluded: CPU boundary, missing CPU, TLS, missing values, failed runs', () => {
   for (const change of [ { generatorCpu: 90 }, { generatorCpu: null }, { value: NaN }, { error: 'failed' },
