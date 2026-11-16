@@ -16,7 +16,7 @@ export function observe(state: State): Observed {
     pending: c.pending.map(p => ({ client_message_id: p.clientMessageId, state: p.state })),
   }])) }
 }
-export function protocolClient() {
+export function protocolClient(onInput?: (input: Input) => void) {
   let state = initialState('me')
   return {
     get: () => state,
@@ -51,6 +51,7 @@ export function protocolClient() {
         case 'watch': case 'unwatch': case 'refresh': case 'load_older': input = { type: i.type, channel }; break
         default: throw new Error(`unhandled fixture input ${i.type}`)
       }
+      onInput?.(input)
       const result = step(state, input)
       state = result.state
       return result.effects.map(e => ({ ...e }))

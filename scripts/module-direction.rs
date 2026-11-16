@@ -27,8 +27,15 @@ use rustc_span::{
 };
 use std::{collections::HashSet, process::ExitCode};
 
-const MODULES: [&str; 5] = ["auth", "channels", "messages", "realtime", "fukulow_api"];
-const ALLOWED_EDGES: [(&str, &str); 8] = [
+const MODULES: [&str; 6] = [
+    "auth",
+    "channels",
+    "messages",
+    "realtime",
+    "fukulow_api",
+    "fukulow_client_core",
+];
+const ALLOWED_EDGES: [(&str, &str); 9] = [
     ("realtime", "messages"),
     ("realtime", "channels"),
     ("realtime", "auth"),
@@ -37,6 +44,7 @@ const ALLOWED_EDGES: [(&str, &str); 8] = [
     ("channels", "auth"),
     ("messages", "fukulow_api"),
     ("realtime", "fukulow_api"),
+    ("fukulow_client_core", "fukulow_api"),
 ];
 
 fn configured_edges() -> Result<Vec<(String, String)>, String> {
@@ -142,8 +150,8 @@ struct Direction<'tcx> {
 impl<'tcx> Direction<'tcx> {
     fn module_index(&self, mut id: DefId) -> Option<usize> {
         let crate_name = self.tcx.crate_name(id.krate);
-        if crate_name.as_str() == "fukulow_api" {
-            return MODULES.iter().position(|name| *name == "fukulow_api");
+        if matches!(crate_name.as_str(), "fukulow_api" | "fukulow_client_core") {
+            return MODULES.iter().position(|name| *name == crate_name.as_str());
         }
         // Domain modules in the server retain their identity across crate boundaries.
         // Unrelated dependency crates are outside this graph.
