@@ -25,8 +25,8 @@ pub mod dms;
 mod failure;
 mod limiter;
 mod mentions;
+pub use fukulow_api::{ListMessagesQuery, Mention, Message, MessagePage, SendMessageRequest};
 pub use limiter::SendLimit;
-pub use mentions::Mention;
 pub(crate) mod replies;
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub(crate) mod topics;
@@ -49,101 +49,25 @@ pub use unread::{
     mark_topic_read,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-pub struct Message {
-    pub id: Uuid,
-    pub channel_id: Uuid,
-    /// Per-channel sequence, starting at 1.
-    #[schema(minimum = 1)]
-    pub seq: i64,
-    pub client_message_id: Uuid,
-    /// Member id of the sender.
-    pub sender: Uuid,
-    pub body: String,
-    #[schema(format = DateTime)]
-    pub created_at: String,
-    #[schema(required = true)]
-    pub topic_id: Option<Uuid>,
-    /// Confirmed parent Message; null for a non-Reply.
-    #[schema(required = true)]
-    pub reply_to: Option<Uuid>,
-    /// Stable root even when the parent is outside the loaded window; null for a non-Reply.
-    #[schema(required = true)]
-    pub reply_root_id: Option<Uuid>,
-    /// Persisted accepted ids, sorted by UUID, with current retained display names.
-    pub mentions: Vec<Mention>,
-}
-
-impl sqlx::FromRow<'_, sqlx::postgres::PgRow> for Message {
-    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        let mentions: String = row.try_get("mentions")?;
-        Ok(Self {
-            id: row.try_get("id")?,
-            channel_id: row.try_get("channel_id")?,
-            seq: row.try_get("seq")?,
-            client_message_id: row.try_get("client_message_id")?,
-            sender: row.try_get("sender")?,
-            body: row.try_get("body")?,
-            created_at: row.try_get("created_at")?,
-            topic_id: row.try_get("topic_id")?,
-            reply_to: row.try_get("reply_to")?,
-            reply_root_id: row.try_get("reply_root_id")?,
-            mentions: serde_json::from_str(&mentions).map_err(|error| {
-                sqlx::Error::ColumnDecode {
-                    index: "mentions".into(),
-                    source: Box::new(error),
-                }
-            })?,
-        })
-    }
-}
-
-/// Idempotency key: (organization, sender, client_message_id), derived from the session.
-/// Matching body, Channel, normalized Topic name and reply target returns the canonical Message/sequence;
-/// changing any of them returns 409.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SendMessageRequest {
-    pub client_message_id: Uuid,
-    /// 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming.
-    #[schema(min_length = 1, max_length = 4000)]
-    pub body: String,
-    /// Join or create a Topic in this Channel. Omitted/null sends without a Topic unless replying.
-    /// 1..=60 Unicode scalars, no NUL or surrounding/only trim whitespace; ASCII case folds.
-    #[schema(min_length = 1, max_length = 60)]
-    pub topic_name: Option<String>,
-    /// Confirmed parent in this Organization/Channel. Omitted/null is a non-Reply.
-    /// A Reply inherits its parent's Topic; topic_name must be omitted/null.
-    pub reply_to: Option<Uuid>,
-}
-
-/// Use after_seq XOR before_seq, or neither for the latest page. Cursors are exclusive.
-#[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
-pub struct ListMessagesQuery {
-    /// Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
-    #[param(minimum = 0)]
-    #[schema(minimum = 0)]
-    pub after_seq: Option<i64>,
-    /// Return seq < before_seq. Cannot combine with after_seq.
-    #[param(minimum = 1)]
-    #[schema(minimum = 1)]
-    pub before_seq: Option<i64>,
-    /// Page size, default 50, maximum 200.
-    #[param(minimum = 1, maximum = 200, default = 50)]
-    #[schema(minimum = 1, maximum = 200)]
-    pub limit: Option<u16>,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct MessagePage {
-    /// Always ascending seq (newest last), including latest and before_seq pages.
-    pub messages: Vec<Message>,
-    /// More messages exist in the queried direction (older for latest/before_seq,
-    /// newer for after_seq). Continue after_seq with the last seq or before_seq
-    /// with the first seq; continue the latest page toward older messages with before_seq.
-    pub has_more: bool,
+fn message_from_row(row: &sqlx::postgres::PgRow) -> Result<Message, sqlx::Error> {
+    use sqlx::Row;
+    let mentions: String = row.try_get("mentions")?;
+    Ok(Message {
+        id: row.try_get("id")?,
+        channel_id: row.try_get("channel_id")?,
+        seq: row.try_get("seq")?,
+        client_message_id: row.try_get("client_message_id")?,
+        sender: row.try_get("sender")?,
+        body: row.try_get("body")?,
+        created_at: row.try_get("created_at")?,
+        topic_id: row.try_get("topic_id")?,
+        reply_to: row.try_get("reply_to")?,
+        reply_root_id: row.try_get("reply_root_id")?,
+        mentions: serde_json::from_str(&mentions).map_err(|error| sqlx::Error::ColumnDecode {
+            index: "mentions".into(),
+            source: Box::new(error),
+        })?,
+    })
 }
 
 /// List visible channel messages using exclusive per-channel sequence cursors.
@@ -204,11 +128,12 @@ pub async fn list_messages(
             query.before_seq.map(|seq| seq - 1).unwrap_or(i64::MAX)
         };
         let sql = mentions::page_sql(sql, if ascending { "p.seq ASC" } else { "p.seq DESC" });
-        let mut messages = sqlx::query_as::<_, Message>(&sql)
+        let mut messages = sqlx::query(&sql)
             .bind(organization_id)
             .bind(channel_id)
             .bind(cursor)
             .bind(i64::from(limit) + 1)
+            .try_map(|row| message_from_row(&row))
             .fetch_all(&mut *tx)
             .await?;
         let has_more = messages.len() > usize::from(limit);
@@ -392,7 +317,11 @@ async fn committed(
     .await
 }
 
-impl SendMessageRequest {
+trait ValidateSendMessage {
+    fn validate(&self) -> Result<(), MessageError>;
+}
+
+impl ValidateSendMessage for SendMessageRequest {
     fn validate(&self) -> Result<(), MessageError> {
         if self.reply_to.is_some() && self.topic_name.is_some() {
             return Err(MessageError::ReplyTopicNotAllowed);
@@ -413,7 +342,11 @@ impl SendMessageRequest {
     }
 }
 
-impl ListMessagesQuery {
+trait ValidateListMessages {
+    fn validate(&self) -> Result<u16, MessageError>;
+}
+
+impl ValidateListMessages for ListMessagesQuery {
     fn validate(&self) -> Result<u16, MessageError> {
         let limit = self.limit.unwrap_or(50);
         if (self.after_seq.is_some() && self.before_seq.is_some())
@@ -597,7 +530,7 @@ async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     sender: Uuid,
     client_message_id: Uuid,
 ) -> Result<Option<Message>, sqlx::Error> {
-    sqlx::query_as(&mentions::page_sql(
+    sqlx::query(&mentions::page_sql(
         "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
@@ -606,6 +539,7 @@ async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     .bind(organization_id)
     .bind(sender)
     .bind(client_message_id)
+    .try_map(|row| message_from_row(&row))
     .fetch_optional(executor)
     .await
 }
@@ -757,14 +691,15 @@ async fn persist_admitted(
         .await?
     };
     let reply_root_id = parent.as_ref().map(|p| p.reply_root_id.unwrap_or(p.id));
-    let message = sqlx::query_as::<_, Message>(
+    let message = sqlx::query(
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
          RETURNING id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions",
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
-        .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).fetch_optional(tx.connection()?).await?;
+        .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).try_map(|row| message_from_row(&row))
+        .fetch_optional(tx.connection()?).await?;
     if let Some(mut message) = message {
         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
@@ -839,12 +774,13 @@ pub(crate) async fn replay_page(
         &sql,
         async |tx: &mut sqlx::PgConnection, sql: &str| {
             let sql = format!("{sql} ORDER BY seq");
-            sqlx::query_as(&sql)
+            sqlx::query(&sql)
                 .bind(organization)
                 .bind(channel)
                 .bind(after)
                 .bind(through)
                 .bind(REPLAY_PAGE_SIZE)
+                .try_map(|row| message_from_row(&row))
                 .fetch_all(tx)
                 .await
         },
@@ -865,7 +801,7 @@ pub(crate) async fn authorized_replay_page(
     after: i64,
     through: i64,
 ) -> Result<Vec<Message>, MessageError> {
-    use sqlx::{FromRow, Row};
+    use sqlx::Row;
     let sql = format!(
         r#"WITH access AS MATERIALIZED (SELECT ({}) AS visible)
         SELECT access.visible,m.* FROM access LEFT JOIN LATERAL (
@@ -907,7 +843,7 @@ pub(crate) async fn authorized_replay_page(
     let mut messages = Vec::new();
     for row in rows {
         if row.try_get::<Option<Uuid>, _>("id")?.is_some() {
-            messages.push(Message::from_row(&row)?);
+            messages.push(message_from_row(&row)?);
         }
     }
     Ok(messages)

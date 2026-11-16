@@ -1,13 +1,6 @@
 use super::*;
 use std::collections::BTreeSet;
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-pub struct Mention {
-    pub member_id: Uuid,
-    /// Current retained Member name in this authorized Message snapshot.
-    pub name: String,
-}
-
 pub(super) fn extract(body: &str) -> Vec<Uuid> {
     let mut ids = BTreeSet::new();
     let bytes = body.as_bytes();

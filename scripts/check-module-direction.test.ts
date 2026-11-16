@@ -17,11 +17,11 @@ test('module direction uses compiler resolution in production and tests', async 
   const directory = mkdtempSync(join(tmpdir(), 'fukulow-module-direction-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
 
-  function compile(source: string, checked: boolean, tests = false, extra: string[] = [], fixtureEdges?: string) {
+  function compile(source: string, checked: boolean, tests = false, extra: string[] = [], fixtureEdges?: string, crateName = 'fixture') {
     const file = join(directory, 'lib.rs')
     writeFileSync(file, `#![allow(dead_code, unused_imports)]\n${source}`)
     return spawnSync(checked ? (fixtureEdges === undefined ? driver : fixtureDriver) : 'rustc', [
-      '--edition=2024', '--crate-name', 'fixture', '--crate-type', 'lib',
+      '--edition=2024', '--crate-name', crateName, '--crate-type', 'lib',
       '--emit=metadata', '--out-dir', directory,
       ...(tests ? ['--test'] : []), ...extra, file,
     ], {
@@ -30,13 +30,13 @@ test('module direction uses compiler resolution in production and tests', async 
     })
   }
 
-  await t.test('the six production edges preserve the old order for all 16 pairs', () => {
-    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime'])
-    assert.equal(edges.length, 6)
-    assert.equal(new Set(edges).size, 6)
+  await t.test('production edges retain domain order and the shared wire leaf', () => {
+    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime', 'fukulow_api'])
+    assert.equal(edges.length, 8)
+    assert.equal(new Set(edges).size, 8)
     for (let from = 0; from < names.length; from++) {
       for (let to = 0; to < names.length; to++) {
-        assert.equal(allowed(names[from], names[to]), to <= from)
+        assert.equal(allowed(names[from], names[to]), from === to || (from < 4 && to < 4 && to < from) || (from >= 2 && from < 4 && to === 4))
       }
     }
   })
@@ -112,6 +112,83 @@ test('module direction uses compiler resolution in production and tests', async 
       }
     })
   }
+
+  await t.test('cross-crate edges check paths, aliases, inferred types, fields, calls and macros in production and tests', () => {
+    function library(name: string, source: string): string {
+      const file = join(directory, name + '.rs')
+      const output = join(directory, 'lib' + name + '_external.rmeta')
+      writeFileSync(file, source)
+      const built = spawnSync('rustc', [
+        '--edition=2024', '--crate-name', name, '--crate-type', 'lib',
+        '--emit=metadata', file, '-o', output,
+      ], { encoding: 'utf8' })
+      assert.equal(built.status, 0, built.stderr)
+      return output
+    }
+    const leaf = library('fukulow_api', `
+pub struct Item { pub count: u8 }
+impl Item { pub fn count(&self) -> u8 { self.count } }
+pub type Alias = Item;
+pub fn make() -> Item { Item { count: 1 } }
+#[macro_export] macro_rules! empty { () => {}; }
+`)
+    const server = library('fukulow_server', `
+pub mod messages {
+    pub struct Item { pub count: u8 }
+    impl Item { pub fn count(&self) -> u8 { self.count } }
+    pub type Alias = Item;
+    pub fn make() -> Item { Item { count: 1 } }
+    pub use crate::empty;
+}
+#[macro_export] macro_rules! empty { () => {}; }
+`)
+    for (const tests of [false, true]) {
+      for (const from of ['auth', 'messages', 'realtime']) {
+        const bodies = [
+          'use fukulow_api::Item;',
+          'fn f(_: fukulow_api::Alias) {}',
+          'fn f() { let _value = fukulow_api::make(); }',
+          'fn f(i: &fukulow_api::Item) -> u8 { i.count }',
+          'fn f(i: &fukulow_api::Item) -> u8 { i.count() }',
+          'fukulow_api::empty!();',
+          'use fukulow_api as wire; wire::empty!();',
+        ]
+        for (const body of bodies) {
+          const source = 'mod ' + from + ' { ' + (tests ? '#[cfg(test)] mod tests { ' + body + ' }' : body) + ' }'
+          const extra = ['--extern', 'fukulow_api=' + leaf]
+          const baseline = compile(source, false, tests, extra)
+          assert.equal(baseline.status, 0, baseline.stderr)
+          const result = compile(source, true, tests, extra)
+          assert.equal(result.status, from === 'auth' ? 1 : 0, result.stderr)
+          if (from === 'auth') assert.match(result.stderr, /module direction: auth must not reference fukulow_api/)
+        }
+      }
+      for (const body of [
+        'use fukulow_server::messages::Item;',
+        'fn f(_: fukulow_server::messages::Alias) {}',
+        'fn f() { let _value = fukulow_server::messages::make(); }',
+        'fn f(i: &fukulow_server::messages::Item) -> u8 { i.count }',
+        'fn f(i: &fukulow_server::messages::Item) -> u8 { i.count() }',
+        'use fukulow_server::messages as domain; domain::empty!();',
+        'fukulow_server::messages::empty!();',
+      ]) {
+        const source = tests ? '#[cfg(test)] mod tests { ' + body + ' }' : body
+        const extra = ['--extern', 'fukulow_server=' + server]
+        assert.equal(compile(source, false, tests, extra, undefined, 'fukulow_api').status, 0)
+        const result = compile(source, true, tests, extra, undefined, 'fukulow_api')
+        assert.equal(result.status, 1, result.stderr)
+        assert.match(result.stderr, /module direction: fukulow_api must not reference messages/)
+        const renamed = compile(source.replaceAll('fukulow_server', 'domain_crate'),
+          true, tests, ['--extern', 'domain_crate=' + server], undefined, 'fukulow_api')
+        assert.equal(renamed.status, 1, renamed.stderr)
+        assert.match(renamed.stderr, /module direction: fukulow_api must not reference messages/)
+      }
+      // The leaf's own root and nested code are checked, while external std remains allowed.
+      const valid = compile('pub struct Item; mod nested { fn f(_: crate::Item, _: std::string::String) {} }',
+        true, tests, [], undefined, 'fukulow_api')
+      assert.equal(valid.status, 0, valid.stderr)
+    }
+  })
 
   const denied: Record<string, string> = {
     'direct import': 'use crate::messages::Message;',

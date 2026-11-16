@@ -198,13 +198,14 @@ pub async fn topic_history(
             ORDER BY seq {order} LIMIT $5"
         );
         let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
-        let mut messages = sqlx::query_as::<_, Message>(&sql)
+        let mut messages = sqlx::query(&sql)
             .bind(organization)
             .bind(channel)
             .bind(topic)
             .bind(cursor)
             .bind(i64::from(limit) + 1)
             .bind(w)
+            .try_map(|row| message_from_row(&row))
             .fetch_all(&mut *tx)
             .await?;
         let has_more = messages.len() > usize::from(limit);

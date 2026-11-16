@@ -9,16 +9,19 @@ FROM rust:1.99.1-slim@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b0
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml server/Cargo.toml
+COPY api-types/Cargo.toml api-types/Cargo.toml
 # Every workspace crate's manifest must be present to resolve the lockfile, even
 # dev-only ones (test-macros) that the release binary never builds; stub their sources.
 COPY server/test-macros/Cargo.toml server/test-macros/Cargo.toml
 # Dependency-only layer: cached until Cargo.toml/Cargo.lock change.
-RUN mkdir -p server/src server/test-macros/src && echo "" > server/src/lib.rs && echo "fn main() {}" > server/src/main.rs \
+RUN mkdir -p server/src server/test-macros/src api-types/src && echo "" > server/src/lib.rs && echo "fn main() {}" > server/src/main.rs \
  && echo "" > server/test-macros/src/lib.rs \
- && cargo build --locked --release -p fukulow-server && rm -rf server/src server/test-macros/src
+ && echo "" > api-types/src/lib.rs \
+ && cargo build --locked --release -p fukulow-server && rm -rf server/src server/test-macros/src api-types/src
 COPY server/ server/
+COPY api-types/ api-types/
 COPY deploy/db-*.sql deploy/
-RUN find server/src -name "*.rs" -exec touch {} +
+RUN find server/src api-types/src -name "*.rs" -exec touch {} +
 COPY --from=web /app/web/dist web/dist
 RUN cargo build --locked --release -p fukulow-server
 

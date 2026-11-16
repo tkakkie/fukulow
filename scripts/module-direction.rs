@@ -27,14 +27,16 @@ use rustc_span::{
 };
 use std::{collections::HashSet, process::ExitCode};
 
-const MODULES: [&str; 4] = ["auth", "channels", "messages", "realtime"];
-const ALLOWED_EDGES: [(&str, &str); 6] = [
+const MODULES: [&str; 5] = ["auth", "channels", "messages", "realtime", "fukulow_api"];
+const ALLOWED_EDGES: [(&str, &str); 8] = [
     ("realtime", "messages"),
     ("realtime", "channels"),
     ("realtime", "auth"),
     ("messages", "channels"),
     ("messages", "auth"),
     ("channels", "auth"),
+    ("messages", "fukulow_api"),
+    ("realtime", "fukulow_api"),
 ];
 
 fn configured_edges() -> Result<Vec<(String, String)>, String> {
@@ -139,7 +141,13 @@ struct Direction<'tcx> {
 
 impl<'tcx> Direction<'tcx> {
     fn module_index(&self, mut id: DefId) -> Option<usize> {
-        if !id.is_local() {
+        let crate_name = self.tcx.crate_name(id.krate);
+        if crate_name.as_str() == "fukulow_api" {
+            return MODULES.iter().position(|name| *name == "fukulow_api");
+        }
+        // Domain modules in the server retain their identity across crate boundaries.
+        // Unrelated dependency crates are outside this graph.
+        if !id.is_local() && crate_name.as_str() != "fukulow_server" {
             return None;
         }
         while let Some(parent) = self.tcx.opt_parent(id) {
@@ -332,6 +340,36 @@ impl<'tcx> Direction<'tcx> {
                         scope = parent;
                     };
                     let Some(Res::Def(_, id)) = child else {
+                        if first
+                            && let Some(krate) = self.tcx.crates(()).iter().copied().find(|krate| {
+                                self.tcx.crate_name(*krate).as_str() == name
+                                    || self
+                                        .tcx
+                                        .sess
+                                        .opts
+                                        .externs
+                                        .get(name)
+                                        .and_then(|entry| entry.files())
+                                        .is_some_and(|mut files| {
+                                            files.any(|file| {
+                                                self.tcx.crate_extern_paths(*krate).iter().any(
+                                                    |path| {
+                                                        path == file.original()
+                                                            || path == file.canonicalized()
+                                                    },
+                                                )
+                                            })
+                                        })
+                            })
+                        {
+                            module = DefId {
+                                krate,
+                                index: CRATE_DEF_INDEX,
+                            };
+                            self.edge(owner, module, span);
+                            first = false;
+                            continue;
+                        }
                         if first
                             && (self.tcx.sess.opts.externs.get(name).is_some()
                                 || matches!(name, "std" | "core" | "alloc" | "proc_macro"))

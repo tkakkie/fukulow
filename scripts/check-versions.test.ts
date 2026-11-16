@@ -57,3 +57,9 @@ test('Playwright manifest and installed lockfile versions cannot drift', () => {
     assert.throws(() => checkVersions({ ...files, webLock: JSON.stringify(changed) }), /lockfile version must agree/)
   }
 })
+
+test('wasm target must stay pinned in the Rust toolchain', () => {
+  for (const rust of [files.rust.replace(/^targets = .*$/m, ''), files.rust.replace('wasm32-unknown-unknown', 'wasm32-wasip1')]) {
+    assert.throws(() => checkVersions({ ...files, rust }), /targets must include wasm32-unknown-unknown/)
+  }
+})

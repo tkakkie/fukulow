@@ -9,6 +9,7 @@ default-run = "fukulow-server"
 workspace = true
 
 [dependencies]
+fukulow-api = { path = "../api-types" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 rust-embed = "8"
