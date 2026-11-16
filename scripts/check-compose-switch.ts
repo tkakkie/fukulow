@@ -1,11 +1,12 @@
-// #469 switch/rollback gate: Caddy -> nginx -> Caddy -> (failed nginx, restored) -> nginx
-// through deploy/switch-proxy.sh, against a disposable Pebble CA. Never reads deployment .env.
+// #469 switch/rollback gate through deploy/switch-proxy.sh: Caddy -> nginx -> Caddy, refusals
+// (overlap, ports, issuance, trust, start) with restore, previous-state handling and reuse,, against a disposable Pebble CA. Never reads deployment .env.
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { randomInt, randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { acmeFixture, caActivity, certificate, checkStartupReuse, checkVerifiedTls, pebbleIssuingRoot, poll, testDomain } from './compose-acme.ts'
 
@@ -15,6 +16,7 @@ const cwd = fileURLToPath(new URL('..', import.meta.url))
 const project = `fukulow-switch-${randomUUID().slice(0, 8)}`
 const directory = mkdtempSync(join(process.env.CHECK_COMPOSE_WORK_DIR || tmpdir(), project))
 const override = join(directory, 'compose.yml')
+const rootFile = join(directory, 'pebble-issuing-root.pem')
 const image = process.env.CHECK_COMPOSE_IMAGE || 'fukulow-app'
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-switch-db-test-only',
   POSTGRES_APP_PASSWORD: 'compose-switch-app-test-only', FUKULOW_SETUP_TOKEN: 'compose-switch-setup-test-only',
@@ -34,13 +36,33 @@ const run = (args: string[]) => {
 // enabled to parse it. Only commands naming their services (or read-only) use this.
 const dc = (...args: string[]) => run(['compose', ...composeOptions, '--profile', 'caddy', '--profile', 'nginx', ...args])
 // Both profiles only so Compose can parse the fixture; the script names every service it touches.
-const switchProxy = (target: Proxy, ...extra: string[]) =>
-  attempt('bash', ['deploy/switch-proxy.sh', target, ...composeOptions, '--profile', 'caddy', '--profile', 'nginx', ...extra])
+// While it waits for verified HTTPS, the ACME directory follows the target into its namespace.
+async function switchProxy(target: Proxy, { extra = [] as string[], follow = true, scriptEnv = {} as Record<string, string> } = {}) {
+  const child = spawn('bash', ['deploy/switch-proxy.sh', target, ...composeOptions, '--profile', 'caddy', '--profile', 'nginx', ...extra],
+    { cwd, env: { ...env, SWITCH_PROXY_CACERT: rootFile, ...scriptEnv }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = '', stderr = '', exited = false
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const status = new Promise<number | null>(resolve => child.on('close', code => { exited = true; resolve(code) }))
+  while (follow && !exited) {
+    if (running().includes(target)) { followDirectory(target); break }
+    await delay(250)
+  }
+  return { status: await status, stdout, stderr }
+}
 // Compose status lines only (no container logs); match the script's own outcome line.
-function switched(target: Proxy) {
-  const result = switchProxy(target)
+async function switched(target: Proxy, options?: Parameters<typeof switchProxy>[1]) {
+  const result = await switchProxy(target, options)
   assert.equal(result.status, 0, `switch to ${target} failed (output suppressed)`)
-  assert.match(result.stdout, new RegExp(`^switch-proxy: ${target} is serving`, 'm'))
+  assert.match(result.stdout, new RegExp(`^switch-proxy: ${target} is serving verified HTTPS`, 'm'))
+}
+async function refused(target: Proxy, reason: RegExp, outcome: RegExp, options?: Parameters<typeof switchProxy>[1]) {
+  const result = await switchProxy(target, options)
+  assert.notEqual(result.status, 0, `switch to ${target} must fail`)
+  // The script's own reason and outcome lines, not a failure elsewhere in it.
+  assert.match(result.stderr, reason)
+  assert.match(result.stderr, outcome)
+  return result.status
 }
 // Longer than the whole run: any new CA order below is a reissue, never a renewal.
 const fixture = (active: Proxy) => writeFileSync(override, `services:
@@ -93,9 +115,12 @@ async function main() {
   fixture('caddy')
   run(['compose', ...composeOptions, '--profile', 'caddy', 'up', '-d', '--no-build', '--wait'])
   const root = pebbleIssuingRoot(dc)
-  const untrustedCa = readFileSync(join(directory, 'pebble-ca.pem'), 'utf8')
+  writeFileSync(rootFile, root)
+  const untrustedFile = join(directory, 'pebble-ca.pem')
+  const untrustedCa = readFileSync(untrustedFile, 'utf8')
   const caddy = { serial: await serving('caddy', root, untrustedCa), ...activity() }
   console.log(`PASS caddy: issued and serving, serial ${caddy.serial}`)
+  const caddyBack = { ...caddy }
 
   // Both proxies own the edge IP (and 80/443 in production): Docker refuses overlap.
   const overlap = attempt('docker', ['compose', ...composeOptions, '--profile', 'caddy', '--profile', 'nginx', 'up', '-d', '--no-deps', 'nginx'])
@@ -106,36 +131,65 @@ async function main() {
   assert.equal(await checkVerifiedTls(port('caddy'), root, untrustedCa), caddy.serial)
   console.log('PASS overlap: starting nginx while caddy runs is refused; caddy keeps serving')
 
+  // A target publishing other ports than the running proxy (a dropped loopback override)
+  // is refused before anything stops.
+  const publicPorts = join(directory, 'public-nginx.yml')
+  writeFileSync(publicPorts, 'services:\n  nginx:\n    ports: !override ["::443", "::80"]\n')
   fixture('nginx')
-  switched('nginx')
-  const nginxSerial = await serving('nginx', root, untrustedCa)
-  const nginx = { serial: nginxSerial, ...activity() }
+  assert.equal(await refused('nginx', /^switch-proxy: nginx would publish \[.*\] but caddy publishes \[.*127\.0\.0\.1.*\]/m,
+    /nothing changed\)$/m, { extra: ['-f', publicPorts], follow: false }), 2)
+  assert.deepEqual(running(), ['caddy'])
+  assert.equal(await checkVerifiedTls(port('caddy'), root, untrustedCa), caddy.serial)
+  console.log('PASS port check: a switch that would publish other ports is refused; caddy untouched')
+
+  // Issuance failure: the CA is unreachable from nginx, so HTTPS never verifies.
+  fixture('caddy')
+  await refused('nginx', /^switch-proxy: nginx did not serve verified HTTPS within 20s$/m, /^switch-proxy: restoring caddy$/m,
+    { follow: false, scriptEnv: { SWITCH_PROXY_HTTPS_TIMEOUT: '20' } })
+  await reused('caddy', caddyBack, root, untrustedCa)
+  console.log('PASS issuance failure: nginx never served verified HTTPS, caddy restored without a new order')
+
+  fixture('nginx')
+  await switched('nginx')
+  const nginx = { serial: await serving('nginx', root, untrustedCa), ...activity() }
   assert.ok(nginx.orders > caddy.orders, 'nginx issues its own certificate in its own volume')
-  console.log(`PASS caddy -> nginx: caddy stopped, nginx serving, serial ${nginx.serial}`)
+  console.log(`PASS caddy -> nginx: caddy stopped, nginx serving verified HTTPS, serial ${nginx.serial}`)
 
   fixture('caddy')
-  switched('caddy')
+  await switched('caddy')
   await reused('caddy', { ...nginx, serial: caddy.serial }, root, untrustedCa)
   console.log('PASS nginx -> caddy: rollback reuses the caddy certificate and account without a new order')
+
+  // Trust failure: nginx serves its certificate, but not one the operator's CA trusts.
+  fixture('nginx')
+  await refused('nginx', /^switch-proxy: nginx did not serve verified HTTPS within 20s$/m, /^switch-proxy: restoring caddy$/m,
+    { scriptEnv: { SWITCH_PROXY_CACERT: untrustedFile, SWITCH_PROXY_HTTPS_TIMEOUT: '20' } })
+  fixture('caddy')
+  await reused('caddy', { ...nginx, serial: caddy.serial }, root, untrustedCa)
+  console.log('PASS trust failure: an untrusted certificate is rejected and caddy restored without a new order')
 
   // A target that cannot start is stopped and the previous proxy restored.
   const broken = join(directory, 'broken-nginx.yml')
   writeFileSync(broken, 'services:\n  nginx:\n    environment:\n      NGINX_ACME_PACKAGE_VERSION: switch-check-mismatch\n')
   fixture('nginx')
-  const failed = switchProxy('nginx', '-f', broken)
-  assert.equal(failed.status, 1, 'failed switch reports failure')
-  // Restored by the script itself, not by a failure elsewhere in it.
-  assert.match(failed.stderr, /^switch-proxy: nginx did not start; restoring caddy$/m)
-  assert.deepEqual(running(), ['caddy'])
+  await refused('nginx', /^switch-proxy: nginx did not turn healthy$/m, /^switch-proxy: restoring caddy$/m, { extra: ['-f', broken], follow: false })
   fixture('caddy')
   await reused('caddy', { ...nginx, serial: caddy.serial }, root, untrustedCa)
-  console.log('PASS failed switch: nginx did not start, caddy restored without a new order')
+  console.log('PASS failed start: nginx did not turn healthy, caddy restored without a new order')
+
+  // A previous proxy that was not running is never started by a failed switch.
+  dc('stop', 'caddy')
+  assert.deepEqual(running(), [])
+  fixture('nginx')
+  await refused('nginx', /^switch-proxy: nginx did not turn healthy$/m, /^switch-proxy: caddy was not running, so it stays stopped$/m,
+    { extra: ['-f', broken], follow: false })
+  assert.deepEqual(running(), [], 'no proxy is started that was not running')
+  console.log('PASS previous state: a failed switch leaves a stopped caddy stopped')
 
   // Recreated with the original configuration, nginx reuses its own volume.
-  fixture('nginx')
-  switched('nginx')
+  await switched('nginx')
   await reused('nginx', nginx, root, untrustedCa)
-  console.log('PASS caddy -> nginx again: nginx reuses its certificate and account without a new order')
+  console.log('PASS -> nginx again: nginx reuses its certificate and account without a new order')
 }
 
 try {
