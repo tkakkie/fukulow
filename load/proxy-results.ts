@@ -8,6 +8,8 @@ export type RunResult = {
   /** load/app-evidence.ts aggregates for the generator window (proxy runs only). */
   appEvidence?: AppEvidence;
   proxyEvidence?: ProxyEvidence;
+  /** First generator error, allowlisted (load/generator.ts allowlistedReason). */
+  generatorError?: { reason: string; atMs: number };
   cpuPeakPercent?: Record<string, number | null>;
   summary?: { metrics?: Record<string, { values: Record<string, number> }>; summaries?: {
     pathLabel: string; network: string; cache: string; timelineVisibleMs: { p50: number; p95: number }

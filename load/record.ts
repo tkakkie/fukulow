@@ -9,7 +9,7 @@ import { createCertificate, domain, outsideCheckout, proxyOverride, recordTls } 
 import type { Proxy } from './proxy-judgment.ts';
 import { sampledCpuPeaks, type ResourceSample } from './throughput-summary.ts';
 import { requireSuccessfulRun } from './summary.ts';
-import { loadRecipe } from './generator.ts';
+import { allowlistedReason, loadRecipe } from './generator.ts';
 import { appEvidence, proxyEvidence, type AppEvidence, type ProxyEvidence } from './app-evidence.ts';
 const execAsync = promisify(execFile);
 const proxy = process.env.LOAD_PROXY as Proxy | undefined;
@@ -86,6 +86,7 @@ let generatorWindow: { startedAt: number; clientClosingAt?: number; endedAt?: nu
 let appContainer: string | undefined;
 let appSide: AppEvidence | undefined;
 let proxySide: ProxyEvidence | undefined;
+let generatorError: { reason: string; atMs: number } | undefined;
 let primaryError: unknown;
 let child: ChildProcess | undefined;
 const cleanupErrors: unknown[] = [];
@@ -204,6 +205,10 @@ try {
         if (line.includes('LOAD_MEASUREMENT_END')) capture('after');
         // console.log messages are JSON-quoted in k6's text log output.
         const message = line.includes('msg=') ? JSON.parse(line.match(/msg=("(?:[^"\\]|\\.)*")/)?.[1] || 'null') : line;
+        // scenario.ts reports its first failure with console.error (k6: level=error source=console).
+        if (typeof message === 'string' && !generatorError && /\blevel=error\b/.test(line) && /\bsource=console\b/.test(line)) {
+          generatorError = { reason: allowlistedReason(message), atMs: Date.now() - (generatorWindow?.startedAt ?? Date.now()) };
+        }
         if (typeof message === 'string' && message.startsWith('LOAD_RECONNECT_STORM ')) storm = JSON.parse(message.slice(21));
         if (typeof message === 'string' && message.startsWith('LOAD_TLS ')) clientTls.add(message.slice(9));
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
@@ -304,7 +309,7 @@ try {
         ...(firstPaint ? { generator: hostGeneratorSamples.length ? Math.max(...hostGeneratorSamples.map(s => s.cpuPercent)) : null } : {}) },
       generatorCpuSource: firstPaint ? 'host ps lifetime %CPU summed over runner and browser descendants' : 'docker stats; instantaneous sampled CPU',
       cpuSamplingScope: 'whole generator run including provisioning, boundaries, idle/drain and teardown; 100% is one core',
-      progress, setupComplete, appEvidence: appSide, proxyEvidence: proxySide, generatorWindow, measurementError }, null, 2));
+      progress, setupComplete, appEvidence: appSide, proxyEvidence: proxySide, generatorError, generatorWindow, measurementError }, null, 2));
   });
   if (!proxy) attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));
   if (!proxy) attempt(() => writeFileSync(`${output}/database.log`, docker(...compose, 'logs', '--no-color', 'db')));

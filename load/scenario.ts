@@ -184,7 +184,8 @@ export default async function (data: Setup): Promise<void> {
           deliveryLatency.add(deliveries.receive(message.client_message_id, Date.now()), tags);
           delivered.add(1, tags);
         } else {
-          throw new Error('Unexpected event');
+          // The event type is a contract constant; the harness keeps it only if it matches [a-z_] (load/generator.ts).
+          throw new Error(`Unexpected event: ${String((event as { type?: unknown }).type)}`);
         }
       } catch (error) {
         recordError(String(error));

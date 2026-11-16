@@ -37,3 +37,13 @@ test('the repository load recipe expands to one docker run command', () => {
   assert.match(args[1], /^docker run --rm --name 'fukulow-load-x-generator'/);
   assert.match(args[1], / run 'load\/scenario\.ts'$/);
 });
+
+test('only fixed generator error reasons are kept; anything else is unlisted', async () => {
+  const { allowlistedReason } = await import('./generator.ts');
+  assert.equal(allowlistedReason('Error: Sequence gap'), 'Sequence gap');
+  assert.equal(allowlistedReason('Unexpected event: message_edited'), 'Unexpected event: message_edited');
+  assert.equal(allowlistedReason('GoError: send_message returned 0, expected 201'), 'send_message returned 0, expected 201');
+  for (const text of ['Error: request timeout https://fukulow.test/api/v1/o/7f1c/channels', 'Unexpected event: {"token":"x"}',
+    'send_message returned 500, expected 201 body={"secret":1}', 'Error: Sequence gap at 9f3e'])
+    assert.equal(allowlistedReason(text), 'unlisted');
+});
