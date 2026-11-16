@@ -420,11 +420,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fukulow-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "fukulow-server"
 version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
+ "fukulow-api",
  "fukulow-test",
  "futures-util",
  "mime_guess",

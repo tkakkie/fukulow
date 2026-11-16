@@ -42,6 +42,7 @@ jobs:
         # PR-ref caches are readable only by that PR; saving them evicts main's (10 GB repository limit).
         with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: mkdir -p web/dist
+      - run: cargo build -p fukulow-api --target wasm32-unknown-unknown --locked
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
   load:
