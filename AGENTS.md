@@ -47,7 +47,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 
 ## Commands
 - Server: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-- Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build` (invariants checked statically; cargo matching runs in CI server job)
+- Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build` (invariants checked statically; cargo matching runs in CI server-tests shard 1)
 - Migrations: `bash scripts/check-migrations.sh <base-sha>`, `node --test scripts/check-migrations.test.ts`; the schema guard runs in `cargo test` with Postgres. API types: `make api`. Module direction: `docs/workflow.md` §8.
 
 ## Workflow essentials
