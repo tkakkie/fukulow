@@ -70,3 +70,22 @@ test('TLS mismatch excludes only the mismatched pair; unchanged pairs retain evi
   assert.ok('counts' in result);
   assert.deepEqual(result.counts, { caddy: 4, nginx: 4 });
 });
+
+test('connection ladders ended by an app-side or unattributed limit are lower bounds, never a pass or fail', () => {
+  const tls = [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }, { protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }];
+  const row = (proxy: 'caddy' | 'nginx', value: number, cause?: 'app' | 'proxy' | 'unknown') =>
+    ({ proxy, value, tls, generatorCpu: 10, ...(cause ? { ceiling: { failedStep: value * 2, cause, reasons: [] } } : {}) });
+  const rows = (caddy: 'app' | 'proxy' | 'unknown', nginx: 'app' | 'proxy' | 'unknown', c = 1000, n = 1000) =>
+    [...Array(5)].flatMap(() => [row('caddy', c, caddy), row('nginx', n, nginx)]);
+  // Both proxies stopped by the same app limit: inconclusive with the passed steps recorded as lower bounds.
+  const both = judge(rows('app', 'app'), 'step', true);
+  assert.equal(both.verdict, 'inconclusive');
+  assert.equal(both.lowerBounds?.ceilings.length, 10);
+  assert.match(both.lowerBounds?.reason ?? '', /lower bounds/);
+  // One side unattributed: still not decided, in either direction.
+  assert.equal(judge(rows('proxy', 'unknown'), 'step', true).verdict, 'inconclusive');
+  assert.equal(judge(rows('app', 'proxy', 4000, 1000), 'step', true).verdict, 'inconclusive');
+  // Control: proxy-attributed ceilings keep the unchanged run-for-run rule.
+  assert.equal(judge(rows('proxy', 'proxy'), 'step', true).verdict, 'pass');
+  assert.equal(judge(rows('proxy', 'proxy', 4000, 1000), 'step', true).verdict, 'fail');
+});
