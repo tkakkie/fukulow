@@ -207,3 +207,64 @@ async fn unread_missing_position_suppresses_only_affected_channel_at_committed_b
         StatusCode::NOT_FOUND
     );
 }
+
+// #225: going public initializes Topic positions only for Members who gain access.
+// An existing Member keeps exactly their rows; a missing row already reads as initial_seq.
+#[fukulow_test::test]
+async fn public_transition_initializes_topic_positions_only_for_new_members(pool: PgPool) {
+    let org = organization(&pool).await;
+    let (granted, joining) = (Uuid::new_v4(), Uuid::new_v4());
+    member(&pool, org, granted).await;
+    member(&pool, org, joining).await;
+    let channel = Uuid::new_v4();
+    super::super::channel(&pool, org, channel, granted, true).await;
+    // Both Topics postdate the grant, so the granted Member has no lazy row for 'Late'.
+    sqlx::query(
+        "INSERT INTO topics (organization_id,channel_id,id,name,first_seq,last_seq,message_count) \
+        VALUES ($1,$2,gen_random_uuid(),'Early',1,1,1),($1,$2,gen_random_uuid(),'Late',2,2,1)",
+    )
+    .bind(org)
+    .bind(channel)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) \
+        SELECT $1,gen_random_uuid(),$2,first_seq,$3,gen_random_uuid(),'access',id FROM topics WHERE organization_id=$1 AND channel_id=$2")
+        .bind(org).bind(channel).bind(granted).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,2)",
+    )
+    .bind(org)
+    .bind(channel)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO topic_read_positions SELECT $1,$2,$3,id,1 FROM topics WHERE organization_id=$1 AND channel_id=$2 AND name='Early'")
+        .bind(org).bind(channel).bind(granted).execute(&pool).await.unwrap();
+    let rows = |member: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, i64)>("SELECT t.name,tr.read_seq FROM topic_read_positions tr JOIN topics t \
+                ON t.organization_id=tr.organization_id AND t.channel_id=tr.channel_id AND t.id=tr.topic_id \
+                WHERE tr.organization_id=$1 AND tr.channel_id=$2 AND tr.member_id=$3 ORDER BY t.name")
+                .bind(org).bind(channel).bind(member).fetch_all(&pool).await.unwrap()
+        }
+    };
+    assert_eq!(rows(granted).await, [("Early".to_string(), 1)]);
+    assert!(rows(joining).await.is_empty());
+    sqlx::query("UPDATE channels SET visibility='public' WHERE organization_id=$1 AND id=$2")
+        .bind(org)
+        .bind(channel)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_positions_match_visibility(&pool).await;
+    assert_eq!(rows(granted).await, [("Early".to_string(), 1)]);
+    assert_eq!(
+        rows(joining).await,
+        [("Early".to_string(), 2), ("Late".to_string(), 2)]
+    );
+    let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+        .bind(org).bind(channel).bind(joining).fetch_one(&pool).await.unwrap();
+    assert_eq!(initial, 2);
+}

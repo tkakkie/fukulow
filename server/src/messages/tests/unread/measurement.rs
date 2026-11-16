@@ -163,6 +163,137 @@ async fn covering_range_vacuum_reports_held_same_database_transaction(pool: PgPo
     vacuum_messages_visible(&mut connection).await.unwrap();
 }
 
+// Messages rows a plan reads (returned plus filtered, over every loop), and any
+// sequential Messages scan. A full scan from initial_seq reads every Topic.
+fn message_work(node: &Value, work: &mut f64) -> Result<(), String> {
+    if node["Relation Name"] == "messages" {
+        if node["Node Type"] == "Seq Scan" {
+            return Err(format!("sequential Messages scan: {node}"));
+        }
+        *work += (node["Actual Rows"].as_f64().unwrap_or(0.0)
+            + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+            * node["Actual Loops"].as_f64().unwrap_or(1.0);
+    }
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        message_work(child, work)?;
+    }
+    Ok(())
+}
+
+fn bounded_message_work(plan: &Value, bound: f64) -> Result<f64, String> {
+    let mut work = 0.0;
+    message_work(&plan[0]["Plan"], &mut work)?;
+    if work > bound {
+        return Err(format!("Unread count read {work} Messages, bound {bound}"));
+    }
+    Ok(work)
+}
+
+// Always-on guard for #220's ranges (#225): fully read Topics never touch Messages,
+// and the one unread Topic is read only within its own index range. Under RLS the
+// seq bound is a Filter inside that range (#356), so the bound is the Topic's size.
+#[fukulow_test::test]
+async fn unread_topic_counts_read_only_unread_topic_ranges(pool: PgPool) {
+    const TOPICS: i64 = 20;
+    const PER_TOPIC: i64 = 50;
+    let org = organization(&pool).await;
+    let sender = Uuid::new_v4();
+    member(&pool, org, sender).await;
+    let channel = Uuid::new_v4();
+    super::super::channel(&pool, org, channel, sender, false).await;
+    let viewer = Uuid::new_v4();
+    member(&pool, org, viewer).await;
+    // Topic k holds seq k, k+20, ...; Topics are interleaved across the whole history.
+    sqlx::query(
+        "INSERT INTO topics (organization_id,channel_id,id,name,first_seq,last_seq,message_count) \
+        SELECT $1,$2,gen_random_uuid(),'Topic '||k,k,k+$3*($4-1),$4 FROM generate_series(1,$3) k",
+    )
+    .bind(org)
+    .bind(channel)
+    .bind(TOPICS)
+    .bind(PER_TOPIC)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) \
+        SELECT $1,gen_random_uuid(),$2,t.first_seq+$3*n,$4,gen_random_uuid(),'plan',t.id \
+        FROM topics t CROSS JOIN generate_series(0,$5-1) n WHERE t.organization_id=$1 AND t.channel_id=$2")
+        .bind(org).bind(channel).bind(TOPICS).bind(sender).bind(PER_TOPIC).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,$3)",
+    )
+    .bind(org)
+    .bind(channel)
+    .bind(TOPICS * PER_TOPIC)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Every Topic but 'Topic 1' is fully read; 'Topic 1' is read up to half its Messages.
+    sqlx::query("INSERT INTO topic_read_positions (organization_id,channel_id,member_id,topic_id,read_seq) \
+        SELECT $1,$2,$3,id,CASE WHEN name='Topic 1' THEN first_seq+$4*($5/2-1) ELSE last_seq END \
+        FROM topics WHERE organization_id=$1 AND channel_id=$2 \
+        ON CONFLICT (organization_id,channel_id,member_id,topic_id) DO UPDATE SET read_seq=EXCLUDED.read_seq")
+        .bind(org).bind(channel).bind(viewer).bind(TOPICS).bind(PER_TOPIC).execute(&pool).await.unwrap();
+    for table in [
+        "messages",
+        "topics",
+        "topic_read_positions",
+        "channel_read_positions",
+    ] {
+        sqlx::query(&format!("ANALYZE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = crate::test_app_pool(pool.clone()).await;
+    let explain = |sql: &str| format!("EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {sql}");
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        let mut tx = app.begin().await.unwrap();
+        crate::database::set_organization(&mut tx, org)
+            .await
+            .unwrap();
+        sqlx::query(&format!("SET LOCAL plan_cache_mode={mode}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let row = sqlx::query(crate::messages::unread::LIST_COUNTS_SQL)
+            .bind(org)
+            .bind(viewer)
+            .bind(0_i64)
+            .bind([channel])
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<i64, _>("unread_count"), PER_TOPIC / 2, "{mode}");
+        let plan: Value = sqlx::query_scalar(&explain(crate::messages::unread::LIST_COUNTS_SQL))
+            .bind(org)
+            .bind(viewer)
+            .bind(0_i64)
+            .bind([channel])
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        // 19 fully read Topics hold 950 Messages: reading any of them breaks the bound.
+        bounded_message_work(&plan, PER_TOPIC as f64)
+            .unwrap_or_else(|error| panic!("{mode}: {error}\n{plan}"));
+        if mode == "force_generic_plan" {
+            // Negative control: #220's reviewed full-history query must fail the same check.
+            let before: Value = sqlx::query_scalar(&explain(BEFORE))
+                .bind(org)
+                .bind(viewer)
+                .bind(0_i64)
+                .bind([channel])
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            let error = bounded_message_work(&before, PER_TOPIC as f64).unwrap_err();
+            assert!(error.contains("Messages"), "{error}");
+        }
+        tx.rollback().await.unwrap();
+    }
+    app.close().await;
+}
+
 #[fukulow_test::test]
 #[ignore = "manual before/after release query measurement; run without other builds/tests"]
 async fn measure_unread_list_read_position_ranges(pool: PgPool) {
