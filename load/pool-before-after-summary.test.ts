@@ -69,3 +69,17 @@ test('an incomplete, interrupted or uncleaned run never yields a verdict',()=>{
   assert.equal(judgeAll(all,true).find(j=>j.scenario==='send'&&j.rate===250)!.status,'PASS');
   assert.ok(judgeAll(all,false).every(j=>j.status==='NOT EVALUATED'));
 });
+const mixedRuns=()=>runs().map(r=>({...r,scenario:'mixed' as const,steps:[{...row(),reads:lane(500),signin:lane(20)}]}));
+test('mixed reads and sign-ins are judged like sends; their loss never passes',()=>{
+  assert.equal(judge(mixedRuns(),'mixed',250).status,'PASS');
+  for(const name of ['reads','signin'] as const) {
+    const zero=mixedRuns();const a=zero.find(c=>c.arm==='A')!.steps[0][name]!;a.rejected503=a.accepted;a.accepted=0;a.p95=a.p99=null;
+    assert.deepEqual(validity(zero.find(c=>c.arm==='A')!.steps[0]),[]);assert.equal(judge(zero,'mixed',250).status,'FAIL');
+    const drop=mixedRuns();const d=drop.find(c=>c.arm==='A')!.steps[0][name]!;d.otherErrors=Math.ceil(d.attempted*.011);d.accepted-=d.otherErrors;
+    assert.equal(judge(drop,'mixed',250).status,'FAIL');
+    const slow=mixedRuns();slow.find(c=>c.arm==='A')!.steps[0][name]!.p99=22.01;assert.equal(judge(slow,'mixed',250).status,'FAIL');
+    const sat=mixedRuns();for(const b of sat.filter(c=>c.arm==='B')){const l=b.steps[0][name]!;l.otherErrors=Math.ceil(l.attempted*.02);l.accepted-=l.otherErrors;}
+    assert.equal(judge(sat,'mixed',250).status,'REPORT ONLY');
+    sat[0].steps=[{...row(),reads:lane(500),signin:lane(20)}];assert.equal(judge(sat,'mixed',250).status,'NOT EVALUATED');
+  }
+});

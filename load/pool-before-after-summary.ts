@@ -51,14 +51,19 @@ export function judge(runs:Run[], scenario:Scenario, rate:number) {
       [b,a].some(r=>r.reader.rate!==2||r.reader.seconds!==60 || (scenario==='mixed' ? r.reads?.rate!==500||r.signin?.rate!==20||r.reads.seconds!==60||r.signin.seconds!==60 : !!r.reads||!!r.signin))) return {pair:index+1,status:'NOT EVALUATED',reason:'settings mismatch'};
     const invalid=[...validity(b),...validity(a)];
     if(invalid.length) return {pair:index+1,status:'NOT EVALUATED',reason:invalid.join('; ')};
-    const br=b.send.accepted/b.send.attempted, ar=a.send.accepted/a.send.attempted;
-    if(br<.99) return {pair:index+1,status:'REPORT ONLY',reason:'above B saturation'};
+    // Mixed contention lanes are judged like sends: losing them would remove the DB pressure the scenario exists for.
+    const judged=(['send',...(scenario==='mixed'?['reads','signin'] as const:[])] as const).map(name=>({name,b:b[name]!,a:a[name]!}));
+    const rate_=(l:Lane)=>l.accepted/l.attempted;
+    const br=rate_(b.send), ar=rate_(a.send);
+    const saturated=judged.filter(l=>rate_(l.b)<.99).map(l=>l.name);
+    if(saturated.length) return {pair:index+1,status:'REPORT ONLY',reason:`above B saturation (${saturated.join(', ')})`};
     // Success-rate and other-Organization failures need no latency: a candidate with no successes fails, it is not unmeasured.
-    if(!(ar>=.99 && ar+1e-12>=br-.01) || !(b.reader.accepted===b.reader.attempted && a.reader.accepted===a.reader.attempted && readers.every(r=>r.accepted===r.attempted)))
-      return {pair:index+1,status:'FAIL',baselineSuccessRate:br,candidateSuccessRate:ar};
-    if(b.send.p95===null||b.send.p99===null||a.send.p95===null||a.send.p99===null) return {pair:index+1,status:'NOT EVALUATED',reason:'missing latency'};
-    const pass=a.send.p95<=1.10*b.send.p95 && a.send.p99<=1.10*b.send.p99;
-    return {pair:index+1,status:pass?'PASS':'FAIL',baselineSuccessRate:br,candidateSuccessRate:ar};
+    const rateFails=judged.filter(l=>!(rate_(l.a)>=.99 && rate_(l.a)+1e-12>=rate_(l.b)-.01)).map(l=>l.name);
+    if(rateFails.length || !(b.reader.accepted===b.reader.attempted && a.reader.accepted===a.reader.attempted && readers.every(r=>r.accepted===r.attempted)))
+      return {pair:index+1,status:'FAIL',reason:rateFails.length?`success rate (${rateFails.join(', ')})`:'other Organization',baselineSuccessRate:br,candidateSuccessRate:ar};
+    if(judged.some(l=>l.b.p95===null||l.b.p99===null||l.a.p95===null||l.a.p99===null)) return {pair:index+1,status:'NOT EVALUATED',reason:'missing latency'};
+    const slower=judged.filter(l=>!(l.a.p95!<=1.10*l.b.p95! && l.a.p99!<=1.10*l.b.p99!)).map(l=>l.name);
+    return {pair:index+1,status:slower.length?'FAIL':'PASS',...(slower.length?{reason:`latency (${slower.join(', ')})`}:{}),baselineSuccessRate:br,candidateSuccessRate:ar};
   });
   // An invalid or saturated pair never substitutes for one of the three required comparisons.
   const status=cells.some(c=>c.status==='NOT EVALUATED')?'NOT EVALUATED':cells.every(c=>c.status==='REPORT ONLY')?'REPORT ONLY':
