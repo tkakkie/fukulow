@@ -8,21 +8,41 @@ use sqlx::PgPool;
 use std::{panic::AssertUnwindSafe, time::Duration};
 use test_support::TestPools;
 
-async fn assert_app_backends_closed(admin: &PgPool, apps: &[PgPool], timeout_ms: i64) {
+async fn assert_app_backends_closed(
+    admin: &PgPool,
+    apps: &[PgPool],
+    expected_pids: &[i32],
+    timeout_ms: i64,
+) {
     // Check the harness before signalling anything: an open pool must fail, not
     // have its connections cleaned up by pg_terminate_backend.
     for app in apps {
         assert!(app.is_closed(), "harness left an app pool open");
         assert_eq!(app.size(), 0);
     }
+    let unexpected: Vec<i32> = sqlx::query_scalar(
+        "SELECT pid FROM pg_stat_activity
+         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'
+         AND NOT (pid = ANY($1))",
+    )
+    .bind(expected_pids)
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    assert!(
+        unexpected.is_empty(),
+        "harness left unexpected app backend PIDs: {unexpected:?}"
+    );
     // SQLx sends Terminate and closes its socket without a server acknowledgement.
     // A positive timeout waits for actual backend exit, including exit callbacks.
-    // Restrict signals to this test database's app role; admin pools stay separate.
+    // Restrict signals to the expected app backends in this test database.
     let waits: Vec<(i32, bool)> = sqlx::query_as(
         "SELECT pid, pg_terminate_backend(pid, $1) FROM pg_stat_activity
-         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
+         WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'
+         AND pid = ANY($2)",
     )
     .bind(timeout_ms)
+    .bind(expected_pids)
     .fetch_all(admin)
     .await
     .unwrap();
@@ -88,6 +108,7 @@ async fn backend_exit_can_outlive_pool_close(pool: PgPool) {
     let failure = AssertUnwindSafe(assert_app_backends_closed(
         &pool,
         std::slice::from_ref(&app),
+        &[pid],
         20,
     ))
     .catch_unwind()
@@ -97,16 +118,21 @@ async fn backend_exit_can_outlive_pool_close(pool: PgPool) {
     assert!(message.contains("remaining PIDs"));
     assert!(message.contains(&pid.to_string()));
     barrier.rollback().await.unwrap();
-    assert_app_backends_closed(&pool, &[app], 5_000).await;
+    assert_app_backends_closed(&pool, &[app], &[pid], 5_000).await;
 }
 
 #[fukulow_test::test]
 async fn backend_exit_assertion_rejects_an_open_app_pool(pool: PgPool) {
     let app = TestPools::new(pool.clone()).await.app;
     let mut connection = app.acquire().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
     let failure = AssertUnwindSafe(assert_app_backends_closed(
         &pool,
         std::slice::from_ref(&app),
+        &[pid],
         5_000,
     ))
     .catch_unwind()
@@ -121,6 +147,24 @@ async fn backend_exit_assertion_rejects_an_open_app_pool(pool: PgPool) {
         .execute(&mut *connection)
         .await
         .unwrap();
+
+    let closed_app = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy_with(app.connect_options().as_ref().clone());
+    closed_app.close().await;
+    for apps in [&[][..], std::slice::from_ref(&closed_app)] {
+        let failure = AssertUnwindSafe(assert_app_backends_closed(&pool, apps, &[], 5_000))
+            .catch_unwind()
+            .await
+            .unwrap_err();
+        let message = failure.downcast_ref::<String>().unwrap();
+        assert!(message.contains("unexpected app backend PIDs"));
+        assert!(message.contains(&pid.to_string()));
+        let value: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(value, 1);
+    }
 }
 
 #[fukulow_test::test]
@@ -169,15 +213,22 @@ async fn harness_closes_all_app_pools_with_retained_handles(pool: PgPool) {
         .connect_with(pool.connect_options().as_ref().clone())
         .await
         .unwrap();
-    let apps = test_support::run(async {
+    let (apps, expected_pids) = test_support::run(async {
         let first = TestPools::new(pool.clone()).await;
         let second = TestPools::new(other_admin.clone()).await;
+        let expected_pids: Vec<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity
+             WHERE datname = current_database() AND usename = 'fukulow_sqlx_test_app'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         // Retained handles model application state/background tasks outliving the body.
-        (first.app, second.app)
+        ((first.app, second.app), expected_pids)
     })
     .await;
     other_admin.close().await;
-    assert_app_backends_closed(&pool, &[apps.0, apps.1], 5_000).await;
+    assert_app_backends_closed(&pool, &[apps.0, apps.1], &expected_pids, 5_000).await;
 }
 
 #[fukulow_test::test]
