@@ -153,8 +153,8 @@ async function seed(s: HostState) {
     checks.push({organization:o,memberList:200,guestList:200,guestOpen:403,guestSend:201,lapsedPeerSend:409,actualRenewal:200,afterRenewalSend:201,renewalPool:fixture.renewals.length});
   }
   save(`${root}/fixture-checks.json`,checks);
-  save(`${root}/fixture-histograms.json`,await sql(s,histogramsSql));
   await sql(s,'VACUUM(ANALYZE);');
+  save(`${root}/fixture-histograms.json`,await sql(s,histogramsSql));
   const seeded=await sql(s,countsSql), actual=JSON.parse(seeded), orgs=s.mode==='smoke'?1:10;
   const {historical,supplemental}=fixturePairs(s.scenario),pairCount=historical.length+supplemental.length;
   const expected={organizations:orgs+1,members:orgs*1000+10000,dms:orgs*pairCount+14999,grants:orgs*pairCount*2+29998,messages:orgs*(s.mode==='smoke'||s.pilot?50000:5000000)+3*orgs+2};
