@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appEvidence } from './app-evidence.ts';
+import { appEvidence, proxyEvidence } from './app-evidence.ts';
 
 const t0 = Date.parse('2026-11-17T00:00:00Z');
 const at = (ms: number) => new Date(t0 + ms).toISOString().replace('Z', '123Z');
@@ -50,4 +50,43 @@ test('missing, rotated, restarted or late pool samples make the evidence incompl
   // The panic hook writes no timestamp: counted, never silently dropped.
   const panic = appEvidence([...pools(6), '{"level":"ERROR","target":"fukulow","fields":{"event":"panic"}}'].join('\n'), ...window);
   assert.equal(panic.panics, 1);
+});
+
+test('out-of-order lines, pre-window sockets, teardown and other app warnings', () => {
+  const log = [
+    ...pools(8),
+    line(200, { event: 'websocket_opened' }), line(300, { event: 'websocket_opened' }), line(400, { event: 'websocket_opened' }),
+    line(1500, { event: 'websocket_disconnected' }),
+    // Threads format timestamps before the stderr lock: 2999 is written after 3000.
+    line(3000, { event: 'websocket_closed', code: '1011' }), line(2999, { event: 'websocket_closed', code: '1011' }),
+    line(3001, { event: 'websocket_closed', code: '1011' }),
+    line(2100, { event: 'websocket_opened' }), line(2000, { event: 'websocket_opened' }),
+    { ...JSON.parse(line(2500, { event: 'work_deadline_expired' })), level: 'WARN' },
+  ].map(row => typeof row === 'string' ? row : JSON.stringify(row)).join('\n');
+  const evidence = appEvidence(log, t0 + 1000, t0 + 6000);
+  assert.deepEqual(evidence.reasons, []);
+  assert.deepEqual(evidence.closes['1011'], { count: 3, firstMs: 1999, lastMs: 2001, perSecond: [[1, 1], [2, 2]] });
+  // Three sockets were open before the window; one closed inside it, two more opened.
+  assert.equal(evidence.sockets.peakConcurrent, 4);
+  assert.equal(evidence.sockets.peakOpenedPerSecond, 2);
+  assert.deepEqual(evidence.otherWarnings, { work_deadline_expired: 1 });
+  // Two samples in the same millisecond keep their sequence order and are not a restart.
+  const same = [pool(1), pool(2), line(1500, { ...JSON.parse(pool(3)).fields }), ...pools(6).slice(3)];
+  assert.equal(appEvidence(same.join('\n'), t0 + 1000, t0 + 4000).reasons.includes('pool_stats sequence gap or restart'), false);
+  // A restart reports every missing edge and keeps no cross-process deltas.
+  const restarted = appEvidence([...pools(3), pool(1)].join('\n'), t0 + 1000, t0 + 9000);
+  assert.equal(restarted.pool, null);
+  assert.match(restarted.reasons.join(), /sequence gap or restart/);
+  assert.match(restarted.reasons.join(), /after the window/);
+});
+
+test('proxy evidence keeps only level counts in the window', () => {
+  const nginx = ['2026/11/17 00:00:00 [warn] 1#1: startup', '2026/11/17 00:00:02 [error] 7#7: *1 upstream timed out, request: "GET /api/v1/x"',
+    '2026/11/17 00:00:03 [alert] 7#7: 1024 worker_connections are not enough', 'entrypoint text', '2026/11/17 00:00:09 [error] late'].join('\n');
+  const n = proxyEvidence(nginx, 'nginx', t0 + 1000, t0 + 5000);
+  assert.deepEqual(n, { complete: true, reasons: [], levels: { error: 1, alert: 1 }, errorLines: 2 });
+  assert.doesNotMatch(JSON.stringify(n), /api|upstream/);
+  const caddy = [JSON.stringify({ level: 'info', ts: (t0 + 2000) / 1000, msg: 'x' }), JSON.stringify({ level: 'error', ts: (t0 + 3000) / 1000, msg: '/api/v1/y' })].join('\n');
+  assert.deepEqual(proxyEvidence(caddy, 'caddy', t0 + 1000, t0 + 5000).errorLines, 1);
+  assert.equal(proxyEvidence('', 'caddy', t0, t0 + 1, 'docker logs exited 1').complete, false);
 });

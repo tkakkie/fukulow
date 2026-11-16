@@ -93,7 +93,9 @@ test('connection ceilings are attributed to the app, the proxy or unknown from a
   const app1011 = (count: number) => ({ ...clean, closes: { ...clean.closes, '1011': { count, firstMs: 0, lastMs: 0, perSecond: [] } } });
   const client = (count: number): RunResult['summary'] => ({ metrics: { 'socket_closes{code:1011}': { values: { count } } } });
   const failures = { ...clean.databaseFailures, pool_timeout: 4 };
-  const cause = (summary: RunResult['summary'], appEvidence?: RunResult['appEvidence']) => ceilingCause({ exitCode: 1, summary, appEvidence }, 2000);
+  const proxyLog = (errorLines: number, complete = true) => ({ complete, reasons: [], levels: { error: errorLines }, errorLines });
+  const cause = (summary: RunResult['summary'], appEvidence?: RunResult['appEvidence'], proxyEvidence: RunResult['proxyEvidence'] = proxyLog(0)) =>
+    ceilingCause({ exitCode: 1, summary, appEvidence, proxyEvidence }, 2000);
   // Every client 1011 was sent by the app, with the database cause.
   assert.deepEqual(cause(client(499), { ...app1011(499), databaseFailures: failures }),
     { cause: 'app', reasons: ['app sent 499 closes with 1011', 'database_failure pool_timeout: 4'] });
@@ -108,11 +110,16 @@ test('connection ceilings are attributed to the app, the proxy or unknown from a
   assert.equal(cause(client(0)).cause, 'unknown');
   assert.equal(cause(client(0), { ...clean, complete: false, reasons: ['missing pool_stats'] }).cause, 'unknown');
   assert.equal(cause({ metrics: {} }, clean).cause, 'unknown');
-  // The proxy is named only with positive evidence: requested sockets that never reached a failure-free app.
-  assert.deepEqual(cause(client(0), { ...clean, sockets: { ...clean.sockets, opened: 1500 } }),
-    { cause: 'proxy', reasons: ['app opened 1500 of 2000 requested sockets, with no app-side failure'] });
-  // No app events at all is not proxy evidence: an app limit can leave none.
-  assert.equal(cause(client(0), { ...clean, sockets: { ...clean.sockets, opened: 2000 } }).cause, 'unknown');
+  // The proxy is named only with positive evidence: its own error-level log lines while the app logged no failure.
+  assert.deepEqual(cause(client(0), clean, proxyLog(3)),
+    { cause: 'proxy', reasons: ['proxy logged 3 error-level lines with no app-side failure', 'app opened 0 of 2000 requested sockets'] });
+  // No failure logged on either side is not proxy evidence: an app limit can leave none.
+  assert.equal(cause(client(0), clean, proxyLog(0)).cause, 'unknown');
+  assert.equal(cause(client(0), clean, proxyLog(3, false)).cause, 'unknown');
+  assert.equal(cause(client(0), clean, undefined).cause, 'unknown');
+  // Proxy errors never override app-side failures, including server-sent 1001 and other app warnings.
+  assert.equal(cause(client(0), { ...clean, closes: { ...clean.closes, '1001': { count: 2, firstMs: 0, lastMs: 0, perSecond: [] } } }, proxyLog(3)).cause, 'unknown');
+  assert.equal(cause(client(0), { ...clean, otherWarnings: { work_deadline_expired: 1 } }, proxyLog(3)).cause, 'unknown');
   // A panic (no timestamp, counted over the whole log) is an app-side signal, never a proxy limit.
   assert.equal(cause(client(0), { ...clean, panics: 1 }).cause, 'unknown');
 

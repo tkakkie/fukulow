@@ -10,7 +10,7 @@ import type { Proxy } from './proxy-judgment.ts';
 import { sampledCpuPeaks, type ResourceSample } from './throughput-summary.ts';
 import { requireSuccessfulRun } from './summary.ts';
 import { loadRecipe } from './generator.ts';
-import { appEvidence, type AppEvidence } from './app-evidence.ts';
+import { appEvidence, proxyEvidence, type AppEvidence, type ProxyEvidence } from './app-evidence.ts';
 const execAsync = promisify(execFile);
 const proxy = process.env.LOAD_PROXY as Proxy | undefined;
 if (proxy && !['caddy', 'nginx'].includes(proxy)) throw new Error('LOAD_PROXY must be caddy or nginx');
@@ -82,9 +82,10 @@ let rate: { startedAt?: number; offered: number; [key: string]: unknown } | unde
 let measurementError: unknown;
 let exitCode = 1;
 let generatorExitCode: number | undefined;
-let generatorWindow: { startedAt: number; endedAt?: number } | undefined;
+let generatorWindow: { startedAt: number; clientClosingAt?: number; endedAt?: number } | undefined;
 let appContainer: string | undefined;
 let appSide: AppEvidence | undefined;
+let proxySide: ProxyEvidence | undefined;
 let primaryError: unknown;
 let child: ChildProcess | undefined;
 const cleanupErrors: unknown[] = [];
@@ -206,7 +207,11 @@ try {
         if (typeof message === 'string' && message.startsWith('LOAD_RECONNECT_STORM ')) storm = JSON.parse(message.slice(21));
         if (typeof message === 'string' && message.startsWith('LOAD_TLS ')) clientTls.add(message.slice(9));
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
-        if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) progress = JSON.parse(message.slice(14));
+        if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) {
+          // scenario.ts prints this just before closing its sockets and revoking Sessions (4001 closes): the evidence window ends here.
+          generatorWindow!.clientClosingAt ??= Date.now();
+          progress = JSON.parse(message.slice(14));
+        }
         if (typeof message === 'string' && message.startsWith('LOAD_SETUP_COMPLETE ')) setupComplete = JSON.parse(message.slice(20));
         if (line.startsWith('LOAD_THROUGHPUT ')) {
           throughput = JSON.parse(line.slice(16));
@@ -262,7 +267,7 @@ try {
   attempt(() => writeFileSync(`${output}/k6.log`, log));
   // Proxy runs never retain app logs (public artifacts); keep only allowlisted aggregates, also after a failure.
   if (proxy && appContainer && generatorWindow) {
-    const window = { startedAt: generatorWindow.startedAt, endedAt: generatorWindow.endedAt ?? Date.now() };
+    const window = { startedAt: generatorWindow.startedAt, endedAt: generatorWindow.clientClosingAt ?? generatorWindow.endedAt ?? Date.now() };
     try {
       // pool_stats is written every second: wait for the sample that closes the window, at most 5 s.
       for (let attempt = 0; ; attempt++) {
@@ -271,6 +276,11 @@ try {
         appSide = appEvidence(`${read.stdout ?? ''}\n${read.stderr ?? ''}`, window.startedAt, window.endedAt, failed);
         if (attempt >= 5 || !appSide.reasons.includes('no pool_stats sample within 2 s after the window')) break;
         await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      if (resourceNames.proxy) {
+        const read = spawnSync('docker', ['logs', resourceNames.proxy], { env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+        const failed = read.error ? `proxy log read failed: ${read.error.message}` : read.status !== 0 ? `docker logs exited ${read.status}` : undefined;
+        proxySide = proxyEvidence(`${read.stdout ?? ''}\n${read.stderr ?? ''}`, proxy, window.startedAt, window.endedAt, failed);
       }
     } catch (error) { cleanupErrors.push(error); }
   }
@@ -294,7 +304,7 @@ try {
         ...(firstPaint ? { generator: hostGeneratorSamples.length ? Math.max(...hostGeneratorSamples.map(s => s.cpuPercent)) : null } : {}) },
       generatorCpuSource: firstPaint ? 'host ps lifetime %CPU summed over runner and browser descendants' : 'docker stats; instantaneous sampled CPU',
       cpuSamplingScope: 'whole generator run including provisioning, boundaries, idle/drain and teardown; 100% is one core',
-      progress, setupComplete, appEvidence: appSide, generatorWindow, measurementError }, null, 2));
+      progress, setupComplete, appEvidence: appSide, proxyEvidence: proxySide, generatorWindow, measurementError }, null, 2));
   });
   if (!proxy) attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));
   if (!proxy) attempt(() => writeFileSync(`${output}/database.log`, docker(...compose, 'logs', '--no-color', 'db')));

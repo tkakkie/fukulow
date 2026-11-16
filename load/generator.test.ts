@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadRecipe } from './generator.ts';
 
@@ -31,7 +32,7 @@ test('a recipe with more than one command is rejected', t => {
 
 test('the repository load recipe expands to one docker run command', () => {
   const { file, args } = loadRecipe({ ...process.env, LOAD_CONTAINER_NAME: 'fukulow-load-x-generator', LOAD_DOCKER_NETWORK: 'bridge',
-    LOAD_NOFILE: '65536', BASE_URL: 'http://app:8080', LOAD_SCRIPT: 'load/scenario.ts' }, '..');
+    LOAD_NOFILE: '65536', BASE_URL: 'http://app:8080', LOAD_SCRIPT: 'load/scenario.ts' }, resolve(import.meta.dirname, '..'));
   assert.equal(file, '/bin/sh');
   assert.match(args[1], /^docker run --rm --name 'fukulow-load-x-generator'/);
   assert.match(args[1], / run 'load\/scenario\.ts'$/);

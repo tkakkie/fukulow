@@ -1,5 +1,5 @@
 import type { Ceiling, Observation, Proxy, Tls } from './proxy-judgment.ts';
-import type { AppEvidence } from './app-evidence.ts';
+import type { AppEvidence, ProxyEvidence } from './app-evidence.ts';
 
 export type RunResult = {
   exitCode: number; generatorExitCode?: number; tls?: Tls[]; measurementError?: string;
@@ -7,6 +7,7 @@ export type RunResult = {
   setupComplete?: { sessions: number; accounts: number };
   /** load/app-evidence.ts aggregates for the generator window (proxy runs only). */
   appEvidence?: AppEvidence;
+  proxyEvidence?: ProxyEvidence;
   cpuPeakPercent?: Record<string, number | null>;
   summary?: { metrics?: Record<string, { values: Record<string, number> }>; summaries?: {
     pathLabel: string; network: string; cache: string; timelineVisibleMs: { p50: number; p95: number }
@@ -71,7 +72,8 @@ export function ceilingCause(result: RunResult, requestedSockets: number): Pick<
   if (!Number.isSafeInteger(client1011)) return { cause: 'unknown', reasons: ['missing client close code counts'] };
   const app1011 = evidence.closes['1011'].count;
   const signals = [
-    ...Object.entries(evidence.closes).filter(([code, close]) => code !== 'peer_or_transport' && code !== '1001' && close.count)
+    // peer_or_transport is the client's own close; every other bucket, 1001 included, is a server-sent close.
+    ...Object.entries(evidence.closes).filter(([code, close]) => code !== 'peer_or_transport' && close.count)
       .map(([code, close]) => `app sent ${close.count} closes with ${code}`),
     ...Object.entries(evidence.databaseFailures).filter(([, n]) => n).map(([kind, n]) => `database_failure ${kind}: ${n}`),
     ...(['acquire_timeout', 'acquire_closed', 'acquire_io', 'acquire_database', 'acquire_other'] as const)
@@ -79,17 +81,19 @@ export function ceilingCause(result: RunResult, requestedSockets: number): Pick<
     ...(evidence.pool?.acquireWaitsOver1s ? [`pool acquire waits over 1 s: ${evidence.pool.acquireWaitsOver1s}`] : []),
     ...(evidence.http5xx ? [`app HTTP 5xx: ${evidence.http5xx}`] : []),
     ...(evidence.panics ? [`app panics: ${evidence.panics}`] : []),
+    ...Object.entries(evidence.otherWarnings).map(([event, n]) => `app ${event}: ${n}`),
   ];
   if (client1011! > app1011) return { cause: 'unknown', reasons: [`client saw ${client1011} closes with 1011, app sent ${app1011}`, ...signals] };
   if (client1011! > 0) return { cause: 'app', reasons: [...signals, ...(signals.some(signal => /database_failure|pool /.test(signal)) ? []
     : ['no database_failure or pool failure in the window: the app-side cause is not identified'])] };
   if (signals.length) return { cause: 'unknown', reasons: ['app-side failures present, but no client 1011 ties them to the failure', ...signals] };
   // Absence of app events alone is not proxy evidence (an app limit can leave none): the proxy is named only
-  // when some requested sockets never reached the app while the app logged no failure or rejection.
-  const opened = evidence.sockets.opened;
-  if (opened < requestedSockets) return { cause: 'proxy',
-    reasons: [`app opened ${opened} of ${requestedSockets} requested sockets, with no app-side failure`] };
-  return { cause: 'unknown', reasons: [`the app opened all ${requestedSockets} requested sockets and logged no failure; no proxy-side evidence`] };
+  // when the proxy itself logged errors in the window while the app logged no failure or rejection.
+  const opened = `app opened ${evidence.sockets.opened} of ${requestedSockets} requested sockets`;
+  const proxy = result.proxyEvidence;
+  if (!proxy?.complete) return { cause: 'unknown', reasons: ['no app-side failure, but proxy evidence is missing or incomplete', opened] };
+  if (proxy.errorLines > 0) return { cause: 'proxy', reasons: [`proxy logged ${proxy.errorLines} error-level lines with no app-side failure`, opened] };
+  return { cause: 'unknown', reasons: ['neither the app nor the proxy logged a failure', opened] };
 }
 
 // Highest passing step. Exit 99 (k6 thresholds, e.g. missing_deliveries) is capacity; anything else is a harness error.
