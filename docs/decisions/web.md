@@ -3,7 +3,7 @@
 Web client. Writing rules and the other parts: [index](../decisions.md).
 
 ## Web client
-- #465: wasm is the default; SYNC_CORE=ts builds the one-sprint rollback (#467 removes it). Vite rejects mixed bundles. Initialize before mount; failure shows an error. One dispatch keeps notifications before ordered effects. #466 on this head and maintainer review gate merge.
+- #465: wasm is the default; SYNC_CORE=ts builds the one-sprint rollback (#467 removes it). Vite rejects mixed bundles. Shell mounts during core load; sync starts after it (#466); failure shows an error. One dispatch notifies before ordered effects. #466 on this head and maintainer review gate merge.
 - #465: JSON deltas retain unchanged JS Channel/array identities, reuse retained Message indices and intern body text once per step. Bounded request/timer reads leave State in Rust. A matched format probe favored JSON (PR evidence); #466 acceptance remains separate.
 - #465: manifest-listed wasm and glue chunks receive immutable caching; wasm MIME is application/wasm. CSP adds only wasm-unsafe-eval, allowing compilation without general unsafe-eval. Both proxy browser suites verify it.
 - #308 bounds Topic/Reply/cursor evidence at 400 ranges and Unread at 1,100 records/presented seqs, 400 Topic scopes and one visit marker. Checkpoints refetch existing baselines; insufficient counts stay unresolved and forgotten gaps refill, avoiding per-arrival memory growth.

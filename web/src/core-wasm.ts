@@ -4,8 +4,10 @@ import { identityOrder, rememberIdentityResponse } from './identity-order'
 import type { Message } from './api'
 import type { ChannelState, CoreResult, Input, Pending, State, SyncCore, SyncView } from './protocol-types'
 
-export async function initCore(): Promise<void> {
-  await init()
+let ready: Promise<void> | undefined
+/** Starts loading once; every caller shares the same outcome, so a failed load is never retried behind the error. */
+export function initCore(): Promise<void> {
+  return ready ??= init().then(() => undefined)
 }
 
 type Delta = Omit<CoreResult, 'changedChannels' | 'records'> & {

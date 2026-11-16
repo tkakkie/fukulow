@@ -2,14 +2,51 @@ import { expect, test } from '@playwright/test'
 import type { components } from '../src/api-schema.d.ts'
 import { createChannel, secretSafe, signInOwner } from './helpers.ts'
 
-test('wasm init failure shows an error before any controller starts', async ({ page }) => {
-  const apiRequests: string[] = []
-  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/api/')) apiRequests.push(request.method()) })
+// #466: the shell and the Organization check (C10) no longer wait for the core; sync never starts without it.
+const syncPath = (path: string) => ['/channels', '/timeline', '/messages', '/unread', '/dms'].some(part => path.includes(part))
+test('wasm init failure shows an error and never starts sync', async ({ page }) => {
+  const org = await signInOwner(page.request)
+  const sync: string[] = [], sockets: string[] = []
+  page.on('request', request => { const path = new URL(request.url()).pathname; if (syncPath(path)) sync.push(path) })
+  page.on('websocket', socket => sockets.push(socket.url()))
   await page.route('**/*.wasm', route => route.abort())
-  await page.goto('/')
+  await page.goto(`/o/${org}`)
   await expect(page.getByRole('alert')).toHaveText('アプリを起動できませんでした。ページを再読み込みしてください。')
-  expect(apiRequests).toEqual([])
+  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 500)))
+  expect(sync).toEqual([])
+  expect(sockets).toEqual([])
   await expect(page.getByRole('textbox')).toHaveCount(0)
+})
+
+test('a slow core delays only sync: the Organization check runs first and sync starts once after it loads', async ({ page }) => {
+  const org = await signInOwner(page.request)
+  const channel = await createChannel(page.request, org, `slow-core-${crypto.randomUUID().slice(0, 8)}`)
+  const sent = await secretSafe(() => page.request.post(`/api/v1/orgs/${org}/channels/${channel.id}/messages`, {
+    data: { client_message_id: crypto.randomUUID(), body: channel.name },
+  }))
+  expect(sent.status()).toBe(201)
+  const sync: string[] = [], sockets: string[] = []
+  let checked = false
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname
+    if (path === `/api/v1/orgs/${org}/me`) checked = true
+    if (syncPath(path)) sync.push(path)
+  })
+  page.on('websocket', socket => sockets.push(socket.url()))
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/*.wasm', async route => { await held; await route.continue() })
+  try {
+    await page.goto(`/o/${org}/c/${channel.id}`)
+    await expect.poll(() => checked).toBe(true)
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 500)))
+    expect(sync).toEqual([])
+    expect(sockets).toEqual([])
+    release()
+    await expect(page.getByRole('article').filter({ hasText: channel.name })).toBeVisible()
+    await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    expect(sockets).toHaveLength(1)
+  } finally { release() }
 })
 
 for (const status of [200, 403]) test(`wasm fences an old history generation after re-selection (${status})`, async ({ page }) => {
