@@ -31,10 +31,11 @@ jobs:
       - run: rustup toolchain install --profile minimal
       - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - run: npm --prefix web ci
+      # Before any wasm build: the TS rollback must not need the wasm toolchain or web/wasm.
+      - run: SYNC_CORE=ts npm --prefix web run build -- --outDir ../target/web-ts --emptyOutDir
       - run: npm --prefix web run check
       - run: npm --prefix web test
       - run: SYNC_CORE=ts npm --prefix web test
-      - run: SYNC_CORE=ts npm --prefix web run build -- --outDir ../target/web-ts --emptyOutDir
       - run: npm --prefix web run build
   # Linting needs no DB or real SPA: an empty web/dist satisfies rust-embed for clippy, so lint runs alongside `web`.
   lint:
