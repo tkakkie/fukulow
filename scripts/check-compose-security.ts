@@ -2,10 +2,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomInt, randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { acmeFixture, certificate, challengeResponses, checkCertificateLifecycle, nodeImage, poll, testDomain } from './compose-acme.ts'
+import { acmeFixture, certificate, challengeResponses, checkCertificateLifecycle, checkVerifiedTls, nodeImage, pebbleIssuingRoot, poll, testDomain } from './compose-acme.ts'
 import { fileURLToPath } from 'node:url'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -55,6 +55,11 @@ async function check(profile: string) {
     const resolveHost = ['--noproxy', '*', '--connect-to', `${testDomain}::127.0.0.1:`]
     const curl = (args: string[]) => execFileSync('curl', [...resolveHost, ...args], { encoding: 'utf8', timeout: 15_000 }).trim()
     await poll('TLS issuance', () => certificate(tlsPort()), value => !!value)
+    // Normal path with verification on: Pebble's issuing root is trusted and the
+    // served chain and hostname are checked for ${testDomain}.
+    const issuingRoot = pebbleIssuingRoot(proxy)
+    const untrustedCa = readFileSync(join(directory, 'pebble-ca.pem'), 'utf8')
+    console.log(`PASS ${profile}: verified TLS chain and hostname, serial ${await checkVerifiedTls(tlsPort(), issuingRoot, untrustedCa)}`)
     const request = (path: string, data?: unknown, forwarded?: string, baseUrl = url, token?: string) => {
       const args = ['--insecure', '--silent', '--show-error', '--max-time', '10', '-w', '\n%{http_code}']
       if (data !== undefined) args.push('-H', 'Content-Type: application/json', '--data', JSON.stringify(data))
@@ -141,6 +146,8 @@ async function check(profile: string) {
     }
     if (process.env.CHECK_COMPOSE_ACCEPTANCE === '1' || process.env.CHECK_COMPOSE_RENEWAL === '1') {
       await checkCertificateLifecycle(profile, proxy, tlsPort, checkHttp, run)
+      // The renewed certificate must verify the same way.
+      console.log(`PASS ${profile}: verified renewed TLS chain and hostname, serial ${await checkVerifiedTls(tlsPort(), issuingRoot, untrustedCa)}`)
       checkState()
       url = `https://${testDomain}:${tlsPort()}`
       assert.equal(curl(['-sk', url + '/api/v1/health']), 'ok')

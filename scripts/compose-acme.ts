@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { connect } from 'node:tls'
+import { checkServerIdentity, connect } from 'node:tls'
 import { fileURLToPath } from 'node:url'
 import { setTimeout } from 'node:timers/promises'
 
@@ -131,6 +131,49 @@ export async function certificate(port: number): Promise<{ serial: string, start
       resolve(peer.serialNumber ? { serial: peer.serialNumber, starts: Date.parse(peer.valid_from), expires: Date.parse(peer.valid_to) } : undefined)
     })
   })
+}
+
+// Pebble generates its issuing root at startup; the management API serves it
+// (public certificate only). Fetch it inside the Compose network, verifying
+// Pebble's own listener with its published test CA.
+export function pebbleIssuingRoot(exec: (...args: string[]) => string): string {
+  const script = "const fs=require('node:fs');require('node:https').get('https://pebble:15000/roots/0'," +
+    "{ca:fs.readFileSync('/etc/pebble-ca.pem'),timeout:5000},r=>{let d='';r.on('data',c=>d+=c);" +
+    "r.on('end',()=>{if(r.statusCode!==200)process.exit(1);process.stdout.write(d)})}).on('error',()=>process.exit(1))"
+  const pem = exec('exec', '-T', 'acme-directory', 'node', '-e', script)
+  assert.equal(pem.match(/-----BEGIN CERTIFICATE-----/g)?.length, 1, 'Pebble must serve exactly one issuing root certificate')
+  return pem
+}
+
+export type VerifiedTls = { authorized: boolean, error?: string, serial?: string }
+
+// Full verification: chain to `ca` and hostname match for `testDomain`
+// (rejectUnauthorized + Node's default checkServerIdentity). `identity`
+// overrides only the name checked, to prove the hostname check is active.
+export async function verifiedCertificate(port: number, ca: string, identity = testDomain): Promise<VerifiedTls> {
+  return new Promise(resolve => {
+    const socket = connect({ host: '127.0.0.1', port, servername: testDomain, ca, rejectUnauthorized: true,
+      checkServerIdentity: (_host, cert) => checkServerIdentity(identity, cert) })
+    socket.setTimeout(5000, () => socket.destroy(new Error('TLS verification timed out')))
+    socket.on('error', (error: NodeJS.ErrnoException) => resolve({ authorized: false, error: error.code ?? error.message }))
+    socket.on('secureConnect', () => {
+      const result = { authorized: socket.authorized, serial: socket.getPeerCertificate().serialNumber }
+      socket.destroy()
+      resolve(result)
+    })
+  })
+}
+
+export async function checkVerifiedTls(port: number, root: string, untrustedCa: string) {
+  const verified = await verifiedCertificate(port, root)
+  assert.deepEqual({ authorized: verified.authorized, error: verified.error }, { authorized: true, error: undefined },
+    `served certificate must chain to the Pebble issuing root and match ${testDomain}`)
+  // Negative controls: the same connection fails with another CA or another name.
+  assert.equal((await verifiedCertificate(port, untrustedCa)).authorized, false, 'an untrusted CA must fail verification')
+  const mismatch = await verifiedCertificate(port, root, 'attacker.example')
+  assert.equal(mismatch.authorized, false, 'a hostname mismatch must fail verification')
+  assert.equal(mismatch.error, 'ERR_TLS_CERT_ALTNAME_INVALID')
+  return verified.serial
 }
 
 export function checkReuse(before: { serial: string, orders: number, accounts: number }, after: { serial: string, orders: number, accounts: number }) {
