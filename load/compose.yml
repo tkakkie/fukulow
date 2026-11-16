@@ -24,6 +24,8 @@ services:
       FUKULOW_ADDR: 0.0.0.0:8080
       DATABASE_URL: postgres://fukulow_app:${LOAD_APP_PASSWORD:?Set LOAD_APP_PASSWORD}@db:5432/fukulow
       FUKULOW_COOKIE_SECURE: "false"
+      FUKULOW_SEND_BURST: ${LOAD_SEND_BURST:-10}
+      FUKULOW_SEND_REFILL_PER_SECOND: ${LOAD_SEND_REFILL_PER_SECOND:-1}
       FUKULOW_SETUP_TOKEN: ${LOAD_SETUP_TOKEN:?Set LOAD_SETUP_TOKEN for the disposable stack}
     ports:
       - "127.0.0.1:${LOAD_PORT:?Set LOAD_PORT}:8080"
@@ -62,3 +64,8 @@ services:
       interval: 1s
       timeout: 5s
       retries: 30
+
+# Proxy-target mode supplies reserved addresses/alias via a disposable override;
+# direct runs retain Docker-assigned addressing.
+networks:
+  default: {}

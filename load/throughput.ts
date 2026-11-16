@@ -6,7 +6,7 @@ import type { Options } from 'k6/options';
 import type { AcceptInviteRequest, CreateInviteRequest, InviteResponse, NativeSessionResponse, SendMessageRequest, SignInRequest } from '../web/src/api-schema.d.ts';
 import { positiveInteger } from './delivery.ts';
 import { organizationPath, signInPath } from './compat.ts';
-import { baseUrl, params, requireStatus, revoke, seed, uuid, type Setup } from './seed.ts';
+import { baseUrl, params, requireStatus, requireTransport, revoke, seed, uuid, type Setup } from './seed.ts';
 import { summaryForReport } from './summary.ts';
 import { classifySend, selectSender, throughputPlan, throughputReport } from './throughput-summary.ts';
 
@@ -89,6 +89,7 @@ export default function(data: Setup): void {
   const started = Date.now();
   const response = http.post(`${baseUrl}${organizationPath(data.organizationId, false)}/channels/${channel}/messages`,
     JSON.stringify(body), { ...params('throughput_send', token), timeout: `${timeout}s` });
+  requireTransport(response);
   const elapsed = Date.now() - execution.scenario.startTime;
   const outcome = classifySend(response.status, response.headers['Retry-After']);
   accepted.add(Number(outcome.outcome === 'accepted'));

@@ -23,12 +23,14 @@ export async function poll<T>(label: string, observe: () => Promise<T> | T, acce
   throw new Error(`${label}: observable state did not converge within ${milliseconds}ms`)
 }
 
-export function acmeFixture(directory: string, profile: string, run: (args: string[]) => string): string {
+// `proxies` adds every listed proxy's fixture block; `profile` owns the ACME directory.
+export function acmeFixture(directory: string, profile: string, run: (args: string[]) => string,
+  { proxies = [profile], validity = 600 }: { proxies?: string[], validity?: number } = {}): string {
   const config = {
     pebble: { listenAddress: '0.0.0.0:14000', managementListenAddress: '0.0.0.0:15000',
       certificate: 'test/certs/localhost/cert.pem', privateKey: 'test/certs/localhost/key.pem',
-      httpPort: 80, tlsPort: 443, certificateValidityPeriod: 600,
-      profiles: { default: { description: 'CI ten-minute certificate', validityPeriod: 600 } },
+      httpPort: 80, tlsPort: 443, certificateValidityPeriod: validity,
+      profiles: { default: { description: 'CI short-lived certificate', validityPeriod: validity } },
       // Force fresh HTTP-01 validation on renewal, not cached authorizations.
       authorizationValidityPeriod: 1, retryAfter: { authz: 1, order: 1 } },
   }
@@ -69,8 +71,8 @@ export function acmeFixture(directory: string, profile: string, run: (args: stri
     }
 \timport browser_headers
 \t@api`))
-  return `
-  ${profile}:
+  return proxies.map(proxy => `
+  ${proxy}:
     depends_on:
       pebble:
         condition: service_started
@@ -80,7 +82,7 @@ export function acmeFixture(directory: string, profile: string, run: (args: stri
         aliases: [${testDomain}]
     volumes:
       - ${directory}/pebble-ca.pem:/etc/pebble-ca.pem:ro
-      - ${directory}/${profile === 'nginx' ? 'nginx.conf:/etc/nginx/templates/nginx.conf.template' : 'Caddyfile:/etc/caddy/Caddyfile'}:ro
+      - ${directory}/${proxy === 'nginx' ? 'nginx.conf:/etc/nginx/templates/nginx.conf.template' : 'Caddyfile:/etc/caddy/Caddyfile'}:ro`).join('') + `
   pebble:
     image: ${pebbleImage}
     command: ["-config", "/pebble.json", "-dnsserver", "127.0.0.11:53"]

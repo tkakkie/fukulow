@@ -15,7 +15,20 @@ export function params(operation: string, token?: string): Params {
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) } };
 }
 
+let transportRecorded = false;
+export function requireTransport(response: Response): void {
+  if (!__ENV.LOAD_PROXY) return;
+  if (response.proto !== 'HTTP/1.1' || response.tls_version !== 'tls1.3' || response.tls_cipher_suite !== 'TLS_AES_128_GCM_SHA256') {
+    fail('Proxy measurement requires HTTP/1.1, TLS 1.3 and TLS_AES_128_GCM_SHA256 on actual k6 responses');
+  }
+  if (!transportRecorded) {
+    console.log('LOAD_TLS ' + JSON.stringify({ protocol: response.tls_version, cipher: response.tls_cipher_suite, http: response.proto }));
+    transportRecorded = true;
+  }
+}
+
 export function requireStatus(response: Response, status: number, operation: string): void {
+  requireTransport(response);
   if (!check(response, { [operation]: (r) => r.status === status })) {
     // Never print response bodies: sign-in returns the bearer credential.
     fail(`${operation} returned ${response.status}, expected ${status}`);

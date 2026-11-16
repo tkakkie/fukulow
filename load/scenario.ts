@@ -28,6 +28,7 @@ const drainTimeout = positiveInteger(__ENV.DRAIN_TIMEOUT_SECONDS, 5);
 const socketsPerSession = positiveInteger(__ENV.SOCKETS_PER_SESSION, 1);
 const legacy = __ENV.LOAD_LEGACY === '1';
 const allowRejections = __ENV.LOAD_ALLOW_REJECTIONS === '1';
+const connectionsOnly = __ENV.LOAD_CONNECTIONS_ONLY === '1';
 const storm = __ENV.LOAD_RECONNECT_STORM === '1';
 const reconnect = storm || __ENV.LOAD_RECONNECT === '1';
 const connectBatch = positiveInteger(__ENV.CONNECT_BATCH, channels * subscribers);
@@ -79,8 +80,7 @@ export const options: Options = {
     invalid_retry_after: ['count==0'],
     load_errors: ['count==0'],
     missing_deliveries: ['count==0'],
-    published_messages: ['count>0'],
-    delivered_messages: ['count>0'],
+    ...(connectionsOnly ? {} : { published_messages: ['count>0'], delivered_messages: ['count>0'] }),
     iterations: ['count==1'],
     concurrent_connections: ['value==0'],
     concurrent_publishes: ['value==0'],
@@ -282,7 +282,9 @@ export default async function (data: Setup): Promise<void> {
         reconnectAttempts, firstClose, policy: 'full jitter [0, min(10000, 500 * 2^attempt)) ms; reset on subscribed' }));
     }
     sendStartedAt = Date.now();
-    const result = await schedule(duration * 1000, interval, publishers, Date.now, pause, publish);
+    const result = connectionsOnly
+      ? await (async () => { const startedAt = Date.now(); await pause(duration * 1000); return { startedAt, elapsedMs: Date.now() - startedAt, offered: 0 }; })()
+      : await schedule(duration * 1000, interval, publishers, Date.now, pause, publish);
     console.log('LOAD_RATE ' + JSON.stringify({ ...result, offeredSendRate: result.offered / (result.elapsedMs / 1000),
       firstOfferedAt, lastOfferedAt, launchSpanMs: lastOfferedAt - firstOfferedAt,
       accepted, refusals, acceptedSendRate: accepted / (Math.max(result.elapsedMs, sendCompletedAt - result.startedAt) / 1000),
