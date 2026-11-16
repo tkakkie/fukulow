@@ -33,25 +33,37 @@ Related: [Setup token](accounts.md#setup).
 - nginx's dedicated `nginx_acme` volume holds account/certificate keys. The master and workers run as nginx; state is nginx-owned, directories 0700/files 0600. Restart/recreation reuse it. Binding 80/443 as nginx relies on Docker's per-network-namespace `net.ipv4.ip_unprivileged_port_start` (normally 0); startup fails with a clear message if it exceeds 80. Never inspect/export state contents or include them in logs/artifacts. nginx has no DNS-01; unattended renewal with both ingress ports closed is unsupported. TLS-ALPN-01 is an optional module alternative, not required or tested here.
 - Keep the nginx tag+digest and exact `NGINX_ACME_PACKAGE_VERSION` together: Dependabot proposes image updates; manually inspect the image's `dpkg-query` package version and update both in one reviewed PR. `check-versions.ts` rejects ABI-version drift; startup verifies the package and `nginx -t` loads it against the binary. No module compilation/custom image. Pebble updates are manual tag+digest changes in `scripts/compose-acme.ts`, followed by the same checks.
 - `CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts` adds the browser suite and restart/recreation/renewal checks for both profiles (`CHECK_COMPOSE_PROFILE` selects one). A pinned local Pebble CA issues ten-minute certificates with real HTTP-01 and no authorization reuse. A test-only directory omits optional ARI to select lifetime-based renewal; Caddy scans every 5s with half-life renewal. After each restart/recreation, directory health and the first served persisted certificate anchor a 15s observation of unchanged serial/order/account counts. Observation continues to reject new orders or replacements before nginx's earliest half-life renewal window (48% of certificate validity, truncated to seconds; nginx 0.4.1 varies half-life by 2%). Only a subsequent new order and serial before the original expiry count as automatic renewal, without another restart. Polls have a 250ms cadence; HTTP challenge/redirect/header checks continue throughout. Only main pushes/manual dispatch run this full gate; PRs retain the existing shorter security check. `CHECK_COMPOSE_WORK_DIR` selects temporary fixture storage.
+- **Switching the proxy.** Run `deploy/switch-proxy.sh nginx` (or `caddy`) from the checkout, appending the `docker compose` options used for every other command (for example `-f compose.yml -f '<override>'`). The script needs bash, Docker and host `curl`. Steps:
+  1. It records whether the other proxy is running and creates (never starts) the target. If the target's published ports differ from the running proxy's, it refuses and changes nothing (exit 2), so a switch cannot drop a loopback-only override; `SWITCH_PROXY_ALLOW_PORT_CHANGE=1` permits an intended change.
+  2. It stops the other proxy, then starts the target with `up --wait`. A proxy is healthy once container port 80 answers HTTP for `FUKULOW_DOMAIN` (a redirect).
+  3. It requires verified HTTPS within `SWITCH_PROXY_HTTPS_TIMEOUT` (default 180 s): `https://$FUKULOW_DOMAIN/api/v1/health` through the published 443 must return `ok` with a trusted chain and matching hostname (host trust store, or `SWITCH_PROXY_CACERT`). A failed issuance or an untrusted certificate fails this step.
+  4. On failure it stops the target and restarts the previous proxy only if it was running before (with the same health and HTTPS checks), then exits 1; a proxy that was not running stays stopped.
+  - Both proxies take the fixed edge IP `<prefix>.2` (and in production 80/443), so Docker refuses to run both; never enable both profiles in one `up`. Each keeps its own state volume (`caddy_data`, `nginx_acme`); a switch removes neither, and returning to a proxy reuses its certificate and account without a new order. A proxy's first start issues a new certificate, which counts toward the public CA's rate limits. The stopped proxy stays stopped across Docker restarts (`unless-stopped`).
+  - `node scripts/check-compose-switch.ts` verifies against Pebble, on main pushes and manual e2e-compose dispatch: Caddy -> nginx -> Caddy, refused overlap and port change, restore after issuance failure, untrusted certificate and failed start, a stopped previous proxy left stopped, and reuse on return.
 - The binary remains PID 1 with Docker's default SIGTERM stop signal and the existing 75-second stop grace period; #195 handles shutdown. No init wrapper is needed because the server starts no child processes.
 
 ### Restricted access through SSH (#392; preparation for #285)
 
 SSH tunnelling is the first candidate, pending maintainer deployment. Firewall public ingress to allow only SSH; close 80/443 on every public IPv4/IPv6 address, including Docker-published paths (host firewall rules alone may be bypassed by Docker). Keep app/DB unpublished. Caddy still terminates TLS for `FUKULOW_DOMAIN=<app-domain>` with a valid domain certificate and persistent `caddy_data`; the tunnel carries TLS unchanged to Caddy, never directly to app HTTP.
 
-**Loopback-only Caddy ports.** Docker publishes `80:80`/`443:443` on every host address and its rules can bypass the host firewall, so bind Caddy to loopback with a private Compose override kept outside the checkout:
+**Loopback-only proxy ports.** Docker publishes `80:80`/`443:443` on every host address and its rules can bypass the host firewall, so bind the proxy to loopback with a private Compose override kept outside the checkout. Cover both proxies, so a switch to either keeps the restriction (`deploy/switch-proxy.sh` refuses a target whose ports differ from the running proxy's):
 
 ```yaml
 services:
   caddy:
     ports: !override
       - "127.0.0.1:443:443"
+  nginx:
+    ports: !override
+      - "127.0.0.1:443:443"
 ```
 
-Use `!override` (Compose 2.24.4 or later): a plain `ports:` list in an override is appended to the base list and leaves `80`/`443` public (verified with `docker compose config`). Pass it on every command (`docker compose -f compose.yml -f '<override>' --profile caddy ...`); a command that recreates Caddy without it republishes the public ports. Port 80 stays unpublished; the SSH tunnel needs only loopback 443. Verify on the VPS before and after each change:
+Use `!override` (Compose 2.24.4 or later): a plain `ports:` list in an override is appended to the base list and leaves `80`/`443` public (verified with `docker compose config`). Pass it on every command (`docker compose -f compose.yml -f '<override>' --profile caddy ...`, and to `deploy/switch-proxy.sh`); a command that recreates a proxy without it republishes the public ports. nginx has no DNS-01, so while 80/443 stay closed its renewal also needs an approved window. Port 80 stays unpublished; the SSH tunnel needs only loopback 443. Verify on the VPS before and after each change:
 
 ```sh
-docker compose -f compose.yml -f '<override>' --profile caddy port caddy 443   # expect 127.0.0.1:443
+# Before switching: both proxies must render loopback-only ports.
+docker compose -f compose.yml -f '<override>' --profile caddy --profile nginx config caddy nginx | grep -A3 'ports:'   # expect host_ip: 127.0.0.1 for both
+docker compose -f compose.yml -f '<override>' --profile caddy port caddy 443   # running proxy (or nginx): expect 127.0.0.1:443
 ss -ltnH '( sport = :80 or sport = :443 )'                                    # expect only 127.0.0.1:443
 ```
 

@@ -53,6 +53,13 @@ jobs:
           CHECK_COMPOSE_ACCEPTANCE: '1'
           CHECK_COMPOSE_WORK_DIR: ${{ runner.temp }}
         run: node scripts/check-compose-security.ts
+      - name: Proxy switch and rollback (Caddy -> nginx -> Caddy) against Pebble
+        # #469 part 2. One leg is enough: the check drives both proxies itself.
+        if: matrix.profile == 'caddy'
+        env:
+          CHECK_COMPOSE_IMAGE: fukulow-app
+          CHECK_COMPOSE_WORK_DIR: ${{ runner.temp }}
+        run: node scripts/check-compose-switch.ts
       - name: Upload restricted Compose E2E failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
