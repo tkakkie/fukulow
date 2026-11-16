@@ -44,7 +44,7 @@ export function judge(runs:Run[], scenario:Scenario, rate:number) {
     const readers=[bs[0].reader,as[0].reader];
     if(readers.some(r=>!r || r.rate!==2 || r.seconds!==284 || r.attempted<r.rate*r.seconds*settings.minimumOfferedFraction ||
       r.droppedIterations!==0 || ![r.attempted,r.accepted,r.rejected429,r.rejected503,r.otherErrors,r.clientTimeouts,r.transportErrors].every(n=>Number.isInteger(n)&&n>=0) ||
-      r.p95===null||r.p99===null||!Number.isFinite(r.p95)||!Number.isFinite(r.p99)||r.p95<0||r.p99<r.p95 ||
+      (r.accepted>0 && (r.p95===null||r.p99===null||!Number.isFinite(r.p95)||!Number.isFinite(r.p99)||r.p95<0||r.p99<r.p95)) ||
       r.attempted!==r.accepted+r.rejected429+r.rejected503+r.otherErrors+r.clientTimeouts+r.transportErrors))
       return {pair:index+1,status:'NOT EVALUATED',reason:'missing continuous other-Organization evidence'};
     if(b.seconds!==60||a.seconds!==60 || b.send.rate!==rate||a.send.rate!==rate || b.send.seconds!==60||a.send.seconds!==60 ||
@@ -53,13 +53,22 @@ export function judge(runs:Run[], scenario:Scenario, rate:number) {
     if(invalid.length) return {pair:index+1,status:'NOT EVALUATED',reason:invalid.join('; ')};
     const br=b.send.accepted/b.send.attempted, ar=a.send.accepted/a.send.attempted;
     if(br<.99) return {pair:index+1,status:'REPORT ONLY',reason:'above B saturation'};
+    // Success-rate and other-Organization failures need no latency: a candidate with no successes fails, it is not unmeasured.
+    if(!(ar>=.99 && ar+1e-12>=br-.01) || !(b.reader.accepted===b.reader.attempted && a.reader.accepted===a.reader.attempted && readers.every(r=>r.accepted===r.attempted)))
+      return {pair:index+1,status:'FAIL',baselineSuccessRate:br,candidateSuccessRate:ar};
     if(b.send.p95===null||b.send.p99===null||a.send.p95===null||a.send.p99===null) return {pair:index+1,status:'NOT EVALUATED',reason:'missing latency'};
-    const pass=ar>=.99 && ar+1e-12>=br-.01 && a.send.p95<=1.10*b.send.p95 && a.send.p99<=1.10*b.send.p99 &&
-      b.reader.accepted===b.reader.attempted && a.reader.accepted===a.reader.attempted && readers.every(r=>r.accepted===r.attempted);
+    const pass=a.send.p95<=1.10*b.send.p95 && a.send.p99<=1.10*b.send.p99;
     return {pair:index+1,status:pass?'PASS':'FAIL',baselineSuccessRate:br,candidateSuccessRate:ar};
   });
   // An invalid or saturated pair never substitutes for one of the three required comparisons.
   const status=cells.some(c=>c.status==='NOT EVALUATED')?'NOT EVALUATED':cells.every(c=>c.status==='REPORT ONLY')?'REPORT ONLY':
     cells.some(c=>c.status==='REPORT ONLY')?'NOT EVALUATED':cells.some(c=>c.status==='FAIL')?'FAIL':'PASS';
   return {scope,scenario,rate,status,pairs:cells,poolAcquireTimeouts:'NOT EVALUATED',timeoutNote};
+}
+// An interrupted, failed, smoke or uncleaned run, or one with missing results, never yields a verdict.
+export function judgeAll(runs:Run[], complete:boolean) {
+  return scenarios.flatMap(s=>settings.rates.map(rate=>{
+    const j=judge(runs,s,rate);
+    return complete ? j : {...j,status:'NOT EVALUATED',reason:'run incomplete, interrupted, smoke, missing results or cleanup failed'};
+  }));
 }

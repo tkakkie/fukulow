@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { judge, validity, pairs, plan, scope, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
+import { judge, judgeAll, validity, pairs, plan, scope, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
 const lane=(rate=250):Lane=>({rate,seconds:60,attempted:rate*60,accepted:rate*60,rejected429:0,rejected503:0,otherErrors:0,clientTimeouts:0,transportErrors:0,droppedIterations:0,p95:10,p99:20});
 const row=():Row=>({rate:250,seconds:60,send:lane(),reader:lane(2),evidence:{complete:true,samples:60,maxSampleGapMs:1000,samplingErrors:0}});
 const runs=():Run[]=>pairs().flatMap((arms,i)=>arms.map(arm=>({scope,pair:i+1,arm,scenario:'send',smoke:false,steps:[row()],reader:{...lane(2),seconds:284,attempted:568,accepted:568}})));
@@ -56,4 +56,16 @@ test('omitted resource fields and full-run success latency remain missing eviden
   const r=runs();delete (r[0].steps[0].evidence as Partial<Row['evidence']>).maxSampleGapMs;
   assert.equal(judge(r,'send',250).status,'NOT EVALUATED');
   const other=runs();other[0].reader.p95=null;assert.equal(judge(other,'send',250).status,'NOT EVALUATED');
+});
+test('zero candidate or other-Organization successes fail instead of going unmeasured',()=>{
+  const r=runs();const a=r.find(c=>c.arm==='A')!.steps[0];a.send.accepted=0;a.send.rejected503=15000;a.send.p95=a.send.p99=null;
+  assert.deepEqual(validity(a),[]);assert.equal(judge(r,'send',250).status,'FAIL');
+  const other=runs();const reader=other.find(c=>c.arm==='A')!.reader;reader.clientTimeouts=reader.accepted;reader.accepted=0;reader.p95=reader.p99=null;
+  assert.equal(judge(other,'send',250).status,'FAIL');
+});
+test('an incomplete, interrupted or uncleaned run never yields a verdict',()=>{
+  const mixed=runs().map(r=>({...r,scenario:'mixed' as const,steps:[{...row(),reads:lane(500),signin:lane(20)}]}));
+  const all=[...runs(),...mixed];
+  assert.equal(judgeAll(all,true).find(j=>j.scenario==='send'&&j.rate===250)!.status,'PASS');
+  assert.ok(judgeAll(all,false).every(j=>j.status==='NOT EVALUATED'));
 });

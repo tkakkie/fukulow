@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { judge, scenarios, settings, scope, timeoutNote, pairs, type Run } from './pool-before-after-summary.ts';
+import { judgeAll, scenarios, scope, timeoutNote, pairs, type Run } from './pool-before-after-summary.ts';
 const dir=resolve(process.argv[2]??'');
 if(!process.argv[2])throw new Error('Usage: node load/pool-before-after-report.ts /external/comparison-directory');
 const runs:Run[]=[];
@@ -12,7 +12,11 @@ for(const scenario of scenarios) for(const [i,arms] of pairs().entries()) for(co
   if(run.arm!==arm||run.pair!==i+1||run.scenario!==scenario){missing.push(`mismatched identity: ${path}`);continue;}
   runs.push(run);
 }
-const report={scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',missing,
-  judgement:scenarios.flatMap(s=>settings.rates.map(rate=>judge(runs,s,rate)))};
+// The runner's own record decides completeness: interrupted, failed, smoke or uncleaned runs never yield a verdict.
+const summaryPath=`${dir}/summary.json`;
+const summary=existsSync(summaryPath)?JSON.parse(readFileSync(summaryPath,'utf8')) as {complete?:unknown;smoke?:unknown;cleanupErrors?:unknown}:undefined;
+if(!summary)missing.push(summaryPath);
+const complete=summary?.complete===true&&summary.smoke===false&&Array.isArray(summary.cleanupErrors)&&summary.cleanupErrors.length===0&&missing.length===0;
+const report={scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',complete,missing,judgement:judgeAll(runs,complete)};
 writeFileSync(`${dir}/judgement.json`,JSON.stringify(report,null,2));
 console.log(JSON.stringify(report,null,2));

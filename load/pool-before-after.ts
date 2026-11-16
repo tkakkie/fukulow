@@ -5,7 +5,7 @@ import { tmpdir, cpus, totalmem, platform, arch, release, hostname } from 'node:
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
-import { plan, pairs, settings, scenarios, scope, timeoutNote, judge, validity, type Run, type Scenario, type Arm, type Counts } from './pool-before-after-summary.ts';
+import { plan, pairs, settings, scenarios, scope, timeoutNote, judgeAll, validity, type Run, type Scenario, type Arm, type Counts } from './pool-before-after-summary.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
 if(process.argv.includes('--help')) {
@@ -37,8 +37,8 @@ let interrupted=false;
 const stop=()=>{interrupted=true;generator?.kill('SIGTERM'); if(generatorName) {try{docker('rm','-f',generatorName);}catch{/* finally retries */}}};
 process.on('SIGINT',stop);process.on('SIGTERM',stop);
 const check=()=>{if(interrupted)throw new Error('Interrupted');};
-const summary=()=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,runs,
-  judgement:scenarios.flatMap(s=>settings.rates.map(rate=>judge(runs,s,rate))),cleanupErrors});
+const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,runs,
+  judgement:judgeAll(runs,complete&&!smoke),cleanupErrors});
 let failed=false;
 try {
   const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-summary.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
@@ -211,8 +211,9 @@ try {
   if(activeCompose){try{command('docker',[...activeCompose,'down','--volumes','--remove-orphans'],undefined,activeEnv);}catch{cleanupErrors.push('Final Compose cleanup failed');}}
   for(const arm of ['B','A']) {try{const tag=`${project}-${arm.toLowerCase()}`;if(docker('image','ls','-q',tag))docker('image','rm',tag);}catch{cleanupErrors.push(`${arm}: image cleanup failed`);}}
   rmSync(scratch,{recursive:true,force:true});
-  save(`${output}/summary.json`,{...summary(),complete:!failed&&!cleanupErrors.length});
+  const complete=!failed&&!interrupted&&!cleanupErrors.length&&(smoke||runs.length===scenarios.length*pairs().length*2);
+  save(`${output}/summary.json`,{...summary(complete),complete});
   process.off('SIGINT',stop);process.off('SIGTERM',stop);
 }
 console.log(`${scope}: artifacts ${output}`);
-process.exitCode=failed||cleanupErrors.length?1:0;
+process.exitCode=failed||interrupted||cleanupErrors.length?1:0;
