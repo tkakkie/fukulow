@@ -34,7 +34,7 @@ export async function localCopy(exec:Executor,source:string,destination:string,t
 // Base images a Dockerfile pulls; a FROM naming an earlier stage (FROM rust-base AS wasm) is not an image.
 export function dockerfileBases(dockerfile:string) {
   const stages=new Set<string>(),bases:string[]=[];
-  for(const [,from,alias] of dockerfile.matchAll(/^FROM\s+(\S+)(?:\s+AS\s+(\S+))?/gim)){if(!stages.has(from!.toLowerCase()))bases.push(from!);if(alias)stages.add(alias.toLowerCase());}
+  for(const [,from,alias] of dockerfile.matchAll(/^[ \t]*FROM[ \t]+(?:--\S+[ \t]+)*(\S+)(?:[ \t]+AS[ \t]+(\S+))?/gim)){if(!stages.has(from!.toLowerCase()))bases.push(from!);if(alias)stages.add(alias.toLowerCase());}
   return bases;
 }
 export async function sha256File(path:string) {

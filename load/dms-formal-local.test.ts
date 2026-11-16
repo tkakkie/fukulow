@@ -150,7 +150,7 @@ test('local log-reader shutdown drains output and distinguishes an expected kill
 });
 
 test('local build checks only external Dockerfile bases, not earlier stage names', () => {
-  const dockerfile='FROM rust:1@sha256:a AS rust-base\nFROM rust-base AS wasm\nFROM node:2@sha256:b AS web\nFROM Rust-Base as server\nFROM debian:3@sha256:c\n';
-  assert.deepEqual(dockerfileBases(dockerfile),['rust:1@sha256:a','node:2@sha256:b','debian:3@sha256:c']);
+  const dockerfile='FROM rust:1@sha256:a AS rust-base\nFROM rust-base AS wasm\nFROM node:2@sha256:b AS web\nFROM Rust-Base as server\nFROM debian:3@sha256:c\n  from --platform=linux/arm64 alpine:4@sha256:d AS tools\nFROM --platform=linux/arm64 tools\n';
+  assert.deepEqual(dockerfileBases(dockerfile),['rust:1@sha256:a','node:2@sha256:b','debian:3@sha256:c','alpine:4@sha256:d']);
   assert.deepEqual(dockerfileBases(readFileSync(resolve(import.meta.dirname,'../Dockerfile'),'utf8')).every(pin=>/@sha256:[a-f0-9]{64}$/.test(pin)),true);
 });
