@@ -770,9 +770,9 @@ Validation on Node v26.13.0: type check and all 61 tests passed. The corrected s
 
 **No comparison result.** Procedure as in the #151 / #426 Mac relative record above, at `1662d5d`, patch SHA-256 `a803ace6…e744`, scales tried largest first (1/10, 1/25, 1/50), 30 s pilots, then three B/C, C/B, B/C pairs at the largest sustained scale.
 
-- **Attempts 1–2 (01:34, 09:57): infrastructure failure in build.** The runner script's `umask 077` made the cloned source mode 0600; the local offline build (`--network=none`) then missed the cached `npm ci` layer and failed to resolve the npm registry. Runner fault, not a harness or app result. Fixed by `umask 022` after creating the private output directory.
-- **Attempt 3 pilots (10:16–10:34).** 1/10 not sustained: 0 errors, 3 dropped arrivals, incomplete offered-work evidence, generator restarted or missing. 1/25 sustained.
-- **Attempt 3 comparison at 1/25 (10:34–11:12): infrastructure failure in seed.** Seeding, fixture checks and probes finished at 11:02; the fixture-histogram query then ended at the harness's 600 s `psql` timeout (exit 128) on the 10-Organization, 5,000,000-Messages-per-Organization fixture. No arm ran.
+- **Attempts 1–3 (01:34, 09:57, 10:14): infrastructure failure in build.** The runner script's `umask 077` made the cloned source mode 0600; the local offline build (`--network=none`) then missed the cached `npm ci` layer and failed to resolve the npm registry. A networked warm build before attempt 3 did not help, since the cache was present and only the file mode differed. Runner fault, not a harness or app result. Fixed by `umask 022` after creating the private output directory.
+- **Attempt 4 pilots (10:16–10:34).** 1/10 not sustained: 0 errors, 3 dropped arrivals, incomplete offered-work evidence, generator restarted or missing. 1/25 sustained.
+- **Attempt 4 comparison at 1/25 (10:34–11:12): infrastructure failure in seed.** Seeding, fixture checks and probes finished at 11:02; the fixture-histogram query then ended at the harness's 600 s `psql` timeout (exit 128) on the 10-Organization, 5,000,000-Messages-per-Organization fixture. No arm ran.
 - **Next.** A reviewed harness change for the seed-phase timeout on the Mac is needed before the comparison can run. CPU 10%, p95/p99, RSS, spread and missing-evidence rules are unchanged.
 
 ## Unread candidate bounds (#355, 2026-11-16 JST)
