@@ -72,16 +72,20 @@ test('startup observation rejects delayed reissuance after initially serving the
 
 test('lifetime renewal rejects early startup orders independently of the startup observation window', () => {
   const before = { serial: '0123', orders: 1, accounts: 1 }
+  const late = { starts: 288_000 }
   const window = lifetimeRenewalNotBefore({ starts: 1000, expires: 600_000 })
   assert.equal(window, 288_000, 'nginx truncates the 287.52s offset to whole seconds')
-  assert.equal(checkLifetimeRenewal(before, before, 60_000, window), false)
+  assert.equal(checkLifetimeRenewal(before, { ...before, ...late, ...late }, 60_000, window), false)
   for (const after of [{ ...before, orders: 2 }, { ...before, serial: '4567', orders: 2 }]) {
-    assert.throws(() => checkLifetimeRenewal(before, after, 60_000, window), /restart\/recreation/)
+    assert.throws(() => checkLifetimeRenewal(before, { ...after, ...late }, 60_000, window), /restart\/recreation/)
   }
-  assert.equal(checkLifetimeRenewal(before, { ...before, orders: 2 }, window, window), false)
-  assert.equal(checkLifetimeRenewal(before, { ...before, orders: 2, serial: '4567' }, window, window), true)
-  assert.throws(() => checkLifetimeRenewal(before, { ...before, serial: '4567' }, window, window), /fresh CA order/)
-  assert.throws(() => checkLifetimeRenewal(before, { ...before, orders: 2, serial: '4567', accounts: 2 }, window, window), /persisted account/)
+  assert.equal(checkLifetimeRenewal(before, { ...before, ...late, orders: 2 }, window, window), false)
+  assert.equal(checkLifetimeRenewal(before, { ...before, ...late, orders: 2, serial: '4567' }, window, window), true)
+  assert.throws(() => checkLifetimeRenewal(before, { ...before, ...late, serial: '4567' }, window, window), /fresh CA order/)
+  assert.throws(() => checkLifetimeRenewal(before, { ...before, ...late, orders: 2, serial: '4567', accounts: 2 }, window, window), /persisted account/)
+  // An order placed before the window whose certificate is first served after it.
+  assert.throws(() => checkLifetimeRenewal(before, { ...before, orders: 2, serial: '4567', starts: 287_000 }, window + 5_000, window),
+    /lifetime renewal window/)
 })
 
 test('ACME state polling has a deadline and propagates observation failures', async () => {

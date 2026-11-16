@@ -153,13 +153,17 @@ export function checkStartupReuse(before: ReuseObservation, after: ReuseObservat
   return observedAt >= readyAt + 15_000
 }
 
-export function checkLifetimeRenewal(before: ReuseObservation, after: ReuseObservation, observedAt: number, renewalNotBefore: number): boolean {
+export function checkLifetimeRenewal(before: ReuseObservation, after: ReuseObservation & { starts: number }, observedAt: number, renewalNotBefore: number): boolean {
   assert.equal(after.accounts, before.accounts, 'renewal reuses persisted account')
   // The fixture sets Caddy to half-life; nginx 0.4.1 uses half-life +/- 2%.
   // Until that window, a delayed startup order or replacement is a failure.
-  if (observedAt < renewalNotBefore) checkReuse(before, after)
+  const { starts, ...observed } = after
+  if (observedAt < renewalNotBefore) checkReuse(before, observed)
   if (after.serial === before.serial) return false
   assert.ok(after.orders > before.orders, 'renewal creates a fresh CA order')
+  // The CA stamps notBefore at issuance (whole seconds; the window is whole
+  // seconds too), so a certificate ordered before the window cannot pass late.
+  assert.ok(starts >= renewalNotBefore, 'renewed certificate was issued within the lifetime renewal window')
   return true
 }
 
@@ -209,7 +213,7 @@ export async function checkCertificateLifecycle(profile: string, dc: (...args: s
     httpCheck()
     const served = await certificate(port())
     assert.ok(served, 'certificate remains available until automatic renewal')
-    return checkLifetimeRenewal(initial, { serial: served.serial, ...activity() }, Date.now(), renewalNotBefore)
+    return checkLifetimeRenewal(initial, { serial: served.serial, starts: served.starts, ...activity() }, Date.now(), renewalNotBefore)
   }, Boolean, Math.min(540_000, before.expires - Date.now()))
   // Recreation removes the first container's status-only log. The current log
   // starts empty and must contain a fresh validation after renewal.
