@@ -7,13 +7,14 @@ const pr = (number: number, extra: object = {}) => ({ number, title: `PR ${numbe
   headRefOid: `head${number}`, isDraft: false, createdAt: '2026-11-16T00:00:00Z', closingIssuesReferences: [], ...extra })
 const issue = (number: number, extra: object = {}) => ({ number, title: `Issue ${number}`, labels: label('status:ready'),
   milestone: { title: 'Backlog' }, createdAt: '2026-11-16T00:00:00Z', body: '', ...extra })
-const green = [{ status: 'COMPLETED', conclusion: 'SUCCESS' }]
+const required = ['web', 'server', 'docker']
+const green = required.map(name => ({ name, status: 'COMPLETED', conclusion: 'SUCCESS' }))
 const view = (head: string, extra: object = {}) => ({ headRefOid: head, mergeable: 'MERGEABLE', statusCheckRollup: green,
   reviewRequests: [], latestReviews: [], ...extra })
 
 // A fake gh keyed by the call shape; every call is recorded for the read-only check.
 function fake(state: { prs?: object[][], issues?: object[][], views?: Record<number, object | Error>,
-  total?: number, items?: Record<number, object> }) {
+  total?: number, items?: Record<number, object>, rules?: object[] }) {
   const calls: string[][] = []
   const pages = { pr: [...(state.prs ?? [[]])], issue: [...(state.issues ?? [[]])] }
   const gh: Gh = args => {
@@ -30,6 +31,10 @@ function fake(state: { prs?: object[][], issues?: object[][], views?: Record<num
       const listed = new Set([...(state.prs ?? []).flat(), ...(state.issues ?? []).flat()].map(i => (i as { number: number }).number))
       return JSON.stringify({ open_issues_count: state.total ?? listed.size })
     }
+    if (group === 'api' && args.at(-1) === 'repos/{owner}/{repo}/rules/branches/main') {
+      return JSON.stringify(state.rules ?? [{ type: 'pull_request' },
+        { type: 'required_status_checks', parameters: { required_status_checks: required.map(context => ({ context })) } }])
+    }
     const item = args.at(-1)?.match(/issues\/(\d+)$/)
     if (group === 'api' && item) return JSON.stringify(state.items?.[Number(item[1])])
     throw new Error(`unexpected gh ${args.join(' ')}`)
@@ -40,9 +45,11 @@ function fake(state: { prs?: object[][], issues?: object[][], views?: Record<num
 const line = (report: ReturnType<typeof collect>, prefix: string) => report.lines.find(l => l.startsWith(prefix + ' '))!
 
 test('CI: green on an older SHA, missing and in progress are never green', () => {
-  const { gh } = fake({ prs: [[pr(1), pr(2), pr(3), pr(4), pr(5)]], views: {
+  const { gh } = fake({ prs: [[pr(1), pr(2), pr(3), pr(4), pr(5), pr(6), pr(7)]], views: {
+    6: view('head6', { statusCheckRollup: green.filter(c => c.name !== 'docker') }),
+    7: view('head7', { statusCheckRollup: [{ name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS' }] }),
     1: view('newer-head'), 2: view('head2', { statusCheckRollup: [] }),
-    3: view('head3', { statusCheckRollup: [{ status: 'IN_PROGRESS', conclusion: '' }] }),
+    3: view('head3', { statusCheckRollup: [{ name: 'web', status: 'IN_PROGRESS', conclusion: '' }, ...green.slice(1)] }),
     4: view('head4', { statusCheckRollup: [...green, { status: 'QUEUED', conclusion: '' }] }), 5: view('head5') } })
   const report = collect(gh)
   assert.match(line(report, 'PR #1'), /ci=head-changed/)
@@ -50,6 +57,13 @@ test('CI: green on an older SHA, missing and in progress are never green', () =>
   assert.match(line(report, 'PR #3'), /ci=pending/)
   assert.match(line(report, 'PR #4'), /ci=pending/)
   assert.match(line(report, 'PR #5'), /ci=green/)
+  assert.match(line(report, 'PR #6'), /ci=missing/, 'a required check absent from a green rollup')
+  assert.match(line(report, 'PR #7'), /ci=missing/, 'only non-required checks reported')
+})
+
+test('CI: a ruleset without required checks cannot confirm green', () => {
+  assert.throws(() => collect(fake({ prs: [[pr(1)]], views: { 1: view('head1') }, rules: [{ type: 'pull_request' }] }).gh),
+    /lists no required checks/)
 })
 
 test('Mergeable: UNKNOWN and CONFLICTING are reported as such', () => {
@@ -59,14 +73,16 @@ test('Mergeable: UNKNOWN and CONFLICTING are reported as such', () => {
   assert.match(line(report, 'PR #2'), /mergeable=CONFLICTING/)
 })
 
-test('Copilot: not requested, requested and pending, finished', () => {
-  const { gh } = fake({ prs: [[pr(1), pr(2), pr(3)]], views: { 1: view('head1'),
+test('Copilot: not requested, requested and pending, finished, re-requested after a review', () => {
+  const { gh } = fake({ prs: [[pr(1), pr(2), pr(3), pr(4)]], views: { 1: view('head1'),
+    4: view('head4', { reviewRequests: [{ login: 'Copilot' }], latestReviews: [{ author: { login: 'copilot-pull-request-reviewer' } }] }),
     2: view('head2', { reviewRequests: [{ login: 'Copilot' }] }),
     3: view('head3', { latestReviews: [{ author: { login: 'copilot-pull-request-reviewer' } }] }) } })
   const report = collect(gh)
   assert.match(line(report, 'PR #1'), /copilot=not-requested/)
   assert.match(line(report, 'PR #2'), /copilot=pending/)
   assert.match(line(report, 'PR #3'), /copilot=finished/)
+  assert.match(line(report, 'PR #4'), /copilot=pending/)
 })
 
 test('Blocked: one of several blockers merged is not flagged; all merged is', () => {

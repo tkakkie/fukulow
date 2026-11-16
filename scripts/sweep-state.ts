@@ -8,7 +8,8 @@ type Listed = { number: number, title: string, labels: Label[], createdAt: strin
 type ListedPr = Listed & { headRefOid: string, isDraft: boolean, closingIssuesReferences: { number: number }[] }
 type ListedIssue = Listed & { milestone: { title: string } | null, body: string }
 type Merged = { number: number, headRefName: string, mergedAt: string }
-type Check = { status?: string, conclusion?: string, state?: string }
+type Check = { name?: string, context?: string, status?: string, conclusion?: string, state?: string }
+type Rule = { type: string, parameters?: { required_status_checks?: { context: string }[] } }
 type Viewed = { headRefOid: string, mergeable: string, statusCheckRollup: Check[] | null,
   reviewRequests: { login?: string, name?: string }[], latestReviews: { author: { login: string } }[] }
 
@@ -66,10 +67,12 @@ function listAll<T extends Listed>(gh: Gh, kind: 'pr' | 'issue', fields: string)
   return [...byNumber.values()].sort((a, b) => b.number - a.number)
 }
 
-export function ciState(view: Viewed, listedHead: string): string {
+// Green needs every check the main ruleset requires; reported checks alone are not enough.
+export function ciState(view: Viewed, listedHead: string, required: string[]): string {
   if (view.headRefOid !== listedHead) return 'head-changed'
   const checks = view.statusCheckRollup ?? []
-  if (!checks.length) return 'missing'
+  const reported = new Set(checks.map(c => c.name ?? c.context))
+  if (!checks.length || required.some(name => !reported.has(name))) return 'missing'
   const result = (c: Check) => (c.conclusion || c.state || '').toUpperCase()
   if (checks.some(c => ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'].includes(result(c)))) return 'red'
   if (checks.some(c => (c.status && c.status.toUpperCase() !== 'COMPLETED') || ['', 'PENDING', 'EXPECTED'].includes(result(c)))) return 'pending'
@@ -78,8 +81,9 @@ export function ciState(view: Viewed, listedHead: string): string {
 
 export function copilotState(view: Viewed): string {
   const copilot = (name = '') => /copilot/i.test(name)
-  if (view.latestReviews.some(r => copilot(r.author.login))) return 'finished'
+  // A pending request wins over an older finished review (re-requested after a push).
   if (view.reviewRequests.some(r => copilot(r.login) || copilot(r.name))) return 'pending'
+  if (view.latestReviews.some(r => copilot(r.author.login))) return 'finished'
   return 'not-requested'
 }
 
@@ -100,6 +104,9 @@ export function collect(gh: Gh): Report {
   if (prs.length + issues.length !== total) {
     throw new SweepError(`incomplete listing: ${prs.length} PRs + ${issues.length} Issues, GitHub reports ${total} open`)
   }
+  const rules = json<Rule[]>(counted, ['api', '-X', 'GET', 'repos/{owner}/{repo}/rules/branches/main'])
+  const required = rules.flatMap(r => r.type === 'required_status_checks' ? r.parameters?.required_status_checks?.map(c => c.context) ?? [] : [])
+  if (!required.length) throw new SweepError('main ruleset lists no required checks; cannot confirm CI')
   const merged = json<Merged[]>(counted, ['pr', 'list', '--state', 'merged', '--limit', '30', '--json', 'number,headRefName,labels,mergedAt'])
   const openIssues = new Set(issues.map(i => i.number))
   const open = new Set([...openIssues, ...prs.map(p => p.number)])
@@ -119,7 +126,7 @@ export function collect(gh: Gh): Report {
       if (!openIssues.has(issue.number)) report.flags.push(`PR #${pr.number}: linked Issue #${issue.number} is not open`)
     }
     const others = pr.labels.map(l => l.name).filter(n => !n.startsWith('status:'))
-    report.lines.push(`PR #${pr.number} [${status}]${pr.isDraft ? ' draft' : ''} head=${pr.headRefOid.slice(0, 7)} ci=${ciState(view, pr.headRefOid)} mergeable=${view.mergeable} copilot=${copilotState(view)}${others.length ? ` {${others.join(',')}}` : ''} ${pr.title}`)
+    report.lines.push(`PR #${pr.number} [${status}]${pr.isDraft ? ' draft' : ''} head=${pr.headRefOid.slice(0, 7)} ci=${ciState(view, pr.headRefOid, required)} mergeable=${view.mergeable} copilot=${copilotState(view)}${others.length ? ` {${others.join(',')}}` : ''} ${pr.title}`)
   }
   for (const issue of issues) {
     const status = labelFlags('Issue', issue)
