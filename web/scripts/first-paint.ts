@@ -11,9 +11,12 @@ import { connect as tlsConnect, type DetailedPeerCertificate } from 'node:tls'
 import { fileURLToPath } from 'node:url'
 import { chromium, request as pwRequest } from '@playwright/test'
 
+const external = process.env.FIRST_PAINT_EXTERNAL === '1'
+const targetDomain = process.env.FIRST_PAINT_DOMAIN ?? 'localhost'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const outDir = resolve(process.env.FIRST_PAINT_OUT ?? join(tmpdir(), 'fukulow-345'))
-const project = process.env.FIRST_PAINT_PROJECT ?? 'fukulow-fp345'
+const project = process.env.FIRST_PAINT_PROJECT ?? (external ? process.env.LOAD_PROJECT! : 'fukulow-fp345')
+const profile = external ? process.env.LOAD_PROXY ?? 'caddy' : 'caddy'
 const runsPerCell = Number(process.env.FIRST_PAINT_RUNS ?? '10')
 const warmupRuns = Number(process.env.FIRST_PAINT_WARMUP ?? '12')
 const orgId = '00000000-0000-4000-8000-00000000000a'
@@ -134,12 +137,12 @@ const env: NodeJS.ProcessEnv = {
   COMPOSE_PROJECT_NAME: project,
   POSTGRES_PASSWORD: `fp345-db-only-${randomUUID()}`,
   POSTGRES_APP_PASSWORD: `fp345-app-only-${randomUUID()}`,
-  FUKULOW_SETUP_TOKEN: `fp345-setup-only-${randomUUID()}`,
+  FUKULOW_SETUP_TOKEN: external ? process.env.FUKULOW_SETUP_TOKEN : `fp345-setup-only-${randomUUID()}`,
   FUKULOW_COOKIE_SECURE: 'true',
   FUKULOW_DOMAIN: 'localhost',
   FUKULOW_EDGE_PREFIX: `10.${randomInt(192, 256)}.${randomInt(256)}`,
 }
-const composeFlags = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', overridePath, '--profile', 'caddy']
+const composeFlags: string[] = external ? JSON.parse(process.env.FIRST_PAINT_COMPOSE!) : ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', overridePath, '--profile', 'caddy']
 
 function docker(args: string[], input?: string): string {
   return execFileSync('docker', args, {
@@ -159,7 +162,7 @@ function dc(args: string[], input?: string): string {
 async function getServerSpkiHashes(port: number): Promise<string[]> {
   return await new Promise<string[]>((resolvePromise, rejectPromise) => {
     const socket = tlsConnect(
-      { host: '127.0.0.1', port, servername: 'localhost', rejectUnauthorized: false },
+      { host: '127.0.0.1', port, servername: targetDomain, rejectUnauthorized: false },
       () => {
         const hashes = new Set<string>()
         let cert: DetailedPeerCertificate | undefined = socket.getPeerCertificate(true)
@@ -178,7 +181,7 @@ async function getServerSpkiHashes(port: number): Promise<string[]> {
   })
 }
 
-writeFileSync(
+if (!external) writeFileSync(
   overridePath,
   `services:
   app:
@@ -576,16 +579,18 @@ function summarizeCell(
 }
 
 try {
-  console.log(`Building and starting Compose stack (${project}, profile: caddy)...`)
-  dc(['build', 'app'])
-  dc(['up', '-d', '--no-build', '--wait', '--wait-timeout', '120'])
+  console.log(`${external ? 'Using disposable' : 'Building and starting'} Compose stack (${project}, profile: ${profile})...`)
+  if (!external) {
+    dc(['build', 'app'])
+    dc(['up', '-d', '--no-build', '--wait', '--wait-timeout', '120'])
+  }
 
-  const portOutput = dc(['port', 'caddy', '443'])
+  const portOutput = external ? process.env.FIRST_PAINT_PORT! : dc(['port', 'caddy', '443'])
   const port = portOutput.split(':').at(-1)!
-  const baseUrl = `https://localhost:${port}`
-  console.log(`Caddy HTTPS listening at ${baseUrl}`)
+  const baseUrl = `https://${targetDomain}:${port}`
+  console.log(`${profile} HTTPS listening at ${baseUrl}`)
 
-  const apiContext = await pwRequest.newContext({ baseURL: baseUrl, ignoreHTTPSErrors: true })
+  const apiContext = await pwRequest.newContext({ baseURL: external ? process.env.FIRST_PAINT_API : baseUrl, ignoreHTTPSErrors: true })
   try {
     for (let i = 0; i < 30; i++) {
       try {
@@ -638,6 +643,8 @@ try {
       throw new Error(`Sign-in as ${memberEmail} failed with status ${signInRes.status()}`)
     }
     const storageState = await apiContext.storageState()
+    // Provisioning uses the private app port; only timed navigations traverse TLS.
+    if (external) for (const cookie of storageState.cookies) { cookie.domain = targetDomain; cookie.secure = true }
 
     const pgVersion = dc(['exec', '-T', 'db', 'psql', '-U', 'fukulow', '-d', 'fukulow', '-Atc', 'SHOW server_version'])
     const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
@@ -647,7 +654,8 @@ try {
     // stores immutable static assets just like a production CA-signed deployment.
     const browser = await chromium.launch({
       headless: true,
-      args: [`--ignore-certificate-errors-spki-list=${spkiHashes.join(',')}`],
+      args: [`--ignore-certificate-errors-spki-list=${spkiHashes.join(',')}`,
+        ...(external ? [`--host-resolver-rules=MAP ${targetDomain} 127.0.0.1`] : [])],
     })
     try {
       const directChannelPath = `/o/${orgId}/c/${hotChannelId}`
@@ -705,6 +713,8 @@ try {
       }
 
       const report = {
+        proxy: profile,
+        baseUrl,
         measuredAt: new Date().toISOString(),
         commit: commitSha,
         host: {
@@ -754,13 +764,13 @@ try {
 } finally {
   console.log(`Tearing down Compose stack (${project})...`)
   try {
-    dc(['down', '-v', '--remove-orphans'])
+    if (!external) dc(['down', '-v', '--remove-orphans'])
   } catch (err) {
     console.error('Failed to tear down compose stack:', err)
     process.exitCode = 1
   }
   try {
-    docker(['image', 'rm', '-f', image])
+    if (!external) docker(['image', 'rm', '-f', image])
   } catch {
     // ignore
   }
