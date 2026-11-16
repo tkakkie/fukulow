@@ -41,7 +41,7 @@ export function checkWorkspace(driver: string): void {
   if (process.env.MODULE_DIRECTION_EDGES !== undefined) {
     throw new Error('MODULE_DIRECTION_EDGES is only supported by the fixture driver')
   }
-  run('cargo', ['check', '--locked', '--all-targets'], {
+  run('cargo', ['check', '--locked', '--all-targets', '--features', 'fukulow-client-core/wasm'], {
     ...process.env,
     RUSTC_WORKSPACE_WRAPPER: driver,
   })

@@ -5,14 +5,26 @@ import { protocolClient, record, scenarios } from './protocol-test-helpers'
 import { initialState, step, type Input, type State } from './protocol'
 import { fixtureUuid, normalizeInput } from '../scripts/client-core-ids'
 
+import { createCore as createWasmCore } from './core-wasm'
+
 type Trace = { id: string; steps: number }
 function recorder(id: string) {
   let state = initialState(fixtureUuid('me'))
+  const wasm = createWasmCore(fixtureUuid('me'))
+  const tokens = new Set<number>()
   const trace: Trace = { id, steps: 0 }
   function feed(raw: Input) {
     const input = normalizeInput(raw)
     const result = step(state, input)
     const { channels, requests, timers, ...session } = result.state
+    const actual = wasm.step(input)
+    for (const effect of actual.effects) if ('id' in effect) tokens.add(effect.id)
+    const wasmRequests = Object.fromEntries([...tokens].flatMap(id => { const r = wasm.request(id); return r ? [[id, r]] : [] }))
+    const wasmTimers = Object.fromEntries([...tokens].flatMap(id => { const t = wasm.timer(id); return t ? [[id, t]] : [] }))
+    expect(JSON.parse(JSON.stringify({ ...wasm.get(), requests: wasmRequests, timers: wasmTimers,
+      effects: actual.effects, changedChannels: [...actual.changedChannels], records: [...actual.records], stateChanged: actual.stateChanged })),
+      id + ' step ' + trace.steps + ' ' + input.type).toEqual(JSON.parse(JSON.stringify({ ...result.state,
+      effects: result.effects, changedChannels: [...result.changedChannels], records: [...result.records], stateChanged: result.state !== state })))
     if (process.env.CLIENT_CORE_TRACE_FILE) appendFileSync(process.env.CLIENT_CORE_TRACE_FILE, JSON.stringify({ trace: id, input, expected: {
       effects: result.effects, changedChannels: [...result.changedChannels], records: [...result.records],
       stateChanged: result.state !== state, channels, session, requests, timers,

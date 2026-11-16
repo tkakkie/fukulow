@@ -4,6 +4,8 @@ mod merge;
 mod responses;
 mod transitions;
 mod types;
+#[cfg(feature = "wasm")]
+mod wasm;
 pub use types::*;
 
 use std::collections::BTreeMap;

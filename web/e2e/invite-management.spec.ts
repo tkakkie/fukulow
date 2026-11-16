@@ -14,9 +14,9 @@ for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
       can_invite: { allowed }, can_manage_roles: { allowed: role === 'owner' },
       can_deactivate_members: { allowed }, can_create_channels: { allowed: role !== 'guest' },
     } }
-    const member = { id: 'self', name: '自分', role }
+    const member = { id: '00000000-0000-0000-0000-000000000001', name: '自分', role }
     const invites: OutstandingInvite[] = Array.from({ length: 250 }, (_, n) => ({
-      id: `${n}`, email: `invite-${n}@example.invalid`, role: 'member', created_by: 'self', expires_at: '2027-01-01T00:00:00Z',
+      id: `${n}`, email: `invite-${n}@example.invalid`, role: 'member', created_by: '00000000-0000-0000-0000-000000000001', expires_at: '2027-01-01T00:00:00Z',
     }))
     const dist = resolve(import.meta.dirname, '../dist')
     const server = createServer(async (req, res) => {
@@ -41,7 +41,7 @@ for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
       if (!file.startsWith(`${dist}/`)) { res.writeHead(404); res.end(); return }
       try {
         const body = await readFile(file)
-        res.writeHead(200, { 'content-type': ({ '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' } as Record<string, string>)[extname(file)] ?? 'application/octet-stream' })
+        res.writeHead(200, { 'content-type': ({ '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm' } as Record<string, string>)[extname(file)] ?? 'application/octet-stream' })
         res.end(body)
       } catch { res.writeHead(404); res.end() }
     })

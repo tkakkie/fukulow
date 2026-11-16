@@ -5,7 +5,7 @@ import { flush } from './sync-test-helpers'
 import { expect, it } from 'vitest'
 import { windowClient } from './message-window-test-helpers'
 import { record } from './protocol-test-helpers'
-import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT, REPLY_MESSAGE_LIMIT, TOTAL_MESSAGE_LIMIT } from './protocol'
+import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT, REPLY_MESSAGE_LIMIT, TOTAL_MESSAGE_LIMIT } from './protocol-driver'
 
 it.skipIf(!process.env.MEASURE_WINDOW)('measures a long session with Channel switches and repeated Topic and Reply navigation', async () => {
   const c = windowClient(2000); await c.boot()

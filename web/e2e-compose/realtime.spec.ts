@@ -58,7 +58,8 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   const headers = first!.headers()
   expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")
   expect(headers['content-security-policy']).toContain('wss://' + new URL(baseURL!).host)
-  expect(headers['content-security-policy']).not.toMatch(/unsafe-inline|unsafe-eval/)
+  expect(headers['content-security-policy']).not.toMatch(/'unsafe-inline'|'unsafe-eval'/)
+  expect(headers['content-security-policy']).toContain("script-src 'self' 'wasm-unsafe-eval'")
   expect(headers['x-content-type-options']).toBe('nosniff')
   expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin')
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(baseURL!).hostname)
@@ -73,6 +74,14 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
     const response = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'gzip' } }))
     expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
     expect(response.headers()['content-encoding']).toBe('gzip')
+  }
+  const wasmAssets = await a.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.endsWith('.wasm') || /sync-wasm-.*\.js$/.test(name)))
+  expect(wasmAssets.filter(name => name.endsWith('.wasm'))).toHaveLength(1)
+  expect(wasmAssets.some(name => /sync-wasm-.*\.js$/.test(name))).toBe(true)
+  for (const path of wasmAssets) {
+    const response = await secretSafe(() => a.request.get(path))
+    expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
+    if (path.endsWith('.wasm')) expect(response.headers()['content-type']).toBe('application/wasm')
   }
   if (setup_required) {
     await a.getByLabel('組織名', { exact: true }).fill('Acme')

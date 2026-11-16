@@ -7,7 +7,7 @@ import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import { selectMainTimeline, selectTopicMessages, type TopicBaseline, type TopicSummaryError } from './topic-selectors'
 import { countSequencesAfter, rememberTopicMessages, trimMessages, topicEvidence, boundTopicEvidence } from './message-window'
-import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
+import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol-types'
 import { latestMessageCopy } from './identity-order'
 
 type Sync = ReturnType<typeof createSync>

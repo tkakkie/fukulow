@@ -177,6 +177,19 @@ async function check(profile: string) {
     const html = curl(['-sk', url + '/'])
     const asset = html.match(/src="([^"]+\.js)"/)?.[1]
     assert.ok(asset, 'built Vite entry must exist')
+    const rootHeaders = curl(['-sk', '-D', '-', '-o', '/dev/null', url + '/'])
+    assert.match(rootHeaders, /script-src 'self' 'wasm-unsafe-eval';/)
+    assert.doesNotMatch(rootHeaders, /'unsafe-eval'/)
+    const glue = html.match(/href="([^"]*sync-wasm-[^"]+\.js)"/)?.[1]
+    assert.ok(glue, 'manifest glue chunk is module-preloaded')
+    const glueSource = curl(['-sk', url + glue])
+    const wasm = glueSource.match(/assets\/fukulow_client_core_bg-[\w-]+\.wasm/)?.[0]
+    assert.ok(wasm, 'glue references emitted wasm')
+    for (const path of [glue, '/' + wasm]) {
+      const headers = curl(['-sk', '-D', '-', '-o', '/dev/null', url + path])
+      assert.match(headers, /cache-control: public, max-age=31536000, immutable/i)
+      if (path.endsWith('.wasm')) assert.match(headers, /content-type: application\/wasm/i)
+    }
     const assetHeaders = curl(['-sk', '-D', '-', '-o', '/dev/null', '-H', 'Accept-Encoding: gzip', url + asset])
     assert.match(assetHeaders, /cache-control: public, max-age=31536000, immutable/i)
     assert.match(assetHeaders, /content-encoding: gzip/i, `${profile} static compression`)

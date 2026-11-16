@@ -4,6 +4,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 | Rule | Test |
 |---|---|
+| Emitted wasm and glue are manifest-listed immutable assets; wasm uses application/wasm; unlisted hashed-looking names are never immutable | `server/src/lib.rs::wasm_and_glue_are_manifest_assets_with_immutable_cache_and_wasm_mime` |
 | Deployment/load app and migrate have read-only roots, drop ALL capabilities, forbid new privileges and have no writable mounts or tmpfs | `scripts/compose-security.test.ts::deployment and load app and migrate enforce container restrictions with removal and weakening denials` |
 | Both proxies enforce empty Permissions-Policy feature allowlists and COOP same-origin on success/errors; nginx locations cannot discard headers | `scripts/compose-security.test.ts::both proxies enforce browser headers with removal weakening and inheritance denials` |
 | nginx uses a full TLS config, the exact official ACME package, nginx-owned private state and an unprivileged master | `scripts/compose-security.test.ts::nginx TLS requires the full config, private state volume and package ABI check` |

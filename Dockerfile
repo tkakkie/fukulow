@@ -1,11 +1,29 @@
+FROM rust:1.99.1-slim@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS rust-base
+FROM rust-base AS wasm
+WORKDIR /app
+RUN rustup target add wasm32-unknown-unknown \
+ && cargo install wasm-bindgen-cli --version 0.2.130 --locked
+COPY Cargo.toml Cargo.lock ./
+COPY server/Cargo.toml server/Cargo.toml
+COPY server/test-macros/Cargo.toml server/test-macros/Cargo.toml
+COPY api-types/ api-types/
+COPY client-core/ client-core/
+RUN mkdir -p server/src server/test-macros/src \
+ && touch server/src/lib.rs server/src/main.rs server/test-macros/src/lib.rs \
+ && cargo build --locked --release -p fukulow-client-core --features wasm --target wasm32-unknown-unknown \
+ && wasm-bindgen --target web --out-dir web/wasm target/wasm32-unknown-unknown/release/fukulow_client_core.wasm
+
 FROM node:26.13.1-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS web
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci
 COPY web/ ./
-RUN npm run build
+COPY --from=wasm /app/web/wasm wasm/
+# The pinned Rust stage already generated the artifact.
+ARG SYNC_CORE=wasm
+RUN SYNC_CORE=${SYNC_CORE} npm run build --ignore-scripts
 
-FROM rust:1.99.1-slim@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS server
+FROM rust-base AS server
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml server/Cargo.toml

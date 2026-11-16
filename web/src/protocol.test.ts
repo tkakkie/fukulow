@@ -18,7 +18,7 @@ describe('pure protocol shared client fixtures', () => {
   })
 })
 
-import { initialState, step, type Input, type Effect, type State } from './protocol'
+import { initialState, step, type Input, type Effect, type State } from './protocol-driver'
 import { record } from './protocol-test-helpers'
 
 it('keeps duplicate Mention arrays stable and accepts a refreshed display name', () => {

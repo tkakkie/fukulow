@@ -63,7 +63,7 @@ pub enum Session {
     SignInRequired,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Pending {
     pub client_message_id: Uuid,

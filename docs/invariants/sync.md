@@ -4,6 +4,10 @@ Web real-time client: protocol, sync controller, Organization sync, shared contr
 
 | Rule | Test |
 |---|---|
+| Wasm sync matches the TS reference per input, including effects, changed Channels, records and stateChanged | `web/src/client-core-traces.test.ts::records live per-step references for every implemented core fixture and seeded sequences` |
+| Every dispatch notifies global, Channel and composer observers before its effects; repeated stop still notifies global observers | `web/src/sync-boundary.test.ts::notifies each input before its ordered effects and preserves repeated-stop global notifications` |
+| Core initialization finishes before any controller mounts; failure shows an error without starting sync | `web/src/bootstrap.test.ts::initializes wasm before mounting any controller and shows an error without starting on failure` |
+| Builds ship one sync implementation with the same bounded sync contract; wasm and glue ship together | `web/scripts/core-bundle.test.ts::ships exactly one implementation and rejects mixed missing or duplicate wasm bundles`, `web/src/core-contract.test.ts::the build switch preserves the bounded sync contract and never changes API values` |
 | Topic evidence is bounded; discarded evidence requires fresh W before counts become authoritative | `web/src/message-window-review.test.ts::bounds interleaved Topic evidence and rejects stale counts until a safe baseline refresh`, `web/src/message-window-review.test.ts::bounds production evidence under interleaved Topic arrivals while a baseline refresh is stalled` |
 | Disjoint cursor evidence is bounded; forgotten sequences require unfiltered recovery before cursor advancement | `web/src/message-window-review.test.ts::caps disjoint cursor evidence and refetches its forgotten final sequence without advancing across a gap` |
 | Display eviction preserves gap evidence, reconnect cursor, replay uniqueness and C8 reset | `web/src/message-window.test.ts::bounds sync bodies during an unresolved gap and keeps evicted continuation evidence through replay reconnect and C8` |

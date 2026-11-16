@@ -18,8 +18,8 @@ Always this file. Default: search headings/keywords, read only matches; split do
 Generated files (`openapi.json`, `web/src/api-schema.d.ts`, lockfiles) and CI/E2E/load logs: grep or read the relevant part first. Reorganising or verifying docs: read in full. "Not whole" is a default, never a ban on a needed diagnosis or consistency check.
 
 ## Stack
-Rust (axum, tokio, sqlx), PostgreSQL, WebSocket in `server/`; Svelte + Vite SPA (no SvelteKit/SSR) in `web/`, embedded (rust-embed). One Docker image; compose profile Caddy (default) or nginx; Xserver VPS.
-API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin (KMP) later; real-time events in the same schema. Auth: cookie (web), bearer (native).
+Rust (axum, tokio, sqlx), PostgreSQL, WebSocket in `server/`; Svelte + Vite SPA (Rust/wasm sync core, no SvelteKit/SSR) in `web/`, embedded (rust-embed). One Docker image; compose profile Caddy (default) or nginx; Xserver VPS.
+API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; shared Rust client core in `client-core/`; real-time events in the same schema. Auth: cookie (web), bearer (native).
 
 ## Rules
 - Tier 1 (absolute): CI-enforced, or review-enforced where marked. Tier 2 (default): deviate only for a better way, one line in the PR. A CI check is added only if reliable (with a negative test); until then the rule is review-enforced.
@@ -37,11 +37,11 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 - No new dependency, abstraction or doc without a reason in the PR.
 
 ## Boundaries
-- Module direction uses the explicit acyclic edge table in `scripts/module-direction.rs`: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`; `messages`, `realtime` -> `fukulow_api` (shared wire crate, leaf); `fukulow_client_core` -> `fukulow_api` only (no server edge to the core). Cross-module references require a listed direct edge; reachability does not grant permission. More crates are allowed with a PR reason (responsibility, dependency direction, build time, testability); crates keep this DAG, no cycles; release stays one binary, one image. Production domain split: #378.
+- Module direction uses the explicit acyclic edge table in `scripts/module-direction.rs`: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`; `messages`, `realtime` -> `fukulow_api` (shared wire crate, leaf); `fukulow_client_core` -> `fukulow_api` only (native + feature-gated wasm binding; no server edge to the core). Cross-module references require a listed direct edge; reachability does not grant permission. More crates are allowed with a PR reason (responsibility, dependency direction, build time, testability); crates keep this DAG, no cycles; release stays one binary, one image. Production domain split: #378.
 - Target DAG (#319): the four domain modules keep these edges; leaves `database` (used by channels, messages; by auth only once #314 needs it) and `shutdown` (used by messages, realtime) depend on nothing. Both leaves remain outside the checked module list in #318; checking them follows in M1 (#320). Kept on purpose: `docs/decisions/process.md` #319.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.
-- (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure protocol: `step(state, input) -> {state, effects}`, no clock, randomness, I/O, Svelte; vitest-testable. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
+- (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure Rust protocol owns State: `step(input)` returns effects, changed Channels, records and stateChanged; no clock, randomness, I/O or Svelte. JS caches changed views only; bounded request/timer accessors. Vitest exercises wasm. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
 - 4 and 5 do not know each other; only message sync has a protocol, CRUD is controller + adapter; no `$state` in 3 or 4.
 - REST/WebSocket types only from generated `api-schema.d.ts` (review); web-only types not duplicating the contract are fine. Behaviour: `docs/spec/realtime.md` "Real-time sync contract".
 

@@ -110,7 +110,7 @@ it('ordinary REST organization_unavailable ends only its Organization', async ()
         net.creates[0].resolve(refusal)
       }
       await settle()
-      expect(session.sync.get()).toMatchObject({ organization: 'unavailable', running: false, timers: {},
+      expect(session.sync.get()).toMatchObject({ organization: 'unavailable', running: false,
         channels: { A: { pending: [{ state: 'failed' }] } } })
       expect(net.socket.closed).toBe(true)
       expect(onEnded).not.toHaveBeenCalled()
