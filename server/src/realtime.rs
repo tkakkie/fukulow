@@ -7,16 +7,17 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Serialize;
 use std::{collections::HashMap, time::Duration};
 use tracing::Instrument;
-use utoipa::ToSchema;
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::{
     AppState,
     auth::{Auth, ErrorBody},
-    messages::{LIVE_QUEUE_CAPACITY, Message},
+    messages::LIVE_QUEUE_CAPACITY,
 };
 
 mod connection;
@@ -25,82 +26,10 @@ mod origin;
 pub use limits::{Budget, SocketGate, SocketLimits};
 pub use origin::AllowedOrigins;
 
-/// Queue overflow: reconnect and subscribe from the last seq per channel; never drop silently.
-pub const CLOSE_QUEUE_OVERFLOW: u16 = 4008;
-/// Session expired or signed out: stop protected delivery and go to Sign in.
-pub const CLOSE_SESSION_ENDED: u16 = 4001;
-/// Membership ended for this Organization only: terminal unavailable, no reconnect.
-pub const CLOSE_ORGANIZATION_UNAVAILABLE: u16 = 4003;
-/// Control-frame budget exhausted: reconnect with backoff, as after 4008.
-pub const CLOSE_RATE_LIMITED: u16 = 4029;
-
-/// Client -> server control messages. Cursors are per channel and exclusive.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientMessage {
-    Subscribe {
-        channel_id: Uuid,
-        /// Replay committed messages with seq > after_seq; 0 starts at the beginning.
-        #[schema(minimum = 0)]
-        after_seq: i64,
-    },
-    Unsubscribe {
-        channel_id: Uuid,
-    },
-}
-
-/// Server -> client events. Clients dedupe messages by (channel_id, seq).
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerEvent {
-    /// Own-Member DM list invalidation.
-    DmListChanged,
-    ActivityReady,
-    ActivityReset,
-    ChannelActivity {
-        channel_id: Uuid,
-        #[schema(minimum = 1)]
-        seq: i64,
-    },
-    ReadPositionChanged {
-        channel_id: Uuid,
-        #[schema(required = true)]
-        topic_id: Option<Uuid>,
-        #[schema(minimum = 0)]
-        read_seq: i64,
-    },
-    ChannelAccessGained {
-        channel_id: Uuid,
-    },
-    ChannelAccessRevoked {
-        channel_id: Uuid,
-    },
-    ChannelListChanged,
-    ChannelMembersChanged {
-        channel_id: Uuid,
-    },
-    MembersChanged,
-    /// Live and replayed messages have exactly the same canonical shape.
-    Message {
-        message: Message,
-    },
-    /// Sent after committed replay and queued live events have been handed off.
-    Subscribed {
-        channel_id: Uuid,
-        /// Last sequence caught up through; 0 when the channel has no messages.
-        #[schema(minimum = 0)]
-        caught_up_seq: i64,
-    },
-    /// Effective Channel access loss; the socket and other Channels stay open.
-    ChannelAccessLost {
-        channel_id: Uuid,
-    },
-    Error {
-        code: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        channel_id: Option<Uuid>,
-    },
-}
+pub use fukulow_api::{
+    CLOSE_ORGANIZATION_UNAVAILABLE, CLOSE_QUEUE_OVERFLOW, CLOSE_RATE_LIMITED, CLOSE_SESSION_ENDED,
+    ClientMessage, ServerEvent,
+};
 
 /// Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.
 /// Authenticate with the session cookie or Authorization: Bearer, never a query token.

@@ -72,3 +72,9 @@ test('nginx ACME ABI and Pebble require exact matching pins', () => {
     assert.throws(() => checkVersions({ ...files, acme: files.acme.replace(/ghcr\.io\/letsencrypt\/pebble:[^']+/, `ghcr.io/letsencrypt/pebble:${pin}`) }), /Pebble must pin/)
   }
 })
+
+test('wasm target must stay pinned in the Rust toolchain', () => {
+  for (const rust of [files.rust.replace(/^targets = .*$/m, ''), files.rust.replace('wasm32-unknown-unknown', 'wasm32-wasip1')]) {
+    assert.throws(() => checkVersions({ ...files, rust }), /targets must include wasm32-unknown-unknown/)
+  }
+})

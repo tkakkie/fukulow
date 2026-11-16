@@ -21,6 +21,12 @@ impl Fixture {
         let (header, _) = manifest.split_once("\n[dependencies]").unwrap();
         fs::write(fixture.0.join("server/Cargo.toml"), header).unwrap();
         fs::write(fixture.0.join("server/src/main.rs"), "fn main() {}\n").unwrap();
+        // Cargo resolves every workspace member even though this fixture only tests server lints.
+        fs::create_dir_all(fixture.0.join("api-types/src")).unwrap();
+        let manifest = fs::read_to_string(root.join("../api-types/Cargo.toml")).unwrap();
+        let (header, _) = manifest.split_once("\n[dependencies]").unwrap();
+        fs::write(fixture.0.join("api-types/Cargo.toml"), header).unwrap();
+        fs::write(fixture.0.join("api-types/src/lib.rs"), "").unwrap();
         fixture
     }
 

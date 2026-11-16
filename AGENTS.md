@@ -37,7 +37,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 - No new dependency, abstraction or doc without a reason in the PR.
 
 ## Boundaries
-- Module direction uses the explicit acyclic edge table in `scripts/module-direction.rs`: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`. Cross-module references require a listed direct edge; reachability does not grant permission. More crates are allowed with a PR reason (responsibility, dependency direction, build time, testability); crates keep this DAG, no cycles; release stays one binary, one image. Production domain split: #378.
+- Module direction uses the explicit acyclic edge table in `scripts/module-direction.rs`: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`; `messages`, `realtime` -> `fukulow_api` (shared wire crate, leaf). Cross-module references require a listed direct edge; reachability does not grant permission. More crates are allowed with a PR reason (responsibility, dependency direction, build time, testability); crates keep this DAG, no cycles; release stays one binary, one image. Production domain split: #378.
 - Target DAG (#319): the four domain modules keep these edges; leaves `database` (used by channels, messages; by auth only once #314 needs it) and `shutdown` (used by messages, realtime) depend on nothing. Both leaves remain outside the checked module list in #318; checking them follows in M1 (#320). Kept on purpose: `docs/decisions/process.md` #319.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.
@@ -47,7 +47,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; Kotlin 
 
 ## Commands
 - Server: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-- Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build` (invariants checked statically; cargo matching runs in CI server job)
+- Web: `npm --prefix web run check && npm --prefix web test && npm --prefix web run build` (invariants checked statically; cargo matching runs in CI server-tests shard 1)
 - Migrations: `bash scripts/check-migrations.sh <base-sha>`, `node --test scripts/check-migrations.test.ts`; the schema guard runs in `cargo test` with Postgres. API types: `make api`. Module direction: `docs/workflow.md` §8.
 
 ## Workflow essentials

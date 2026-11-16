@@ -1,5 +1,5 @@
 use super::*;
-use sqlx::{FromRow, Row};
+use sqlx::Row;
 
 #[cfg(test)]
 mod measurement;
@@ -125,7 +125,7 @@ async fn read(
             if row.try_get::<Option<Uuid>, _>("id")?.is_none() {
                 continue;
             }
-            let message = Message::from_row(row)?;
+            let message = message_from_row(row)?;
             items.push(match message.topic_id {
                 None => TimelineItem::Message { message },
                 Some(id) => TimelineItem::Topic {

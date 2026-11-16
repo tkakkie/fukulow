@@ -1,5 +1,5 @@
 [workspace]
-members = ["server"]
+members = ["server", "api-types"]
 resolver = "2"
 
 [workspace.lints.rust]

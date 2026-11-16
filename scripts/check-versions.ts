@@ -7,6 +7,9 @@ export function checkVersions(files: {
   compose: string, acme: string,
 }): void {
   const rust = files.rust.match(/^channel = "([^"]+)"$/m)?.[1]
+  const targets = files.rust.match(/^targets = \[([^\]]*)\]$/m)?.[1]
+  assert.ok(targets?.split(',').map(value => value.trim()).includes('"wasm32-unknown-unknown"'),
+    'Rust targets must include wasm32-unknown-unknown')
   const node = files.node.trim()
   assert.ok(rust && /^\d+\.\d+\.\d+$/.test(rust), 'Rust must name an exact patch version')
   assert.match(node, /^\d+\.\d+\.\d+$/, 'Node must name an exact patch version')

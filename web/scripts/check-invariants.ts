@@ -21,7 +21,7 @@
 //     tree cannot be trusted (#[path], include!, macro_rules!, unbalanced braces). So an unreferenced
 //     server/src/unused_guard.rs is refused even if lib.rs has an inline `mod unused_guard` with a test of the same name.
 //     Other server/tests/** paths (e.g. tests/helpers/mod.rs) and server/src/bin/** cannot be mapped and are refused.
-//     Without cargo, the CLI fails. CI runs it in the server job after `cargo nextest run --locked` (already compiled).
+//     Without cargo, the CLI fails. CI runs it in server-tests shard 1 after `cargo nextest run --locked` (already compiled).
 //     The vitest "real docs" test uses the static scan only (the web job has no Rust build).
 //   - Vitest: web/**/*.{test,spec}.ts outside web/e2e (mirrors `test.exclude` in web/vite.config.ts).
 //     Not run: .skip, .todo, .fixme, xit/xtest/xdescribe, and any test inside such a describe.
