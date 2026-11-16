@@ -11,6 +11,7 @@ async function fixture(
   options: { withChannel?: boolean; upgradeDelayMs?: number } = {},
 ) {
   let upgrades = 0, memberChecks = 0
+  const org = '00000000-0000-0000-0000-000000000001', member = '00000000-0000-0000-0000-000000000002', channel = '00000000-0000-0000-0000-000000000003'
   const capabilities = { can_invite: { allowed: true }, can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } }
   const dist = resolve(import.meta.dirname, '../dist')
   const server = createServer(async (req, res) => {
@@ -20,43 +21,44 @@ async function fixture(
       res.end(JSON.stringify(body))
     }
     if (path === '/api/v1/me') return json({ account: { id: 'account', email: 'a@example.com' },
-      organizations: [{ organization_id: 'o', name: 'Org', capabilities }] })
-    if (path === '/api/v1/orgs/o/me') {
+      organizations: [{ organization_id: org, name: 'Org', capabilities }] })
+    if (path === `/api/v1/orgs/${org}/me`) {
       memberChecks++
       if (memberChecks > 1) {
         if (mode === 'membership') return json({ error: 'organization_unavailable' }, 404)
         if (mode === 'network') { req.socket.destroy(); return }
         return json({ error: 'internal_error' }, 503)
       }
-      return json({ organization: { organization_id: 'o', name: 'Org', capabilities }, member: { id: 'm', name: 'Alice', role: 'owner' } })
+      return json({ organization: { organization_id: org, name: 'Org', capabilities }, member: { id: member, name: 'Alice', role: 'owner' } })
     }
-    if (path === '/api/v1/orgs/o/members') return json({ members: [] })
-    if (path === '/api/v1/orgs/o/channels') {
+    if (path === `/api/v1/orgs/${org}/members`) return json({ members: [] })
+    if (path === `/api/v1/orgs/${org}/channels`) {
       return json({
         channels: options.withChannel
-          ? [{ id: 'c1', kind: 'channel', name: 'general', visibility: 'public', created_at: '2026-01-01T00:00:00Z' }]
+          ? [{ id: channel, kind: 'channel', name: 'general', visibility: 'public', created_at: '2026-01-01T00:00:00Z' }]
           : [],
       })
     }
     const retainedMessage = {
-      id: 'm1',
-      channel_id: 'c1',
+      id: '00000000-0000-0000-0000-000000000004',
+      channel_id: channel,
       seq: 1,
-      sender: 'm',
-      client_message_id: 'cm1',
+      sender: member,
+      client_message_id: '00000000-0000-0000-0000-000000000005',
+      mentions: [],
       body: '保持されるメッセージ',
       created_at: '2026-01-01T00:00:00Z',
       topic_id: null,
       reply_to: null,
       reply_root_id: null,
     }
-    if (path === '/api/v1/orgs/o/channels/c1/messages') {
+    if (path === `/api/v1/orgs/${org}/channels/${channel}/messages`) {
       return json({
         messages: [retainedMessage],
         has_more: false,
       })
     }
-    if (path === '/api/v1/orgs/o/channels/c1/timeline') {
+    if (path === `/api/v1/orgs/${org}/channels/${channel}/timeline`) {
       return json({
         as_of_seq: 1,
         items: [{ kind: 'message', message: retainedMessage }],
@@ -67,7 +69,7 @@ async function fixture(
     if (!file.startsWith(`${dist}/`)) { res.writeHead(404); res.end(); return }
     try {
       const body = await readFile(file)
-      const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' }
+      const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.wasm': 'application/wasm' }
       res.writeHead(200, { 'content-type': mime[extname(file)] ?? 'application/octet-stream' })
       res.end(body)
     } catch { res.writeHead(404); res.end() }

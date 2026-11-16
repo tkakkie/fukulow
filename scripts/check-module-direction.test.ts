@@ -174,7 +174,8 @@ pub fn make() -> Item { Item { count: 1 } }
           `fn f(i: &${target}::Item) -> u8 { i.count() }`,
           `${target}::empty!();`, `use ${target} as bridge; bridge::empty!();`,
         ]) {
-          const inner = tests ? '#[cfg(test)] mod tests { ' + body + ' }' : body
+          const binding = from === 'fukulow_client_core' ? 'mod wasm { ' + body + ' }' : body
+          const inner = tests ? '#[cfg(test)] mod tests { ' + binding + ' }' : binding
           const wholeCrate = from.startsWith('fukulow_')
           const source = wholeCrate ? inner : 'mod ' + from + ' { ' + inner + ' }'
           const extra = ['--extern', to + '=' + external]

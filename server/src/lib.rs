@@ -357,7 +357,7 @@ async fn security_headers(State(secure): State<bool>, request: Request, next: Ne
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
     let policy = format!(
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'{websocket}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'{websocket}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
     );
     let api = request.uri().path() == "/api" || request.uri().path().starts_with("/api/");
     let mut response = next.run(request).await;
@@ -475,17 +475,19 @@ async fn static_handler(uri: Uri) -> Response {
 }
 
 fn serve_asset(name: &str, file: rust_embed::EmbeddedFile) -> Response {
-    let mime = mime_guess::from_path(name).first_or_octet_stream();
+    let guessed = mime_guess::from_path(name).first_or_octet_stream();
+    let mime = if name.ends_with(".wasm") {
+        "application/wasm"
+    } else {
+        guessed.as_ref()
+    };
     let cache = if is_hashed_asset(name) {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"
     };
     (
-        [
-            (header::CONTENT_TYPE, mime.as_ref()),
-            (header::CACHE_CONTROL, cache),
-        ],
+        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache)],
         file.data,
     )
         .into_response()
@@ -562,6 +564,39 @@ mod tests {
             checked > 0,
             "web/dist has no assets; build the web app first"
         );
+    }
+
+    #[tokio::test]
+    async fn wasm_and_glue_are_manifest_assets_with_immutable_cache_and_wasm_mime() {
+        let manifest = Assets::get(".vite/manifest.json").expect("build web first");
+        let chunks: HashMap<String, ManifestChunk> =
+            serde_json::from_slice(&manifest.data).unwrap();
+        let wasm: Vec<_> = chunks
+            .values()
+            .map(|c| &c.file)
+            .filter(|name| name.ends_with(".wasm"))
+            .collect();
+        let glue: Vec<_> = chunks
+            .values()
+            .map(|c| &c.file)
+            .filter(|name| name.contains("sync-wasm") && name.ends_with(".js"))
+            .collect();
+        assert_eq!(wasm.len(), 1);
+        assert_eq!(glue.len(), 1);
+        for name in wasm.iter().chain(glue.iter()) {
+            assert!(is_hashed_asset(name));
+            let response = get(&format!("/{name}")).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+            if name.ends_with(".wasm") {
+                assert_eq!(content_type(&response), "application/wasm");
+            }
+        }
+        assert!(!is_hashed_asset("assets/unlisted-abc12345.wasm"));
+        assert!(!is_hashed_asset("assets/sync-wasm-abc12345.js"));
     }
 
     #[tokio::test]
@@ -650,9 +685,10 @@ mod tests {
                     "connect-src 'self' {scheme}://chat.example:18443;"
                 )));
                 assert!(csp.contains("frame-ancestors 'none'"));
-                assert!(csp.contains("script-src 'self'"));
+                assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
+                assert!(!csp.contains("'unsafe-eval'"));
                 assert!(csp.contains("style-src 'self'"));
-                assert!(!csp.contains("unsafe-"));
+                assert!(!csp.replace("'wasm-unsafe-eval'", "").contains("unsafe-"));
                 assert!(!csp.contains("evil.example"));
                 assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
                 assert_eq!(

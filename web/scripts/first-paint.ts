@@ -59,6 +59,7 @@ type RunMetrics = {
   blankScreenMs: number
   jsEndMs: number
   cssEndMs: number
+  wasmEndMs: number
   assetsEndMs: number
   assetsTransferBytes: number
   appMountMs: number
@@ -86,6 +87,7 @@ type CellSummary = {
   assetsEndMs: PercentilePair
   jsEndMs: PercentilePair
   cssEndMs: PercentilePair
+  wasmEndMs: PercentilePair
   appMountMs: PercentilePair
   wsSubscribedMs: PercentilePair
   timelineVisibleMs: PercentilePair
@@ -130,7 +132,8 @@ if (
     JSON.stringify({ cliPluginsExtraDirs: ['/Applications/Docker.app/Contents/Resources/cli-plugins'] }),
   )
 }
-const image = `${project}-app`
+const prebuiltImage = process.env.FIRST_PAINT_IMAGE?.trim()
+const image = prebuiltImage || `${project}-app`
 const env: NodeJS.ProcessEnv = {
   ...process.env,
   ...(existsSync(dockerConfigDir) ? { DOCKER_CONFIG: dockerConfigDir } : {}),
@@ -449,10 +452,15 @@ async function measurePageLoad(
       const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
       const jsResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.js'))
       const cssResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.css'))
+      const wasmResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.wasm'))
       const jsEndMs = jsResources.length > 0 ? Math.max(...jsResources.map((r) => r.responseEnd)) : 0
       const cssEndMs = cssResources.length > 0 ? Math.max(...cssResources.map((r) => r.responseEnd)) : 0
-      const assetsEndMs = Math.max(jsEndMs, cssEndMs)
-      const assetsTransferBytes = [...jsResources, ...cssResources].reduce((sum, r) => sum + (r.transferSize ?? 0), 0)
+      const wasmEndMs = wasmResources.length > 0 ? Math.max(...wasmResources.map((r) => r.responseEnd)) : 0
+      const assetsEndMs = Math.max(jsEndMs, cssEndMs, wasmEndMs)
+      const assetsTransferBytes = [...jsResources, ...cssResources, ...wasmResources].reduce(
+        (sum, r) => sum + (r.transferSize ?? 0),
+        0,
+      )
 
       const usedResourceIndices = new Set<number>()
       const apiCalls: ApiTiming[] = startedBeforeTimeline.map((c) => {
@@ -512,6 +520,7 @@ async function measurePageLoad(
         blankScreenMs: Number(s.fcpMs.toFixed(2)),
         jsEndMs: Number(jsEndMs.toFixed(2)),
         cssEndMs: Number(cssEndMs.toFixed(2)),
+        wasmEndMs: Number(wasmEndMs.toFixed(2)),
         assetsEndMs: Number(assetsEndMs.toFixed(2)),
         assetsTransferBytes,
         appMountMs: Number(s.appMountMs.toFixed(2)),
@@ -568,6 +577,7 @@ function summarizeCell(
     assetsEndMs: summarizeNumbers(runs.map((r) => r.assetsEndMs)),
     jsEndMs: summarizeNumbers(runs.map((r) => r.jsEndMs)),
     cssEndMs: summarizeNumbers(runs.map((r) => r.cssEndMs)),
+    wasmEndMs: summarizeNumbers(runs.map((r) => r.wasmEndMs)),
     appMountMs: summarizeNumbers(runs.map((r) => r.appMountMs)),
     wsSubscribedMs: summarizeNumbers(runs.map((r) => r.wsSubscribedMs)),
     timelineVisibleMs: summarizeNumbers(runs.map((r) => r.timelineVisibleMs)),
@@ -579,9 +589,10 @@ function summarizeCell(
 }
 
 try {
-  console.log(`${external ? 'Using disposable' : 'Building and starting'} Compose stack (${project}, profile: ${profile})...`)
+  const startMode = external ? 'Using disposable' : prebuiltImage ? `Starting prebuilt image ${image} in` : 'Building and starting'
+  console.log(`${startMode} Compose stack (${project}, profile: ${profile})...`)
   if (!external) {
-    dc(['build', 'app'])
+    if (!prebuiltImage) dc(['build', 'app'])
     dc(['up', '-d', '--no-build', '--wait', '--wait-timeout', '120'])
   }
 
@@ -770,7 +781,8 @@ try {
     process.exitCode = 1
   }
   try {
-    if (!external) docker(['image', 'rm', '-f', image])
+    // A prebuilt image (FIRST_PAINT_IMAGE) is reused across interleaved rounds, so it is never removed here.
+    if (!external && !prebuiltImage) docker(['image', 'rm', '-f', image])
   } catch {
     // ignore
   }

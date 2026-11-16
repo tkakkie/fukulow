@@ -144,7 +144,7 @@ http {
         # Stock nginx has gzip, not zstd; keep API responses out of compression.
         gzip on;
         gzip_vary on;
-        gzip_types text/css text/javascript application/javascript image/svg+xml;
+        gzip_types text/css text/javascript application/javascript image/svg+xml application/wasm;
         gzip_proxied any;
         location = /api { gzip off; proxy_pass http://app:8080; }
         location /api/ { gzip off; proxy_pass http://app:8080; }
@@ -324,8 +324,11 @@ test('proxy grammar rejects unprobed scopes, inheritance controls and alternate 
 })
 
 function checkBaseImages(dockerfile: string) {
-  const bases = dockerfile.matchAll(/^FROM (\S+)/gm)
-  for (const [, image] of bases) assert.match(image, /^\w+:[\w.-]+@sha256:[a-f0-9]{64}$/, 'base image must pin tag and digest')
+  const stages = new Set<string>()
+  for (const [, image, stage] of dockerfile.matchAll(/^FROM (\S+)(?: AS (\S+))?$/gmi)) {
+    if (!stages.has(image.toLowerCase())) assert.match(image, /^\w+:[\w.-]+@sha256:[a-f0-9]{64}$/, 'base image must pin tag and digest')
+    if (stage) stages.add(stage.toLowerCase())
+  }
 }
 
 function checkImagesAndLogs(services: Record<string, { build?: unknown, image: string, logging: unknown }>) {
@@ -356,7 +359,12 @@ test('all base images and external Compose images are pinned; every deployment/l
 })
 
 test('base image check rejects an unpinned Dockerfile base', () => {
-  assert.throws(() => checkBaseImages('FROM debian:bookworm-slim\n'), /base image must pin tag and digest/)
+  for (const source of ['FROM debian:bookworm-slim\n', 'FROM missing AS server',
+    'FROM base AS server\nFROM debian:bookworm-slim AS base',
+    'FROM debian:bookworm-slim AS base\nFROM base AS server']) {
+    assert.throws(() => checkBaseImages(source), /base image must pin tag and digest/)
+  }
+  checkBaseImages('FROM rust:1.99.1-slim@sha256:' + 'a'.repeat(64) + ' AS base\nFROM base AS wasm\nFROM wasm AS server')
 })
 
 test('upgrade rehearsal pins both old images for the post-merge Compose shape', () => {

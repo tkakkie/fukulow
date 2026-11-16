@@ -15,3 +15,11 @@ panic = "deny"
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Only the browser wasm build uses this profile (scripts/build-wasm.ts, Dockerfile); server release builds are unchanged.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

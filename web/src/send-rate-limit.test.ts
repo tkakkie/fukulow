@@ -103,7 +103,7 @@ it('controller cancels throttled retry on settlement, discard, denial, lifecycle
       await client.feed({ type: 'history_result', respond_to: bootstrap, messages: [record(60)], has_more: false })
     }
     await flush()
-    expect(Object.values(client.sync.get().timers).filter(t => t.purpose === 'send_retry')).toEqual([])
+    expect((client.sync.get().channels.A?.pending ?? []).flatMap(p => p.retryWait === undefined ? [] : [client.sync.timer(p.retryWait)])).toEqual([])
     expect(vi.getTimerCount()).toBe(0)
     const savedCallback = wait.fn as () => void
     savedCallback()
@@ -134,7 +134,7 @@ it('clamp fences old 429 while new bootstrap sends may wait and retry', async ()
   const before = client.sync.get()
   await client.feed({ type: 'send_failed', respond_to: old, status: 429, retry_after_ms: 1000 })
   expect(client.sync.get().channels).toBe(before.channels)
-  expect(client.sync.get().timers).toBe(before.timers)
+  expect(client.sync.timer(before.channels.A.pending.find(p => p.retryWait !== undefined)!.retryWait!)).toMatchObject({ purpose: 'send_retry' })
   await vi.advanceTimersByTimeAsync(1999)
   expect(client.allEffects.filter(e => e.type === 'send')).toHaveLength(2)
   await vi.advanceTimersByTimeAsync(1)

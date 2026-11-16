@@ -28,9 +28,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: rustup toolchain install --profile minimal
+      - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - run: npm --prefix web ci
+      # Before any wasm build: the TS rollback must not need the wasm toolchain or web/wasm.
+      - run: SYNC_CORE=ts npm --prefix web run build -- --outDir ../target/web-ts --emptyOutDir
       - run: npm --prefix web run check
       - run: npm --prefix web test
+      - run: SYNC_CORE=ts npm --prefix web test
       - run: npm --prefix web run build
   # Linting needs no DB or real SPA: an empty web/dist satisfies rust-embed for clippy, so lint runs alongside `web`.
   lint:
@@ -44,7 +49,7 @@ jobs:
       - run: mkdir -p web/dist
       - run: cargo build -p fukulow-api -p fukulow-client-core --target wasm32-unknown-unknown --locked
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets --features fukulow-client-core/wasm -- -D warnings
   load:
     runs-on: ubuntu-latest
     steps:
@@ -78,6 +83,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: rustup toolchain install --profile minimal
+      - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - run: npm --prefix web ci # also for the invariants check, which imports typescript
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
@@ -87,7 +94,7 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with: { tool: cargo-nextest@0.9.151 }
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
-      - run: cargo nextest run --locked --no-fail-fast --partition count:${{ matrix.shard }}/3
+      - run: cargo nextest run --locked --features fukulow-client-core/wasm --no-fail-fast --partition count:${{ matrix.shard }}/3
       - if: matrix.shard == 1
         run: cargo test --locked --doc # nextest does not run doctests
       - if: matrix.shard == 1
@@ -107,6 +114,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: rustup toolchain install --profile minimal
+      - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml

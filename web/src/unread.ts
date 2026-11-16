@@ -3,7 +3,7 @@ import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, T
 import type { createSync } from './sync'
 import type { Topics } from './topics'
 import type { TopicBaseline } from './topic-selectors'
-import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol'
+import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol-types'
 import { backoffCap } from './reconnect'
 import { completeCountFields, chooseBaseline, chooseChannelBaseline, coveredThrough, inScope, mainBaseline, recordCoverage,
   needsUnreadRecord, scopeCount, sequenceToSubmit, topicBaseline, type AggregateBaseline, type Coverage, type ScopeBaseline, type UnreadScope, type UnreadRecord } from './unread-counts'

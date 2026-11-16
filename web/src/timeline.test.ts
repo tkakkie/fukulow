@@ -21,7 +21,7 @@ it('a timed-out send cannot restore its draft after stop and a late 409', async 
   expect(await sending).toBe(true)
   const pending = sync.get().channels.A.pending[0]
   expect(pending.state).toBe('unknown')
-  expect(sync.get().requests[pending.request]).toBeUndefined()
+  expect(sync.request(pending.request)).toBeUndefined()
   await sync.close()
   net.sends[0].resolve({ ok: false, kind: 'http', status: 409 })
   await settle()

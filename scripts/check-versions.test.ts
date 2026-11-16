@@ -9,7 +9,7 @@ const files = { rust: read('rust-toolchain.toml'), node: read('.node-version'),
   loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
   playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
   webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
-  compose: read('compose.yml'), acme: read('scripts/compose-acme.ts') }
+  compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') }
 
 test('versions agree with tag-only and tag-plus-digest Docker bases', () => {
   checkVersions(files)
@@ -77,4 +77,13 @@ test('wasm target must stay pinned in the Rust toolchain', () => {
   for (const rust of [files.rust.replace(/^targets = .*$/m, ''), files.rust.replace('wasm32-unknown-unknown', 'wasm32-wasip1')]) {
     assert.throws(() => checkVersions({ ...files, rust }), /targets must include wasm32-unknown-unknown/)
   }
+})
+
+test('wasm-bindgen library and locked CLI installs must agree', () => {
+  assert.throws(() => checkVersions({ ...files, core: files.core.replace('=0.2.130', '^0.2.130') }), /exact version/)
+  for (const name of ['dockerfile', 'ci', 'e2e'] as const) {
+    assert.throws(() => checkVersions({ ...files, [name]: files[name].replaceAll('--version 0.2.130', '--version 0.2.129') }), /CLI must agree/)
+    assert.throws(() => checkVersions({ ...files, [name]: files[name].replaceAll(/cargo install wasm-bindgen-cli[^\n]+/g, '') }), /must install/)
+  }
+  assert.throws(() => checkVersions({ ...files, wasmBuild: files.wasmBuild.replaceAll("'--locked'", '') }), /must use --locked/)
 })

@@ -668,10 +668,10 @@ it('controller skips unchanged Channels during olderError bookkeeping and keeps 
   trackChannels()
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
 
-  // Each of the 5 dispatches clones previous.channels once inside step; controller dispatch enumerates/reads 0 unchanged keys.
-  expect(ownKeysCalls).toBe(5)
-  expect(bReads).toBe(5)
-  expect(cReads).toBe(5)
+  // A changed-view cache may copy the Channel map once per dispatch; bookkeeping never inspects unchanged Channel fields.
+  expect(ownKeysCalls).toBeLessThanOrEqual(5)
+  expect(bReads).toBe(ownKeysCalls)
+  expect(cReads).toBe(ownKeysCalls)
   expect(visits).toBe(0)
   expect(client.sync.get().channels.B).toBe(bChannel)
   expect(client.sync.get().channels.C).toBe(cChannel)

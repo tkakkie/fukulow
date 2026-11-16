@@ -11,6 +11,7 @@ import { getOrganizationMe, isOrganizationUnavailable, type Identity } from './a
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
+import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess } from './members'
 import { membersAdapter } from './members.svelte'
@@ -27,12 +28,14 @@ export type AuthDeps = {
   setupAndSignIn: typeof setupAndSignIn
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
+  /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
+  coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
   openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void): SessionModel
 }
 const defaults: AuthDeps = {
-  restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe,
+  restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
   openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
   openSession(selfId, onEnded, organizationId, drafts, onIdentity) {
     const session = createSession({ selfId, onEnded, organizationId, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
@@ -113,6 +116,11 @@ export function createAuth(deps: AuthDeps = defaults) {
       if (isOrganizationUnavailable(result)) organizationStatus = 'unavailable'
       else organizationStatus = 'error'
       return
+    }
+    // The REST reads above overlap core loading; no sync controller exists until the core is ready.
+    if (deps.coreReady) {
+      try { await deps.coreReady() } catch { return }
+      if (account !== accountGeneration || selection !== selectionGeneration) return
     }
     organization = result.data
     session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {

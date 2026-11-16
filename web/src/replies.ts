@@ -1,7 +1,7 @@
 import * as api from './api'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
-import { REPLY_MESSAGE_LIMIT } from './protocol'
+import { REPLY_MESSAGE_LIMIT } from './protocol-types'
 import { countSequencesAfter, rememberSequence, trimMessages, EVIDENCE_LIMIT } from './message-window'
 
 type Sync = ReturnType<typeof createSync>

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 export function checkVersions(files: {
   rust: string, node: string, webNode: string, loadNode: string, dockerfile: string,
   playwright: string, webLock: string, e2e: string,
-  compose: string, acme: string,
+  compose: string, acme: string, core: string, wasmBuild: string, ci: string,
 }): void {
   const rust = files.rust.match(/^channel = "([^"]+)"$/m)?.[1]
   const targets = files.rust.match(/^targets = \[([^\]]*)\]$/m)?.[1]
@@ -33,6 +33,15 @@ export function checkVersions(files: {
   const playwrightImage = images[0][1]
   assert.equal(playwrightImage.split('@')[0], `mcr.microsoft.com/playwright:v${files.playwright}-noble`, 'Playwright image must agree with package.json and use Noble')
   assert.match(playwrightImage, /^[^@]+@sha256:[a-f0-9]{64}$/, 'Playwright image digest must be sha256 with 64 hex digits')
+  const bindgen = files.core.match(/wasm-bindgen = \{ version = "=(\d+\.\d+\.\d+)"/)?.[1]
+  assert.ok(bindgen, 'wasm-bindgen must pin an exact version')
+  for (const [name, source] of [['Dockerfile', files.dockerfile], ['CI', files.ci], ['E2E', files.e2e]]) {
+    const installs = [...source.matchAll(/cargo install wasm-bindgen-cli --version (\S+) --locked/g)]
+    assert.ok(installs.length, name + ' must install wasm-bindgen-cli with --locked')
+    for (const install of installs) assert.equal(install[1], bindgen, name + ' wasm-bindgen CLI must agree with crate')
+  }
+  assert.match(files.wasmBuild, /cargo.*|run\('cargo'/, 'wasm build uses Cargo')
+  assert.match(files.wasmBuild, /'--locked'/, 'wasm build must use --locked')
   const nginxImages = [...files.compose.matchAll(/^\s+image: (nginx:\S+)$/gm)]
   assert.equal(nginxImages.length, 1, 'Compose must have exactly one nginx image')
   const nginx = nginxImages[0][1]
@@ -52,5 +61,5 @@ if (import.meta.main) {
     loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
     playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
     webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
-    compose: read('compose.yml'), acme: read('scripts/compose-acme.ts') })
+    compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') })
 }

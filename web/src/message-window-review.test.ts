@@ -1,5 +1,5 @@
 import { evidenceClient, observeBookkeeping } from './message-window-evidence-test-helpers'
-import { initialState, step, type Input } from './protocol'
+import { initialState, step, type Input } from './protocol-driver'
 import { record } from './protocol-test-helpers'
 import { expect, it } from 'vitest'
 import { replyClient, reply, root } from './reply-test-helpers'

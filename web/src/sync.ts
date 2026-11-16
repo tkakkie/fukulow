@@ -5,7 +5,8 @@ import * as api from './api'
 import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
-import { initialState, step, type ChannelState, type Effect, type Input } from './protocol'
+import { createCore } from '#sync-core'
+import type { ChannelState, Effect, Input } from './protocol-types'
 
 export type TimelineApi = {
   listMessages(channel: string, query?: ListMessagesQuery): Promise<Result<MessagePage>>
@@ -106,7 +107,8 @@ export function createSync(options: SyncOptions) {
   const random = options.random ?? Math.random
   const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms))
   const cancel = options.cancel ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
-  let state = initialState(options.selfId)
+  const core = createCore(options.selfId)
+  let state = core.get()
   let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
@@ -261,13 +263,14 @@ export function createSync(options: SyncOptions) {
         // A repeated stop sees no pending state; it must not undo an earlier detachment (C10).
         if (draft.detached) continue
         draft.detached = previous.channels[draft.channel]?.pending.some(p => {
-          const request = previous.requests[p.request]
+          const request = core.request(p.request)
           return p.clientMessageId === id && p.state !== 'unknown' && request !== undefined && !request.stale
         }) ?? false
       }
     }
-    const result = step(state, input)
-    state = result.state
+    const previousRequest = input.type === 'history_failed' ? core.request(input.request) : undefined
+    const result = core.step(input)
+    state = core.get()
     const extraChanged = new Set<string>()
     const changedComposers = new Set<string>()
     const changedTopicComposers = new Set<string>()
@@ -316,7 +319,7 @@ export function createSync(options: SyncOptions) {
       }
     } else {
       if (input.type === 'history_failed') {
-        const req = previous.requests[input.request]
+        const req = previousRequest
         if (req?.type === 'history' && req.page === 'before' && !req.stale) {
           const next = state.channels[req.channel]
           if (state.running && next && next.state !== 'unavailable' && putOlderError(req.channel, true)) {
@@ -337,7 +340,7 @@ export function createSync(options: SyncOptions) {
         }
       }
     }
-    if (state !== previous) listeners.forEach(l => l(result.changedChannels, result.records))
+    if (result.stateChanged) listeners.forEach(l => l(result.changedChannels, result.records))
     for (const channel of result.changedChannels) {
       channelListeners.get(channel)?.forEach(l => l())
     }
@@ -492,7 +495,7 @@ export function createSync(options: SyncOptions) {
         const arm = (remaining: number) => {
           const chunk = Math.min(remaining, 2_147_483_647)
           timers.set(effect.id, schedule(() => {
-            if (!state.timers[effect.id]) return
+            if (!core.timer(effect.id)) return
             if (remaining > chunk) { arm(remaining - chunk); return }
             timers.delete(effect.id)
             void dispatch({ type: 'timer_elapsed', id: effect.id })
@@ -810,6 +813,8 @@ export function createSync(options: SyncOptions) {
   return {
     onActivity(listener: (notice: ActivityNotice) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
     get: () => state,
+    request: (id: number) => core.request(id),
+    timer: (id: number) => core.timer(id),
     subscribe(listener: (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),
     replaceSession: (selfId: string) => dispatch({ type: 'session_replaced', selfId }),
@@ -830,9 +835,7 @@ export function createSync(options: SyncOptions) {
       for (const extra of replyExtras.values()) {
         if (extra.draft.length > 0) return true
       }
-      for (const c of Object.values(state.channels)) {
-        if (c.pending.length > 0) return true
-      }
+      if (core.hasPending()) return true
       return false
     },
     getTimeline(channel: string) {

@@ -4,10 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "wasm": "node ../scripts/build-wasm.ts",
+    "dev": "node ../scripts/build-wasm.ts --unless-ts && vite",
+    "prebuild": "node ../scripts/build-wasm.ts --unless-ts",
     "build": "vite build",
     "preview": "vite preview",
+    "precheck": "npm run wasm",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "pretest": "npm run wasm",
     "test": "vitest run",
     "e2e": "playwright test",
     "e2e:compose": "playwright test -c playwright.compose.config.ts"
