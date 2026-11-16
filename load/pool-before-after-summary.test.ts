@@ -47,9 +47,11 @@ test('missing or mismatched mixed lanes and durations never pass',()=>{
   assert.equal(judge(mixed,'mixed',250).status,'PASS');
   mixed[0].steps[0].signin!.droppedIterations++;assert.equal(judge(mixed,'mixed',250).status,'NOT EVALUATED');
 });
-test('other-Organization drain failures cannot pass and missing continuous evidence is not evaluated',()=>{
+test('other Organization is judged per step; whole-run reader failures elsewhere do not fail this step; missing continuous evidence is not evaluated',()=>{
   const r=runs();r[0].reader.accepted--;r[0].reader.clientTimeouts++;
-  assert.equal(judge(r,'send',250).status,'FAIL');
+  assert.equal(judge(r,'send',250).status,'PASS');
+  const step=runs();const reader=step.find(c=>c.arm==='A')!.steps[0].reader;reader.accepted--;reader.clientTimeouts++;
+  assert.equal(judge(step,'send',250).status,'FAIL');
   r[0].reader.droppedIterations++;assert.equal(judge(r,'send',250).status,'NOT EVALUATED');
 });
 test('omitted resource fields and full-run success latency remain missing evidence',()=>{
@@ -60,7 +62,7 @@ test('omitted resource fields and full-run success latency remain missing eviden
 test('zero candidate or other-Organization successes fail instead of going unmeasured',()=>{
   const r=runs();const a=r.find(c=>c.arm==='A')!.steps[0];a.send.accepted=0;a.send.rejected503=15000;a.send.p95=a.send.p99=null;
   assert.deepEqual(validity(a),[]);assert.equal(judge(r,'send',250).status,'FAIL');
-  const other=runs();const reader=other.find(c=>c.arm==='A')!.reader;reader.clientTimeouts=reader.accepted;reader.accepted=0;reader.p95=reader.p99=null;
+  const other=runs();const reader=other.find(c=>c.arm==='A')!.steps[0].reader;reader.clientTimeouts=reader.accepted;reader.accepted=0;reader.p95=reader.p99=null;
   assert.equal(judge(other,'send',250).status,'FAIL');
 });
 test('an incomplete, interrupted or uncleaned run never yields a verdict',()=>{

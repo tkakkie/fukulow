@@ -94,7 +94,8 @@ try {
     let timer:ReturnType<typeof setInterval>|undefined;
     let pending:Promise<void>|undefined;
     const samples:{at:number;cpuTicks:number;rssKiB:number;connections:number;active:number;cpuPercent:number|null}[]=[];
-    let sampleErrors=0;
+    // Failed samples are counted per step by time; a sample skipped while the previous one runs only widens the gap, which validity bounds.
+    const sampleErrorTimes:number[]=[];
     let startMs:number|undefined;
     let result:(Omit<Run,'pair'|'arm'|'scenario'|'smoke'|'reader'> & {lanes:unknown[];continuousReaderComplete:boolean;runMetrics:Record<string,Counts>})|undefined;
     try {
@@ -139,7 +140,7 @@ try {
         dbSettings:sql("SELECT name||'='||setting FROM pg_settings WHERE name IN ('max_connections','shared_buffers','statement_timeout','lock_timeout') ORDER BY name"),
         roleSettings:sql("SELECT rolname,rolconfig FROM pg_roles WHERE rolname IN ('fukulow','fukulow_app')"),started:new Date().toISOString()});
       const sample=()=> {
-        if(pending) { sampleErrors++;return; }
+        if(pending) return;
         const at=Date.now();
         pending=Promise.all([
           exec('docker',['exec',app,'cat','/proc/1/stat','/proc/1/status'],{env}),
@@ -152,21 +153,21 @@ try {
           if(![cpuTicks,rssKiB,connections,active].every(Number.isFinite))throw new Error('Invalid sample');
           const previous=samples.at(-1);
           samples.push({at,cpuTicks,rssKiB,connections,active,cpuPercent:previous?(cpuTicks-previous.cpuTicks)*1000/(at-previous.at):null});
-        }).catch(()=>{sampleErrors++;}).finally(()=>{pending=undefined;});
+        }).catch(()=>{sampleErrorTimes.push(at);}).finally(()=>{pending=undefined;});
       };
       sample();timer=setInterval(sample,1000);
       generatorName=`${project}-generator`;
       generator=spawn('docker',['run','--rm','--name',generatorName,'--network',`${env.LOAD_PROJECT}_default`,
         '-v',`${resolve('.') }:/work:ro`,'-v',`${privateDir}:/fixture:ro`,'-w','/work',
         '-e','BASE_URL=http://app:8080','-e',`POOL_SMOKE=${smoke?'1':'0'}`,'-e',`POOL_SCENARIO=${cell.scenario}`,k6Id,'run','load/pool-before-after-load.ts'],{env,stdio:['ignore','pipe','pipe']});
-      let log='';
-      const consume=(chunk:Buffer)=>{log+=chunk.toString();};
-      generator.stdout!.on('data',consume);generator.stderr!.on('data',consume);
+      // POOL_RESULT is parsed from stdout alone so stderr chunks can never split it.
+      let stdout='',stderr='';
+      generator.stdout!.on('data',(chunk:Buffer)=>{stdout+=chunk.toString();});generator.stderr!.on('data',(chunk:Buffer)=>{stderr+=chunk.toString();});
       const code=await new Promise<number>((done,reject)=>{generator!.on('error',reject);generator!.on('close',c=>done(c??1));});
       clearInterval(timer);timer=undefined;await pending;
-      writeFileSync(`${dir}/generator.log`,log);
-      const marker=log.match(/POOL_START (\d+)/);startMs=marker?Number(marker[1]):undefined;
-      const line=log.split('\n').find(l=>l.startsWith('POOL_RESULT '));
+      writeFileSync(`${dir}/generator.log`,stderr);writeFileSync(`${dir}/generator.stdout.log`,stdout);
+      const marker=(stderr+'\n'+stdout).match(/POOL_START (\d+)/);startMs=marker?Number(marker[1]):undefined;
+      const line=stdout.split('\n').find(l=>l.startsWith('POOL_RESULT '));
       if(line)result=JSON.parse(line.slice(12));
       if(code!==0||!result||!startMs)throw new Error('Missing/failed generator evidence');
       check();
@@ -181,7 +182,7 @@ try {
       const steps=result.steps.map((r,i)=>{
         const step=plan(smoke)[i];
         const stats=resources(startMs!+step.startSeconds*1000,startMs!+(step.startSeconds+step.seconds)*1000);
-        return {...r,resources:stats,evidence:{complete:result!.continuousReaderComplete,samples:stats.samples,maxSampleGapMs:stats.maxSampleGapMs,samplingErrors:sampleErrors}};
+        return {...r,resources:stats,evidence:{complete:result!.continuousReaderComplete,samples:stats.samples,maxSampleGapMs:stats.maxSampleGapMs,samplingErrors:sampleErrorTimes.filter(t=>t>=startMs!+step.startSeconds*1000&&t<startMs!+(step.startSeconds+step.seconds)*1000).length}};
       });
       const last=plan(smoke).at(-1)!;
       const run:Run={scope,...cell,smoke,steps,reader:{...result.runMetrics.reader,rate:2,seconds:last.startSeconds+last.seconds+11}};

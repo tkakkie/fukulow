@@ -51,12 +51,12 @@ function request(kind:'send'|'reads'|'signin'|'reader') {
   const outcome=r.error_code===1050?'clientTimeouts':r.status>=200&&r.status<300?'accepted':r.status===429?'rejected429':r.status===503?'rejected503':
     r.status===0?(r.error_code===1050?'clientTimeouts':'transportErrors'):'otherErrors';
   for(const name of countNames.filter(n=>n!=='attempted')) counts[name].add(Number(outcome===name));
-  if(outcome==='accepted') latency.add(Date.now()-start);
+  if(outcome==='accepted') latency.add(r.timings.duration);
   if(kind!=='reader') {
     const tags={scenario:`run_${kind}`};
     counts.attempted.add(1,tags);
     for(const name of countNames.filter(n=>n!=='attempted')) counts[name].add(Number(outcome===name),tags);
-    if(outcome==='accepted') latency.add(Date.now()-start,tags);
+    if(outcome==='accepted') latency.add(r.timings.duration,tags);
   }
   // Split the continuous other-Organization reader by request start, including drain gaps.
   if(kind==='reader') {
@@ -66,7 +66,7 @@ function request(kind:'send'|'reads'|'signin'|'reader') {
       const tags={scenario:`${step.name}_reader`};
       counts.attempted.add(1,tags);
       for(const name of countNames.filter(n=>n!=='attempted')) counts[name].add(Number(outcome===name),tags);
-      if(outcome==='accepted') latency.add(Date.now()-start,tags);
+      if(outcome==='accepted') latency.add(r.timings.duration,tags);
     }
   }
 }

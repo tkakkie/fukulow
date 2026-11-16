@@ -59,7 +59,8 @@ export function judge(runs:Run[], scenario:Scenario, rate:number) {
     if(saturated.length) return {pair:index+1,status:'REPORT ONLY',reason:`above B saturation (${saturated.join(', ')})`};
     // Success-rate and other-Organization failures need no latency: a candidate with no successes fails, it is not unmeasured.
     const rateFails=judged.filter(l=>!(rate_(l.a)>=.99 && rate_(l.a)+1e-12>=rate_(l.b)-.01)).map(l=>l.name);
-    if(rateFails.length || !(b.reader.accepted===b.reader.attempted && a.reader.accepted===a.reader.attempted && readers.every(r=>r.accepted===r.attempted)))
+    // The other Organization is judged per step (maintainer, 2026-11-17); the whole-run reader stays recorded as evidence.
+    if(rateFails.length || !(b.reader.accepted===b.reader.attempted && a.reader.accepted===a.reader.attempted))
       return {pair:index+1,status:'FAIL',reason:rateFails.length?`success rate (${rateFails.join(', ')})`:'other Organization',baselineSuccessRate:br,candidateSuccessRate:ar};
     if(judged.some(l=>l.b.p95===null||l.b.p99===null||l.a.p95===null||l.a.p99===null)) return {pair:index+1,status:'NOT EVALUATED',reason:'missing latency'};
     const slower=judged.filter(l=>!(l.a.p95!<=1.10*l.b.p95! && l.a.p99!<=1.10*l.b.p99!)).map(l=>l.name);
