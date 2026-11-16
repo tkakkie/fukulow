@@ -35,7 +35,7 @@ test('settle-fixture is opt-in, metadata and conditions retain it in every mode'
   for(const mode of ['--smoke','--full','--diagnose']) {
     const off=parseOptions([mode]),on=parseOptions([mode,'--settle-fixture','--out','/private/tmp/i160-options-test']);
     assert.equal(off.settleFixture,false);assert.equal(on.settleFixture,true);
-    assert.deepEqual(fixtureCondition(off.settleFixture),{});
+    assert.deepEqual(fixtureCondition(off.settleFixture),{settleFixture:false});
     assert.deepEqual(JSON.parse(JSON.stringify({configOptions:on})).configOptions.settleFixture,true);
     assert.deepEqual(JSON.parse(JSON.stringify({conditions:fixtureCondition(on.settleFixture)})).conditions,{settleFixture:true});
   }

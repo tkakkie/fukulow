@@ -32,7 +32,7 @@ export function reduce(entries: Entry[], start = 0, prior = new Map<string, Entr
 }
 export interface Conditions {
   scenario: string; rate: number; seconds: number; clients: number;
-  settleFixture?:true;
+  settleFixture:boolean;
   seed: number; image: string; config: string; machine: string;
 }
 export interface Sample {

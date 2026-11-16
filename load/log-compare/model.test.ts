@@ -6,7 +6,7 @@ import { commonSchema, variantSchema, functions, replaySQL, workloadSQL } from '
 const entry=(position:number,deleted=false,body=deleted?'':'body',version=position)=>({position,id:'m',deleted,body,version});
 function samples():Sample[] {
   return [0,1,2].flatMap(round=>arms.map(arm=>({arm,round,
-    conditions:{scenario:'create',rate:10,seconds:10,clients:2,seed:1,image:'sha256:x',config:'same',machine:'same'},
+    conditions:{scenario:'create',rate:10,seconds:10,clients:2,seed:1,image:'sha256:x',config:'same',machine:'same',settleFixture:false},
     schedule:{count:100,hash:arrivalSchedule(10,10,1,[100,0,0,0]).hash,mix:[100,0,0,0]},offeredMix:[100,0,0,0],missingOffers:0,
     offered:100,accepted:100,errors:0,dropped:0,late:0,elapsed:10,p50:1,p95:2,p99:3,tps:10,
     walPerOp:100,heapPerOp:80,indexPerOp:20,correctness:{missing:0,resurrected:0,retryPositions:0}})));

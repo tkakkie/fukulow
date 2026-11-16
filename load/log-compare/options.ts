@@ -21,4 +21,5 @@ export function parseOptions(args:string[]) {
   if(out===process.cwd() || out.startsWith(process.cwd()+'/'))throw new Error('artifacts must be outside checkout');
   return {smoke,full,diagnose,settleFixture:args.includes('--settle-fixture'),rounds,seconds,maxSeconds,clients,rates,out};
 }
-export const fixtureCondition=(settleFixture:boolean)=>settleFixture ? {settleFixture:true as const} : {};
+// Recorded explicitly when off too, so an absent field never stands for an unknown condition.
+export const fixtureCondition=(settleFixture:boolean)=>({settleFixture});
