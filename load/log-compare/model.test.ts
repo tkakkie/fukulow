@@ -6,7 +6,7 @@ import { commonSchema, variantSchema, functions, replaySQL, workloadSQL } from '
 const entry=(position:number,deleted=false,body=deleted?'':'body',version=position)=>({position,id:'m',deleted,body,version});
 function samples():Sample[] {
   return [0,1,2].flatMap(round=>arms.map(arm=>({arm,round,
-    conditions:{scenario:'create',rate:10,seconds:10,clients:2,seed:1,image:'sha256:x',config:'same',machine:'same'},
+    conditions:{scenario:'create',rate:10,seconds:10,clients:2,seed:1,image:'sha256:x',config:'same',machine:'same',settleFixture:false},
     schedule:{count:100,hash:arrivalSchedule(10,10,1,[100,0,0,0]).hash,mix:[100,0,0,0]},offeredMix:[100,0,0,0],missingOffers:0,
     offered:100,accepted:100,errors:0,dropped:0,late:0,elapsed:10,p50:1,p95:2,p99:3,tps:10,
     walPerOp:100,heapPerOp:80,indexPerOp:20,correctness:{missing:0,resurrected:0,retryPositions:0}})));
@@ -150,4 +150,27 @@ test('operation reconciliation is independent of database collation and rejects 
   assert.equal(sameOperations(['1/1','2/2','10/10'],['1/1','10/10','2/2']),true);
   assert.equal(sameOperations(['1/1','2/2'],['1/1','10/10','2/2']),false);
   assert.equal(sameOperations(['1/1','1/1'],['1/1','2/2']),false);
+});
+
+test('FPI-excluded spread is diagnostic only; raw WAL spread still invalidates',()=>{
+  const s=samples();
+  for(const row of s) {
+    const fpiBytes=row.round===0 ? 20000 : 0;
+    row.walPerOp=100+fpiBytes/row.accepted;
+    row.walDiagnostics={walDump:{status:'available',summary:{total:{fpiBytes}}}};
+  }
+  const result=gates(s,true);
+  assert.equal(result.valid,false);assert.ok(result.reasons.some(r=>r.includes('walPerOp spread')));
+  const diagnostic=result.diagnosticWalPerOpWithoutFPI.baseline;
+  assert.match(diagnostic.label,/DIAGNOSTIC ONLY/);assert.equal(diagnostic.statistics?.spread,0);
+  assert.equal(diagnostic.statistics?.median,100);
+  delete s[0].walDiagnostics;
+  const missing=gates(s,true).diagnosticWalPerOpWithoutFPI.baseline;
+  assert.equal(missing.status,'unavailable');assert.equal(missing.statistics,null);
+  s[0].walDiagnostics={walDump:{status:'unavailable'}};
+  assert.equal(gates(s,true).diagnosticWalPerOpWithoutFPI.baseline.status,'unavailable');
+});
+test('settled and unsettled fixture conditions cannot be paired',()=>{
+  const s=samples();s[0].conditions.settleFixture=true;
+  assert.ok(gates(s,true).reasons.includes('mismatched conditions'));
 });

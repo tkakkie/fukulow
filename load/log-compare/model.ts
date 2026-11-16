@@ -32,9 +32,11 @@ export function reduce(entries: Entry[], start = 0, prior = new Map<string, Entr
 }
 export interface Conditions {
   scenario: string; rate: number; seconds: number; clients: number;
+  settleFixture:boolean;
   seed: number; image: string; config: string; machine: string;
 }
 export interface Sample {
+  walDiagnostics?: {walDump: {status:"available"; summary:{total:{fpiBytes:number}}} | {status:"unavailable"}};
   schedule: { count:number; hash:string; mix:number[] }; offeredMix:number[]; missingOffers:number;
   arm: Arm; round: number; conditions: Conditions; offered: number; accepted: number;
   errors: number; dropped: number; late: number; elapsed: number;
@@ -88,7 +90,8 @@ export function gates(samples: Sample[], creation: boolean) {
   }
   return { label: 'MAC-RELATIVE', absoluteBudgets: 'NOT EVALUATED (#431)',
     valid: reasons.length === 0, pass: reasons.length === 0 && regressions.length === 0,
-    reasons: [...new Set(reasons)], regressions, summary };
+    reasons: [...new Set(reasons)], regressions, summary,
+    diagnosticWalPerOpWithoutFPI:Object.fromEntries(arms.map(arm=>[arm,diagnosticWalSpread(samples.filter(s=>s.arm===arm))])) };
 }
 export function alternating(round: number): Arm[] {
   return round % 2 === 0 ? [...arms] : [...arms].reverse();
@@ -109,4 +112,15 @@ export function coverage(expected:Entry[],actual:Entry[]) {
 
 export function sameOperations(actual:string[],expected:string[]) {
   return JSON.stringify([...actual].sort())===JSON.stringify([...expected].sort());
+}
+
+export function diagnosticWalSpread(rows:Sample[]) {
+  const values=rows.map(row=>{
+    const dump=row.walDiagnostics?.walDump;
+    return dump?.status==='available' && row.accepted>0 ? row.walPerOp-dump.summary.total.fpiBytes/row.accepted : null;
+  });
+  const available=values.every(n=>n!==null && Number.isFinite(n) && n>=0) && rows.length>0;
+  const stats=available ? repetition(values as number[]) : null;
+  return {label:'DIAGNOSTIC ONLY: (LSN WAL bytes - pg_waldump FPI bytes) / accepted; never used for validity',
+    status:available?'available':'unavailable',values,statistics:stats ? {count:stats.count,median:stats.median,min:stats.min,max:stats.max,spread:stats.spread} : null};
 }
