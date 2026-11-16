@@ -710,6 +710,23 @@ No evaluation was run for this change; verification uses small local fake-proces
 
 - Search freeze corrections and real-Docker smoke (#153, 2026-11-15): moved to #153 (correction history; the frozen state lives in manifest-v1.json).
 
+
+## Search engine comparison, frozen manifest v1 (#153, 2026-11-17 JST, Mac)
+
+**p95 target missed by every engine; no engine decision here.** Frozen manifest `19927163…` at source `65fc9b3`, `node load/search-engines/run.ts` 04:09–05:43 JST then `node load/search-engines/quality/run.ts` 05:43–05:45, alone after the other overnight runs. Apple M5 / 10 CPUs / 32 GiB, Docker 29.9.3 with a 10-CPU / 19.5 GiB VM (the 2026-11-15 cohort had 7.748 GiB, so the two are not an improvement comparison), Node 26.13.1, PostgreSQL 18.6-1.pgdg13+2, pg_trgm 1.6, pg_bigm 1.2, PGroonga 4.1.0 / libgroonga0 16.1.3-1. Fresh images: performance `sha256:25503d9e…`, quality `sha256:efc0bb7f…`. Both runs valid with cleanup verified; desktop activity continued. Data and queries as frozen (1,000,000 Messages, no DMs, 5 clients, 3 rounds, 28 query classes). Medians of three rounds:
+
+| Variant | Index MiB | Build s | Inserts/s (median paired Δ vs control) | Write p95 ms | WAL B/insert | Worst query p95 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| Control | 0 | — | 5295 | 1.474 | 9586 | — |
+| pg_trgm GIN | 224.1 | 17.49 | 4962 (−6.3%) | 1.636 | 10538 | 1237.3 |
+| pg_bigm GIN | 194.4 | 17.22 | 4947 (−6.0%) | 1.605 | 10555 | 1227.9 |
+| PGroonga | 1168.0 (DB growth) | 20.72 | 4025 (−23.5%) | 1.998 | 10044 | 1254.2 |
+
+- **Latency.** For every engine 21 of 28 classes exceed p95 500 ms (mostly 1.0–1.25 s); only the single-scalar frequent Japanese and 1–3 character ASCII classes (~1–2 ms) and the three literal-wildcard classes (~390 ms) stay under.
+- **Index under RLS: not met.** App-role plans use `search_body` in 0 of 28 classes for every engine; they use `search_channel_recent` with heap recheck (for example 麒麟-class plan 920 ms). Owner diagnostics do use the search index (pg_trgm 14, pg_bigm 18, PGroonga 21 of 28 classes). No Seq Scan on Messages in app plans. Same finding as the 2026-11-15 record.
+- **Completeness and failures.** 224/224 equal to the reference sequential `strpos` scan per engine (round 1) and after dump/restore; 0 failed transactions in all pgbench runs; statement_timeout 10 s verified. #198 drill, #316 restore and upgrades NOT EVALUATED.
+- **Quality.** Identical to the 2026-11-15 quality record: literal modes micro P/R/F1 0.809/0.528/0.639; pgroonga-split-query 0.830 F1 (recall 0.847).
+- **Limits.** No DMs in the frozen dataset, so the DM part of the gate is NOT EVALUATED; plans and completeness from round 1 only; one shared Mac/VM. Whether this Mac run is the formal judgement (Issue body) or Linux remains (record above) is a maintainer decision. Raw artifacts outside Git.
 ## DM Q4 concurrent offered-work evidence (#151, 2026-11-15)
 
 Procedure clarification, superseding whole-core totals/cardinality as Q4 concurrency evidence; no formal measurement was performed. Retain fixed 60-second buckets aligned to the common core, with exact boundaries, connection intervals, actual offered sends and opens separately by resolve/create/renew, and browsing offers separately by first/deep. Each of the ten Organizations must maintain 1,000 connections and offer 200 sends/s plus 2 opens/s (half resolve, quarter create, quarter renew); the separate browsing Organization offers 100 reads/s (half first, half deep). Every bucket overlapping the browsing sample window must qualify; the runner conservatively checks the entire fixed core, which supplies those samples. Historical artifacts without this evidence are NOT EVALUATED with an explicit reason.
@@ -763,8 +780,26 @@ Validation on Node v26.13.0: type check and all 61 tests passed. The corrected s
 - **Correctness.** All 540 fixed-rate correctness summaries had zero missing/out-of-order positions, resurrected bodies and retry positions.
 - **Fixed-rate gates: 0 of 36 groups valid** (12 scenarios × 50/250/1000 offered). Invalidation reasons: `walPerOp` spread over 10% (112 arm-groups of 180; overall median spread 26%, maximum 574%), p95 spread (23), heap per op (15), storage per op (7), dropped work or unsustainable load at 1000/s (3: mixed50-1-17, mixed50-1-4000, mixed90-1-4000), tps spread (1). No scenario has a valid common sustainable rate, so the 90%/110%/2× gates are not evaluated. The 14 regressions flagged inside invalid groups are not evidence.
 - **Other summaries.** Maximum-step spread valid 56 of 60 (invalid: baseline, events-ids, events-snapshot, log-snapshot in one scenario each); replay spread valid 3 of 30; migration spread valid for events-snapshot, log-ids, log-snapshot, invalid for events-ids (WAL 13%, blocking 13%).
-- **Suspected cause, not verified.** WAL per op differs up to several-fold between rounds of the same arm and rate (for example 14,190 vs 45,695 bytes), which fits checkpoint or full-page-write timing rather than the arm. A harness change that isolates this (for example a checkpoint before each sample) is needed before a rerun; until then a rerun is expected to be invalid the same way.
+- **Suspected cause, not verified.** WAL per op differs up to several-fold between rounds of the same arm and rate (for example 14,190 vs 45,695 bytes), which fits checkpoint or full-page-write timing rather than the arm. A harness change that isolates this (for example a checkpoint before each sample) is needed before a rerun; until then a rerun is expected to be invalid the same way. Isolated in the diagnose record below.
 - **Limits.** One run; condition 5 and the spec differences in the smoke record still apply. Raw artifacts stay outside Git.
+
+## #160 log comparison: WAL variance diagnose (2026-11-17 JST)
+
+**Cause isolated; no comparison result, no design conclusion.** `node load/log-compare/run.ts --diagnose` ran at `13820c4` (PR #499) twice, without and with `--settle-fixture` (01:55–02:32, 02:32–03:08 JST), alone on the Apple M5 Mac, Docker 29.9.3, PostgreSQL 18.6 (`data_checksums=on`, `full_page_writes=on`, `wal_log_hints=off`), Node 26.13.1; 60 fixed-rate samples each (create-1-17 and mixed90-200-4000 at 50 and 250 ops/s, five arms, three rounds). Output is **MAC-RELATIVE**; absolute budgets **NOT EVALUATED (#431)**.
+
+- **Cause.** No checkpoint completed in any sample; three unsettled mixed90-200-4000 250/s snapshot samples started a requested checkpoint (`XLOG/CHECKPOINT_REDO`), one of them with 21.3 KB/op hint-bit FPIs (`mixed90-200-4000-250-2-log-snapshot`). Otherwise, unsettled, every high-WAL round coincides with in-window autovacuum or autoanalyze of the freshly seeded fixture tables, and the excess is `Heap2/VISIBLE` full-page images (for example create-1-17 50/s round 1: baseline `walPerOp` +31,472 B/op over log-ids, of which 31,102 B/op `Heap2/VISIBLE` FPI). Hint-bit FPIs are under 1 KB/op in the other 119 samples. Which arm gets a high round follows timing, not the arm. Unsettled fixed-rate groups valid: 0 of 4.
+- **Settled.** All four groups valid (`walPerOp` spread at most 2.2%, under 1% in 17 of 20 arm-groups) and the harness gates pass. Unsettled samples without in-window vacuum are 0–5.1% below the settled medians (within 2.5% in 15 of 17), so settling removes the pending fixture vacuum, not arm writes; in-window autovacuum still occurs. Whether settling hides an arm cost awaits maintainer review (#499).
+- **Correctness.** Zero missing, resurrected and retry positions, errors and drops in all 120 samples.
+- **Latency.** Settled p95 medians are 4.5–4.8 ms (create-1-17, spread 0.6–4.1%) and 17.2–17.7 ms (mixed90-200-4000, spread 0.02–0.34%), nearly equal across arms even where WAL differs 1.5× (unsettled create-1-17 50/s p95 spread 11–24%); it is measured on the host through `docker exec` psql, so it is a transport floor and DB-side differences are NOT EVALUATED.
+
+| Settled medians: WAL B/op | baseline | events-ids | events-snapshot | log-ids | log-snapshot |
+|---|---:|---:|---:|---:|---:|
+| create-1-17 50/s | 14,261 | 14,249 | 14,927 | 14,530 | 14,920 |
+| create-1-17 250/s | 5,190 | 5,197 | 5,835 | 5,434 | 5,854 |
+| mixed90-200-4000 50/s | 56,576 | 56,788 | 78,144 | 57,922 | 77,618 |
+| mixed90-200-4000 250/s | 42,511 | 42,703 | 63,466 | 43,051 | 61,708 |
+
+- **Limits.** Two of 12 scenarios; no 1000/s, maximum, replay or migration; one run per condition; condition 5 and the smoke-record spec differences still apply. Raw artifacts stay outside Git.
 
 ## #426 Mac relative instrumentation overhead: attempts, NOT EVALUATED (2026-11-16 JST)
 
@@ -774,6 +809,7 @@ Validation on Node v26.13.0: type check and all 61 tests passed. The corrected s
 - **Attempt 4 pilots (10:16–10:34).** 1/10 not sustained: 0 errors, 3 dropped arrivals, incomplete offered-work evidence, generator restarted or missing. 1/25 sustained.
 - **Attempt 4 comparison at 1/25 (10:34–11:12): infrastructure failure in seed.** Seeding, fixture checks and probes finished at 11:02; the fixture-histogram query then ended at the harness's 600 s `psql` timeout (exit 128) on the 10-Organization, 5,000,000-Messages-per-Organization fixture. No arm ran.
 - **Next.** A reviewed harness change for the seed-phase timeout on the Mac is needed before the comparison can run. CPU 10%, p95/p99, RSS, spread and missing-evidence rules are unchanged.
+- **Attempt 5 (2026-11-17 03:08 JST, `65fc9b3`): infrastructure failure in build after 4 s; no pilot ran.** The local base-image check passed (the harness inspects pins by digest). The offline legacy build (`--network=none`) missed the build cache from Step 3 of the new `wasm` stage and failed at Step 5 (`rustup target add wasm32-unknown-unknown`) with a DNS failure downloading `rust-std-1.99.1-wasm32-unknown-unknown`. The earlier 1/10 pilot at 00:36 the same night (`d1f58b6`) failed on the stage-alias base-image check fixed by #502. Environment/harness fault, not an app result; the comparison stays NOT EVALUATED until the offline build has a complete cache for every stage (or a reviewed harness change).
 
 ## Unread candidate bounds (#355, 2026-11-16 JST)
 
@@ -904,8 +940,28 @@ Per class (round 3, µs, B → W): stream append p50 2.5–4.8 → 58–60; dupl
   - Steady memory: +3.5 MiB (11.34 → 14.88 MiB): 1.6 MiB wasm linear memory (state held in Rust as well as the JS view) and ~1.9 MiB JS heap (cause not confirmed). No growth (slope 3 B/msg, 0 pages).
 - Limits: single developer Mac (`MAC-RELATIVE`), loopback Docker network, synthetic deterministic message bodies, single browser/Node runtime, Node 26.8.1 instead of the pinned 26.13.1. Raw artifacts outside Git: `/private/tmp/fukulow-466-artifacts`.
 
-## #196 B before/after: method (no results yet)
+## #196 B before/after: method
 
 Run `PATH=/Users/tomoya/.local/share/mise/installs/node/26.13.1/bin:$PATH node load/pool-before-after.ts --out /private/tmp/fukulow-196b-overnight` from the repository root, alone on the same Mac. This evaluates **whole PR #388, not the acquire timeout alone**: B `956f91e`, A `7e3762a`, release images built once each, fresh database per run, three B/A, A/B, B/A pairs per scenario. Both scenarios use `THROUGHPUT_SCENARIO=many` equivalent (200 public Channels, no subscribers), 250/500/1,000/2,000 offered sends/s for 60 s each, 10 s request timeout, 11 s drains; 4,000 distinct Members round robin and Channels by iteration modulo 200. At the maximum, 2,000/4,000 = 0.5 sends/s per Member (one every 2 s), below unchanged burst 10/refill 1/s. Scenarios: sends only; sends plus 500 ordinary Channel-list reads/s and 20 correct sign-ins/s during each step. Both add a second-Organization reader at 2/s continuously, including drains. Authentication holds pool connections during password verification in these commits; the mixed scenario adds contention that short send transactions alone may not sustain. Disposable SQL fixtures copy one genuine password hash and seed distinct Members/sessions; the isolated app alone trusts rotating synthetic sign-in IPs. No server patch or limiter override is applied.
 
 Artifacts record commits, immutable image IDs, machine/settings/harness hashes; per step and run, offers, attempts, accepted/success rate, successful-request p95/p99, separate 429/503/other HTTP errors/client timeouts/transport failures/drops, other-Organization attempts/successes/errors/p95, and 1 s app CPU/RSS plus app-role `pg_stat_activity` connections (including idle; active separately). Any drops, offers below the existing 95% delivery-harness tolerance, send 429s or incomplete evidence invalidate a step. Above B's saturation, report only. Where B succeeds ≥99%, A must also reach ≥99%, lose at most 1 percentage point per pair, and have success p95 and p99 ≤1.10× B; in the mixed scenario this applies to sends, Channel-list reads and sign-ins alike, and a step where B saturates any of them never passes; the other Organization must succeed 100% in both arms during that step (maintainer, 2026-11-17); its whole-run result including drains is recorded, not judged. Success latency is k6 `http_req_duration` (fractional ms, excluding connection setup). A failed resource sample invalidates only the step it falls in; a sample skipped while the previous one runs counts through the 2.5 s maximum sample gap. Fewer than three valid, applicable pairs or missing evidence is NOT EVALUATED; nothing invalid/unmeasured passes. `load/pool-before-after-report.ts <directory>` regenerates judgement. Neither arm has #426 pool instrumentation: both map SQLx pool errors to HTTP 500 / `ErrorBody.error="internal error"`, logging `database operation failed: pool timed out while waiting for an open connection` for `PoolTimedOut`. Exact observed log events are retained by emission step only; absent request attribution and late/background/cancelled work mean per-request pool timeout counts are **NOT EVALUATED**, never inferred from 503/500. The 10 s client timeout means B's 30 s acquire timeout itself cannot be observed directly. Mac-relative only; `--smoke` runs B alone at 50/s for 10 s and cannot enter comparison judgement.
+
+## #196 B before/after: results (2026-11-17 JST, Mac)
+
+**Whole PR #388, not the acquire timeout alone; Mac-relative only. Overall: not a pass.** Method as in the section above, harness at `ee36849` (PR #503), run 03:08–04:09 JST alone on the developer Mac (Apple M5, 10 CPUs, 32 GiB, Docker Desktop 29.9.3 VM 19.5 GiB), Node 26.13.1, k6 `grafana/k6:1.8.2`. B `956f91e` image `sha256:8f40122e…1d6c`, A `7e3762a` image `sha256:1cf73846…9acd`. Runner record complete (12 runs, no missing results, no cleanup errors); judgement regenerated with `load/pool-before-after-report.ts`. Raw artifacts outside Git.
+
+| Scenario | Step (sends/s) | Pair 1 (B/A) | Pair 2 (A/B) | Pair 3 (B/A) | Step result |
+|---|---:|---|---|---|---|
+| send | 250 | FAIL (latency) | PASS | FAIL (latency) | **FAIL** |
+| send | 500 | PASS | PASS | PASS | **PASS** |
+| send | 1,000 | PASS | PASS | PASS | **PASS** |
+| send | 2,000 | NOT EVALUATED (B 120,002 attempts > 120,001 bound) | PASS | PASS | **NOT EVALUATED** |
+| mixed | 250 | PASS | PASS | PASS | **PASS** |
+| mixed | 500, 1,000, 2,000 | NOT EVALUATED | NOT EVALUATED | NOT EVALUATED | **NOT EVALUATED** (target load not generated) |
+
+- **send 250 FAIL.** Every arm 15,001/15,001 sends (100%), other Organization 120/120. Success p95 (ms) B/A: pair 1 1.66/1.93 (1.16×), pair 2 1.73/1.82, pair 3 1.92/1.94; p99 pair 3 3.16/4.05 (1.28×). B's own p95 spread across pairs is 1.66–1.92 ms (16%); the fixed criteria have no noise rule, so the FAIL stands.
+- **send 500/1,000.** 100% in every arm; A p95/p99 within 1.10× of B in every pair (p95 1.25–1.64 ms). 2,000/s: 100% everywhere, pairs 2 and 3 pass; pair 1 is invalid by the fixed upper attempt bound (one extra arrival), so fewer than three valid pairs.
+- **mixed 250 PASS.** Sends, Channel-list reads and sign-ins 100% in every arm (sign-in p95 13.9–14.8 ms); all within 1.10×.
+- **mixed ≥500 not generated.** At 500/s app CPU averaged ~95% in both arms and k6 dropped 1,100–1,400 send arrivals (p95 ~1–1.5 s). At 1,000 and 2,000/s both arms collapsed (sends ~1,000–1,600 accepted of ~36,000–40,000, mostly 503 and client timeouts; sign-ins 36–54% accepted). Report-only observations there: B's other-Organization reader stayed 100% in every step, while A's had 120/121 in pair 1 at 1,000/s and 110/121, 114/120 and 113/120 at 2,000/s; A's Channel-list reads had 1,500–2,000 other HTTP errors at 2,000/s, B had none.
+- **Pool acquire timeouts: NOT EVALUATED** (no request attribution). Observed `pool timed out` log events by emission step: A mixed 1,000/s 16 / 134 / 28 and 2,000/s 6,208 / 5,954 / 6,464 (pairs 1–3); B none in any run; none in the send scenario. The 10 s client timeout means B's 30 s acquire timeout itself cannot be observed directly.
+- **Limits.** One Mac with all roles shared; sub-2 ms latencies at low steps; no production hardware. #196 stays open.
