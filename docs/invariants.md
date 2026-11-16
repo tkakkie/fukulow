@@ -3,6 +3,7 @@
 Writing: a Rule cell states what must hold, scope and exceptions included, in at most 160 characters.
 
 Rules that must always hold. Each one lists the test that guards it as `path::test_name`; the test must run in CI. Add the test with the code.
+E2E rows require a final pass in the CI Playwright report (a pass after retry counts); static checks remain defence in depth. E2E names use the file and leaf title, as in the static check; multiple report entries with that identity are refused.
 
 Rows live in parts under `docs/invariants/`, one part per area; each row is in exactly one part, and every other part it touches lists it under "Rows in other parts". Read the parts your change touches (a cross-area change: every related part). A new row goes in the part of its main area; each other area it governs lists it there by a test name that matches only that row, or, when none does, by a `{#id}` (lowercase words and hyphens) added at the start of its Rule cell; an ID is not counted in the Rule limit and is used only where needed.
 

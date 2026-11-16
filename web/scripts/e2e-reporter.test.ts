@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { FullResult, TestCase, TestError, TestResult, TestStep } from '@playwright/test/reporter'
 import { describe, expect, it, vi } from 'vitest'
-import E2EReporter from './e2e-reporter.ts'
+import ts from 'typescript'
+import E2EReporter, { sourceTitles } from './e2e-reporter.ts'
 import { secretSafe } from '../e2e/helpers.ts'
+import { checkE2EInvariants } from './check-e2e-invariants.ts'
 
 const secrets = [
   'https://example.invalid/#invite=sentinel-invite-token',
@@ -69,10 +71,52 @@ function result(secret: string): TestResult {
 }
 
 function testCase(secret: string): TestCase {
-  return { title: secret, location, id: secret, tags: [secret], annotations: [{ type: secret, description: secret }] } as TestCase
+  return { title: secret, expectedStatus: 'passed', location, id: secret, tags: [secret], annotations: [{ type: secret, description: secret }] } as TestCase
 }
 
 describe('restricted E2E diagnostics', () => {
+  it('preserves multiple source declarations on one line, including duplicate identities', () => {
+    const source = ts.createSourceFile('fixture.ts', "test('first', () => {}); test('second', () => {}); test('first', () => {})", ts.ScriptTarget.Latest, true)
+    const { titles, titlePaths } = sourceTitles(source)
+    expect(titles.get(1)).toEqual(['first', 'second', 'first'])
+    expect(titlePaths.get(1)).toEqual([['first'], ['second'], ['first']])
+  })
+
+  it.each(['failed', 'passed'])('records only whether expectedStatus is passed: %s', async expectedStatus => {
+    await withReporter(async (reporter, directory) => {
+      const entry = testCase('built app is served by the server')
+      entry.expectedStatus = expectedStatus as TestCase['expectedStatus']
+      reporter.onTestEnd(entry, { ...result(secrets[0]), status: 'passed' })
+      await reporter.onEnd(completed)
+      const report = JSON.parse(await readFile(join(directory, 'invariants.json'), 'utf8'))
+      expect(report.tests[0].expectedStatusPassed).toBe(expectedStatus === 'passed')
+    })
+  })
+
+  it('reports one final pass after retry, preserving duplicate TestCases and safe annotations', async () => {
+    await withReporter(async (reporter, directory) => {
+      const entry = testCase('built app is served by the server')
+      entry.annotations = [{ type: 'slow', description: secrets[0] }]
+      const attempt = result(secrets[0])
+      attempt.annotations = []
+      attempt.status = 'failed'
+      reporter.onTestEnd(entry, attempt)
+      reporter.onTestEnd(entry, { ...attempt, status: 'passed' })
+      await reporter.onEnd(completed)
+      const path = join(directory, 'invariants.json')
+      const report = JSON.parse(await readFile(path, 'utf8'))
+      expect(report.tests).toEqual([{
+        file: 'web/e2e/smoke.spec.ts', titlePath: ['built app is served by the server'],
+        status: 'passed', expectedStatusPassed: true, annotations: [{ type: 'slow' }],
+      }])
+      const root = resolve(import.meta.dirname, '../..')
+      expect(checkE2EInvariants(root, path)).toEqual([])
+      reporter.onTestEnd({ ...entry } as TestCase, { ...attempt, status: 'passed' })
+      await reporter.onEnd(completed)
+      expect(checkE2EInvariants(root, path)[0]).toContain('duplicated title')
+    })
+  })
+
   it('allowlists Compose source locations and titles without serializing runtime credentials', async () => {
     const file = resolve(import.meta.dirname, '../e2e-compose/realtime.spec.ts')
     const source = await readFile(file, 'utf8')
@@ -99,7 +143,10 @@ describe('restricted E2E diagnostics', () => {
       const json = await readFile(join(directory, 'report.json'), 'utf8')
       expect(json).not.toContain(secret)
       expect(json).not.toContain('sentinel-')
-      expect(await readdir(directory)).toEqual(['report.json'])
+      const runtime = await readFile(join(directory, 'invariants.json'), 'utf8')
+      expect(runtime).not.toContain('sentinel-')
+      expect(JSON.parse(runtime).tests[0]).toMatchObject({ titlePath: null, annotations: [{ type: 'other' }, { type: 'other' }] })
+      expect((await readdir(directory)).sort()).toEqual(['invariants.json', 'report.json'])
       // Exact shape prevents newly serialized payload fields escaping the sentinel checks.
       expect(JSON.parse(json)).toEqual({
         status: 'failed', startTime: started.toISOString(), duration: 30001,

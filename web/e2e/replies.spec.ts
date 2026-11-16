@@ -72,7 +72,13 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
   await navigate(root.id)
   const panel = page.locator('#panel-content'), scroll = panel.locator('.reply-panel__scroll')
   const more = panel.getByRole('button', { name: 'さらに返信を読み込む', exact: true })
-  await more.click(); await more.click()
+  // A click resolves before the routed read is recorded; wait for its fulfilled response.
+  const chainResponse = (after: number) => page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return url.pathname.endsWith('/chain') && url.searchParams.get('after_seq') === String(after)
+  })
+  await Promise.all([chainResponse(50), more.click()])
+  await Promise.all([chainResponse(100), more.click()])
   expect(reads.map(r => r.after)).toEqual([0, 50, 100])
   await scroll.evaluate(el => { el.scrollTop = el.scrollHeight / 2; el.dispatchEvent(new Event('scroll')) })
   await frames()
@@ -123,7 +129,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
   await expect(more).toBeEnabled()
 
   // The main projection already knows this far descendant's record, so no hint read is needed.
-  await navigate(far.id)
+  await Promise.all([chainResponse(8975), navigate(far.id)])
   await expect(panel.locator(`[data-message-id="${far.id}"]`)).toBeInViewport()
   await frames()
   expect(reads).toEqual([{ anchor: far.id, after: 8975 }])
@@ -138,7 +144,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
 
   await panel.getByRole('button', { name: 'パネルを閉じる(Esc)', exact: true }).click()
   reads.length = 0
-  await navigate(far.id)
+  await Promise.all([chainResponse(8975), navigate(far.id)])
   await expect(panel.locator(`[data-message-id="${far.id}"]`)).toBeInViewport()
   await frames()
   expect(reads).toEqual([{ anchor: far.id, after: 8975 }])
