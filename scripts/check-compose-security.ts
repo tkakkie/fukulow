@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { acmeFixture, certificate, challengeResponses, checkCertificateLifecycle, nodeImage, poll, testDomain } from './compose-acme.ts'
 import { fileURLToPath } from 'node:url'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
 const project = process.env.CHECK_COMPOSE_PROJECT || `fukulow-security-${randomUUID().slice(0, 8)}`
@@ -63,19 +65,65 @@ async function check(profile: string) {
       return { status: Number(response.slice(boundary + 1)), body: response.slice(0, boundary) }
     }
     await poll('HTTPS health', () => request('/api/v1/health'), value => value.status === 200)
+    function checkBrowserHeaders(output: string, path: string) {
+      for (const [name, value] of [['permissions-policy', permissionsPolicy], ['cross-origin-opener-policy', 'same-origin']]) {
+        const values = output.split(/\r?\n/).filter(line => line.toLowerCase().startsWith(`${name}:`)).map(line => line.slice(line.indexOf(':') + 1).trim())
+        assert.deepEqual(values, [value], `${profile} ${path}: ${name}`)
+      }
+    }
     function checkHttp() {
       const http = `http://${testDomain}:${proxy('port', profile, '80').split(':').at(-1)}`
       for (const path of ['/', '/api/v1/health', '/api/v1/ready?check=1']) {
         const headers = curl(['-sI', '--max-time', '5', http + path])
         assert.match(headers, /^HTTP\/\S+ 308\b/)
-        assert.match(headers, new RegExp(`location: https://${testDomain.replace('.', '\\.')}`, 'i'))
+        const locations = headers.split(/\r?\n/).filter(line => /^location:/i.test(line)).map(line => line.slice(line.indexOf(':') + 1).trim())
+        assert.deepEqual(locations, [`https://${testDomain}${path}`])
         assert.doesNotMatch(headers, /strict-transport-security:/i)
+        checkBrowserHeaders(headers, path)
       }
       const challenge = curl(['-sI', '--max-time', '5', http + '/.well-known/acme-challenge/not-an-active-token'])
       assert.match(challenge, /^HTTP\/\S+ 404\b/)
       assert.doesNotMatch(challenge, /location:|strict-transport-security:/i)
+      checkBrowserHeaders(challenge, 'HTTP-01 fallback')
     }
     checkHttp()
+    async function checkRejectedHost(tls: boolean, host: string, servername?: string, absoluteForm = false) {
+      const response = await new Promise<{ status: number, location?: string, csp?: string } | undefined>((resolve, reject) => {
+        const req = (tls ? httpsRequest : httpRequest)({ hostname: '127.0.0.1',
+          port: tls ? tlsPort() : Number(proxy('port', profile, '80').split(':').at(-1)),
+          servername, rejectUnauthorized: false, headers: { Host: host },
+          path: absoluteForm ? `https://${testDomain}/api/v1/health` : '/api/v1/health', agent: false }, res => {
+          res.resume()
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, location: res.headers.location, csp: res.headers['content-security-policy'] }))
+        })
+        req.setTimeout(5000, () => req.destroy(new Error('Host rejection probe timed out')))
+        req.on('error', (error: NodeJS.ErrnoException) => {
+          // nginx 444/Caddy abort close the socket; unknown SNI fails TLS.
+          if (error.code === 'ECONNRESET' || (tls && error.code === 'EPROTO')) resolve(undefined)
+          else reject(error)
+        })
+        req.end()
+      })
+      if (response) {
+        if (absoluteForm && profile === 'caddy') {
+          // Go canonicalizes absolute-form authority into Request.Host before
+          // Caddy routing. The conflicting raw Host must never reach the app.
+          assert.equal(response.status, 200)
+          assert.match(response.csp ?? '', /wss:\/\/fukulow\.test(?:[ ;]|$)/)
+          assert.ok(!response.csp?.includes(host), 'absolute-form authority must replace the foreign Host')
+          return
+        }
+        assert.ok(response.status >= 400 && response.status < 500, `${profile}: unknown Host/SNI must be rejected`)
+        assert.equal(response.location, undefined, 'foreign Host must never control a redirect')
+      }
+    }
+    for (const host of ['attacker.example', '127.0.0.1']) {
+      await checkRejectedHost(false, host)
+      await checkRejectedHost(true, host, testDomain)
+    }
+    await checkRejectedHost(true, testDomain, 'attacker.example')
+    await checkRejectedHost(true, testDomain, '')
+    await checkRejectedHost(true, 'attacker.example', testDomain, true)
     challengeResponses(profile, proxy('ps', '-q', profile), run)
     function checkState() {
       if (profile !== 'nginx') return
@@ -102,17 +150,14 @@ async function check(profile: string) {
       const output = curl(['-sI', '--insecure', '--show-error', '--max-time', '10', baseUrl + path])
       assert.match(output, new RegExp(`^HTTP/\\S+ ${status}\\b`))
       if (baseUrl === url) assert.match(output, /strict-transport-security: max-age=31536000/i)
-      for (const [name, value] of [['permissions-policy', permissionsPolicy], ['cross-origin-opener-policy', 'same-origin']]) {
-        const values = output.split(/\r?\n/).filter(line => line.toLowerCase().startsWith(`${name}:`)).map(line => line.slice(line.indexOf(':') + 1).trim())
-        assert.deepEqual(values, [value], `${profile} ${path}: ${name}`)
-      }
+      checkBrowserHeaders(output, path)
       console.log(`curl -sI --insecure ${baseUrl + path}\n${output.split(/\r?\n/).filter(line => /^(HTTP\/|permissions-policy:|cross-origin-opener-policy:)/i.test(line)).join('\n')}`)
     }
     for (const [path, status] of [['/', 200], ['/api/v1/health', 200], ['/api/v1/missing', 404], ['/api/v1/ready', 404], ['/api/v1/ready?check=1', 404]] as const) checkHeaders(path, status)
     assert.equal(request('/api/v1/ready').status, 404, 'readiness must stay internal')
     assert.equal(request('/api/v1/ready?check=1').status, 404, 'query strings must not bypass the exact-path block')
     assert.deepEqual(request('/api/v1/health'), { status: 200, body: 'ok' })
-    for (const path of ['/', '/fallback-route', '/api', '/api/', '/api/v1/health', '/api/v1/missing']) {
+    function checkCacheAndCompression(path: string) {
       const response = curl(['-sk', '-D', '-', '-o', '/dev/null', '-H', 'Accept-Encoding: gzip', url + path])
       if (path.startsWith('/api')) {
         assert.doesNotMatch(response, /content-encoding:/i, `${profile} API compression exclusion`)
@@ -121,6 +166,7 @@ async function check(profile: string) {
         assert.match(response, /cache-control: no-cache/i)
       }
     }
+    for (const path of ['/', '/fallback-route', '/api', '/api/', '/api/v1/health', '/api/v1/missing', '/api/v1/ready', '/api/v1/ready?check=1']) checkCacheAndCompression(path)
     const html = curl(['-sk', url + '/'])
     const asset = html.match(/src="([^"]+\.js)"/)?.[1]
     assert.ok(asset, 'built Vite entry must exist')
@@ -235,11 +281,12 @@ async function check(profile: string) {
     const [stopped] = JSON.parse(run(['inspect', app]))
     assert.equal(stopped.State.ExitCode, 0, 'PID 1 must handle default SIGTERM without SIGKILL')
     assert.equal(stopped.State.OOMKilled, false)
-    // Both proxies bound upstream connection establishment to five seconds.
-    // Refused peers produce 502; a dropped connection can instead yield 504.
+    // Upstream error-path coverage only: refused peers do not measure the 5s
+    // connect limit. The static config guard verifies that timeout in both profiles.
     const failed = request('/api/v1/health')
     assert.ok([502, 504].includes(failed.status))
     checkHeaders('/api/v1/health', failed.status)
+    checkCacheAndCompression('/api/v1/health')
     await restartApp()
     assert.equal(request('/api/v1/setup').body, '{"setup_required":false}')
     const history = authenticated(messagesPath)

@@ -1,18 +1,30 @@
+{
+	servers {
+		strict_sni_host on
+	}
+}
+
 (browser_headers) {
 	header >Permissions-Policy "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()"
 	header >Cross-Origin-Opener-Policy "same-origin"
+}
+
+:80 {
+	abort
 }
 
 http://{$FUKULOW_DOMAIN:localhost} {
 	import browser_headers
 	route {
 		respond /.well-known/acme-challenge/* 404
-		redir https://{host}{uri} 308
+		redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308
 	}
 }
 
 {$FUKULOW_DOMAIN:localhost} {
 	import browser_headers
+	@api path /api /api/*
+	header @api >Cache-Control "no-store"
 	@static not path /api /api/*
 	encode @static zstd gzip
 	@hsts {
@@ -32,6 +44,7 @@ http://{$FUKULOW_DOMAIN:localhost} {
 	# Upstream connection errors execute a separate route chain.
 	handle_errors {
 		import browser_headers
+		header @api >Cache-Control "no-store"
 		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 }

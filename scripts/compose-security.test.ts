@@ -24,21 +24,33 @@ function checkRestrictions(service: Record<string, unknown>) {
 // new includes, routes, inheritance controls and header operations require review.
 // Keep values/quoting exact; HTTP field names alone are case-insensitive.
 const approvedProxyConfig: Record<string, string> = {
-  caddy: `(browser_headers) {
+  caddy: `{
+	servers {
+		strict_sni_host on
+	}
+}
+
+(browser_headers) {
 	header >Permissions-Policy "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()"
 	header >Cross-Origin-Opener-Policy "same-origin"
+}
+
+:80 {
+	abort
 }
 
 http://{$FUKULOW_DOMAIN:localhost} {
 	import browser_headers
 	route {
 		respond /.well-known/acme-challenge/* 404
-		redir https://{host}{uri} 308
+		redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308
 	}
 }
 
 {$FUKULOW_DOMAIN:localhost} {
 	import browser_headers
+	@api path /api /api/*
+	header @api >Cache-Control "no-store"
 	@static not path /api /api/*
 	encode @static zstd gzip
 	@hsts {
@@ -58,6 +70,7 @@ http://{$FUKULOW_DOMAIN:localhost} {
 	# Upstream connection errors execute a separate route chain.
 	handle_errors {
 		import browser_headers
+		header @api >Cache-Control "no-store"
 		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 }
@@ -80,8 +93,14 @@ http {
         accept_terms_of_service;
     }
     map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+    # Validate the raw Host too: absolute-form targets can override $host.
+    map $http_host $request_host { default $http_host; ~^([^:]+):[0-9]+$ $1; }
+    map $request_host $known_host { default 0; \${FUKULOW_DOMAIN} 1; }
     map $https $hsts { default ""; on "max-age=31536000"; }
+    map $uri $response_cache_control { default $upstream_http_cache_control; ~^/api(?:/|$) "no-store"; }
     add_header Strict-Transport-Security $hsts always;
+    proxy_hide_header Cache-Control;
+    add_header Cache-Control $response_cache_control always;
     # Child servers/locations must inherit these headers without overrides.
     proxy_hide_header Permissions-Policy;
     proxy_hide_header Cross-Origin-Opener-Policy;
@@ -98,15 +117,25 @@ http {
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
     server {
+        listen 80 default_server;
+        listen 443 ssl default_server;
+        ssl_reject_handshake on;
+        return 444;
+    }
+    server {
         listen 80;
         server_name \${FUKULOW_DOMAIN};
-        # The module handles active HTTP-01 tokens before this fallback.
+        if ($known_host = 0) { return 444; }
+        # nginx-acme 0.4.1 src/acme/solvers/http.rs registers POST_READ,
+        # before location lookup/rewrite: active tokens bypass this fallback.
+        # https://nginx.org/en/docs/http/ngx_http_acme_module.html (404 example)
         location ^~ /.well-known/acme-challenge/ { return 404; }
-        location / { return 308 https://$host$request_uri; }
+        location / { return 308 https://\${FUKULOW_DOMAIN}$request_uri; }
     }
     server {
         listen 443 ssl;
         server_name \${FUKULOW_DOMAIN};
+        if ($known_host = 0) { return 444; }
         acme_certificate public;
         ssl_certificate $acme_certificate;
         ssl_certificate_key $acme_certificate_key;
@@ -120,6 +149,7 @@ http {
         location = /api { gzip off; proxy_pass http://app:8080; }
         location /api/ { gzip off; proxy_pass http://app:8080; }
         location = /api/v1/ready {
+            gzip off;
             return 404;
         }
         location / {
@@ -135,7 +165,7 @@ function proxyTokens(profile: string, source: string): string[] {
   const tokens: string[] = []
   // Backslash escapes, backticks, arbitrary placeholders and non-ASCII whitespace
   // are unsupported: never silently reinterpret syntax the proxy may treat differently.
-  const token = /https:\/\/\{host\}\{uri\}|(?:http:\/\/)?\{\$FUKULOW_DOMAIN:localhost\}|\$\{FUKULOW_DOMAIN\}|\{host\}\{uri\}|[ \t\r]+|\n|#[^\r\n]*|\{\$FUKULOW_DOMAIN:localhost\}|\{err.status_code\}|"[^"\\\r\n]*"|'[^'\\\r\n]*'|[{};]|[^\s{};"'\\#`]+/gy
+  const token = /https:\/\/(?:\{host\}|\{\$FUKULOW_DOMAIN:localhost\})\{uri\}|https:\/\/\$\{FUKULOW_DOMAIN\}\$request_uri|(?:http:\/\/)?\{\$FUKULOW_DOMAIN:localhost\}|\$\{FUKULOW_DOMAIN\}|\{host\}\{uri\}|[ \t\r]+|\n|#[^\r\n]*|\{\$FUKULOW_DOMAIN:localhost\}|\{err.status_code\}|"[^"\\\r\n]*"|'[^'\\\r\n]*'|[{};]|[^\s{};"'\\#`]+/gy
   let position = 0
   let separated = true
   let previous = ''
@@ -436,8 +466,36 @@ test('nginx TLS requires the full config, private state volume and package ABI c
   assert.throws(() => checkNginxTLS({ ...service, environment: {} }))
   const entrypoint = readFileSync(new URL('../deploy/nginx-acme.sh', import.meta.url), 'utf8')
   for (const required of ['nginx-module-acme', '$NGINX_ACME_PACKAGE_VERSION', '-o nginx -g nginx -m 700 /var/lib/nginx/acme',
-    'umask 077', '--reuid=nginx --regid=nginx --init-groups nginx -t', 'exec setpriv']) {
+    'ip_unprivileged_port_start', '> 80', 'umask 077', '--reuid=nginx --regid=nginx --init-groups nginx -t', 'exec setpriv']) {
     assert.ok(entrypoint.includes(required), required)
+  }
+})
+
+test('nginx startup clearly rejects a network namespace that disables unprivileged port binding', () => {
+  const service = JSON.parse(execFileSync('docker', args('nginx'), { cwd, env, encoding: 'utf8' })).services.nginx
+  const result = spawnSync('docker', ['run', '--rm', '--network', 'none', '--sysctl', 'net.ipv4.ip_unprivileged_port_start=1024',
+    '--mount', `type=bind,source=${cwd}/deploy/nginx-acme.sh,target=/entrypoint.sh,readonly`,
+    '--entrypoint', '/bin/bash', service.image, '/entrypoint.sh'], { cwd, env, encoding: 'utf8' })
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /nginx requires net.ipv4.ip_unprivileged_port_start <= 80 in its container network namespace/)
+})
+
+test('both proxy configs reject unknown Hosts and SNI and redirect only to configured domain', () => {
+  for (const [profile, config] of Object.entries(approvedProxyConfig)) {
+    const fragments = profile === 'nginx'
+      ? ['listen 80 default_server;', 'listen 443 ssl default_server;', 'ssl_reject_handshake on;', 'return 444;',
+        'map $http_host $request_host', 'map $request_host $known_host', 'if ($known_host = 0) { return 444; }',
+        'return 308 https://${FUKULOW_DOMAIN}$request_uri;']
+      : ['strict_sni_host on', ':80 {\n\tabort\n}', 'redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308']
+    for (const fragment of fragments) {
+      assert.ok(config.includes(fragment), fragment)
+      assert.throws(() => checkProxyHeaders(profile, config.replace(fragment, '')), /unsupported proxy/)
+    }
+    const reflected = profile === 'nginx'
+      ? config.replace('https://${FUKULOW_DOMAIN}$request_uri', 'https://$host$request_uri')
+      : config.replace('https://{$FUKULOW_DOMAIN:localhost}{uri}', 'https://{host}{uri}')
+    assert.throws(() => checkProxyHeaders(profile, reflected), /unsupported proxy/)
   }
 })
 
@@ -445,9 +503,12 @@ test('both proxy configs retain HTTP-01 routing, TLS, API compression exclusions
   for (const [profile, config] of Object.entries(approvedProxyConfig)) {
     const fragments = profile === 'nginx'
       ? ['load_module /usr/lib/nginx/modules/ngx_http_acme_module.so;', 'challenge http-01;', 'state_path /var/lib/nginx/acme;',
-        'listen 443 ssl;', 'acme_certificate public;', 'location ^~ /.well-known/acme-challenge/', 'return 308 https://$host$request_uri;',
+        'listen 443 ssl;', 'acme_certificate public;', 'location ^~ /.well-known/acme-challenge/', 'return 308 https://${FUKULOW_DOMAIN}$request_uri;',
+        'map $uri $response_cache_control', 'proxy_hide_header Cache-Control;', 'add_header Cache-Control $response_cache_control always;',
+        'location = /api/v1/ready {\n            gzip off;',
         'location = /api { gzip off;', 'location /api/ { gzip off;', 'proxy_connect_timeout 5s;', 'proxy_read_timeout 3600s;', 'proxy_send_timeout 3600s;']
-      : ['respond /.well-known/acme-challenge/* 404', 'redir https://{host}{uri} 308', '@static not path /api /api/*',
+      : ['respond /.well-known/acme-challenge/* 404', 'redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308', '@static not path /api /api/*',
+        'header @api >Cache-Control "no-store"',
         'dial_timeout 5s', 'read_timeout 3600s', 'write_timeout 3600s']
     checkProxyHeaders(profile, config)
     for (const fragment of fragments) {
