@@ -31,6 +31,12 @@ export async function localCopy(exec:Executor,source:string,destination:string,t
   await checked(exec,{program:'cp',args:['-pR',source,destination],timeout,signal,log});
 }
 
+// Base images a Dockerfile pulls; a FROM naming an earlier stage (FROM rust-base AS wasm) is not an image.
+export function dockerfileBases(dockerfile:string) {
+  const stages=new Set<string>(),bases:string[]=[];
+  for(const [,from,alias] of dockerfile.matchAll(/^[ \t]*FROM[ \t]+(?:--\S+[ \t]+)*(\S+)(?:[ \t]+AS[ \t]+(\S+))?/gim)){if(!stages.has(from!.toLowerCase()))bases.push(from!);if(alias)stages.add(alias.toLowerCase());}
+  return bases;
+}
 export async function sha256File(path:string) {
   const hash=createHash('sha256');for await(const chunk of createReadStream(path))hash.update(chunk);return hash.digest('hex');
 }
