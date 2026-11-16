@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { descendants, dockerCleanup, runBounded, runBudgetMs, timeoutReason } from './proxy-run.ts';
+import { deadlineSkip, descendants, dockerCleanup, jobDeadlineMs, runBounded, runBudgetMs, timeoutReason } from './proxy-run.ts';
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 // A fake generator: writes its own and a grandchild's pid, then never exits; `stubborn` ignores SIGTERM.
@@ -130,4 +130,15 @@ test('an interrupted run is stopped, cleaned up and invalid even if it exits on 
 
 test('descendants follows the whole tree, not only direct children', () => {
   assert.deepEqual(descendants(10, () => ' 10 1\n 11 10\n 12 11\n 13 12\n 20 1\n').sort(), [11, 12, 13]);
+});
+
+test('a run that cannot finish before the job deadline is not started', () => {
+  assert.equal(jobDeadlineMs({}), undefined);
+  const deadline = jobDeadlineMs({ PROXY_JOB_STARTED: '1000', PROXY_JOB_MINUTES: '60' })!;
+  assert.equal(deadline, (1000 + 3600 - 600) * 1000);
+  assert.throws(() => jobDeadlineMs({ PROXY_JOB_STARTED: '1000' }));
+  assert.equal(deadlineSkip(1_000_000, 1000, 500, undefined), undefined);
+  assert.equal(deadlineSkip(deadline - 1500, 1000, 500, deadline), undefined);
+  assert.match(deadlineSkip(deadline - 1499, 1000, 500, deadline)!, /^not started: job time left 1 s is below this run's bound 2 s; run invalid$/);
+  assert.match(deadlineSkip(deadline + 5000, 1000, 500, deadline)!, /job time left 0 s/);
 });

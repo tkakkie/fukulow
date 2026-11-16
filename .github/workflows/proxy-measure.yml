@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       scenarios: ${{ steps.plan.outputs.scenarios }}
+      # One value for both the job limit and the harness deadline (load/proxy-run.ts jobDeadlineMs).
+      minutes: ${{ inputs.preset == 'smoke' && 60 || inputs.preset == 'preflight' && 240 || 355 }}
     steps:
       - id: plan
         env:
@@ -37,14 +39,17 @@ jobs:
   compare:
     needs: plan
     runs-on: ubuntu-latest
-    # Per-run hard timeouts (load/proxy-run.ts) stop a hung run long before these job limits.
-    timeout-minutes: ${{ inputs.preset == 'smoke' && 60 || inputs.preset == 'preflight' && 240 || 355 }}
+    # Per-run hard timeouts stop a hung run; a run that could not finish (with cleanup) before this
+    # limit is not started and is recorded invalid, so Actions never cancels a run midway.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
     strategy:
       # A preflight stops at its first failure; a full comparison keeps other scenarios' evidence.
       fail-fast: ${{ inputs.preset == 'preflight' }}
       matrix:
         scenario: ${{ fromJSON(needs.plan.outputs.scenarios) }}
     steps:
+      - name: Record the job start for the harness deadline
+        run: echo "PROXY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
@@ -61,6 +66,7 @@ jobs:
       - name: Run both proxies sequentially on this runner
         env:
           PROXY_SCENARIOS: ${{ matrix.scenario }}
+          PROXY_JOB_MINUTES: ${{ needs.plan.outputs.minutes }}
           PROXY_PRESET: ${{ inputs.preset }}
           PROXY_RESULT_DIR: ${{ runner.temp }}/proxy-measure
           LOAD_APP_IMAGE: fukulow-proxy-measure-app

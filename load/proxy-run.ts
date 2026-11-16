@@ -108,3 +108,18 @@ export function timeoutReason(result: Bounded, budgetMs: number): string | undef
     result.forced ? 'SIGTERM ignored; process group killed' : 'stopped by SIGTERM',
     result.cleanupErrors.length ? `Docker cleanup failed: ${result.cleanupErrors.join('; ')}` : 'Docker resources removed'].join('; ');
 }
+
+// The job deadline (#469 B): a run starts only if its whole bound (budget + SIGKILL grace + cleanup and
+// upload reserve) ends before the hosted job's limit, so Actions never cancels a run or its cleanup midway.
+export const jobReserveSeconds = 600;
+export function jobDeadlineMs(env: Record<string, string | undefined>): number | undefined {
+  if (!env.PROXY_JOB_STARTED && !env.PROXY_JOB_MINUTES) return undefined;
+  const started = number(env, 'PROXY_JOB_STARTED');
+  const minutes = number(env, 'PROXY_JOB_MINUTES');
+  return (started + minutes * 60 - jobReserveSeconds) * 1000;
+}
+export function deadlineSkip(nowMs: number, budgetMs: number, graceMs: number, deadlineMs: number | undefined): string | undefined {
+  if (deadlineMs === undefined || nowMs + budgetMs + graceMs <= deadlineMs) return undefined;
+  return `not started: job time left ${Math.max(0, Math.floor((deadlineMs - nowMs) / 1000))} s is below this run's bound `
+    + `${Math.ceil((budgetMs + graceMs) / 1000)} s; run invalid`;
+}

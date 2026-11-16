@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import { abba, judge, type Proxy } from './proxy-judgment.ts';
 import { metricsFor, offeredShortfall, stepMetric, type Metric, type RunResult } from './proxy-results.ts';
 import { createCertificate, outsideCheckout } from './proxy-target.ts';
-import { dockerCleanup, runBudgetMs, runBounded, timeoutReason } from './proxy-run.ts';
+import { deadlineSkip, dockerCleanup, jobDeadlineMs, runBudgetMs, runBounded, timeoutReason } from './proxy-run.ts';
 import { accountAllocation, accountCount } from './scheduler.ts';
 
 const preset = process.env.PROXY_PRESET ?? 'full';
@@ -56,6 +56,8 @@ function save() {
     repetitions: repeats, warmupsPerProxyPerScenario: 1, order: preflight ? [] : abba(repeats), scenarios, settings, stepSizes,
     accounts: { socketsPerAccount, allocation: accountAllocation, sameForBothProxies: true },
     hardTimeout: 'per record run: k6 setup + scenario + teardown limits + Compose allowance; on expiry SIGTERM, SIGKILL after grace, Docker cleanup, run invalid',
+    jobDeadline: jobDeadline === undefined ? null : { at: new Date(jobDeadline).toISOString(),
+      rule: 'a run whose budget + grace would end after the job limit minus a reserve is not started and is invalid' },
     resourceScope: 'sampled whole generator lifetime including provisioning and teardown; 100% CPU is one core',
     throughputDeliveryScope: 'load/scenario.ts steps: every offered send accepted (201) and delivered to every subscriber of its Channel within the drain; no unexpected close or gap',
     sendSettings, sendRates,
@@ -66,6 +68,7 @@ let stopActive: (() => void) | undefined;
 let interrupted = false;
 const stop = () => { interrupted = true; process.exitCode = 1; stopActive?.(); };
 const graceMs = 180_000;
+const jobDeadline = jobDeadlineMs(process.env);
 process.on('SIGINT', stop); process.on('SIGTERM', stop);
 async function record(directory: string, proxy: Proxy, extra: Record<string, string>): Promise<RunResult> {
   if (interrupted) throw new Error('Comparison interrupted');
@@ -76,6 +79,12 @@ async function record(directory: string, proxy: Proxy, extra: Record<string, str
   const budgetMs = runBudgetMs(env);
   const accounts = env.LOAD_FIRST_PAINT === '1' ? undefined
     : accountCount(Number(env.CHANNELS) * Number(env.SUBSCRIBERS), socketsPerAccount);
+  const skipped = deadlineSkip(Date.now(), budgetMs, graceMs, jobDeadline);
+  if (skipped) {
+    conditions.push({ directory, accounts, socketsPerAccount: accounts === undefined ? undefined : socketsPerAccount,
+      budgetSeconds: budgetMs / 1000, elapsedSeconds: 0, timedOut: false, skipped });
+    return { exitCode: 1, measurementError: skipped };
+  }
   const bounded = await runBounded({ command: process.execPath, args: ['load/record.ts'], env, timeoutMs: budgetMs, graceMs,
     cleanup: () => dockerCleanup(project), onStart: terminate => { stopActive = terminate; } });
   stopActive = undefined;
@@ -91,7 +100,7 @@ async function record(directory: string, proxy: Proxy, extra: Record<string, str
     budgetSeconds: budgetMs / 1000, elapsedSeconds: Math.round(bounded.elapsedMs / 1000), timedOut: bounded.timedOut });
   return result;
 }
-const conditions: { directory: string; accounts?: number; socketsPerAccount?: number; budgetSeconds: number; elapsedSeconds: number; timedOut: boolean }[] = [];
+const conditions: { directory: string; accounts?: number; socketsPerAccount?: number; budgetSeconds: number; elapsedSeconds: number; timedOut: boolean; skipped?: string }[] = [];
 async function run(scenario: number, proxy: Proxy, warmup: boolean) {
   const directory = `${output}/${runs.length + 1}-${scenario}-${proxy}-${warmup ? 'warmup' : 'measured'}`;
   const entry: (typeof runs)[number] = { scenario, proxy, warmup, directory };
