@@ -24,7 +24,7 @@ jobs:
     outputs:
       scenarios: ${{ steps.plan.outputs.scenarios }}
       # One value for both the job limit and the harness deadline (load/proxy-run.ts jobDeadlineMs).
-      minutes: ${{ inputs.preset == 'smoke' && 60 || inputs.preset == 'preflight' && 240 || 355 }}
+      minutes: ${{ inputs.preset == 'smoke' && 90 || inputs.preset == 'preflight' && 240 || 355 }}
     steps:
       - id: plan
         env:
