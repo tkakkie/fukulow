@@ -16,7 +16,7 @@ import { histogramsSql } from './dms-formal-histograms.ts';
 import { baselinePaths, baselineSource } from './pool-overhead-baseline.ts';
 import { overheadOrder } from './dms-formal-overhead.ts';
 import { reportOverheadArm } from './dms-formal-overhead-results.ts';
-import { scaledLoad, localIdentity, localCopy, sha256File, type LocalLimits } from './dms-formal-local.ts';
+import { scaledLoad, localIdentity, localCopy, sha256File, dockerfileBases, type LocalLimits } from './dms-formal-local.ts';
 import { reportPilot } from './dms-formal-pilot.ts';
 import { reportAttempt } from './dms-formal-results.ts';
 export type HostState = { target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
@@ -308,7 +308,7 @@ async function main() {
       break;
     }
     case 'build': await clone(s);
-      if(s.target==='local')for(const pin of readFileSync(root+'/source/Dockerfile','utf8').matchAll(/^FROM (\S+)/gm))await docker(['image','inspect',pin[1]!]);
+      if(s.target==='local')for(const pin of dockerfileBases(readFileSync(root+'/source/Dockerfile','utf8')))await docker(['image','inspect',pin]);
       if(s.pilotImage) {
         if(!s.pilot||s.target!=='local'||await docker(['image','inspect','--format','{{index .Config.Labels "org.opencontainers.image.revision"}}',s.pilotImage])!==s.sha)throw new Error('Pilot image source revision mismatch');
         await docker(['tag',s.pilotImage,image(s)]);

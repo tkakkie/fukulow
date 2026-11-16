@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { readConfig } from './dms-formal-config.ts';
 import { arrivalRate, scaledSocketMember } from './dms-formal-scenarios.ts';
-import { scaledLoad, apparentBytes } from './dms-formal-local.ts';
+import { scaledLoad, apparentBytes, dockerfileBases } from './dms-formal-local.ts';
 import { concurrentBrowsingReasons, type OfferedBucket } from './dms-formal-concurrency.ts';
 import { overheadConditionKeys, overheadOrder, overheadMetrics, overheadClasses, judgeOverhead, type OverheadArm } from './dms-formal-overhead.ts';
 import { execute } from './dms-formal-exec.ts';
@@ -147,4 +147,10 @@ test('local log-reader shutdown drains output and distinguishes an expected kill
   await delay(200);const manifest=await stop();assert.equal(manifest.complete,true);assert.match(readFileSync(dir+'/controlled.log','utf8'),/retained/);
   const early=captureAppLogs(dir,['-e',"console.error('early');process.exit(1)"],undefined,process.execPath,'early','SIGKILL');
   await delay(200);assert.equal((await early()).complete,false);
+});
+
+test('local build checks only external Dockerfile bases, not earlier stage names', () => {
+  const dockerfile='FROM rust:1@sha256:a AS rust-base\nFROM rust-base AS wasm\nFROM node:2@sha256:b AS web\nFROM Rust-Base as server\nFROM debian:3@sha256:c\n';
+  assert.deepEqual(dockerfileBases(dockerfile),['rust:1@sha256:a','node:2@sha256:b','debian:3@sha256:c']);
+  assert.deepEqual(dockerfileBases(readFileSync(resolve(import.meta.dirname,'../Dockerfile'),'utf8')).every(pin=>/@sha256:[a-f0-9]{64}$/.test(pin)),true);
 });
