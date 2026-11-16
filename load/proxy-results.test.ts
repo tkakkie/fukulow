@@ -11,7 +11,8 @@ test('memory parsing uses actual Docker units, rejects missing/unknown values', 
 test('throughput steps pass only with every send delivered at the offered rate', async () => {
   const { stepMetric, offeredShortfall } = await import('./proxy-results.ts');
   const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }],
-    cpuPeakPercent: { generator: 20 }, resources: [{ rows: [] }], rate: { offeredSendRate: 99.9, configuredSendRate: 100 } };
+    cpuPeakPercent: { generator: 20 }, resources: [{ rows: [] }], rate: { offeredSendRate: 99.9, configuredSendRate: 100 },
+    setupComplete: { sessions: 7, accounts: 7 } };
   // Every send accepted (201) but one delivery missing: scenario.ts exits 99 on missing_deliveries, so the step fails.
   const undelivered = { ...ok, exitCode: 1, generatorExitCode: 99,
     measurementError: 'Error: Invalid measurement: generator exited with code 99; failed thresholds: missing_deliveries, checks' };
@@ -25,6 +26,8 @@ test('throughput steps pass only with every send delivered at the offered rate',
   assert.match(capacity([{ ...ok, rate: undefined }]).error ?? '', /missing offered send rate/);
   assert.equal(capacity([{ ...ok, rate: { offeredSendRate: 95, configuredSendRate: 100 } }]).value, 50);
   assert.ok(capacity([ok, { ...undelivered, generatorExitCode: 1 }]).error);
+  // A provisioning failure (invite, sign-in, Channel access) also exits 99: invalid, never a capacity limit.
+  assert.ok(capacity([ok, { ...undelivered, setupComplete: undefined }]).error);
   // An exit 99 counts as capacity only with the offered rate proven; otherwise the run is inconclusive.
   for (const rate of [{ offeredSendRate: 90, configuredSendRate: 100 }, undefined]) {
     const run = capacity([ok, { ...undelivered, rate }]);
@@ -58,13 +61,16 @@ test('proxy samples exclude app/generator, report mean/peak and retain failed-ru
 
 test('connection capacity failures are distinct from instrumentation/setup failures and TLS drift', async () => {
   const { stepMetric: connectionMetric } = await import('./proxy-results.ts');
-  const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }], cpuPeakPercent: { generator: 20 }, resources: [{ rows: [] }] };
+  const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }], cpuPeakPercent: { generator: 20 }, resources: [{ rows: [] }],
+    setupComplete: { sessions: 63, accounts: 63 } };
   const capacity = { ...ok, exitCode: 1, generatorExitCode: 99, measurementError: 'Error: Invalid measurement: generator exited with code 99; failed thresholds: load_errors' };
   const metric = connectionMetric('caddy', [ok, capacity], [1000,2000]);
   assert.equal(metric.observation.value, 1000);
   assert.equal(metric.observation.error, undefined);
   assert.ok(connectionMetric('caddy', [ok, { ...capacity, measurementError: 'SQL snapshot failed' }], [1000,2000]).observation.error);
   assert.ok(connectionMetric('caddy', [ok, { ...capacity, generatorExitCode: 1 }], [1000,2000]).observation.error);
+  // Exit 99 from a failed invite/sign-in/Channel-access check during provisioning is a setup failure.
+  assert.ok(connectionMetric('caddy', [ok, { ...capacity, setupComplete: undefined }], [1000,2000]).observation.error);
   assert.ok(connectionMetric('caddy', [ok, { ...ok, tls: [] }], [1000,2000]).observation.error);
   assert.equal(connectionMetric('caddy', [{ ...ok, cpuPeakPercent: {} }], [1000]).observation.generatorCpu, null);
 });

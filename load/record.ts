@@ -75,6 +75,7 @@ let storm: unknown;
 let restart: Promise<void> | undefined;
 let restartMs: number | undefined;
 let progress: unknown;
+let setupComplete: unknown;
 let rate: { startedAt?: number; offered: number; [key: string]: unknown } | undefined;
 let measurementError: unknown;
 let exitCode = 1;
@@ -197,6 +198,7 @@ try {
         if (typeof message === 'string' && message.startsWith('LOAD_TLS ')) clientTls.add(message.slice(9));
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
         if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) progress = JSON.parse(message.slice(14));
+        if (typeof message === 'string' && message.startsWith('LOAD_SETUP_COMPLETE ')) setupComplete = JSON.parse(message.slice(20));
         if (line.startsWith('LOAD_THROUGHPUT ')) {
           throughput = JSON.parse(line.slice(16));
           if (throughput) rate = { offered: throughput.offered, accepted: throughput.accepted };
@@ -268,7 +270,7 @@ try {
         ...(firstPaint ? { generator: hostGeneratorSamples.length ? Math.max(...hostGeneratorSamples.map(s => s.cpuPercent)) : null } : {}) },
       generatorCpuSource: firstPaint ? 'host ps lifetime %CPU summed over runner and browser descendants' : 'docker stats; instantaneous sampled CPU',
       cpuSamplingScope: 'whole generator run including provisioning, boundaries, idle/drain and teardown; 100% is one core',
-      progress, measurementError }, null, 2));
+      progress, setupComplete, measurementError }, null, 2));
   });
   if (!proxy) attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));
   if (!proxy) attempt(() => writeFileSync(`${output}/database.log`, docker(...compose, 'logs', '--no-color', 'db')));

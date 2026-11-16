@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { dockerCleanup, runBounded, runBudgetMs, timeoutReason } from './proxy-run.ts';
+import { descendants, dockerCleanup, runBounded, runBudgetMs, timeoutReason } from './proxy-run.ts';
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 // A fake generator: writes its own and a grandchild's pid, then never exits; `stubborn` ignores SIGTERM.
@@ -13,7 +13,8 @@ function fake(stubborn: boolean) {
     import { spawn } from 'node:child_process';
     import { writeFileSync } from 'node:fs';
     ${stubborn ? "process.on('SIGTERM', () => {});" : ''}
-    const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore' });
+    // Like record.ts's generator: its own process group, so the runner's group signal misses it.
+    const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore', detached: true });
     writeFileSync(${JSON.stringify(`${directory}/pids`)}, process.pid + ' ' + child.pid);
     setInterval(() => {}, 1000);
   `);
@@ -81,6 +82,7 @@ test('Docker cleanup removes only the named project and its generator container'
   const errors = dockerCleanup('fukulow-load-1-abc', args => {
     calls.push(args);
     if (args[0] === 'ps' && args.at(-1)!.startsWith('label=')) return 'app1\ndb1';
+    if (args[0] === 'ps' && args.at(-1)!.startsWith('network=')) return 'k6\nprobe';
     if (args[0] === 'ps') return 'k6';
     if (args[0] === 'network' && args[1] === 'ls') return 'net1';
     if (args[0] === 'volume' && args[1] === 'ls') return '';
@@ -90,7 +92,8 @@ test('Docker cleanup removes only the named project and its generator container'
   assert.deepEqual(calls, [
     ['ps', '-aq', '--filter', 'label=com.docker.compose.project=fukulow-load-1-abc'],
     ['ps', '-aq', '--filter', 'name=^/fukulow-load-1-abc-generator$'],
-    ['rm', '-f', 'app1', 'db1', 'k6'],
+    ['ps', '-aq', '--filter', 'network=fukulow-load-1-abc_default'],
+    ['rm', '-f', 'app1', 'db1', 'k6', 'probe'],
     ['network', 'ls', '-q', '--filter', 'label=com.docker.compose.project=fukulow-load-1-abc'],
     ['network', 'rm', 'net1'],
     ['volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=fukulow-load-1-abc'],
@@ -108,4 +111,23 @@ test('run budget covers k6 limits plus Compose and grows with Accounts', () => {
   assert.equal(runBudgetMs({ ...base, LOAD_RECONNECT_STORM: '1' }) - runBudgetMs(base), 120_000);
   assert.equal(runBudgetMs({ LOAD_FIRST_PAINT: '1' }), 2_400_000);
   assert.throws(() => runBudgetMs({ ...base, CHANNELS: 'x' }));
+});
+
+test('an interrupted run is stopped, cleaned up and invalid even if it exits on SIGTERM', async () => {
+  const generator = fake(false);
+  let cleaned = 0;
+  try {
+    const result = await within(runBounded({ command: process.execPath, args: [generator.script], env: process.env,
+      timeoutMs: 60_000, graceMs: 5000, cleanup: () => { cleaned++; return []; },
+      onStart: stop => setTimeout(stop, 300) }), generator);
+    assert.deepEqual([result.timedOut, result.stopped, cleaned], [false, true, 1]);
+    assert.match(timeoutReason(result, 60_000)!, /^run interrupted; stopped by SIGTERM/);
+    const pids = generator.pids();
+    await waitFor(() => !pids.some(alive));
+    assert.deepEqual(pids.filter(alive), []);
+  } finally { reap(generator); rmSync(generator.directory, { recursive: true, force: true }); }
+});
+
+test('descendants follows the whole tree, not only direct children', () => {
+  assert.deepEqual(descendants(10, () => ' 10 1\n 11 10\n 12 11\n 13 12\n 20 1\n').sort(), [11, 12, 13]);
 });

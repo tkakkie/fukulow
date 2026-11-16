@@ -100,7 +100,10 @@ export const options: Options = {
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function setup(): Setup {
-  return seed({ channels, subscribers, socketsPerSession, socketsPerAccount, visibility, legacy });
+  const data = seed({ channels, subscribers, socketsPerSession, socketsPerAccount, visibility, legacy });
+  // A k6 exit 99 is a capacity result only after provisioning succeeded (load/proxy-results.ts).
+  console.log('LOAD_SETUP_COMPLETE ' + JSON.stringify({ sessions: data.tokens.length, accounts: socketsPerAccount ? data.tokens.length : 1 }));
+  return data;
 }
 
 export default async function (data: Setup): Promise<void> {

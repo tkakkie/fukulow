@@ -84,6 +84,9 @@ async function record(directory: string, proxy: Proxy, extra: Record<string, str
   try { result = JSON.parse(readFileSync(`${directory}/results.json`, 'utf8')); }
   catch { result = { exitCode: bounded.code || 1, measurementError: 'runner did not produce results' }; }
   if (reason) result = { ...result, exitCode: result.exitCode || 1, measurementError: [reason, result.measurementError].filter(Boolean).join('; ') };
+  // results.json is written before teardown: a later failure (cleanup, signal) still invalidates the run.
+  else if (bounded.code !== 0 && result.exitCode === 0) result = { ...result, exitCode: bounded.code,
+    measurementError: `record runner exited ${bounded.code} after writing results (teardown or signal)` };
   conditions.push({ directory, accounts, socketsPerAccount: accounts === undefined ? undefined : socketsPerAccount,
     budgetSeconds: budgetMs / 1000, elapsedSeconds: Math.round(bounded.elapsedMs / 1000), timedOut: bounded.timedOut });
   return result;
@@ -119,8 +122,10 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
       deliveryLatency: result.summary?.metrics?.delivery_latency?.values })) });
     // Proxy resources come from the highest passing step (the first step when none passed).
     const passed = results.filter((result, i) => sendRates[i] <= metric.observation.value && result.exitCode === 0);
-    metrics = { throughput_sends_per_second: metric,
-      ...metricsFor(proxy, 2, passed.at(-1) ?? results[0] ?? { exitCode: 1, measurementError: 'no throughput step ran' }) };
+    const resources = metricsFor(proxy, 2, passed.at(-1) ?? results[0] ?? { exitCode: 1, measurementError: 'no throughput step ran' });
+    // An invalid ladder invalidates its resource observations too.
+    for (const resource of Object.values(resources)) resource.observation.error ??= metric.observation.error;
+    metrics = { throughput_sends_per_second: metric, ...resources };
   } else {
     const extra: Record<string, string> = scenario === 4 ? { SUBSCRIBERS: smoke ? '4' : '5000', LOAD_RECONNECT_STORM: '1', DURATION_SECONDS: '3', PUBLISH_INTERVAL_MS: '500' }
       : scenario === 5 ? { LOAD_FIRST_PAINT: '1' } : {};
@@ -131,9 +136,14 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
     if (!Object.keys(metrics).length) metrics.missing = { kind: 'latency', observation: {
       proxy, value: NaN, tls: result.tls ?? [], generatorCpu: null, error: 'missing scenario metrics' } };
   }
-  // A full-size preflight passes only if every run is valid and each ladder's first step passes.
-  if (preflight && !entry.error && Object.values(metrics).some(metric => metric.kind === 'step' && !(metric.observation.value > 0))) {
-    Object.assign(entry, { error: 'preflight: the first step did not pass' });
+  // A full-size preflight passes only if every observation passes judge()'s per-run validity checks
+  // (metric present, TLS 1.3 evidence, generator CPU below 90% for scenarios 1-2) and each ladder's first step passes.
+  if (preflight && !entry.error) {
+    const reasons = Object.entries(metrics).flatMap(([name, metric]) => [
+      ...judge([metric.observation], metric.kind, scenario <= 2).invalid.flatMap(row => row.reasons.map(reason => `${name}: ${reason}`)),
+      ...(metric.kind === 'step' && !(metric.observation.value > 0) ? [`${name}: the first step did not pass`] : []),
+    ]);
+    if (reasons.length) Object.assign(entry, { error: `preflight: ${reasons.join('; ')}` });
   }
   if (!warmup) for (const [name, metric] of Object.entries(metrics)) {
     const key = `${scenario}/${name}`;

@@ -2,6 +2,8 @@ import type { Observation, Proxy, Tls } from './proxy-judgment.ts';
 
 export type RunResult = {
   exitCode: number; generatorExitCode?: number; tls?: Tls[]; measurementError?: string;
+  /** load/scenario.ts provisioned every Account and Channel (`LOAD_SETUP_COMPLETE`). */
+  setupComplete?: { sessions: number; accounts: number };
   cpuPeakPercent?: Record<string, number | null>;
   summary?: { metrics?: Record<string, { values: Record<string, number> }>; summaries?: {
     pathLabel: string; network: string; cache: string; timelineVisibleMs: { p50: number; p95: number }
@@ -60,7 +62,8 @@ export function stepMetric(proxy: Proxy, results: RunResult[], steps: number[], 
   const first = results[0];
   const signature = (result: RunResult) => JSON.stringify(result.tls?.map(({ protocol, cipher }) => ({ protocol, cipher })));
   const errors = results.flatMap(result => {
-    const capacityFailure = result.generatorExitCode === 99 && result.summary && result.resources?.length &&
+    // A failed provisioning check also exits 99; only a run past setup can show a capacity limit.
+    const capacityFailure = result.generatorExitCode === 99 && result.setupComplete && result.summary && result.resources?.length &&
       result.measurementError?.startsWith('Error: Invalid measurement: generator exited with code 99; failed thresholds:');
     return [
       ...(!result.summary || !result.tls ? ['missing step evidence'] : []),
