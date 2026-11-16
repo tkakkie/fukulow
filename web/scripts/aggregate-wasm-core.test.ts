@@ -91,7 +91,7 @@ describe('aggregateDirectory input checks', () => {
     { type: 'max_rate_summary', maxSustainableRateMsgPerSec: 8000 },
     ...['history_8x50', 'history_2x200', 'catchup_250', 'catchup_1000'].map((subCase) => ({ type: 'bulk_receipt', subCase, p50: 1, p95: 2 })),
     { type: 'memory_summary', steadyMedianMiB: 50, peakMaxMiB: 80, wasmPeakKiB: 0, wasmPeakPages: 0, wasmPagesAddedPostWarmup: 0, olsSlopeBytesPerMessage: 1 },
-    { type: 'g3_integrity', passed: true, totalStepAssertions: 1 },
+    { type: 'g3_integrity', passed: true, totalStepAssertions: 1, totalRunCompletionAssertions: 1 },
   ].filter((l) => l.type !== omit).map((l) => JSON.stringify(l)).join('\n')
   const withDir = (files: Record<string, string>, check: (dir: string) => void) => {
     const dir = mkdtempSync(join(tmpdir(), 'agg466-'))
@@ -104,14 +104,21 @@ describe('aggregateDirectory input checks', () => {
     (['B', 'W', 'R'] as const).map((arm) => [`round-${n}-${arm}.jsonl`, round(arm, n, arm === 'W' ? omitFromW : undefined)])))
 
   it('aggregates complete paired rounds', () => {
-    withDir(all(), (dir) => expect(aggregateDirectory(dir).step.status).toBe('MET'))
+    withDir(all(), (dir) => expect(aggregateDirectory(dir, 466, [2]).step.status).toBe('MET'))
   })
   it('rejects a round with a missing section instead of scoring it as 0 or passed', () => {
-    withDir(all('memory_summary'), (dir) => expect(() => aggregateDirectory(dir)).toThrow(/missing memory_summary/))
-    withDir(all('g3_integrity'), (dir) => expect(() => aggregateDirectory(dir)).toThrow(/missing g3_integrity/))
+    withDir(all('memory_summary'), (dir) => expect(() => aggregateDirectory(dir, 466, [2])).toThrow(/missing memory_summary/))
+    withDir(all('g3_integrity'), (dir) => expect(() => aggregateDirectory(dir, 466, [2])).toThrow(/missing g3_integrity/))
+  })
+  it('rejects a round count the plan does not use', () => {
+    withDir(all(), (dir) => expect(() => aggregateDirectory(dir)).toThrow(/the plan needs 5 or 9/))
+  })
+  it('rejects a failed G3 integrity record', () => {
+    const files = all(); files['round-1-W.jsonl'] = files['round-1-W.jsonl'].replace('"passed":true', '"passed":false')
+    withDir(files, (dir) => expect(() => aggregateDirectory(dir, 466, [2])).toThrow(/G3 integrity did not pass/))
   })
   it('rejects arms that do not cover the same rounds', () => {
     const files = all(); delete files['round-2-R.jsonl']
-    withDir(files, (dir) => expect(() => aggregateDirectory(dir)).toThrow(/R rounds/))
+    withDir(files, (dir) => expect(() => aggregateDirectory(dir, 466, [2])).toThrow(/R rounds/))
   })
 })

@@ -619,16 +619,22 @@ async function main() {
       await releaseCores()
       {
         const { core, c0, cursor } = bootstrapGridCore(createSelectedCore, channelsCount, messagesPerChannel)
-        const pageMessages = Array.from({ length: 50 }, (_, m) => makeMessage(cursor - 49 + m, c0))
+        // Each page edits the 50 newest Messages (distinct body per iteration), so every step really merges and,
+        // on wasm, crosses the boundary as a messages delta; an identical page would be a no-op duplicate.
+        const page = (iteration: number) => Array.from({ length: 50 }, (_, m) => {
+          const seq = cursor - 49 + m
+          return makeMessage(seq, c0, { bodyText: body155(seq, `${iteration}-${c0}`) })
+        })
         for (let i = 0; i < warmupSteps; i++) {
           const reqId = (core.step({ type: 'refresh', channel: c0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
-          core.step({ type: 'history_result', request: reqId, page: { messages: pageMessages, has_more: true } })
+          core.step({ type: 'history_result', request: reqId, page: { messages: page(i), has_more: true } })
         }
         const samples: number[] = []
         for (let i = 0; i < gridSteps; i++) {
           const reqId = (core.step({ type: 'refresh', channel: c0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
-          const histInput: Input = { type: 'history_result', request: reqId, page: { messages: pageMessages, has_more: true } }
-          const t0 = performance.now(); core.step(histInput); samples.push((performance.now() - t0) * 1000)
+          const histInput: Input = { type: 'history_result', request: reqId, page: { messages: page(warmupSteps + i), has_more: true } }
+          const t0 = performance.now(), r = core.step(histInput); samples.push((performance.now() - t0) * 1000)
+          if (!r.changedChannels.has(c0)) throw new Error('history_50 page did not change the Channel')
           assertG3Step(core.get(), new Map([[c0, cursor]]))
         }
         allGridSamples.push(...samples)
@@ -753,7 +759,7 @@ async function main() {
       if (rateMsgPerSec > 100 && completionTs > tStart + windowMs + 250 && completed < totalEvents) break
     }
     const uncompleted = totalEvents - completed
-    const trailingBacklog = prevCompletionTs > tStart + totalEvents * intervalMs + Math.max(intervalMs, 10)
+    const trailingBacklog = prevCompletionTs > tStart + totalEvents * intervalMs
       ? Math.floor((prevCompletionTs - (tStart + totalEvents * intervalMs)) / intervalMs) : 0
     const finalQueue = uncompleted > 0 ? uncompleted : trailingBacklog
     assertG3Step(sync.get(), cursors); g3CompletionAssertions++
@@ -786,6 +792,8 @@ async function main() {
   emit({ type: 'max_rate_summary', arm, core: coreKind, round, maxSustainableRateMsgPerSec: maxSustainableRate, windows: windowSummaries })
 
   // 3. Bulk Message Receipt (§5.4 Row 3)
+  // Only core.step() is timed; get() returns the cached view, and the G3 scans run between steps outside the timer.
+  const timed = <T>(acc: { ms: number }, fn: () => T): T => { const t0 = performance.now(), r = fn(); acc.ms += performance.now() - t0; return r }
   const bulkWarmup = smoke ? 3 : 30, bulkReps = smoke ? 5 : 100, bulkC0 = fixtureUuid('bulk-C0')
   function runBulkHistory8x50(): number {
     const core = createSelectedCore(SELF_UUID)
@@ -795,13 +803,13 @@ async function main() {
     core.step({ type: 'history_result', request: latestId, page: { messages: [makeMessage(401, bulkC0)], has_more: true } })
     core.step({ type: 'event', connection: connId, event: { type: 'subscribed', channel_id: bulkC0, caught_up_seq: 401 } })
     const pages = Array.from({ length: 8 }, (_, p) => Array.from({ length: 50 }, (__, m) => makeMessage(400 - (p + 1) * 50 + 1 + m, bulkC0)))
-    const t0 = performance.now()
+    const acc = { ms: 0 }
     for (let p = 0; p < 8; p++) {
-      const olderEff = core.step({ type: 'load_older', channel: bulkC0 }).effects; assertG3Step(core.get(), new Map([[bulkC0, 401]]))
+      const olderEff = timed(acc, () => core.step({ type: 'load_older', channel: bulkC0 })).effects; assertG3Step(core.get(), new Map([[bulkC0, 401]]))
       const reqId = (olderEff.find((e) => e.type === 'fetch_history') as { id: number }).id
-      core.step({ type: 'history_result', request: reqId, page: { messages: pages[p], has_more: p < 7 } }); assertG3Step(core.get(), new Map([[bulkC0, 401]]))
+      timed(acc, () => core.step({ type: 'history_result', request: reqId, page: { messages: pages[p], has_more: p < 7 } })); assertG3Step(core.get(), new Map([[bulkC0, 401]]))
     }
-    const elapsed = performance.now() - t0
+    const elapsed = acc.ms
     if (core.get().channels[bulkC0].messages.length !== MAIN_MESSAGE_LIMIT) throw new Error('Expected 400 messages after 8x50')
     g3CompletionAssertions++; return Number(elapsed.toFixed(4))
   }
@@ -811,11 +819,11 @@ async function main() {
     core.step({ type: 'connection_ready', connection: connId })
     const latestId = (core.step({ type: 'watch', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
     const page1 = Array.from({ length: 200 }, (_, m) => makeMessage(201 + m, bulkC0)), page2 = Array.from({ length: 200 }, (_, m) => makeMessage(1 + m, bulkC0))
-    const t0 = performance.now()
-    core.step({ type: 'history_result', request: latestId, page: { messages: page1, has_more: true } }); assertG3Step(core.get(), new Map([[bulkC0, 400]]))
-    const olderId = (core.step({ type: 'load_older', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id; assertG3Step(core.get(), new Map([[bulkC0, 400]]))
-    core.step({ type: 'history_result', request: olderId, page: { messages: page2, has_more: false } })
-    const elapsed = performance.now() - t0; assertG3CatchUpComplete(core.get(), bulkC0, 400, MAIN_MESSAGE_LIMIT)
+    const acc = { ms: 0 }
+    timed(acc, () => core.step({ type: 'history_result', request: latestId, page: { messages: page1, has_more: true } })); assertG3Step(core.get(), new Map([[bulkC0, 400]]))
+    const olderId = (timed(acc, () => core.step({ type: 'load_older', channel: bulkC0 })).effects.find((e) => e.type === 'fetch_history') as { id: number }).id; assertG3Step(core.get(), new Map([[bulkC0, 400]]))
+    timed(acc, () => core.step({ type: 'history_result', request: olderId, page: { messages: page2, has_more: false } }))
+    const elapsed = acc.ms; assertG3CatchUpComplete(core.get(), bulkC0, 400, MAIN_MESSAGE_LIMIT)
     return Number(elapsed.toFixed(4))
   }
   function runBulkCatchup(totalMessages: 250 | 1000): number {
@@ -834,16 +842,16 @@ async function main() {
     core.step({ type: 'connection_ready', connection: conn2 })
     const pageCount = totalMessages / 50, highWaterSeq = baseCursor + totalMessages
     const pages = Array.from({ length: pageCount }, (_, p) => Array.from({ length: 50 }, (__, m) => makeMessage(baseCursor + p * 50 + 1 + m, bulkC0)))
-    const t0 = performance.now()
-    let subEff = core.step({ type: 'event', connection: conn2, event: { type: 'subscribed', channel_id: bulkC0, caught_up_seq: highWaterSeq } }).effects
+    const acc = { ms: 0 }
+    let subEff = timed(acc, () => core.step({ type: 'event', connection: conn2, event: { type: 'subscribed', channel_id: bulkC0, caught_up_seq: highWaterSeq } })).effects
     assertG3Step(core.get())
     for (let p = 0; p < pageCount; p++) {
       const fillReq = subEff.find((e) => e.type === 'fetch_history' && e.page === 'after') as { id: number } | undefined
       if (!fillReq) throw new Error(`Missing after_seq fill request at page ${p}`)
-      subEff = core.step({ type: 'history_result', request: fillReq.id, page: { messages: pages[p], has_more: p < pageCount - 1 } }).effects
+      subEff = timed(acc, () => core.step({ type: 'history_result', request: fillReq.id, page: { messages: pages[p], has_more: p < pageCount - 1 } })).effects
       assertG3Step(core.get(), new Map([[bulkC0, baseCursor + (p + 1) * 50]]))
     }
-    const elapsed = performance.now() - t0; assertG3CatchUpComplete(core.get(), bulkC0, highWaterSeq, MAIN_MESSAGE_LIMIT)
+    const elapsed = acc.ms; assertG3CatchUpComplete(core.get(), bulkC0, highWaterSeq, MAIN_MESSAGE_LIMIT)
     if (core.get().channels[bulkC0].forgottenThrough !== undefined) throw new Error('Expected forgottenThrough cleared')
     return Number(elapsed.toFixed(4))
   }

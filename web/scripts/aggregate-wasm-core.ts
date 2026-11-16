@@ -153,20 +153,19 @@ type FirstPaintRound = { arm: Arm; round: number; cells: Record<string, FirstPai
 
 function parseFirstPaintFiles(dir: string): Record<Arm, FirstPaintRound[]> {
   const out: Record<Arm, FirstPaintRound[]> = { B: [], W: [], R: [] }
-  for (const file of walkFiles(dir, '.json')) {
-    if (file.endsWith('summary.json')) continue
-    try {
+  for (const file of walkFiles(join(dir, 'fp'), '.json')) {
+    {
       const data = JSON.parse(readFileSync(file, 'utf8')) as { arm?: Arm; round?: number; summaries?: FirstPaintCell[] }
-      if (!Array.isArray(data.summaries)) continue
+      if (!Array.isArray(data.summaries)) throw new Error(`${file}: no first-display summaries`)
+      for (const c of data.summaries) for (const v of [c.fcpMs?.p50, c.fcpMs?.p95, c.timelineVisibleMs?.p50, c.timelineVisibleMs?.p95]) {
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) throw new Error(`${file}: invalid first-display value in ${c.pathLabel}|${c.network}|${c.cache}`)
+      }
       // Layout fixed by the plan: <dir>/fp/<B|W|R>/round-<n>/results.json; anything else is an error, never a guess.
       const layout = file.match(/[/\\]fp[/\\]([BWR])[/\\]round-(\d+)[/\\]/)
       if (!layout) throw new Error(`first-display result outside <dir>/fp/<arm>/round-<n>/: ${file}`)
       const arm = layout[1] as Arm, round = Number(layout[2])
       const cells = Object.fromEntries(data.summaries.map((s) => [`${s.pathLabel}|${s.network}|${s.cache}`, s]))
       out[arm].push({ arm, round, cells })
-    } catch (err) {
-      if (err instanceof SyntaxError) continue
-      throw err
     }
   }
   for (const arm of ['B', 'W', 'R'] as const) out[arm].sort((a, b) => a.round - b.round)
@@ -193,6 +192,9 @@ function parseRoundFile(file: string): RoundData {
   if (meta.arm !== 'B' && meta.arm !== 'W' && meta.arm !== 'R') throw new Error(`${file}: meta.arm must be B, W or R`)
   const stepSum = section('step_summary'), sustained = section('sustained'), maxRate = section('max_rate_summary')
   const memSum = section('memory_summary'), g3 = section('g3_integrity')
+  if (g3.passed !== true || num(g3, 'totalStepAssertions') <= 0 || num(g3, 'totalRunCompletionAssertions') <= 0) {
+    throw new Error(`${file}: G3 integrity did not pass`)
+  }
   const bulk: Record<string, { p50: number; p95: number }> = {}
   for (const l of lines.filter((x) => x.type === 'bulk_receipt')) bulk[String(l.subCase)] = { p50: num(l, 'p50'), p95: num(l, 'p95') }
   for (const k of BULK_CASES) if (!bulk[k]) throw new Error(`${file}: missing bulk_receipt ${k}`)
@@ -204,14 +206,14 @@ function parseRoundFile(file: string): RoundData {
     bulk, steadyMiB: num(memSum, 'steadyMedianMiB'), peakMiB: num(memSum, 'peakMaxMiB'),
     wasmPeakKiB: num(memSum, 'wasmPeakKiB'), wasmPeakPages: num(memSum, 'wasmPeakPages'),
     wasmPagesAdded: num(memSum, 'wasmPagesAddedPostWarmup'), olsSlope: num(memSum, 'olsSlopeBytesPerMessage'),
-    g3Passed: g3.passed === true, g3Steps: num(g3, 'totalStepAssertions'),
+    g3Passed: true, g3Steps: num(g3, 'totalStepAssertions'),
   }
 }
 
 // Rounds are paired by round number; B, W and R must cover exactly the same rounds.
-function requireSameRounds(label: string, byArm: Record<Arm, Array<{ round: number }>>): void {
+function requireSameRounds(label: string, byArm: Record<Arm, Array<{ round: number }>>, roundCounts: readonly number[]): void {
   const key = (arm: Arm) => byArm[arm].map((r) => r.round).join(',')
-  if (byArm.B.length === 0) throw new Error(`${label}: no rounds for B`)
+  if (!roundCounts.includes(byArm.B.length)) throw new Error(`${label}: ${byArm.B.length} rounds for B, the plan needs ${roundCounts.join(' or ')}`)
   for (const arm of ['W', 'R'] as const) {
     if (key(arm) !== key('B')) throw new Error(`${label}: ${arm} rounds [${key(arm)}] differ from B rounds [${key('B')}]`)
   }
@@ -220,15 +222,19 @@ function requireSameRounds(label: string, byArm: Record<Arm, Array<{ round: numb
   }
 }
 
-export function aggregateDirectory(dir: string, seed = 466) {
+// The plan runs 5 rounds, or 9 after the one pre-committed extension.
+export function aggregateDirectory(dir: string, seed = 466, roundCounts: readonly number[] = [5, 9]) {
   const parsed = walkFiles(dir, '.jsonl').map(parseRoundFile)
   const byArm: Record<Arm, RoundData[]> = { B: [], W: [], R: [] }
   for (const r of parsed) byArm[r.arm].push(r)
   for (const arm of ['B', 'W', 'R'] as const) byArm[arm].sort((a, b) => a.round - b.round)
-  requireSameRounds('sync', byArm)
+  requireSameRounds('sync', byArm, roundCounts)
   const fpByArm = parseFirstPaintFiles(dir)
   const hasFirstDisplay = fpByArm.B.length + fpByArm.W.length + fpByArm.R.length > 0
-  if (hasFirstDisplay) requireSameRounds('first display', fpByArm)
+  if (hasFirstDisplay) {
+    requireSameRounds('first display', fpByArm, roundCounts)
+    if (fpByArm.B.map((r) => r.round).join(',') !== byArm.B.map((r) => r.round).join(',')) throw new Error('first display rounds differ from sync rounds')
+  }
 
   const baselineArm: Arm = 'B'
   const bRounds = byArm.B, wRounds = byArm.W, rRounds = byArm.R
