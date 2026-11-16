@@ -31,12 +31,12 @@ test('module direction uses compiler resolution in production and tests', async 
   }
 
   await t.test('production edges retain domain order and the shared wire leaf', () => {
-    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime', 'fukulow_api'])
-    assert.equal(edges.length, 8)
-    assert.equal(new Set(edges).size, 8)
+    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime', 'fukulow_api', 'fukulow_client_core'])
+    assert.equal(edges.length, 9)
+    assert.equal(new Set(edges).size, 9)
     for (let from = 0; from < names.length; from++) {
       for (let to = 0; to < names.length; to++) {
-        assert.equal(allowed(names[from], names[to]), from === to || (from < 4 && to < 4 && to < from) || (from >= 2 && from < 4 && to === 4))
+        assert.equal(allowed(names[from], names[to]), from === to || (from < 4 && to < 4 && to < from) || ((from >= 2 && from < 4 || from === 5) && to === 4))
       }
     }
   })
@@ -152,7 +152,39 @@ pub struct RootWrapper(pub messages::Item);
 pub type Opaque = RootWrapper;
 #[macro_export] macro_rules! empty { () => {}; }
 `)
+    const core = library('fukulow_client_core', `
+pub struct Item { pub count: u8 }
+impl Item { pub fn count(&self) -> u8 { self.count } }
+pub type Alias = Item;
+pub fn make() -> Item { Item { count: 1 } }
+#[macro_export] macro_rules! empty { () => {}; }
+`)
     for (const tests of [false, true]) {
+      for (const [from, to, external, accepted] of [
+        ['fukulow_client_core', 'fukulow_api', leaf, true],
+        ['fukulow_client_core', 'fukulow_server', server, false],
+        ['fukulow_api', 'fukulow_client_core', core, false],
+        ...['auth', 'channels', 'messages', 'realtime'].map(from => [from, 'fukulow_client_core', core, false]),
+      ] as [string, string, string, boolean][]) {
+        const target = to === 'fukulow_server' ? to + '::messages' : to
+        for (const body of [
+          `use ${target}::Item;`, `fn f(_: ${target}::Alias) {}`,
+          `fn f() { let _value = ${target}::make(); }`,
+          `fn f(i: &${target}::Item) -> u8 { i.count }`,
+          `fn f(i: &${target}::Item) -> u8 { i.count() }`,
+          `${target}::empty!();`, `use ${target} as bridge; bridge::empty!();`,
+        ]) {
+          const inner = tests ? '#[cfg(test)] mod tests { ' + body + ' }' : body
+          const wholeCrate = from.startsWith('fukulow_')
+          const source = wholeCrate ? inner : 'mod ' + from + ' { ' + inner + ' }'
+          const extra = ['--extern', to + '=' + external]
+          const crateName = wholeCrate ? from : 'fixture'
+          assert.equal(compile(source, false, tests, extra, undefined, crateName).status, 0)
+          const result = compile(source, true, tests, extra, undefined, crateName)
+          assert.equal(result.status, accepted ? 0 : 1, `${from} -> ${to}: ${result.stderr}`)
+          if (!accepted) assert.match(result.stderr, new RegExp('module direction: ' + from + ' must not reference ' + (to === 'fukulow_server' ? 'messages' : to)))
+        }
+      }
       for (const from of ['auth', 'messages', 'realtime']) {
         const bodies = [
           'use fukulow_api::Item;',

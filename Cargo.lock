@@ -429,6 +429,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fukulow-client-core"
+version = "0.1.0"
+dependencies = [
+ "fukulow-api",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "fukulow-server"
 version = "0.1.0"
 dependencies = [
