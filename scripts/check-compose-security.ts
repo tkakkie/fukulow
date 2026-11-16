@@ -2,15 +2,18 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomInt, randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
+import { acmeFixture, certificate, challengeResponses, checkCertificateLifecycle, checkVerifiedTls, nodeImage, pebbleIssuingRoot, poll, testDomain } from './compose-acme.ts'
 import { fileURLToPath } from 'node:url'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
-const project = `fukulow-security-${randomUUID().slice(0, 8)}`
-const directory = mkdtempSync(join(tmpdir(), project))
+const project = process.env.CHECK_COMPOSE_PROJECT || `fukulow-security-${randomUUID().slice(0, 8)}`
+assert.match(project, /^fukulow-(?:security|e2e)-[a-z0-9][a-z0-9_-]+$/)
+const directory = mkdtempSync(join(process.env.CHECK_COMPOSE_WORK_DIR || tmpdir(), project))
 const override = join(directory, 'compose.yml')
 const image = process.env.CHECK_COMPOSE_IMAGE || `${project}-app`
 const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-e2e-db-test-only',
@@ -18,14 +21,19 @@ const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-e2e-db-test-on
   FUKULOW_SETUP_TOKEN: 'compose-e2e-setup-test-only',
   // Per-run private subnets; restart checks use a separate second-octet range.
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(128, 192)}.${randomInt(256)}`,
-  FUKULOW_COOKIE_SECURE: 'false' }
+  FUKULOW_COOKIE_SECURE: 'true', FUKULOW_DOMAIN: testDomain }
 const helper = `${project}-untrusted`
 const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
-const run = (args: string[], input?: string) => execFileSync('docker', args, { cwd, env, input, encoding: 'utf8', timeout: 180_000 }).trim()
+const run = (args: string[], input?: string) => {
+  const result = spawnSync('docker', args, { cwd, env, input, encoding: 'utf8', timeout: 180_000, stdio: 'pipe' })
+  // Never forward raw container/CA logs, including stderr, into CI diagnostics.
+  assert.equal(result.status, 0, `docker ${args[0]} failed (output suppressed)`)
+  return (result.stdout + (args[0] === 'logs' ? result.stderr : '')).trim()
+}
 const dc = (...args: string[]) => run([...compose, ...args])
-const owner = { email: 'compose-owner@example.test', password: 'compose-owner-password-test-only' }
+const owner = { email: 'owner@example.com', password: 'correct horse battery' }
 const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
-writeFileSync(override, `services:
+const baseOverride = `services:
   migrate:
     image: ${image}
   app:
@@ -34,46 +42,144 @@ writeFileSync(override, `services:
     networks:
       edge:
         gw_priority: 1
-  caddy:
-    ports: !override ["127.0.0.1::443", "127.0.0.1::80"]
-  nginx:
-    ports: !override ["127.0.0.1::80"]
-`)
+`
+writeFileSync(override, baseOverride)
 
 async function check(profile: string) {
   const proxy = (...args: string[]) => dc('--profile', profile, ...args)
   try {
+    writeFileSync(override, baseOverride + acmeFixture(directory, profile, run))
     proxy('up', '-d', '--no-build', '--wait')
-    const port = proxy('port', profile, profile === 'caddy' ? '443' : '80')
-    const url = `${profile === 'caddy' ? 'https' : 'http'}://${port.replace('127.0.0.1:', 'localhost:')}`
+    const tlsPort = () => Number(proxy('port', profile, '443').split(':').at(-1))
+    let url = `https://${testDomain}:${tlsPort()}`
+    const resolveHost = ['--noproxy', '*', '--connect-to', `${testDomain}::127.0.0.1:`]
+    const curl = (args: string[]) => execFileSync('curl', [...resolveHost, ...args], { encoding: 'utf8', timeout: 15_000 }).trim()
+    await poll('TLS issuance', () => certificate(tlsPort()), value => !!value)
+    // Normal path with verification on: Pebble's issuing root is trusted and the
+    // served chain and hostname are checked for ${testDomain}.
+    const issuingRoot = pebbleIssuingRoot(proxy)
+    const untrustedCa = readFileSync(join(directory, 'pebble-ca.pem'), 'utf8')
+    console.log(`PASS ${profile}: verified TLS chain and hostname, serial ${await checkVerifiedTls(tlsPort(), issuingRoot, untrustedCa)}`)
     const request = (path: string, data?: unknown, forwarded?: string, baseUrl = url, token?: string) => {
       const args = ['--insecure', '--silent', '--show-error', '--max-time', '10', '-w', '\n%{http_code}']
       if (data !== undefined) args.push('-H', 'Content-Type: application/json', '--data', JSON.stringify(data))
       if (forwarded) args.push('-H', `X-Forwarded-For: ${forwarded}`)
       if (token) args.push('-H', `Authorization: Bearer ${token}`)
-      const response = execFileSync('curl', [...args, baseUrl + path], { encoding: 'utf8' }).trim()
+      const response = curl([...args, baseUrl + path])
       const boundary = response.lastIndexOf('\n')
       return { status: Number(response.slice(boundary + 1)), body: response.slice(0, boundary) }
     }
-    for (let n = 0; ; n++) {
-      try { if (request('/api/v1/health').status === 200) break } catch { /* app may still be migrating */ }
-      if (n === 59) throw new Error('App did not become healthy')
-      await delay(1000)
-    }
-    const app = proxy('ps', '-q', 'app')
-    function checkHeaders(path: string, status: number, baseUrl = url) {
-      const output = execFileSync('curl', ['-sI', '--insecure', '--show-error', '--max-time', '10', baseUrl + path], { encoding: 'utf8' })
-      assert.match(output, new RegExp(`^HTTP/\\S+ ${status}\\b`))
+    await poll('HTTPS health', () => request('/api/v1/health'), value => value.status === 200)
+    function checkBrowserHeaders(output: string, path: string) {
       for (const [name, value] of [['permissions-policy', permissionsPolicy], ['cross-origin-opener-policy', 'same-origin']]) {
         const values = output.split(/\r?\n/).filter(line => line.toLowerCase().startsWith(`${name}:`)).map(line => line.slice(line.indexOf(':') + 1).trim())
         assert.deepEqual(values, [value], `${profile} ${path}: ${name}`)
       }
+    }
+    function checkHttp() {
+      const http = `http://${testDomain}:${proxy('port', profile, '80').split(':').at(-1)}`
+      for (const path of ['/', '/api/v1/health', '/api/v1/ready?check=1']) {
+        const headers = curl(['-sI', '--max-time', '5', http + path])
+        assert.match(headers, /^HTTP\/\S+ 308\b/)
+        const locations = headers.split(/\r?\n/).filter(line => /^location:/i.test(line)).map(line => line.slice(line.indexOf(':') + 1).trim())
+        assert.deepEqual(locations, [`https://${testDomain}${path}`])
+        assert.doesNotMatch(headers, /strict-transport-security:/i)
+        checkBrowserHeaders(headers, path)
+      }
+      const challenge = curl(['-sI', '--max-time', '5', http + '/.well-known/acme-challenge/not-an-active-token'])
+      assert.match(challenge, /^HTTP\/\S+ 404\b/)
+      assert.doesNotMatch(challenge, /location:|strict-transport-security:/i)
+      checkBrowserHeaders(challenge, 'HTTP-01 fallback')
+    }
+    checkHttp()
+    async function checkRejectedHost(tls: boolean, host: string, servername?: string, absoluteForm = false) {
+      const response = await new Promise<{ status: number, location?: string, csp?: string } | undefined>((resolve, reject) => {
+        const req = (tls ? httpsRequest : httpRequest)({ hostname: '127.0.0.1',
+          port: tls ? tlsPort() : Number(proxy('port', profile, '80').split(':').at(-1)),
+          servername, rejectUnauthorized: false, headers: { Host: host },
+          path: absoluteForm ? `https://${testDomain}/api/v1/health` : '/api/v1/health', agent: false }, res => {
+          res.resume()
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, location: res.headers.location, csp: res.headers['content-security-policy'] }))
+        })
+        req.setTimeout(5000, () => req.destroy(new Error('Host rejection probe timed out')))
+        req.on('error', (error: NodeJS.ErrnoException) => {
+          // nginx 444/Caddy abort close the socket; unknown SNI fails TLS.
+          if (error.code === 'ECONNRESET' || (tls && error.code === 'EPROTO')) resolve(undefined)
+          else reject(error)
+        })
+        req.end()
+      })
+      if (response) {
+        if (absoluteForm && profile === 'caddy') {
+          // Go canonicalizes absolute-form authority into Request.Host before
+          // Caddy routing. The conflicting raw Host must never reach the app.
+          assert.equal(response.status, 200)
+          assert.match(response.csp ?? '', /wss:\/\/fukulow\.test(?:[ ;]|$)/)
+          assert.ok(!response.csp?.includes(host), 'absolute-form authority must replace the foreign Host')
+          return
+        }
+        assert.ok(response.status >= 400 && response.status < 500, `${profile}: unknown Host/SNI must be rejected`)
+        assert.equal(response.location, undefined, 'foreign Host must never control a redirect')
+      }
+    }
+    for (const host of ['attacker.example', '127.0.0.1']) {
+      await checkRejectedHost(false, host)
+      await checkRejectedHost(true, host, testDomain)
+    }
+    await checkRejectedHost(true, testDomain, 'attacker.example')
+    await checkRejectedHost(true, testDomain, '')
+    await checkRejectedHost(true, 'attacker.example', testDomain, true)
+    challengeResponses(profile, proxy('ps', '-q', profile), run)
+    function checkState() {
+      if (profile !== 'nginx') return
+      const container = proxy('ps', '-q', profile)
+      assert.match(run(['exec', container, 'cat', '/proc/1/status']), /^Uid:\s+101\s+101\s+101\s+101$/m)
+      assert.equal(run(['exec', container, 'stat', '-c', '%U:%G:%a', '/var/lib/nginx/acme']), 'nginx:nginx:700')
+      // Metadata only: state content and private filenames never enter diagnostics.
+      assert.equal(run(['exec', container, 'sh', '-c', 'find /var/lib/nginx/acme -mindepth 1 ! -user nginx -print -quit | wc -l']), '0')
+      assert.equal(run(['exec', container, 'sh', '-c', 'find /var/lib/nginx/acme -mindepth 1 -perm /077 -print -quit | wc -l']), '0')
+    }
+    checkState()
+    if (profile === 'nginx') {
+      const reference = run(['inspect', '--format', '{{.Config.Image}}', proxy('ps', '-q', profile)])
+      run(['run', '--rm', '--network', 'none', '--entrypoint', 'sh', reference, '-c', 'test ! -e /var/lib/nginx/acme'])
+    }
+    if (process.env.CHECK_COMPOSE_ACCEPTANCE === '1' || process.env.CHECK_COMPOSE_RENEWAL === '1') {
+      await checkCertificateLifecycle(profile, proxy, tlsPort, checkHttp, run)
+      // The renewed certificate must verify the same way.
+      console.log(`PASS ${profile}: verified renewed TLS chain and hostname, serial ${await checkVerifiedTls(tlsPort(), issuingRoot, untrustedCa)}`)
+      checkState()
+      url = `https://${testDomain}:${tlsPort()}`
+      assert.equal(curl(['-sk', url + '/api/v1/health']), 'ok')
+    }
+    const app = proxy('ps', '-q', 'app')
+    function checkHeaders(path: string, status: number, baseUrl = url) {
+      const output = curl(['-sI', '--insecure', '--show-error', '--max-time', '10', baseUrl + path])
+      assert.match(output, new RegExp(`^HTTP/\\S+ ${status}\\b`))
+      if (baseUrl === url) assert.match(output, /strict-transport-security: max-age=31536000/i)
+      checkBrowserHeaders(output, path)
       console.log(`curl -sI --insecure ${baseUrl + path}\n${output.split(/\r?\n/).filter(line => /^(HTTP\/|permissions-policy:|cross-origin-opener-policy:)/i.test(line)).join('\n')}`)
     }
     for (const [path, status] of [['/', 200], ['/api/v1/health', 200], ['/api/v1/missing', 404], ['/api/v1/ready', 404], ['/api/v1/ready?check=1', 404]] as const) checkHeaders(path, status)
     assert.equal(request('/api/v1/ready').status, 404, 'readiness must stay internal')
     assert.equal(request('/api/v1/ready?check=1').status, 404, 'query strings must not bypass the exact-path block')
     assert.deepEqual(request('/api/v1/health'), { status: 200, body: 'ok' })
+    function checkCacheAndCompression(path: string) {
+      const response = curl(['-sk', '-D', '-', '-o', '/dev/null', '-H', 'Accept-Encoding: gzip', url + path])
+      if (path.startsWith('/api')) {
+        assert.doesNotMatch(response, /content-encoding:/i, `${profile} API compression exclusion`)
+        assert.match(response, /cache-control: no-store/i)
+      } else {
+        assert.match(response, /cache-control: no-cache/i)
+      }
+    }
+    for (const path of ['/', '/fallback-route', '/api', '/api/', '/api/v1/health', '/api/v1/missing', '/api/v1/ready', '/api/v1/ready?check=1']) checkCacheAndCompression(path)
+    const html = curl(['-sk', url + '/'])
+    const asset = html.match(/src="([^"]+\.js)"/)?.[1]
+    assert.ok(asset, 'built Vite entry must exist')
+    const assetHeaders = curl(['-sk', '-D', '-', '-o', '/dev/null', '-H', 'Accept-Encoding: gzip', url + asset])
+    assert.match(assetHeaders, /cache-control: public, max-age=31536000, immutable/i)
+    assert.match(assetHeaders, /content-encoding: gzip/i, `${profile} static compression`)
     run(['exec', app, 'fukulow-server', 'probe'])
     const [state] = JSON.parse(run(['inspect', app]))
     for (const container of [app, proxy('ps', '-aq', 'migrate')]) {
@@ -98,11 +204,15 @@ async function check(profile: string) {
     assert.deepEqual(state.HostConfig.LogConfig, { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } })
     assert.equal(state.HostConfig.PortBindings['8080/tcp'][0].HostIp, '127.0.0.1')
     assert.deepEqual(request('/api/v1/setup'), { status: 200, body: '{"setup_required":true}' })
-    const setup = { ...owner, organization_name: 'Compose', name: 'Owner' }
+    const setup = { ...owner, organization_name: 'Acme', name: 'Alice' }
     for (const token of [undefined, 'wrong-token-test-only']) {
       assert.equal(request('/api/v1/setup', { ...setup, setup_token: token }).status, 401)
     }
-    assert.equal(request('/api/v1/setup', { ...setup, setup_token: env.FUKULOW_SETUP_TOKEN }).status, 201)
+    if (process.env.CHECK_COMPOSE_ACCEPTANCE === '1') {
+      execFileSync('npm', ['--prefix', 'web', 'run', 'e2e:compose'], { cwd, stdio: 'inherit',
+        env: { ...process.env, E2E_BASE_URL: `https://${testDomain}:${tlsPort()}`,
+          E2E_TEST_DOMAIN: testDomain, E2E_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN } })
+    } else assert.equal(request('/api/v1/setup', { ...setup, setup_token: env.FUKULOW_SETUP_TOKEN }).status, 201)
     assert.equal(request('/api/v1/session', owner).status, 200)
     const native = request('/api/v1/native/session', owner)
     assert.equal(native.status, 200)
@@ -120,7 +230,7 @@ async function check(profile: string) {
     // This helper joins only backend for the test. Its socket peer is untrusted even
     // though the configured header is present; changing spoofed IPs cannot escape 429.
     run(['run', '--rm', '--name', helper, '-i', '--network', `${project}_backend`,
-      'node:26.13.1-slim', 'node', '--input-type=module'], `
+      nodeImage, 'node', '--input-type=module'], `
       import assert from 'node:assert/strict';
       const request = async (email, ip, password = 'wrong-password-test-only') => {
         const response = await fetch('http://app:8080/api/v1/session', { method: 'POST',
@@ -143,14 +253,14 @@ async function check(profile: string) {
     // Temporarily attach test clients to edge; the shipped topology has no such services.
     for (const [host, exhaust] of [[5, true], [6, false]] as const) {
       run(['run', '--rm', '--name', helper, '-i', '--network', `${project}_edge`, '--ip', `${env.FUKULOW_EDGE_PREFIX}.${host}`,
-        'node:26.13.1-slim', 'node', '--input-type=module'], `
+        nodeImage, 'node', '--input-type=module'], `
         import assert from 'node:assert/strict';
-        import { request } from 'node:${profile === 'caddy' ? 'https' : 'http'}';
+        import { request } from 'node:https';
         const signIn = (input) => new Promise((resolve, reject) => {
           const body = JSON.stringify(input);
-          const req = request({ hostname: '${env.FUKULOW_EDGE_PREFIX}.2', port: ${profile === 'caddy' ? 443 : 80},
-            servername: 'localhost', rejectUnauthorized: false, path: '/api/v1/session', method: 'POST',
-            headers: { Host: 'localhost', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+          const req = request({ hostname: '${env.FUKULOW_EDGE_PREFIX}.2', port: 443,
+            servername: '${testDomain}', rejectUnauthorized: false, path: '/api/v1/session', method: 'POST',
+            headers: { Host: '${testDomain}', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
             res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
           req.on('error', reject); req.end(body);
         });
@@ -160,11 +270,7 @@ async function check(profile: string) {
     }
     async function restartApp() {
       proxy('restart', 'app')
-      for (let n = 0; ; n++) {
-        try { if (request('/api/v1/session', owner).status === 200) break } catch { /* restart */ }
-        if (n === 59) throw new Error('Sign-in did not recover after restart')
-        await delay(1000)
-      }
+      await poll('sign-in recovery after restart', () => request('/api/v1/session', owner).status, status => status === 200)
     }
     // Reset budgets first: the host may appear as the same client IP through
     // the public proxy and the debug publication. Prefer edge as its gateway.
@@ -182,9 +288,12 @@ async function check(profile: string) {
     const [stopped] = JSON.parse(run(['inspect', app]))
     assert.equal(stopped.State.ExitCode, 0, 'PID 1 must handle default SIGTERM without SIGKILL')
     assert.equal(stopped.State.OOMKilled, false)
-    // Caddy has a separate error chain. nginx's always headers are already
-    // exercised by its own 404; a stopped Docker peer can take 60 s to time out.
-    if (profile === 'caddy') checkHeaders('/api/v1/health', 502)
+    // Upstream error-path coverage only: refused peers do not measure the 5s
+    // connect limit. The static config guard verifies that timeout in both profiles.
+    const failed = request('/api/v1/health')
+    assert.ok([502, 504].includes(failed.status))
+    checkHeaders('/api/v1/health', failed.status)
+    checkCacheAndCompression('/api/v1/health')
     await restartApp()
     assert.equal(request('/api/v1/setup').body, '{"setup_required":false}')
     const history = authenticated(messagesPath)
@@ -192,7 +301,7 @@ async function check(profile: string) {
     assert.equal(JSON.parse(history.body).messages[0].body, 'Fresh read-only send')
     assert.equal(authenticated(messagesPath, { body: 'Read-only send after restart', client_message_id: randomUUID() }).status, 201)
     assert.equal(run(['diff', app]), '')
-    console.log(`PASS ${profile}: read-only app/migrate without mounts, zero capabilities, no-new-privileges, healthy probe, fresh sends and restart/history/send, proxy/direct 200 and app/proxy 404 headers${profile === 'caddy' ? ', proxy 502 headers' : ''}, non-root, log rotation, SIGTERM exit 0, token, sign-in, backend/public/debug-port spoofing, independent client budgets, retained setup`)
+    console.log(`PASS ${profile}: read-only app/migrate, healthy HTTPS probe, sends/restart/history, browser headers on success/app/proxy errors, HSTS/redirect, compression/cache, non-root, log rotation, SIGTERM exit 0, setup token, forwarded-IP spoofing denials, independent client budgets`)
   } finally {
     spawnSync('docker', ['rm', '-f', helper], { cwd, env, stdio: 'ignore' })
     proxy('down', '-v', '--remove-orphans')
@@ -212,8 +321,10 @@ try {
     assert.match(result.stderr, /FUKULOW_SETUP_TOKEN must/)
     assert.equal(result.stdout, '')
   }
-  await check('caddy')
-  await check('nginx')
+  for (const profile of process.env.CHECK_COMPOSE_PROFILE ? [process.env.CHECK_COMPOSE_PROFILE] : ['caddy', 'nginx']) {
+    assert.ok(['caddy', 'nginx'].includes(profile))
+    await check(profile)
+  }
 } finally {
   if (!process.env.CHECK_COMPOSE_IMAGE) run(['image', 'rm', image])
   rmSync(directory, { recursive: true, force: true })
