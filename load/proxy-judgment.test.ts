@@ -13,25 +13,32 @@ test('distribution computes spread and even median; zero has finite spread', () 
   assert.deepEqual(distribution([3,1,2,4]), { min: 1, max: 4, median: 2.5, spread: 1.2 });
   assert.equal(distribution(five(0)).spread, 0);
 });
-test('latency disjoint ranges pass at +5%, fail above it, and pass when faster', () => {
+test('latency passes only when every nginx run is within +5% of every Caddy run', () => {
   for (const [n, verdict] of [[105,'pass'],[106,'fail'],[90,'pass']] as const)
     assert.equal(judge(rows(five(100), five(n)), 'latency').verdict, verdict);
 });
-test('overlapping and touching ranges are no difference; noise overrides overlap', () => {
-  assert.equal(judge(rows([100,101,102,103,104], [104,105,106,107,108]), 'latency').verdict, 'pass');
-  const result = judge(rows([90,100,100,100,110], five(100)), 'latency');
-  assert.equal(result.verdict, 'inconclusive');
-  assert.equal('difference' in result && result.difference, 'no difference');
+test('overlap is "no difference detected", never an automatic pass', () => {
+  // Medians 100 vs 106 (+6%) with touching ranges: previously an overlap pass.
+  const worse = judge(rows([100,100,100,100,104], [104,106,106,106,106]), 'latency');
+  assert.equal('difference' in worse && worse.difference, 'no difference detected');
+  assert.equal(worse.verdict, 'inconclusive');
+  assert.equal(judge(rows([100,101,102,103,104], [104,105,106,107,108]), 'latency').verdict, 'inconclusive');
+  assert.equal(judge(rows([100,101,102,103,104], [101,102,103,104,105]), 'latency').verdict, 'pass');
+  assert.equal(judge(rows([90,100,100,100,110], five(100)), 'latency').verdict, 'inconclusive');
   assert.equal(judge(rows(five(100), [100,100,100,100,106]), 'latency').verdict, 'inconclusive');
+  // Disjoint but within the margin on every run: a detected difference that still passes.
+  const slower = judge(rows(five(100), five(104)), 'latency');
+  assert.equal('difference' in slower && slower.difference, 'difference');
+  assert.equal(slower.verdict, 'pass');
 });
-test('step metrics require consistent steps and nginx at least Caddy', () => {
-  for (const [n, verdict] of [[2,'pass'],[1,'fail']] as const)
+test('step metrics pass only when every nginx run reaches every Caddy run', () => {
+  for (const [n, verdict] of [[2,'pass'],[1,'fail'],[3,'pass']] as const)
     assert.equal(judge(rows(five(2), five(n)), 'step').verdict, verdict);
-  assert.equal(judge(rows(five(2), five(2)), 'step').verdict, 'pass');
-  // Varying steps with a consistent order between proxies stay decidable.
   assert.equal(judge(rows([1,2,2,2,2], five(3)), 'step').verdict, 'pass');
   assert.equal(judge(rows([3,3,3,3,4], five(2)), 'step').verdict, 'fail');
-  assert.equal(judge(rows(five(2), [2,3,3,3,3]), 'step').verdict, 'inconclusive');
+  assert.equal(judge(rows(five(2), [2,3,3,3,3]), 'step').verdict, 'pass');
+  assert.equal(judge(rows([2,2,2,2,3], five(2)), 'step').verdict, 'inconclusive');
+  assert.equal(judge(rows(five(2), [1,2,2,2,2]), 'step').verdict, 'inconclusive');
 });
 test('invalid runs are excluded: CPU boundary, missing CPU, TLS, missing values, failed runs', () => {
   for (const change of [ { generatorCpu: 90 }, { generatorCpu: null }, { value: NaN }, { error: 'failed' },

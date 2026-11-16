@@ -7,6 +7,7 @@ export type RunResult = {
     pathLabel: string; network: string; cache: string; timelineVisibleMs: { p50: number; p95: number }
   }[] };
   storm?: { allSubscribedMs: number };
+  rate?: { offeredSendRate?: number; configuredSendRate?: number };
   resources?: { rows: { Name: string; CPUPerc: string; MemUsage: string }[] }[];
   throughput?: { steps: { rate: number; seconds: number; attempted: number; accepted: number;
     acceptedInWindow: number; droppedIterations: number; incomplete: number }[] };
@@ -24,11 +25,6 @@ export function metricsFor(proxy: Proxy, scenario: number, result: RunResult): R
       generatorCpu: result.cpuPeakPercent?.generator ?? null,
       error: result.exitCode !== 0 ? result.measurementError || 'runner failed' : undefined } };
   };
-  if (scenario === 2) {
-    const passing = result.throughput?.steps.filter(step => step.attempted > 0 &&
-      step.accepted === step.attempted && step.droppedIterations === 0 && step.incomplete === 0);
-    add('throughput_sends_per_second', Math.max(0, ...passing?.map(step => step.rate) ?? []), 'step');
-  }
   if (scenario === 3) for (const name of ['delivery_latency', 'publish_http_response_time']) {
     for (const percentile of ['p(95)', 'p(99)']) add(`${name}_${percentile}`, result.summary?.metrics?.[name]?.values[percentile], 'latency');
   }
@@ -51,7 +47,16 @@ export function metricsFor(proxy: Proxy, scenario: number, result: RunResult): R
   return metrics;
 }
 
-export function connectionMetric(proxy: Proxy, results: RunResult[], steps: number[]): Metric {
+// A step that exits 0 below 95% of its configured rate measured the generator, not the proxy.
+export function offeredShortfall(result: RunResult): string | undefined {
+  const { offeredSendRate: offered, configuredSendRate: configured } = result.rate ?? {};
+  if (result.exitCode !== 0) return undefined;
+  if (!(typeof offered === 'number' && typeof configured === 'number' && configured > 0)) return 'missing offered send rate';
+  return offered < configured * 0.95 ? `generator offered ${offered.toFixed(1)}/s, below 95% of ${configured}/s` : undefined;
+}
+
+// Highest passing step. Exit 99 (k6 thresholds, e.g. missing_deliveries) is capacity; anything else is a harness error.
+export function stepMetric(proxy: Proxy, results: RunResult[], steps: number[], validate: (result: RunResult) => string | undefined = () => undefined): Metric {
   const first = results[0];
   const signature = (result: RunResult) => JSON.stringify(result.tls?.map(({ protocol, cipher }) => ({ protocol, cipher })));
   const errors = results.flatMap(result => {
@@ -60,10 +65,11 @@ export function connectionMetric(proxy: Proxy, results: RunResult[], steps: numb
     return [
       ...(!result.summary || !result.tls ? ['missing step evidence'] : []),
       ...(result.exitCode !== 0 && !capacityFailure ? [result.measurementError || 'step harness failed'] : []),
+      ...[validate(result)].filter((error): error is string => !!error),
       ...(signature(result) !== signature(first) ? ['TLS conditions changed between connection steps'] : []),
     ];
   });
-  const passing = results.flatMap((result, i) => result.exitCode === 0 ? [steps[i]] : []);
+  const passing = results.flatMap((result, i) => result.exitCode === 0 && !validate(result) ? [steps[i]] : []);
   return { kind: 'step', observation: { proxy, value: Math.max(0, ...passing), tls: first?.tls ?? [],
     generatorCpu: results.some(r => r.cpuPeakPercent?.generator == null) ? null : Math.max(...results.map(r => r.cpuPeakPercent!.generator!)),
     error: errors.length ? errors.join('; ') : undefined } };

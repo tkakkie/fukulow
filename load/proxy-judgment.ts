@@ -38,14 +38,22 @@ export function judge(rows: Observation[], kind: 'latency' | 'step' | 'descripti
   const c = values('caddy'), n = values('nginx');
   if (c.length !== 5 || n.length !== 5) return { verdict: 'inconclusive', invalid, counts: { caddy: c.length, nginx: n.length } };
   const caddy = distribution(c), nginx = distribution(n);
-  const difference = caddy.max < nginx.min || nginx.max < caddy.min ? 'difference' : 'no difference';
-  // Plan: step metrics are decidable when every run reaches the same step, or the
-  // step order between proxies is consistent (non-overlapping ranges).
-  const noisy = kind === 'step' ? difference === 'no difference' && (caddy.min !== caddy.max || nginx.min !== nginx.max)
-    : kind === 'latency' && (caddy.spread > 0.05 || nginx.spread > 0.05);
-  const verdict = kind === 'descriptive' ? 'descriptive' : noisy ? 'inconclusive'
-    : difference === 'no difference' || (kind === 'step' ? nginx.median >= caddy.median : nginx.median <= caddy.median * 1.05) ? 'pass' : 'fail';
-  return { verdict, difference, caddy, nginx, invalid };
+  // Detection is descriptive only: overlapping ranges mean "no difference detected",
+  // which never by itself confirms non-inferiority.
+  const difference = caddy.max < nginx.min || nginx.max < caddy.min ? 'difference' : 'no difference detected';
+  return { verdict: nonInferiority(kind, caddy, nginx), difference, caddy, nginx, invalid };
+}
+type Distribution = ReturnType<typeof distribution>;
+// Non-inferiority is confirmed only run-for-run (#469 criteria, revised before measuring):
+// latency/first display: every nginx run <= every Caddy run * 1.05, with both spreads <= 5%;
+// connections/throughput: every nginx run reaches at least every Caddy run's step.
+// Fail only when every nginx run is beyond the margin; anything between is inconclusive.
+export function nonInferiority(kind: 'latency' | 'step' | 'descriptive', caddy: Distribution, nginx: Distribution) {
+  if (kind === 'descriptive') return 'descriptive';
+  if (kind === 'step') return nginx.min >= caddy.max ? 'pass' : nginx.max < caddy.min ? 'fail' : 'inconclusive';
+  if (caddy.spread > 0.05 || nginx.spread > 0.05) return 'inconclusive';
+  return nginx.max <= caddy.min * 1.05 ? 'pass' : nginx.min > caddy.max * 1.05 ? 'fail' : 'inconclusive';
+
 }
 export function abba(repetitions: number): Proxy[] {
   const order: Proxy[] = [];

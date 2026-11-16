@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { abba, judge, type Proxy } from './proxy-judgment.ts';
-import { connectionMetric, metricsFor, type Metric, type RunResult } from './proxy-results.ts';
+import { metricsFor, offeredShortfall, stepMetric, type Metric, type RunResult } from './proxy-results.ts';
 import { createCertificate, outsideCheckout } from './proxy-target.ts';
 
 const preset = process.env.PROXY_PRESET ?? 'full';
@@ -36,13 +36,19 @@ const settings = {
 const stepSizes = (process.env.PROXY_CONNECTION_STEPS ?? (smoke ? '2,4' : '1000,2000,4000,6000,8000,10000')).split(',').map(Number);
 assert.ok(stepSizes.every((n, i) => Number.isInteger(n) && n > 0 && (i === 0 || n > stepSizes[i - 1])), 'connection steps must increase');
 if (!smoke) assert.deepEqual(stepSizes, [1000, 2000, 4000, 6000, 8000, 10000], 'full connection steps are fixed');
+// Scenario 2: offered sends/s per step = PUBLISHERS * 1000 / PUBLISH_INTERVAL_MS, delivered to every subscriber.
+const sendInterval = smoke ? 500 : 20;
+const sendRates = smoke ? [2, 4] : [50, 100, 200, 400, 800];
+const sendSettings = { CHANNELS: '4', SUBSCRIBERS: smoke ? '2' : '50', PUBLISH_INTERVAL_MS: String(sendInterval),
+  DURATION_SECONDS: smoke ? '3' : '30', DRAIN_TIMEOUT_SECONDS: '15' };
 const tlsDirectory = createCertificate();
 function save() {
   writeFileSync(`${output}/summary.json`, JSON.stringify({ preset, purpose: smoke ? 'harness-validation' : 'comparison',
     gateEligible: !smoke && repeats === 5 && process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_OS === 'Linux',
     repetitions: repeats, warmupsPerProxyPerScenario: 1, order: abba(repeats), scenarios, settings, stepSizes,
     resourceScope: 'sampled whole generator lifetime including provisioning and teardown; 100% CPU is one core',
-    throughputDeliveryScope: 'existing #309 many: zero subscribers; acceptance and completion of every offered send',
+    throughputDeliveryScope: 'load/scenario.ts steps: every offered send accepted (201) and delivered to every subscriber of its Channel within the drain; no unexpected close or gap',
+    sendSettings, sendRates,
     runs, metrics: Object.fromEntries(Object.entries(collected).map(([name, metric]) => [name,
       { ...judge(metric.rows, metric.kind, name.startsWith('1/') || name.startsWith('2/')), observations: metric.rows }])) }, null, 2));
 }
@@ -68,22 +74,34 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
   runs.push(entry);
   console.log(`Proxy comparison: scenario ${scenario}, ${proxy}, ${warmup ? 'discarded warm-up' : 'measured'}; ${directory}`);
   let metrics: Record<string, Metric>;
-  if (scenario === 1) {
+  const stepped = async (sizes: number[], step: (size: number) => Record<string, string>, validate?: (r: RunResult) => string | undefined) => {
     const results: RunResult[] = [];
-    for (const sockets of stepSizes) {
-      const result = await record(`${directory}/step-${sockets}`, proxy, { SUBSCRIBERS: String(sockets), LOAD_CONNECTIONS_ONLY: '1' });
+    for (const size of sizes) {
+      const result = await record(`${directory}/step-${size}`, proxy, step(size));
       results.push(result);
-      if (result.exitCode !== 0) break;
+      if (result.exitCode !== 0 || validate?.(result)) break;
     }
-    const metric = connectionMetric(proxy, results, stepSizes);
+    const metric = stepMetric(proxy, results, sizes, validate);
     if (metric.observation.error) Object.assign(entry, { error: metric.observation.error });
+    return { metric, results };
+  };
+  if (scenario === 1) {
+    const { metric } = await stepped(stepSizes, sockets => ({ SUBSCRIBERS: String(sockets), LOAD_CONNECTIONS_ONLY: '1' }));
     metrics = { connections: metric };
+  } else if (scenario === 2) {
+    const { metric, results } = await stepped(sendRates, rate =>
+      ({ ...sendSettings, PUBLISHERS: String(rate * sendInterval / 1000) }), offeredShortfall);
+    Object.assign(entry, { steps: results.map((result, i) => ({ rate: sendRates[i], exitCode: result.exitCode,
+      offeredSendRate: result.rate?.offeredSendRate, measurementError: result.measurementError,
+      ...Object.fromEntries(['published_messages', 'delivered_messages', 'missing_deliveries'].map(name =>
+        [name, result.summary?.metrics?.[name]?.values.count])),
+      deliveryLatency: result.summary?.metrics?.delivery_latency?.values })) });
+    // Proxy resources come from the highest passing step (the first step when none passed).
+    const passed = results.filter((result, i) => sendRates[i] <= metric.observation.value && result.exitCode === 0);
+    metrics = { throughput_sends_per_second: metric,
+      ...metricsFor(proxy, 2, passed.at(-1) ?? results[0] ?? { exitCode: 1, measurementError: 'no throughput step ran' }) };
   } else {
-    const extra: Record<string, string> = scenario === 2 ? {
-      LOAD_SCRIPT: 'load/throughput.ts', THROUGHPUT_SCENARIO: 'many', CHANNELS: '200',
-      THROUGHPUT_RATES: smoke ? '2,4' : '50,100,250,500,1000,2000,4000', THROUGHPUT_STEP_SECONDS: smoke ? '3' : '60',
-      THROUGHPUT_VUS: '20', THROUGHPUT_MAX_VUS: '100', REQUEST_TIMEOUT_SECONDS: '3',
-    } : scenario === 4 ? { SUBSCRIBERS: smoke ? '4' : '5000', LOAD_RECONNECT_STORM: '1', DURATION_SECONDS: '3', PUBLISH_INTERVAL_MS: '500' }
+    const extra: Record<string, string> = scenario === 4 ? { SUBSCRIBERS: smoke ? '4' : '5000', LOAD_RECONNECT_STORM: '1', DURATION_SECONDS: '3', PUBLISH_INTERVAL_MS: '500' }
       : scenario === 5 ? { LOAD_FIRST_PAINT: '1' } : {};
     const result = await record(directory, proxy, extra);
     metrics = metricsFor(proxy, scenario, result);

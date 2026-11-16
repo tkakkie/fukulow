@@ -8,18 +8,23 @@ test('memory parsing uses actual Docker units, rejects missing/unknown values', 
   assert.equal(memoryBytes('300kB / 4GB'), 300000);
   assert.ok(Number.isNaN(memoryBytes('unknown')));
 });
-test('throughput capacity requires ALL offered arrivals accepted and completed without drops', () => {
-  const step = { rate: 50, seconds: 60, attempted: 3000, accepted: 3000, acceptedInWindow: 3000, droppedIterations: 0, incomplete: 0 };
-  const capacity = (steps: NonNullable<RunResult['throughput']>['steps']) => metricsFor('nginx', 2, { exitCode: 0, throughput: { steps } }).throughput_sends_per_second.observation.value;
-  assert.equal(capacity([step]), 50);
-  for (const change of [{ attempted: 2999 }, { accepted: 2999 }, { droppedIterations: 1 }, { incomplete: 1 }]) {
-    assert.equal(capacity([{ ...step, ...change }]), 0);
-    assert.equal(capacity([step, { ...step, rate: 100, ...change }]), 50);
-  }
-  assert.equal(capacity([{ ...step, acceptedInWindow: 2999 }]), 50); // bounded drain remains part of the existing method
-  assert.equal(capacity([{ ...step, attempted: 3001, accepted: 3001 }]), 50); // arrival boundary is not an invented count gate
-  assert.equal(capacity([{ ...step, attempted: 0, accepted: 0, acceptedInWindow: 0 }]), 0);
-  assert.equal(capacity([]), 0);
+test('throughput steps pass only with every send delivered at the offered rate', async () => {
+  const { stepMetric, offeredShortfall } = await import('./proxy-results.ts');
+  const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }],
+    cpuPeakPercent: { generator: 20 }, resources: [{ rows: [] }], rate: { offeredSendRate: 99.9, configuredSendRate: 100 } };
+  // Every send accepted (201) but one delivery missing: scenario.ts exits 99 on missing_deliveries, so the step fails.
+  const undelivered = { ...ok, exitCode: 1, generatorExitCode: 99,
+    measurementError: 'Error: Invalid measurement: generator exited with code 99; failed thresholds: missing_deliveries, checks' };
+  const capacity = (results: RunResult[]) => stepMetric('nginx', results, [50, 100], offeredShortfall).observation;
+  assert.deepEqual([capacity([ok, ok]).value, capacity([ok, ok]).error], [100, undefined]);
+  assert.deepEqual([capacity([ok, undelivered]).value, capacity([ok, undelivered]).error], [50, undefined]);
+  assert.equal(capacity([undelivered]).value, 0);
+  // Below 95% of the configured rate the generator, not the proxy, set the limit: invalid, not a pass.
+  const short = capacity([ok, { ...ok, rate: { offeredSendRate: 94, configuredSendRate: 100 } }]);
+  assert.equal(short.value, 50); assert.match(short.error ?? '', /below 95% of 100\/s/);
+  assert.match(capacity([{ ...ok, rate: undefined }]).error ?? '', /missing offered send rate/);
+  assert.equal(capacity([{ ...ok, rate: { offeredSendRate: 95, configuredSendRate: 100 } }]).value, 50);
+  assert.ok(capacity([ok, { ...undelivered, generatorExitCode: 1 }]).error);
 });
 test('latency, recovery and every first-display cell propagate missing evidence', () => {
   const result: RunResult = { exitCode: 0, summary: { metrics: { delivery_latency: { values: { 'p(95)': 12, 'p(99)': 15 } } } }, storm: { allSubscribedMs: 100 } };
@@ -47,7 +52,7 @@ test('proxy samples exclude app/generator, report mean/peak and retain failed-ru
 });
 
 test('connection capacity failures are distinct from instrumentation/setup failures and TLS drift', async () => {
-  const { connectionMetric } = await import('./proxy-results.ts');
+  const { stepMetric: connectionMetric } = await import('./proxy-results.ts');
   const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }], cpuPeakPercent: { generator: 20 }, resources: [{ rows: [] }] };
   const capacity = { ...ok, exitCode: 1, generatorExitCode: 99, measurementError: 'Error: Invalid measurement: generator exited with code 99; failed thresholds: load_errors' };
   const metric = connectionMetric('caddy', [ok, capacity], [1000,2000]);
