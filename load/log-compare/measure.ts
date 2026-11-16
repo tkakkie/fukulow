@@ -1,6 +1,8 @@
 import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { Database, docker, dockerAsync, Session, lsn, sizes, walDelta } from './database.ts';
+import { Database, docker, dockerAsync, Session, lsn, sizes } from './database.ts';
+import { statsSnapshot, walEnd, walDiagnostics, settleFixture } from './diagnostics.ts';
+import { fixtureCondition } from './options.ts';
 import { sameOperations, arrivalSchedule, logTable, snapshot, reduce, type Arm, type Conditions, type Sample, type Entry } from './model.ts';
 import { org, member, commonSchema, variantSchema, functions, seedSQL, replaySQL, backfill, workloadSQL, record, expected, seedExpected } from './sql.ts';
 export interface Scenario { name:string; channels:number; body:number; mix:[number,number,number,number] }
@@ -41,8 +43,9 @@ export async function bench(db:Database,arm:Arm,scenario:Scenario,conditions:Con
   db.copy(workloadSQL(body,scenario.channels,scenario.mix),script);
   // Previous logs only in this owned container, never shell-expand a host path.
   docker('exec',db.name,'sh','-c','rm -f /tmp/log-compare/txn.*');
+  if(conditions.settleFixture)settleFixture(db);
   db.sql('CHECKPOINT;');
-  const before=sizes(db),wal=lsn(db);
+  const before=sizes(db),statsBefore=statsSnapshot(db),wal=lsn(db);
   const report=maximum ? await dockerAsync('exec',db.name,'pgbench','-n','-h','127.0.0.1','-U','postgres','-M','prepared',
     '-c',String(conditions.clients),'-j',String(Math.min(conditions.clients,4)),
     '-T',String(conditions.seconds),'--random-seed=160','--log',`--log-prefix=${prefix}`,
@@ -94,7 +97,8 @@ export async function bench(db:Database,arm:Arm,scenario:Scenario,conditions:Con
     } finally {for(const session of sessions) await session.close();}
     writeFileSync(out+'.operations.json',JSON.stringify(records));
   }
-  const walBytes=walDelta(db,wal),after=sizes(db);
+  const {walBytes,endLSN}=walEnd(db,wal),after=sizes(db);
+  const diagnostics=walDiagnostics(db,statsBefore,wal,endLSN,out);
   const log=maximum ? docker('exec',db.name,'sh','-c','cat /tmp/log-compare/txn.*') : '';
   const parsed=fixed ?? {...parsePgbench(report,log,conditions.seconds),schedule:{count:0,hash:'completion-paced maximum; no independent offered rate',mix:[]},offeredMix:[],missingOffers:0,generator:'pgbench completion-paced maximum: diagnostic only, never a matched offered-load comparison'};
   if(maximum) {
@@ -104,7 +108,7 @@ export async function bench(db:Database,arm:Arm,scenario:Scenario,conditions:Con
     }).sort();
     if(!sameOperations(committed,completed)) throw new Error('maximum committed operation identities mismatch');
   }
-  const result={...parsed,arm,round,conditions,walBytes,walPerOp:walBytes/parsed.accepted,
+  const result={...parsed,arm,round,conditions,walBytes,walDiagnostics:diagnostics,walPerOp:walBytes/parsed.accepted,
     heapPerOp:(after.heap-before.heap)/parsed.accepted,indexPerOp:(after.index-before.index)/parsed.accepted,
     before,after,maximum,correctness:await correctness(db,arm)};
   writeFileSync(out+'.pgbench.txt',report); writeFileSync(out+'.transactions.log',log);
@@ -208,8 +212,9 @@ export function planSummary(plan:PlanNode) {
       .reduce((s,n)=>s+(n['Actual Rows']+(n['Rows Removed by Filter']??0)+(n['Rows Removed by Index Recheck']??0))*n['Actual Loops'],0),
     scanRowsDefinition:'sum of tuples returned/filtered/rechecked by physical scan nodes, including repeated index lookups'};
 }
-export async function replay(db:Database,arm:Arm,positions:number,range:'creation'|'mixed'|'deleted',out:string) {
+export async function replay(db:Database,arm:Arm,positions:number,range:'creation'|'mixed'|'deleted',out:string,settle=false) {
   const high=await replayFixture(db,arm,positions,range);
+  if(settle)settleFixture(db);
   const rows:unknown[]=[];
   for(const depth of ['recent','deep']) for(const cache of ['cold','warm']) {
     const after=depth==='recent' ? high-50 : Math.floor(high/4);
@@ -234,13 +239,14 @@ export async function replay(db:Database,arm:Arm,positions:number,range:'creatio
   const retained= tables.length ? Number(db.sql(`SELECT COALESCE(sum(octet_length(payload->>'body')),0) FROM
     (${tables.map(t=>`SELECT m.deleted,e.payload FROM ${t} e JOIN messages m ON m.organization_id=e.organization_id AND m.id=e.message_id`).join(' UNION ALL ')}) s
     WHERE deleted AND payload->>'body'<>''`)) : 0;
-  const result={arm,positions,range,rows,retainedDeletedBodyBytes:retained,sizes:sizes(db),correctness:await correctness(db,arm)};
+  const result={arm,positions,range,conditions:fixtureCondition(settle),rows,retainedDeletedBodyBytes:retained,sizes:sizes(db),correctness:await correctness(db,arm)};
   writeFileSync(out,JSON.stringify(result,null,2)); return result;
 }
-export async function migration(db:Database,arm:Arm,messages:number,out:string) {
+export async function migration(db:Database,arm:Arm,messages:number,out:string,settle=false) {
   await setup(db,'baseline',1,messages);
   db.sql(functions(arm,messages).replace('CREATE FUNCTION apply_op','CREATE FUNCTION writer_op'));
-  const before=sizes(db),wal=lsn(db),started=performance.now();
+  if(settle)settleFixture(db);
+  const before=sizes(db),statsBefore=statsSnapshot(db),wal=lsn(db),started=performance.now();
   const migrator=new Session(db.name,'compare'),writer=new Session(db.name,'compare');
   try {
     await migrator.query(`BEGIN; SET LOCAL lock_timeout='10s'; LOCK TABLE messages IN SHARE MODE;`);
@@ -262,8 +268,10 @@ export async function migration(db:Database,arm:Arm,messages:number,out:string) 
     const backfillMs=performance.now()-backfillStarted;
     const writerOutput=await writing;
     const after=sizes(db);
-    const result={arm,messages,measurementScope:'WAL/storage include schema, backfill and concurrent writer; duration includes session/barrier observation and size query; backfillMs includes DDL/function replacement and COMMIT; no lock acquisition, rollback/retry or generation-changing cutover measurement',strategy:'blocking SHARE lock, atomic schema/backfill/function cutover; coordinated candidate-aware concurrent writer; no online-migration claim',
-      durationMs:performance.now()-started,backfillMs,walBytes:walDelta(db,wal),before,after,
+    const durationMs=performance.now()-started,{walBytes,endLSN}=walEnd(db,wal);
+    const diagnostics=walDiagnostics(db,statsBefore,wal,endLSN,out.replace(/\.json$/,''));
+    const result={arm,messages,conditions:fixtureCondition(settle),walDiagnostics:diagnostics,measurementScope:'WAL/storage include schema, backfill and concurrent writer; duration includes session/barrier observation and size query; backfillMs includes DDL/function replacement and COMMIT; no lock acquisition, rollback/retry or generation-changing cutover measurement',strategy:'blocking SHARE lock, atomic schema/backfill/function cutover; coordinated candidate-aware concurrent writer; no online-migration claim',
+      durationMs,backfillMs,walBytes,before,after,
       heapBytes:after.heap-before.heap,indexBytes:after.index-before.index,
       writerTransactionMs:Number(writerOutput.split('\n').at(-1)),
       lockWaitStart:waitStart,preCommitTimestamp:committed.split('\n').at(-1),
