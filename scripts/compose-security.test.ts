@@ -144,7 +144,7 @@ http {
         # Stock nginx has gzip, not zstd; keep API responses out of compression.
         gzip on;
         gzip_vary on;
-        gzip_types text/css text/javascript application/javascript image/svg+xml;
+        gzip_types text/css text/javascript application/javascript image/svg+xml application/wasm;
         gzip_proxied any;
         location = /api { gzip off; proxy_pass http://app:8080; }
         location /api/ { gzip off; proxy_pass http://app:8080; }

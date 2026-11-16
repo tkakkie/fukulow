@@ -15,6 +15,7 @@ function run(cmd: string, args: string[]): string {
   return result.stdout.trim()
 }
 if (run('wasm-bindgen', ['--version']) !== `wasm-bindgen ${version}`) throw new Error(`Install wasm-bindgen-cli ${version} with --locked`)
-run('cargo', ['build', '--locked', '--release', '-p', 'fukulow-client-core', '--features', 'wasm', '--target', 'wasm32-unknown-unknown'])
-run('wasm-bindgen', ['--target', 'web', '--out-dir', 'web/wasm', 'target/wasm32-unknown-unknown/release/fukulow_client_core.wasm'])
+// Keep in sync with the Dockerfile wasm stage.
+run('cargo', ['build', '--locked', '--profile', 'wasm-release', '-p', 'fukulow-client-core', '--features', 'wasm', '--target', 'wasm32-unknown-unknown'])
+run('wasm-bindgen', ['--target', 'web', '--remove-name-section', '--remove-producers-section', '--out-dir', 'web/wasm', 'target/wasm32-unknown-unknown/wasm-release/fukulow_client_core.wasm'])
 console.log(`Built wasm core (wasm-bindgen ${version})`)
