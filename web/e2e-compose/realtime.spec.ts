@@ -117,10 +117,11 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
 
   // Exceed Caddy's compression threshold to verify that API responses stay uncompressed.
   const text = `live ${Date.now()} ${'message '.repeat(128)}`
-  await a.getByLabel('メッセージ').fill(text)
+  const main = a.locator('#main-content')
+  await main.getByRole('textbox', { name: 'メッセージ', exact: true }).fill(text)
   const acknowledgement = a.waitForResponse(response =>
     new URL(response.url()).pathname.endsWith('/messages') && response.request().method() === 'POST')
-  await a.getByRole('button', { name: '送信' }).click()
+  await main.getByRole('button', { name: '送信', exact: true }).click()
 
   // No reload, no refetch trigger: only the WebSocket can deliver this.
   await expect(b.locator('.body', { hasText: text })).toHaveCount(1)
