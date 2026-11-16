@@ -28,7 +28,9 @@ export function buildDriver(fixture = false): string {
   run('clippy-driver', [
     '--edition=2024', '--crate-name', 'module_direction', '-Dwarnings',
     ...(fixture ? ['--cfg', 'module_direction_fixture'] : []),
-    '-C', 'rpath=yes', '-L', join(sysroot, 'lib'),
+    // An absolute rpath to the sysroot lib: since Rust 1.99.1, `-C rpath=yes` points only at
+    // rustlib, where librustc_driver's `$ORIGIN/../lib` cannot reach libLLVM.
+    '-C', `link-arg=-Wl,-rpath,${join(sysroot, 'lib')}`, '-L', join(sysroot, 'lib'),
     source, '-o', driver,
   ], { ...process.env, RUSTC_BOOTSTRAP: 'module_direction' })
   return driver
