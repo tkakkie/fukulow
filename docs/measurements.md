@@ -823,3 +823,74 @@ The measurement override guards every textual replacement of `deploy/Caddyfile` 
 Scenarios: (1) highest fully subscribed connection step (1k, 2k, 4k, 6k, 8k, 10k), held 60 s without sends or unexpected closes; (2) highest passing delivered-send step at 50, 100, 200, 400, 800 offered sends/s (`load/scenario.ts`, interval 20 ms, 1/2/4/8/16 sends per batch), 30 s each, four Channels with 50 subscribed sockets each; a step passes only if every offered send is accepted and delivered to every subscriber of its Channel within a 15 s drain with no unexpected close, gap or HTTP failure, and the generator offered at least 95% of the step rate (below that, or without rate evidence, the run is invalid even when k6 exits 99); the first failing step ends the run, and per-step published/delivered/missing counts and delivery latency are retained (this replaces the #309 `many` HTTP-only throughput, which has no subscribers); (3) send-to-delivery and send HTTP p95/p99 at 1,000 sockets, 50 sends/s, 60 s; (4) #195 app restart and full-jitter recovery at 5,000 sockets, recording all-subscriptions-recovered ms; (5) #345 Timeline Visible p50/p95 for `/` and direct Channel URL, cold/warm cache, unthrottled/CDP-throttled, original dataset and 10 navigations per cell after 12 database-cache warm-ups; (6) sampled proxy CPU/memory mean/peak during 2–4. Resources span the generator lifetime including provisioning/drain/teardown; CPU is percent of one core and short peaks can be missed. k6 generator CPU is always recorded; peak at or above 90% invalidates scenarios 1–2. First-display generator CPU/RSS uses host `ps`, summing runner/browser descendants (lifetime-average CPU, recorded separately from Docker samples).
 
 Raw structured artifacts and machine-readable `summary.json` stay outside Git; output directories must be new or empty to prevent stale evidence. Summary reports each proxy's `(max-min)/median` spread before judgment. Detection is descriptive: disjoint five-run ranges are a “difference”, touching/overlapping ranges “no difference detected”, and neither alone decides the gate. Non-inferiority is confirmed run-for-run (criteria revised before measuring, approved by the maintainer on #469 2026-11-16): latency/first display pass only when both spreads are at most 5% and every nginx run is at most 1.05 × every Caddy run (nginx max ≤ 1.05 × Caddy min); connections/throughput pass only when every nginx run reaches at least every Caddy run's step (nginx min ≥ Caddy max), with no spread limit because steps are discrete. Fail requires every nginx run beyond the margin (nginx min > 1.05 × Caddy max, or nginx max < Caddy min); everything between, including latency spread above 5%, missing metrics, fewer than five valid runs or invalid TLS/generator-bound runs, is inconclusive and never passes. Reconnect time and proxy CPU/memory are recorded for reference only and never decide pass or fail. Every scenario 2 step, including one where k6 exits 99, must show an offered rate of at least 95% of the step rate; a lower or missing offered rate makes the run inconclusive, never a proxy capacity limit. Shared-runner noise and the co-located generator limit inference; these are modest comparison gates, not capacity claims. Actions uploads only allowlisted JSON metrics with three-day retention, never keys or container logs; disposable TLS files and stacks are removed.
+
+## Web Rust/wasm sync core evaluation (#466, 2026-11-16 JST)
+
+- Decision: pending maintainer review on #466 (first display on a throttled cold load is a severe regression; the other misses are small in absolute terms). `SYNC_CORE=ts` is retained for one sprint (#467).
+- Compared builds: B = `main` (`4659869`, TS protocol), W = PR #484 (`117e75a`, `SYNC_CORE=wasm` default), R = PR #484 (`117e75a`, `SYNC_CORE=ts` rollback). Images `fukulow-466:{main,wasm,ts}` built once before timing.
+- Conditions: Apple M5 (`Mac17,2`), 10 CPUs, 32 GiB, macOS 27.0.1 arm64; Docker Desktop 29.9.3 (10 CPUs / 7.748 GiB VM), PostgreSQL 18.6, Caddy 2.11.9, nginx 1.31.8 + acme 0.4.1; Rust 1.99.1, wasm-bindgen 0.2.130, Playwright 1.65.0 Chromium. Node 26.8.1 for every arm (the pinned 26.13.1 was not installed on this Mac; all arms share the runtime). Five interleaved rounds (B/W/R cyclic Latin square), first display then sync, no competing jobs, AC power (checked before and after every arm), no thermal limit recorded, load average 1.07–3.66. Output is **MAC-RELATIVE**.
+- Reproduce:
+  - Gates: `cargo test --locked && npm --prefix web run check && npm --prefix web test && SYNC_CORE=ts npm --prefix web test && CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`
+  - First display: `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts` per arm and round (5 interleaved rounds)
+  - Sync step, sustained, bulk receipt, memory: `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> --round <n>`, then `--aggregate --out <dir>` (B runs the same script in a `main` worktree)
+
+### Required gates
+
+| Gate | Evidence | Status |
+|---|---|---|
+| Functional equivalence (#464, controller, E2E) | `117e75a` CI 16/16 (client-core wasm tests, web check/test incl. 4 seeded traces > 6,000 steps comparing wasm with `protocol.ts`), e2e workflow, Compose E2E workflow (Caddy and nginx acceptance) | PASS |
+| Real-time contract C1–C10 | protocol, controller and E2E suites above on `SYNC_CORE=wasm` | PASS |
+| Data integrity (no loss/dup/reorder, catch-up) | 212,902 per-step and 527 completion assertions per arm per round, all rounds | PASS |
+| Security (CSP `wasm-unsafe-eval`, MIME, immutable cache) | local `CHECK_COMPOSE_ACCEPTANCE=1` on the W image, both proxies; headers below | PASS |
+| Rollback (`SYNC_CORE=ts` build, tests, baseline parity) | CI `SYNC_CORE=ts` build/test, no wasm asset in R; R within every target vs B below | PASS |
+
+### Bundle size and proxy transfer
+
+| Asset | Build | Raw (B) | gzip -9 (B) | zstd -19 (B) | Brotli -11 (B) | Caddy encoding / transfer (B) | nginx encoding / transfer (B) | Target | Status |
+|---|---|---:|---:|---:|---:|---|---|---|---|
+| `fukulow_client_core_bg-*.wasm` | W | 424,938 | 123,217 | 102,735 | 95,913 | zstd / 121,552 | gzip / 146,531 | Brotli <= 102,400 B | MET |
+| `sync-wasm-*.js` | W | 4,176 | 1,728 | 1,717 | 1,550 | zstd / 1,847 | gzip / 1,845 | recorded | — |
+| `index-*.js` | B | 331,151 | 95,529 | 85,264 | 81,404 | — | — | recorded | — |
+| `index-*.js` | W | 321,103 | 93,108 | 83,146 | 79,384 | zstd / 98,752 | gzip / 116,674 | recorded | — |
+| `index-*.js` | R | 331,829 | 95,888 | 85,576 | 81,724 | — | — | recorded | — |
+
+Raw/compressed sizes are the host build; transfers are the W image (its wasm is 424,339 B raw). Both proxies send `application/wasm` and `public, max-age=31536000, immutable`. Before the size tuning (12b8c9e) the wasm was 676,822 / 172,157 gzip / 132,701 Brotli.
+
+### First display (#345 conditions, 25 runs/cell across 5 interleaved rounds, median of round p50 / p95 ms)
+
+| Cell | B (`main`) p50 / p95 | W (`wasm`) p50 / p95 (change vs B) | R (`ts`) p50 / p95 (change vs B) | Target | Status |
+|---|---:|---:|---:|---|---|
+| `/` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 403.3/408.7 | FCP 56.0/84.0 (+53.3%); TL 431.7/436.0 (+6.8%) | FCP 52.0/52.0 (+0.0%); TL 403.1/423.9 (+3.3%) | <= +5.0% | MISSED |
+| `/` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 399.9/410.5 | FCP 64.0/76.0 (+46.2%); TL 420.7/427.2 (+4.3%) | FCP 48.0/48.0 (+0.0%); TL 399.2/405.1 (-0.6%) | <= +5.0% | MISSED |
+| `/o/:org/c/:channel` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 425.8/461.2 | FCP 56.0/84.0 (+61.5%); TL 432.0/433.8 (-5.9%) | FCP 52.0/52.0 (+0.0%); TL 425.0/431.1 (-0.4%) | <= +5.0% | MISSED |
+| `/o/:org/c/:channel` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 424.6/462.9 | FCP 64.0/76.0 (+58.3%); TL 423.6/427.3 (-7.6%) | FCP 48.0/48.0 (+0.0%); TL 422.3/425.8 (-8.3%) | <= +5.0% | MISSED |
+| `/` throttled cold (FCP; Timeline) | FCP 952.0/960.0; TL 2794.8/2801.3 | FCP 1728.0/1740.0 (+80.5%); TL 3576.6/3584.6 (+27.7%) | FCP 956.0/956.0 (-0.4%); TL 2794.0/2808.1 (+0.2%) | <= +5.0% | MISSED |
+| `/` throttled warm (FCP; Timeline) | FCP 236.0/244.0; TL 2081.3/2089.3 | FCP 236.0/244.0 (+1.6%); TL 2089.9/2099.1 (+0.2%) | FCP 236.0/244.0 (+0.0%); TL 2089.3/2105.5 (+0.8%) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold (FCP; Timeline) | FCP 952.0/960.0; TL 2786.9/2801.3 | FCP 1728.0/1736.0 (+81.3%); TL 3566.4/3574.2 (+27.6%) | FCP 956.0/968.0 (+0.8%); TL 2793.3/2802.6 (+0.0%) | <= +5.0% | MISSED |
+| `/o/:org/c/:channel` throttled warm (FCP; Timeline) | FCP 236.0/244.0; TL 2074.1/2087.1 | FCP 236.0/244.0 (+0.0%); TL 2082.3/2108.2 (+0.8%) | FCP 236.0/244.0 (+0.0%); TL 2081.9/2093.9 (+0.3%) | <= +5.0% | MET |
+
+Waterfall (round 1, cold, p50 ms, B → W): unthrottled JS end 29.9 → 29.7, wasm end — → 41.0, app mount 39.4 → 44.4; throttled JS end 901.6 → 908.8, wasm end — → 1,688.6, app mount 921.9 → 1,698.7, first API request 917 → 1,694. The wasm is requested only after the entry JS runs, and mount and every API request wait for it.
+
+### Sync processing and memory (5 interleaved rounds, median of round percentiles [min–max])
+
+
+| Metric | Workload | B (`main`) | W (`wasm`) (change vs B) | R (`ts`) (change vs B) | Target | Status |
+|---|---|---:|---:|---:|---|---|
+| `step()` (µs) | Grid + 6,000-step trace p50 / p95 / p99 | 4.83 [4.79–5.04] / 27.75 [27.04–28.04] / 34.63 [33.54–37.96] | 36.54 [36.13–37.17] (+656.1%) / 474.42 [472.04–476.75] (+1601.9%) / 1146.50 [1144.50–1148.63] (+3205.4%) | 4.92 [4.88–5.08] (+1.7%) / 24.50 [24.00–25.21] (-11.3%) / 35.04 [34.25–37.13] (+0.6%) | p50, p95 <= +10%; p99 investigated above +25% | MISSED; p99 INVESTIGATE |
+| Sustained latency (ms) | 100 msg/s × 60 s across 8 Channels, p50 / p95 / p99 | 0.59 [0.59–0.61] / 1.39 [1.36–1.40] / 1.78 [1.73–1.87] | 0.78 [0.76–1.01] / 1.78 [1.73–2.09] (+27.6%, CI [+24.7%, +48.8%]) / 2.29 [2.25–2.69] (queue 0) | 0.61 [0.59–0.61] / 1.40 [1.37–1.41] (+0.6%, CI [-1.1%, +1.2%]) / 1.79 [1.71–1.86] | p95 <= +10%, queue 0 | MISSED |
+| Max sustainable rate (msg/s) | 10 s stepped arrival windows | 8000 [8000–8000] | 8000 [8000–8000] | 8000 [8000–8000] | >= 500 msg/s | MET |
+| Bulk receipt (ms) | 8×50, 2×200 history; 250, 1000 catch-up p50 / p95 | history_8x50: 0.25/0.27; history_2x200: 0.14/0.15; catchup_250: 0.17/0.19; catchup_1000: 1.09/1.23 | history_8x50: 3.74/3.78 (+1337.3%); history_2x200: 3.40/3.45 (+2271.7%); catchup_250: 2.36/2.39 (+1167.2%); catchup_1000: 9.69/9.85 (+703.7%) | history_8x50: 0.19/0.20 (-25.6%); history_2x200: 0.12/0.13 (-8.9%); catchup_250: 0.16/0.17 (-9.1%); catchup_1000: 1.02/1.07 (-12.3%) | <= +10% | MISSED |
+| Steady memory (MiB) | Post-GC heap + wasm linear (2.5k–10k msg) | 11.34 [11.34–11.34] | 14.88 [14.88–14.88] (wasm: 1664 KiB) (+31.3%, CI [+31.2%, +31.3%]) | 11.37 [11.37–11.37] (+0.3%, CI [+0.3%, +0.3%]) | <= +10% | MISSED |
+| Peak memory (MiB) | Pre-GC peak heap + wasm linear | 46.31 [46.26–46.36] | 39.26 [39.19–48.05] (wasm: 26 pages) (-15.2%, CI [-15.3%, +3.6%]) | 44.27 [44.25–44.31] (-4.3%, CI [-4.5%, -4.2%]) | <= +20% | MET |
+| Memory growth slope | OLS slope over 2.5k–10k msg (B/msg); wasm pages added | -37.02 [-38.17–-37.01] B/msg; +0 pages | 3.04 [3.02–3.35] B/msg; +0 pages | 1.06 [1.02–2.22] B/msg; +0 pages | <= +64 B/msg; +0 pages | PASS |
+
+Per class (round 3, µs, B → W): stream append p50 2.5–4.8 → 58–60; duplicate 2.4–6.2 → 10–12; send + ACK 3.0–7.0 → 26–55; history 50 p50 20–28 → 349–470; mixed trace p99 64 → 1,208.
+
+- Missed targets, user impact, and improvement options (cause from exploratory profiling, not part of the formal run):
+  - First display, throttled cold: FCP +776 ms (952 → 1,728 ms), Timeline +780 ms. The page stays blank while ~121 KB (Caddy) of wasm downloads after the JS. Severe. Options: mount and start API requests without waiting for the wasm, preload it, serve precompressed Brotli.
+  - First display, unthrottled: FCP p95 +32 ms, Timeline +7% on `/` cold (wasm fetch + compile ≈ 11 ms + 22 ms instantiate). Same options.
+  - `step()`: append ~59 µs vs 2.5–4.8 µs, p99 1.15 ms vs 35 µs. Natively `Core::step` takes 1.6–2.2 µs while the whole `WasmCore::step` takes 18–27 µs: about 90% is building the JSON delta (`serde_json::Value` trees, linear body interning, session on every step). In the browser the wasm call is ~37 µs of ~58 µs; `JSON.parse`, body expansion and the view merge add ~20 µs. Options: serialise typed deltas directly, op-based message deltas, Map lookups in the JS merge. A JS/wasm boundary keeps a fixed cost (the no-op duplicate path is 10–12 µs), so +10% of TS is unlikely to be reachable by optimisation alone.
+  - Sustained 100 msg/s: p95 +0.39 ms (1.39 → 1.78 ms), queue 0, max rate 8,000 msg/s. Small; follows from `step()`.
+  - Bulk receipt: 1,000-message catch-up 9.7 ms vs 1.1 ms; history pages 3.4–3.7 ms vs 0.14–0.25 ms. Under one frame; follows from `step()`.
+  - Steady memory: +3.5 MiB (11.34 → 14.88 MiB): 1.6 MiB wasm linear memory (state held in Rust as well as the JS view) and ~1.9 MiB JS heap (cause not confirmed). No growth (slope 3 B/msg, 0 pages).
+- Limits: single developer Mac (`MAC-RELATIVE`), loopback Docker network, synthetic deterministic message bodies, single browser/Node runtime, Node 26.8.1 instead of the pinned 26.13.1. Raw artifacts outside Git: `/private/tmp/fukulow-466-artifacts`.
