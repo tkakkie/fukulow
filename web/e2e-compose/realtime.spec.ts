@@ -79,9 +79,13 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   const files = await a.locator('script[src], link[rel="stylesheet"]').evaluateAll(elements => elements.map(element => element.getAttribute('src') ?? element.getAttribute('href')!))
   expect(files.length).toBeGreaterThan(0)
   for (const path of files) {
-    const response = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'gzip' } }))
+    const response = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'br' } }))
     expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
-    expect(response.headers()['content-encoding']).toBe('gzip')
+    expect(response.headers()['content-encoding']).toBe('br')
+    expect(response.headers()['vary']).toContain('Accept-Encoding')
+    const identity = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'br;q=0, gzip' } }))
+    expect(identity.headers()['content-encoding']).toBeUndefined()
+    expect(identity.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
   }
   const wasmAssets = await a.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.endsWith('.wasm') || /sync-wasm-.*\.js$/.test(name)))
   expect(wasmAssets.filter(name => name.endsWith('.wasm'))).toHaveLength(1)

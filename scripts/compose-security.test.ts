@@ -51,8 +51,7 @@ http://{$FUKULOW_DOMAIN:localhost} {
 	import browser_headers
 	@api path /api /api/*
 	header @api >Cache-Control "no-store"
-	@static not path /api /api/*
-	encode @static zstd gzip
+	# The app negotiates precompressed Brotli; preserve identity responses too.
 	@hsts {
 		protocol https
 		not host localhost 127.0.0.1 [::1]
@@ -141,11 +140,8 @@ http {
         ssl_certificate_key $acme_certificate_key;
         # Keep the serving cache shorter than the CI certificate lifetime too.
         ssl_certificate_cache max=2 valid=1s;
-        # Stock nginx has gzip, not zstd; keep API responses out of compression.
-        gzip on;
-        gzip_vary on;
-        gzip_types text/css text/javascript application/javascript image/svg+xml application/wasm;
-        gzip_proxied any;
+        # The app negotiates precompressed Brotli; preserve identity responses too.
+        gzip off;
         location = /api { gzip off; proxy_pass http://app:8080; }
         location /api/ { gzip off; proxy_pass http://app:8080; }
         location = /api/v1/ready {
@@ -513,9 +509,10 @@ test('both proxy configs retain HTTP-01 routing, TLS, API compression exclusions
       ? ['load_module /usr/lib/nginx/modules/ngx_http_acme_module.so;', 'challenge http-01;', 'state_path /var/lib/nginx/acme;',
         'listen 443 ssl;', 'acme_certificate public;', 'location ^~ /.well-known/acme-challenge/', 'return 308 https://${FUKULOW_DOMAIN}$request_uri;',
         'map $uri $response_cache_control', 'proxy_hide_header Cache-Control;', 'add_header Cache-Control $response_cache_control always;',
+        '# The app negotiates precompressed Brotli; preserve identity responses too.\n        gzip off;',
         'location = /api/v1/ready {\n            gzip off;',
         'location = /api { gzip off;', 'location /api/ { gzip off;', 'proxy_connect_timeout 5s;', 'proxy_read_timeout 3600s;', 'proxy_send_timeout 3600s;']
-      : ['respond /.well-known/acme-challenge/* 404', 'redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308', '@static not path /api /api/*',
+      : ['respond /.well-known/acme-challenge/* 404', 'redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308',
         'header @api >Cache-Control "no-store"',
         'dial_timeout 5s', 'read_timeout 3600s', 'write_timeout 3600s']
     checkProxyHeaders(profile, config)
