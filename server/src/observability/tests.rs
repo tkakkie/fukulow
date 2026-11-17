@@ -311,7 +311,7 @@ fn socket_close_counters_and_lifecycle_logs_use_only_fixed_codes() {
             Some(4999),
             None,
         ] {
-            metrics.closed(code);
+            metrics.closed(code, "connection");
         }
         assert_eq!(
             metrics
@@ -329,6 +329,12 @@ fn socket_close_counters_and_lifecycle_logs_use_only_fixed_codes() {
     assert_eq!(events[1]["fields"]["active_websockets"], 1);
     assert_eq!(events.last().unwrap()["fields"]["active_websockets"], 0);
     assert!(!output.text().contains("4999"));
+    assert!(
+        events
+            .iter()
+            .filter(|e| e["fields"]["event"] == "websocket_closed")
+            .all(|e| e["fields"]["cause"] == "connection")
+    );
     let codes: Vec<_> = events
         .iter()
         .filter_map(|e| e["fields"]["code"].as_str())

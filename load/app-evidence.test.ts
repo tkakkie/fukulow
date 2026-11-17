@@ -17,10 +17,10 @@ test('aggregates pool deltas, failure kinds, close codes with times and socket r
     line(500, { event: 'websocket_opened' }), // before the window: counts toward concurrency only
     ...Array.from({ length: 5 }, (_, i) => line(2000 + i * 100, { event: 'websocket_opened' })),
     line(4100, { event: 'database_failure', kind: 'pool_timeout' }),
-    line(4200, { event: 'websocket_closed', code: '1011' }), line(4300, { event: 'websocket_disconnected' }),
-    line(5900, { event: 'websocket_closed', code: '1011' }),
+    line(4200, { event: 'websocket_closed', code: '1011', cause: 'notification' }), line(4300, { event: 'websocket_disconnected' }),
+    line(5900, { event: 'websocket_closed', code: '1011', cause: 'connection' }),
     line(4400, { event: 'http_completed' }, { status: 503, route: '/api/v1/x' }),
-    line(9900, { event: 'websocket_closed', code: '1011' }), // after the window
+    line(9900, { event: 'websocket_closed', code: '1011', cause: 'notification' }), // after the window
     'not json from the runtime',
   ].join('\n');
   const evidence = appEvidence(log, t0 + 1000, t0 + 7000);
@@ -30,6 +30,7 @@ test('aggregates pool deltas, failure kinds, close codes with times and socket r
   assert.equal(evidence.pool?.deltas.acquire_timeout, 3);
   assert.equal(evidence.databaseFailures.pool_timeout, 1);
   assert.deepEqual(evidence.closes['1011'], { count: 2, firstMs: 3200, lastMs: 4900, perSecond: [[3, 1], [4, 1]] });
+  assert.deepEqual(evidence.causes1011, { shutdown: 0, session: 0, overflow: 0, notification: 1, connection: 1, peer: 0 });
   assert.deepEqual(evidence.sockets, { opened: 5, disconnected: 1, peakConcurrent: 6, peakOpenedPerSecond: 5, openedPerSecond: 13 });
   assert.equal(evidence.http5xx, 1);
   // Only aggregates leave the module: no route, raw line or other field.
@@ -45,6 +46,9 @@ test('missing, rotated, restarted or late pool samples make the evidence incompl
   assert.match(reasons(pools(3)), /after the window/);
   assert.match(reasons([...pools(6), line(1500, { event: 'websocket_closed', code: '9999' })]), /unknown websocket_closed code/);
   assert.match(reasons([...pools(6), line(1500, { event: 'database_failure', kind: 'new' })]), /unknown database_failure kind/);
+  // A 1011 without a known close site cannot be attributed: incomplete, not silently uncounted.
+  assert.match(reasons([...pools(6), line(1500, { event: 'websocket_closed', code: '1011' })]), /unknown websocket_closed cause/);
+  assert.match(reasons([...pools(6), line(1500, { event: 'websocket_closed', code: '1011', cause: 'pool' })]), /unknown websocket_closed cause/);
   assert.match(reasons([...pools(6), '{"fields":{"event":"websocket_closed"'] ), /unparseable/);
   assert.match(appEvidence(pools(6).join('\n'), ...window, 'docker logs exited 1').reasons.join(), /docker logs exited 1/);
   // The panic hook writes no timestamp: counted, never silently dropped.
@@ -58,8 +62,8 @@ test('out-of-order lines, pre-window sockets, teardown and other app warnings', 
     line(200, { event: 'websocket_opened' }), line(300, { event: 'websocket_opened' }), line(400, { event: 'websocket_opened' }),
     line(1500, { event: 'websocket_disconnected' }),
     // Threads format timestamps before the stderr lock: 2999 is written after 3000.
-    line(3000, { event: 'websocket_closed', code: '1011' }), line(2999, { event: 'websocket_closed', code: '1011' }),
-    line(3001, { event: 'websocket_closed', code: '1011' }),
+    line(3000, { event: 'websocket_closed', code: '1011', cause: 'notification' }), line(2999, { event: 'websocket_closed', code: '1011', cause: 'notification' }),
+    line(3001, { event: 'websocket_closed', code: '1011', cause: 'notification' }),
     line(2100, { event: 'websocket_opened' }), line(2000, { event: 'websocket_opened' }),
     { ...JSON.parse(line(2500, { event: 'work_deadline_expired' })), level: 'WARN' },
   ].map(row => typeof row === 'string' ? row : JSON.stringify(row)).join('\n');

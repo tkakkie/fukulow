@@ -48,7 +48,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                                         .run(&mut socket, connection::Lifecycle::default())
                                         .await
                                         .unwrap_err();
-                                    close(&mut socket, code).await;
+                                    close(&mut socket, code, "connection").await;
                                     finished.send(code).await.unwrap();
                                 }
                                 .with_subscriber(capture.subscriber())

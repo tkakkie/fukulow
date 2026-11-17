@@ -130,18 +130,18 @@ async fn connected_with_lifecycle(
     let _observation = crate::observability::Socket::opened();
     let session = tokio::select! {
         biased;
-        _ = state.shutdown.cancelled() => { close(&mut socket, 1001).await; return; }
+        _ = state.shutdown.cancelled() => { close(&mut socket, 1001, "shutdown").await; return; }
         session = auth.watch_session(&state) => session,
     };
     let mut session = match session {
         Ok(Some(session)) => session,
         Ok(None) => {
-            close(&mut socket, CLOSE_SESSION_ENDED).await;
+            close(&mut socket, CLOSE_SESSION_ENDED, "session").await;
             return;
         }
         Err(error) => {
             crate::observability::database_failure(&error);
-            close(&mut socket, 1011).await;
+            close(&mut socket, 1011, "session").await;
             return;
         }
     };
@@ -163,23 +163,24 @@ async fn connected_with_lifecycle(
         access: HashMap::new(),
         permit,
     };
+    // The cause is a fixed label so a 1011 can be told apart without logging entities (#469).
     let code = tokio::select! {
         biased;
-        _ = state.shutdown.cancelled() => Some(1001),
-        result = session.ended() => Some(result.unwrap_or(1011)),
-        _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
-        _ = notification_failed.failed() => Some(1011),
-        result = connection.run(&mut socket, lifecycle) => result.err(),
+        _ = state.shutdown.cancelled() => Some((1001, "shutdown")),
+        result = session.ended() => Some((result.unwrap_or(1011), "session")),
+        _ = overflow.wait_for(|full| *full) => Some((CLOSE_QUEUE_OVERFLOW, "overflow")),
+        _ = notification_failed.failed() => Some((1011, "notification")),
+        result = connection.run(&mut socket, lifecycle) => result.err().map(|code| (code, "connection")),
     };
-    if let Some(code) = code {
-        close(&mut socket, code).await;
+    if let Some((code, cause)) = code {
+        close(&mut socket, code, cause).await;
     } else {
-        crate::observability::socket_closed(None);
+        crate::observability::socket_closed(None, "peer");
     }
 }
 
-async fn close(socket: &mut WebSocket, code: u16) {
-    crate::observability::socket_closed(Some(code));
+async fn close(socket: &mut WebSocket, code: u16, cause: &'static str) {
+    crate::observability::socket_closed(Some(code), cause);
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         socket.send(Frame::Close(Some(CloseFrame {

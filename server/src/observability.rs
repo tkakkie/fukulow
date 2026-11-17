@@ -222,15 +222,16 @@ fn close_bucket(code: Option<u16>) -> (usize, &'static str) {
         None => (7, "peer_or_transport"),
     }
 }
-pub(crate) fn socket_closed(code: Option<u16>) {
-    METRICS.closed(code);
+/// `cause` is a fixed label from the closing call site, never data.
+pub(crate) fn socket_closed(code: Option<u16>, cause: &'static str) {
+    METRICS.closed(code, cause);
 }
 
 impl Metrics {
-    fn closed(&self, code: Option<u16>) {
+    fn closed(&self, code: Option<u16>, cause: &'static str) {
         let (bucket, code) = close_bucket(code);
         self.closes[bucket].fetch_add(1, Relaxed);
-        tracing::info!(target: TARGET, event = "websocket_closed", code);
+        tracing::info!(target: TARGET, event = "websocket_closed", code, cause);
     }
 }
 

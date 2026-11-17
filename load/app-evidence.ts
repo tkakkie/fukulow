@@ -6,6 +6,8 @@ const poolCounters = ['acquire_success', 'acquire_timeout', 'acquire_closed', 'a
 const failureKinds = ['pool_timeout', 'pool_closed', 'deadline', 'io', 'database', 'other'] as const;
 // observability::close_bucket: server-sent codes, plus the peer/transport end the server did not choose.
 const closeCodes = ['1001', '1011', '4001', '4003', '4008', '4029', 'other', 'peer_or_transport'] as const;
+// realtime.rs close sites: a fixed label that tells the 1011 paths apart (live notification failure vs others).
+const closeCauses = ['shutdown', 'session', 'overflow', 'notification', 'connection', 'peer'] as const;
 const sampleSlackMs = 2000;
 const seriesLimit = 900;
 
@@ -16,6 +18,8 @@ export type AppEvidence = {
     deltas: Record<(typeof poolCounters)[number], number>; acquireWaitsOver1s: number } | null;
   databaseFailures: Record<(typeof failureKinds)[number], number>;
   closes: Record<(typeof closeCodes)[number], Close>;
+  /** Server-sent 1011 closes in the window by close site. */
+  causes1011: Record<(typeof closeCauses)[number], number>;
   sockets: { opened: number; disconnected: number; peakConcurrent: number; peakOpenedPerSecond: number;
     openedPerSecond: number | null };
   http5xx: number;
@@ -42,6 +46,7 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
   const opened: number[] = [];
   const closeTimes = Object.fromEntries(closeCodes.map(code => [code, [] as number[]])) as Record<(typeof closeCodes)[number], number[]>;
   const otherWarnings: Record<string, number> = {};
+  const causes1011 = Object.fromEntries(closeCauses.map(cause => [cause, 0])) as AppEvidence['causes1011'];
   let active = 0, activeAtStart = 0, peakConcurrent = 0, disconnected = 0, http5xx = 0, panics = 0;
   const samples: Row[] = [];
   if (!(endedAt > startedAt)) reasons.push('invalid generator window');
@@ -67,6 +72,10 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
     else if (event === 'websocket_closed') {
       const code = closeCodes.find(code => code === row.fields.code);
       if (code) closeTimes[code].push(row.at - startedAt); else reasons.push('unknown websocket_closed code');
+      if (code === '1011') {
+        const cause = closeCauses.find(cause => cause === row.fields.cause);
+        if (cause) causes1011[cause]++; else reasons.push('unknown websocket_closed cause');
+      }
     } else if (event === 'database_failure') {
       const kind = failureKinds.find(kind => kind === row.fields.kind);
       if (kind) databaseFailures[kind]++; else reasons.push('unknown database_failure kind');
@@ -84,7 +93,7 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
     peakOpenedPerSecond = Math.max(peakOpenedPerSecond, i - j + 1);
   }
   const span = opened.length > 1 ? opened.at(-1)! - opened[0] : 0;
-  return { complete: reasons.length === 0, reasons: [...new Set(reasons)], windowMs: endedAt - startedAt, pool, databaseFailures, closes,
+  return { complete: reasons.length === 0, reasons: [...new Set(reasons)], windowMs: endedAt - startedAt, pool, databaseFailures, closes, causes1011,
     sockets: { opened: opened.length, disconnected, peakConcurrent: Math.max(peakConcurrent, activeAtStart), peakOpenedPerSecond,
       openedPerSecond: span > 0 ? Math.round(opened.length / (span / 1000)) : null },
     http5xx, panics, otherWarnings };
