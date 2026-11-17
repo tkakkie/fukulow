@@ -24,6 +24,13 @@ export function newer(latest: string, pinned: string): boolean {
   return false
 }
 
+// Highest release line by version, never by the API's array order.
+export function newestLine(releases: Release[], lts: boolean, today: string): Release | undefined {
+  return releases
+    .filter(release => release.latest && (!lts || (release.ltsFrom != null && release.ltsFrom <= today)))
+    .reduce<Release | undefined>((best, release) => !best || newer(release.latest!.name, best.latest!.name) ? release : best, undefined)
+}
+
 export async function gather(entries: Entry[], fetch: Fetch, today: string): Promise<Map<string, Facts>> {
   const products = new Map<string, Promise<Release[] | 'missing'>>()
   const releases = (product: string) => {
@@ -58,7 +65,7 @@ export async function gather(entries: Entry[], fetch: Fetch, today: string): Pro
         const lts = entry.latest.lts
         const found = await releases(entry.latest.endoflife)
         if (found === 'missing') throw new Error(`${entry.latest.endoflife} is not on endoflife.date`)
-        const line = found.find(release => !lts || (release.ltsFrom != null && release.ltsFrom <= today))
+        const line = newestLine(found, !!lts, today)
         if (!line?.latest) throw new Error(`endoflife.date ${entry.latest.endoflife}: no ${lts ? 'LTS ' : ''}release with a latest version`)
         fact.latest = line.latest.name
       }
@@ -67,10 +74,13 @@ export async function gather(entries: Entry[], fetch: Fetch, today: string): Pro
   return facts
 }
 
+// Clamps to the target month's last day (Aug 31 + 6 months = Feb 28/29), never rolling into the next month.
 export function addMonths(date: string, months: number): string {
-  const day = new Date(`${date}T00:00:00Z`)
-  day.setUTCMonth(day.getUTCMonth() + months)
-  return day.toISOString().slice(0, 10)
+  const [year, month, day] = date.split('-').map(Number)
+  const target = new Date(Date.UTC(year, month - 1 + months, 1))
+  const last = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate()
+  target.setUTCDate(Math.min(day, last))
+  return target.toISOString().slice(0, 10)
 }
 
 export function report(entries: Entry[], facts: Map<string, Facts>, today: string): string {

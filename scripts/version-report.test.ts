@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Entry } from './check-versions.ts'
-import { addMonths, gather, marker, newer, report } from './version-report.ts'
+import { addMonths, gather, marker, newer, newestLine, report, type Release } from './version-report.ts'
 
 const base = { file: 'f', pattern: '', class: 'patch-minor', updates: 'dependabot' }
 const entries: Entry[] = [
@@ -56,4 +56,31 @@ test('version comparison and month arithmetic', () => {
   assert.ok(!newer('1.99.1', '1.99.1'))
   assert.ok(!newer('1.9', '1.10.0'))
   assert.equal(addMonths('2026-11-17', 6), '2027-05-17')
+})
+
+test('month arithmetic clamps to the end of shorter months', () => {
+  assert.equal(addMonths('2026-08-31', 6), '2027-02-28')
+  assert.equal(addMonths('2027-08-31', 6), '2028-02-29', 'leap year')
+  assert.equal(addMonths('2026-12-31', 6), '2027-06-30')
+  assert.equal(addMonths('2026-05-31', 6), '2026-11-30')
+  assert.equal(addMonths('2026-07-31', 6), '2027-01-31', 'year rollover, no clamp')
+  assert.equal(addMonths('2026-02-28', 6), '2026-08-28')
+  assert.equal(addMonths('2028-02-29', 12), '2029-02-28')
+})
+
+test('latest line is chosen by version, whatever the API order', () => {
+  const lines: Release[] = [
+    { name: '20', eolFrom: '2026-04-30', ltsFrom: '2023-10-24', latest: { name: '20.19.5' } },
+    { name: '26', eolFrom: '2029-04-30', ltsFrom: '2026-10-28', latest: { name: '26.14.0' } },
+    { name: '27', eolFrom: '2028-06-01', ltsFrom: null, latest: { name: '27.1.0' } },
+    { name: '24', eolFrom: '2028-04-30', ltsFrom: '2025-10-28', latest: { name: '24.11.0' } },
+    { name: '28', eolFrom: '2031-04-30', ltsFrom: '2027-10-26', latest: { name: '28.0.0' } },
+  ]
+  const orders = [lines, [...lines].reverse(), [lines[2], lines[0], lines[4], lines[3], lines[1]]]
+  for (const order of orders) {
+    assert.equal(newestLine(order, true, '2026-11-17')?.latest?.name, '26.14.0', 'newest LTS already in LTS')
+    assert.equal(newestLine(order, false, '2026-11-17')?.latest?.name, '28.0.0', 'without lts, highest version')
+  }
+  assert.equal(newestLine(lines, true, '2027-10-26')?.latest?.name, '28.0.0', 'LTS start day counts')
+  assert.equal(newestLine(lines, true, '2023-01-01'), undefined)
 })
