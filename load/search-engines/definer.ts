@@ -50,7 +50,7 @@ const probes = [
 const sender = (k: number) => k===10 ? 2 : k===11 ? 9 : 1;
 const probe = (k: number) => uuid(9_000_000+k);
 // Extra Organization 1 Members, only in the denial database: 7 admin without grants (and DM
-// participant), 8 member demoted to guest, 9 member whose private grant is revoked after sending,
+// participant), 8 member with a Channel 21 grant, demoted to guest, 9 member whose private grant is revoked after sending,
 // 10 member keeping that grant (positive control). Channel 90 is a DM between Members 2 and 7.
 const extraMembers = `${[[7,'admin'],[8,'member'],[9,'member'],[10,'member']].map(([u,role])=>
   `INSERT INTO accounts VALUES ('${member(1,u as number)}','synthetic-1-${u}@example.invalid','measurement-only');
