@@ -341,21 +341,28 @@ async fn frame(client: &mut Client) -> tungstenite::Message {
         .unwrap()
         .unwrap()
 }
-async fn delivery_next(
-    client: &mut Client,
+async fn delivery_next<S>(
+    client: &mut WebSocketStream<S>,
     expected_pong: Option<&[u8]>,
-) -> Option<Result<tungstenite::Message, tungstenite::Error>> {
+) -> Option<Result<tungstenite::Message, tungstenite::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
-        match message_next(client).await? {
-            Ok(tungstenite::Message::Ping(_)) => {
-                if let Err(error) = client.flush().await {
-                    return Some(Err(error));
-                }
-            }
-            Ok(tungstenite::Message::Pong(bytes)) if expected_pong != Some(bytes.as_ref()) => {}
-            other => return Some(other),
+        let result =
+            crate::websocket_test_support::websocket_delivery_next(client, expected_pong).await?;
+        if result.as_ref().is_ok_and(is_notice) {
+            continue;
         }
+        return Some(result);
     }
+}
+async fn delivery_frame(client: &mut Client) -> tungstenite::Message {
+    tokio::time::timeout(Duration::from_secs(5), delivery_next(client, None))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
 }
 async fn event(client: &mut Client) -> Value {
     tokio::time::timeout(Duration::from_secs(5), read_event(client))

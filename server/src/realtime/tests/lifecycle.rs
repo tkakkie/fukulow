@@ -274,6 +274,9 @@ async fn client_initiated_close_gets_close_frame_back(pool: PgPool) {
         subscribe(&mut socket, f.channel, 0).await;
         ready(&mut socket, f.channel, 0).await;
         socket.close(close.clone()).await.unwrap();
-        assert_eq!(frame(&mut socket).await, tungstenite::Message::Close(close));
+        assert_eq!(
+            delivery_frame(&mut socket).await,
+            tungstenite::Message::Close(close)
+        );
     }
 }

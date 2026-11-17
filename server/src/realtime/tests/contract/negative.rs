@@ -25,37 +25,45 @@ async fn contract_reads_answer_ping_and_skip_pong() {
 
 #[tokio::test]
 async fn contract_silence_skips_keepalive_but_rejects_unexpected_message() {
-    let (mut client, mut peer) = super::super::keepalive::socket_pair().await;
-    peer.send(tungstenite::Message::Ping(Default::default()))
-        .await
-        .unwrap();
-    peer.send(tungstenite::Message::Pong(Default::default()))
-        .await
-        .unwrap();
-    peer.send(tungstenite::Message::text(
-        json!({"type":"message","message":{"channel_id":Uuid::new_v4(),"seq":1}}).to_string(),
-    ))
-    .await
-    .unwrap();
+    // Keepalive and unexpected Text are already buffered when now_or_never polls the reader.
+    let mut bytes = vec![0x89, 1, 1, 0x8a, 1, 2, 0x81, 1, b'x'];
+    // A following sentinel proves silence consumed through the unexpected Text.
+    bytes.extend([0x81, 1, b'y']);
+    let (mut client, mut peer) = super::super::keepalive::buffered_pair(bytes).await;
+    // Complete the injected backpressure before checking the pre-barrier rejection.
+    // This test targets frame classification; the next test covers blocked writes.
+    client.get_mut().writes = 2;
     assert_eq!(
         assertions::silence(&mut client, Uuid::new_v4(), 0).await,
         Err(Assertion::Silence)
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), peer.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        tungstenite::Message::Pong(vec![1].into())
+    );
+    assert_eq!(
+        client.next().await.unwrap().unwrap(),
+        tungstenite::Message::text("y")
     );
 }
 
 #[tokio::test]
 async fn contract_silence_answers_ping_and_requires_nonce_pong() {
     for wrong in [false, true] {
-        let (mut client, mut peer) = super::super::keepalive::socket_pair().await;
+        // Buffered before silence starts: exercise its now_or_never pre-barrier poll.
+        let (mut client, mut peer) =
+            super::super::keepalive::buffered_pair(vec![0x89, 1, 1, 0x8a, 1, 2]).await;
         let channel = Uuid::new_v4();
-        let (result, ()) = tokio::join!(assertions::silence(&mut client, channel, 0), async {
-            // Place keepalive traffic before the ack and before the nonce Pong.
-            peer.send(tungstenite::Message::Ping(vec![1].into()))
-                .await
-                .unwrap();
-            peer.send(tungstenite::Message::Pong(vec![2].into()))
-                .await
-                .unwrap();
+        let peer_exchange = async {
+            // The pre-barrier reader must answer Ping(1) before sending controls.
+            assert_eq!(
+                peer.next().await.unwrap().unwrap(),
+                tungstenite::Message::Pong(vec![1].into())
+            );
             let mut controls = 0;
             let nonce = loop {
                 match peer.next().await.unwrap().unwrap() {
@@ -72,7 +80,7 @@ async fn contract_silence_answers_ping_and_requires_nonce_pong() {
                 .await
                 .unwrap();
             peer.send(tungstenite::Message::text(
-                json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0}).to_string(),
+                json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0,"history_generation":Uuid::new_v4()}).to_string(),
             ))
             .await
             .unwrap();
@@ -85,14 +93,23 @@ async fn contract_silence_answers_ping_and_requires_nonce_pong() {
             if wrong {
                 // An unrelated Pong and duplicate ack cannot stand in for the nonce.
                 peer.send(tungstenite::Message::text(
-                    json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0}).to_string(),
+                    json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0,"history_generation":Uuid::new_v4()}).to_string(),
                 ))
                 .await
                 .unwrap();
             } else {
                 peer.send(tungstenite::Message::Pong(nonce)).await.unwrap();
             }
-        });
+            assert_eq!(
+                peer.next().await.unwrap().unwrap(),
+                tungstenite::Message::Pong(vec![3].into())
+            );
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(assertions::silence(&mut client, channel, 0), peer_exchange)
+        })
+        .await
+        .unwrap();
         assert_eq!(
             result,
             if wrong {

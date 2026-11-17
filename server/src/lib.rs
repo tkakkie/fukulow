@@ -9,6 +9,8 @@ pub mod shutdown;
 
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod websocket_test_support;
 
 use axum::{
     Router,

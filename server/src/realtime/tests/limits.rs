@@ -302,7 +302,7 @@ async fn reconnecting_after_4029_does_not_reset_the_account_budget(pool: PgPool)
     let mut subscribed = 0;
     loop {
         subscribe(&mut socket, f.channel, 0).await;
-        match frame(&mut socket).await {
+        match delivery_frame(&mut socket).await {
             tungstenite::Message::Text(text) => {
                 let reply: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(reply["type"], "subscribed");
@@ -426,8 +426,11 @@ async fn measure_reconnect_flood_subscribe_load(pool: PgPool) {
                         break;
                     }
                     // A Close, a reset or a timeout all end this socket: reconnect.
-                    match tokio::time::timeout(Duration::from_secs(5), message_next(&mut socket))
-                        .await
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        delivery_next(&mut socket, None),
+                    )
+                    .await
                     {
                         Ok(Some(Ok(tungstenite::Message::Text(_)))) => subscribes += 1,
                         _ => break,
@@ -460,7 +463,8 @@ async fn measure_reconnect_flood_subscribe_load(pool: PgPool) {
             let sent = control(&mut socket, unsubscribe).await.is_ok()
                 && control(&mut socket, subscribe).await.is_ok();
             let answer =
-                tokio::time::timeout(Duration::from_secs(1), message_next(&mut socket)).await;
+                tokio::time::timeout(Duration::from_secs(1), delivery_next(&mut socket, None))
+                    .await;
             match answer {
                 Ok(Some(Ok(tungstenite::Message::Text(text))))
                     if sent && text.contains("subscribed") =>

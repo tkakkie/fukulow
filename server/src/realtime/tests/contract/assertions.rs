@@ -32,8 +32,8 @@ pub(super) enum Assertion {
     Read,
 }
 
-async fn read(
-    client: &mut Client,
+async fn read<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
     expected_pong: Option<&[u8]>,
 ) -> Result<tungstenite::Message, Assertion> {
     match tokio::time::timeout(Duration::from_secs(5), delivery_next(client, expected_pong)).await {
@@ -45,8 +45,8 @@ async fn read(
     }
 }
 
-pub(super) async fn json(
-    client: &mut Client,
+pub(super) async fn json<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
     mut expected: Value,
     assertion: Assertion,
 ) -> Result<(), Assertion> {
@@ -70,7 +70,10 @@ pub(super) async fn json(
     Ok(())
 }
 
-pub(super) async fn closed(client: &mut Client, code: u16) -> Result<(), Assertion> {
+pub(super) async fn closed<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
+    code: u16,
+) -> Result<(), Assertion> {
     let frame = read(client, None).await?;
     if !matches!(&frame, tungstenite::Message::Close(Some(close)) if u16::from(close.code) == code)
     {
@@ -80,8 +83,8 @@ pub(super) async fn closed(client: &mut Client, code: u16) -> Result<(), Asserti
     Ok(())
 }
 
-pub(super) async fn silence(
-    client: &mut Client,
+pub(super) async fn silence<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
     channel: Uuid,
     caught_up_seq: i64,
 ) -> Result<(), Assertion> {
