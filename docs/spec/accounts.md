@@ -7,6 +7,7 @@ DM-specific exceptions: [Direct messages (#151, specified)](dms.md#model-and-per
 ## Accounts and Memberships
 - Emails, setup Organization/Member names and Channel names reject NUL with 400 ErrorBody before operation-specific database/password work. Authentication and setup-token gates retain 401 precedence; web/native sign-in validates email before throttle reservation. Passwords and Invite tokens keep their existing rules (#299).
 - An Account owns globally unique lower-case email, password and Account Sessions. A Member owns the display name and Role in one Organization. One Account may have different Members and Roles in several Organizations; there is at most one Member per Account per Organization.
+- The web Organization switcher selects among the Account's existing active Memberships.
 - Sign in uses email and password only. Web POST /api/v1/session returns only identity and expires_in, setting an HttpOnly Account Session cookie; native POST /api/v1/native/session returns identity, token and expires_in without cookies. Both share verification, issuance, throttling and DELETE /api/v1/session revocation.
 - DELETE /api/v1/session with invalid, expired, revoked or missing credentials returns 401 and expires the configured and legacy cookies without revoking any Session; a valid Session still returns 204 and revokes only itself (#300).
 - GET /api/v1/me returns the Account and its active Organizations; GET /api/v1/orgs/{org}/me returns its active Member. Every Channel, Message and WebSocket route is under /api/v1/orgs/{org}; only the authenticated Account and that Organization URL establish authority.
@@ -85,6 +86,8 @@ DM-specific exceptions: [Direct messages (#151, specified)](dms.md#model-and-per
 - #298 enables the web private option only after #311's PR merges. The メンバー tab displays the Channel manager right and uses `can_manage_managers` for grant/revoke controls with a confirm Dialog; Japanese refusals follow docs/ui.md §10. This server/API change does not enable that option.
 
 ## Setup
+- Shipped setup (`POST /api/v1/setup`) provisions only the first Organization and its Owner. No supported endpoint creates a second Organization.
+- Setup checks whether any Organization exists globally and rechecks under a table lock before creation; repeated setup returns 409 ErrorBody `setup already completed` after token and input validation.
 - `FUKULOW_SETUP_TOKEN` is required in every mode (Compose, docker run, standalone binary). Unset, whitespace-only or the former published example (`setup-token-local-test-only`, also with surrounding whitespace) fails startup with a Result error, regardless of `FUKULOW_COOKIE_SECURE`. `.env.example` leaves it empty; generate a secret with `openssl rand -base64 32`. Development and tests explicitly supply their own test-only values. The server never generates or logs the token; accepted values retain their exact bytes.
 - Setup extracts the JSON body before checking `setup_token`. Malformed JSON, missing required fields or invalid field types return 400, oversized bodies return 413, and unsupported content types return 415 even if the token is missing or invalid.
 - After successful extraction, the token must match before semantic input validation, password hashing or database access; missing or incorrect tokens return the same generic 401 before and after setup.
