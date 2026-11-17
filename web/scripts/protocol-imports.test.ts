@@ -22,4 +22,12 @@ describe('Rust core purity guard (not transitive purity)', () => {
   it('the Rust core passes the source and dependency purity guard', () => {
     expect(checkRustCore(new URL('../../client-core', import.meta.url).pathname)).toEqual([])
   })
+  it('rejects dotted dependency keys and spaced dependency headers', () => {
+    for (const header of ['[dependencies]', '[dependencies ]', '[ target.x.dependencies ]', '[ target . x . dependencies ]']) {
+      for (const entry of ['rand = "1"', 'rand.version = "1"', 'uuid.features = ["v4", "js"]']) {
+        expect(checkCoreDependencies(`${header}\n${entry}`), `${header} ${entry}`).not.toEqual([])
+      }
+    }
+    expect(checkCoreDependencies('[ dependencies . rand ]\nversion = "1"')).not.toEqual([])
+  })
 })

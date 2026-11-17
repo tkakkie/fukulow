@@ -12,12 +12,30 @@ const contract = JSON.parse(readFileSync(new URL('../../contract/realtime/core-t
 }
 // Arrays and objects contain indexes of earlier values; scalars are literal JSON.
 // This lossless table records all 9,170 original TS-reference steps without repeated snapshots.
-function expand(index: number): unknown {
-  const value = contract.values[index]
-  if (Array.isArray(value)) return value.map(expand)
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expand(v)]))
+function expand(index: number, values: Node[] = contract.values): unknown {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= values.length) throw new Error('missing contract value')
+  const value = values[index]
+  const child = (id: number): unknown => {
+    if (!Number.isSafeInteger(id) || id < 0) throw new Error('invalid contract reference')
+    if (id >= index) throw new Error('contract references must point to earlier values')
+    return expand(id, values)
+  }
+  if (Array.isArray(value)) return value.map(child)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, child(v)]))
   return value
 }
+
+it('rejects missing values self and forward references and non-integer references', () => {
+  expect(() => expand(1, [null])).toThrow('missing contract value')
+  for (const reference of [1, 2, 3, -1, 0.5, '0']) {
+    for (const node of [[reference], { child: reference }]) {
+      const error = typeof reference === 'number' && Number.isSafeInteger(reference) && reference >= 0
+        ? 'contract references must point to earlier values' : 'invalid contract reference'
+      expect(() => expand(1, [null, node as Node, null]), JSON.stringify(node)).toThrow(error)
+    }
+  }
+  expect(expand(1, [null, [0]])).toEqual([null])
+})
 
 it('normalizes symbolic identities consistently without changing payloads or numeric generations', () => {
   expect(fixtureUuid('me')).toBe(fixtureUuid('me'))

@@ -15,7 +15,12 @@ export function checkCoreDependencies(manifest: string): string[] {
   let section = ''
   for (const line of manifest.split('\n')) {
     const header = /^\s*\[([^\]]+)\]/.exec(line)
-    if (header) { section = header[1]; continue }
+    if (header) {
+      section = header[1].trim().replace(/\s*\.\s*/g, '.')
+      // Dependency subtables can conceal renames/features; use inline entries only.
+      if (/(?:^|[.-])dependencies\s*\./.test(section)) errors.push('dependency subtables require review')
+      continue
+    }
     const entry = line.replace(/#.*$/, '').trim()
     if (!entry) continue
     if (section === 'features' && entry.replace(/\s/g, '') !== 'wasm=["dep:wasm-bindgen"]') errors.push(`unapproved core feature: ${entry}`)
@@ -25,8 +30,6 @@ export function checkCoreDependencies(manifest: string): string[] {
       errors.push(`unapproved core dependency declaration: ${entry}`)
     }
   }
-  // Dependency subtables can conceal renames/features; the core uses inline entries only.
-  if (/^\s*\[[^\]]*dependencies\./m.test(manifest)) errors.push('dependency subtables require review')
   return errors
 }
 export function checkCoreSource(source: string): string[] {
