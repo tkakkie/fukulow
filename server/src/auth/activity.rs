@@ -24,6 +24,8 @@ pub trait ActivityChanges: Send + Sync {
     fn directory(&self, pool: sqlx::PgPool, organization: Uuid, target: Uuid);
 }
 pub trait ActivityChange: Send {
+    /// Idempotently retire pre-transition work before a post-COMMIT recheck.
+    fn retire(&mut self);
     fn committed(self: Box<Self>, pool: sqlx::PgPool);
 }
 pub(crate) type Hook = Arc<dyn ActivityChanges>;
