@@ -509,6 +509,7 @@ test('both proxy configs retain HTTP-01 routing, TLS, API compression exclusions
       ? ['load_module /usr/lib/nginx/modules/ngx_http_acme_module.so;', 'challenge http-01;', 'state_path /var/lib/nginx/acme;',
         'listen 443 ssl;', 'acme_certificate public;', 'location ^~ /.well-known/acme-challenge/', 'return 308 https://${FUKULOW_DOMAIN}$request_uri;',
         'map $uri $response_cache_control', 'proxy_hide_header Cache-Control;', 'add_header Cache-Control $response_cache_control always;',
+        '# The app negotiates precompressed Brotli; preserve identity responses too.\n        gzip off;',
         'location = /api/v1/ready {\n            gzip off;',
         'location = /api { gzip off;', 'location /api/ { gzip off;', 'proxy_connect_timeout 5s;', 'proxy_read_timeout 3600s;', 'proxy_send_timeout 3600s;']
       : ['respond /.well-known/acme-challenge/* 404', 'redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308',

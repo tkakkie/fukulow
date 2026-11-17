@@ -522,7 +522,7 @@ fn serve_asset(name: &str, file: rust_embed::EmbeddedFile, headers: &HeaderMap) 
 
 fn accepts_brotli(headers: &HeaderMap) -> bool {
     let mut explicit = None;
-    let mut wildcard = false;
+    let mut wildcard = None;
     for value in headers.get_all(header::ACCEPT_ENCODING) {
         let Ok(value) = value.to_str() else { continue };
         for coding in value.split(',') {
@@ -547,11 +547,11 @@ fn accepts_brotli(headers: &HeaderMap) -> bool {
                 // A refusal wins over duplicate entries and wildcard acceptance.
                 explicit = Some(explicit.unwrap_or(true) && quality);
             } else if name == "*" {
-                wildcard = quality;
+                wildcard = Some(wildcard.unwrap_or(true) && quality);
             }
         }
     }
-    explicit.unwrap_or(wildcard)
+    explicit.or(wildcard).unwrap_or(false)
 }
 
 fn is_hashed_asset(name: &str) -> bool {
@@ -662,6 +662,7 @@ mod tests {
                 (Some("br;q=1.001"), false),
                 (Some("br;q=invalid"), false),
                 (Some("br, br;q=0"), false),
+                (Some("*;q=0, *;q=0.5"), false),
             ] {
                 let response = get_encoded(&format!("/{name}"), encoding).await;
                 assert_eq!(response.status(), StatusCode::OK, "{name} {encoding:?}");
