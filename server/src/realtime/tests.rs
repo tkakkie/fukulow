@@ -341,6 +341,22 @@ async fn frame(client: &mut Client) -> tungstenite::Message {
         .unwrap()
         .unwrap()
 }
+async fn delivery_next(
+    client: &mut Client,
+    expected_pong: Option<&[u8]>,
+) -> Option<Result<tungstenite::Message, tungstenite::Error>> {
+    loop {
+        match message_next(client).await? {
+            Ok(tungstenite::Message::Ping(_)) => {
+                if let Err(error) = client.flush().await {
+                    return Some(Err(error));
+                }
+            }
+            Ok(tungstenite::Message::Pong(bytes)) if expected_pong != Some(bytes.as_ref()) => {}
+            other => return Some(other),
+        }
+    }
+}
 async fn event(client: &mut Client) -> Value {
     tokio::time::timeout(Duration::from_secs(5), read_event(client))
         .await
@@ -383,11 +399,9 @@ async fn denied(client: &mut Client, channel: Uuid) {
     );
 }
 async fn silent(client: &mut Client) {
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), message_next(client))
-            .await
-            .is_err()
-    );
+    let result =
+        tokio::time::timeout(Duration::from_millis(100), delivery_next(client, None)).await;
+    assert!(result.is_err(), "expected delivery silence, got {result:?}");
 }
 async fn closed(client: &mut Client, code: u16) {
     let frame = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1147,6 +1161,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 mod commit;
 mod contract;
 mod history;
+mod keepalive;
 mod lifecycle;
 mod limits;
 mod load_fixture;

@@ -1,5 +1,109 @@
 use super::*;
 
+#[tokio::test]
+async fn contract_reads_answer_ping_and_skip_pong() {
+    let (mut client, mut peer) = super::super::keepalive::socket_pair().await;
+    let expected = json!({"type":"error","code":"invalid_input"});
+    peer.send(tungstenite::Message::Ping(vec![1].into()))
+        .await
+        .unwrap();
+    peer.send(tungstenite::Message::Pong(vec![2].into()))
+        .await
+        .unwrap();
+    peer.send(tungstenite::Message::text(expected.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        assertions::json(&mut client, expected, Assertion::Error).await,
+        Ok(())
+    );
+    assert_eq!(
+        peer.next().await.unwrap().unwrap(),
+        tungstenite::Message::Pong(vec![1].into())
+    );
+}
+
+#[tokio::test]
+async fn contract_silence_skips_keepalive_but_rejects_unexpected_message() {
+    let (mut client, mut peer) = super::super::keepalive::socket_pair().await;
+    peer.send(tungstenite::Message::Ping(Default::default()))
+        .await
+        .unwrap();
+    peer.send(tungstenite::Message::Pong(Default::default()))
+        .await
+        .unwrap();
+    peer.send(tungstenite::Message::text(
+        json!({"type":"message","message":{"channel_id":Uuid::new_v4(),"seq":1}}).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        assertions::silence(&mut client, Uuid::new_v4(), 0).await,
+        Err(Assertion::Silence)
+    );
+}
+
+#[tokio::test]
+async fn contract_silence_answers_ping_and_requires_nonce_pong() {
+    for wrong in [false, true] {
+        let (mut client, mut peer) = super::super::keepalive::socket_pair().await;
+        let channel = Uuid::new_v4();
+        let (result, ()) = tokio::join!(assertions::silence(&mut client, channel, 0), async {
+            // Place keepalive traffic before the ack and before the nonce Pong.
+            peer.send(tungstenite::Message::Ping(vec![1].into()))
+                .await
+                .unwrap();
+            peer.send(tungstenite::Message::Pong(vec![2].into()))
+                .await
+                .unwrap();
+            let mut controls = 0;
+            let nonce = loop {
+                match peer.next().await.unwrap().unwrap() {
+                    tungstenite::Message::Text(_) => controls += 1,
+                    tungstenite::Message::Pong(_) => {}
+                    tungstenite::Message::Ping(nonce) => break nonce,
+                    frame => panic!("unexpected barrier control: {frame:?}"),
+                }
+            };
+            assert_eq!(controls, 2);
+            // Replace tungstenite's queued automatic nonce Pong before any write
+            // can flush it, so the wrong case really withholds the barrier proof.
+            peer.send(tungstenite::Message::Pong(vec![2].into()))
+                .await
+                .unwrap();
+            peer.send(tungstenite::Message::text(
+                json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0}).to_string(),
+            ))
+            .await
+            .unwrap();
+            peer.send(tungstenite::Message::Ping(vec![3].into()))
+                .await
+                .unwrap();
+            peer.send(tungstenite::Message::Pong(vec![4].into()))
+                .await
+                .unwrap();
+            if wrong {
+                // An unrelated Pong and duplicate ack cannot stand in for the nonce.
+                peer.send(tungstenite::Message::text(
+                    json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0}).to_string(),
+                ))
+                .await
+                .unwrap();
+            } else {
+                peer.send(tungstenite::Message::Pong(nonce)).await.unwrap();
+            }
+        });
+        assert_eq!(
+            result,
+            if wrong {
+                Err(Assertion::Silence)
+            } else {
+                Ok(())
+            }
+        );
+    }
+}
+
 #[fukulow_test::test]
 async fn delivery_contract_rejects_incorrect_unread_counts_and_positions(pool: PgPool) {
     for wrong in 0..3 {

@@ -54,6 +54,16 @@ async fn advance(duration: Duration) {
 }
 
 #[fukulow_test::test]
+async fn delivery_silence_answers_heartbeat_ping(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
+    advance(PING_INTERVAL).await;
+    silent(&mut socket).await;
+    let canonical = post(&f, f.channel).await;
+    assert_eq!(event(&mut socket).await["message"], canonical);
+}
+
+#[fukulow_test::test]
 async fn frame_live_and_ping_traffic_does_not_repoll_failure_waits(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
