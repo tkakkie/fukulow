@@ -1869,14 +1869,11 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
     struct OrderedChanges {
         activity: Activity,
         started: Arc<AtomicBool>,
-        target_notice: bool,
     }
     impl ActivityChanges for OrderedChanges {
         fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
             assert!(matches!(change, ChannelChange::Members { .. }));
-            if !self.target_notice {
-                self.started.store(true, Ordering::SeqCst);
-            }
+            self.started.store(true, Ordering::SeqCst);
             self.activity.channel(pool, organization, change);
         }
         fn capture<'a>(
@@ -1885,9 +1882,6 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
             organization: Uuid,
             target: Uuid,
         ) -> Capture<'a> {
-            if !self.target_notice {
-                return self.activity.capture(tx, organization, target);
-            }
             Box::pin(async move {
                 Ok(Box::new(OrderedChange {
                     inner: self.activity.capture(tx, organization, target).await?,
@@ -1952,7 +1946,6 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
         .set_activity(Arc::new(OrderedChanges {
             activity: f.state.message_delivery.channel_access.activity.clone(),
             started: started.clone(),
-            target_notice: phase == "query",
         }));
     f.state
         .session_changes
@@ -1961,6 +1954,82 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
             started,
             gate,
         }));
+}
+
+#[fukulow_test::test]
+async fn role_change_keeps_target_gain_after_its_own_recheck(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, token) = member(&pool, f.organization).await;
+    role(&pool, &f, target, "guest").await;
+    let (guest, guest_token) = member(&pool, f.organization).await;
+    role(&pool, &f, guest, "guest").await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    let mut own = connect(&f, &token).await;
+    let mut denied = connect(&f, &guest_token).await;
+    let mut control = connect(&f, &f.token).await;
+    order_permission_change(&f, f.channel, "query");
+    let response = request(
+        &f.app,
+        "PATCH",
+        &format!("/api/v1/orgs/{}/members/{target}/role", f.organization),
+        &f.token,
+        json!({"role":"member"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let own = notices(&f, &mut own).await;
+    let control = notices(&f, &mut control).await;
+    let denied = notices(&f, &mut denied).await;
+    assert!(
+        own.contains(&json!({"type":"channel_access_gained","channel_id":f.channel})),
+        "target={own:?}, control={control:?}, ungranted Guest={denied:?}"
+    );
+    assert!(control.contains(&json!({"type":"members_changed"})));
+    assert!(denied.is_empty(), "ungranted Guest={denied:?}");
+    assert!(
+        !own.iter()
+            .any(|notice| notice["channel_id"] == json!(private)),
+        "private non-member={own:?}"
+    );
+}
+
+#[fukulow_test::test]
+async fn role_change_keeps_member_notice_after_its_own_recheck(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, token) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, target).await;
+    let (_, outside_token) = member(&pool, f.organization).await;
+    let (guest, guest_token) = member(&pool, f.organization).await;
+    role(&pool, &f, guest, "guest").await;
+    let mut own = connect(&f, &token).await;
+    let mut control = connect(&f, &f.token).await;
+    let mut outside = connect(&f, &outside_token).await;
+    let mut denied = connect(&f, &guest_token).await;
+    order_permission_change(&f, private, "members_query");
+    let response = request(
+        &f.app,
+        "PATCH",
+        &format!("/api/v1/orgs/{}/members/{target}/role", f.organization),
+        &f.token,
+        json!({"role":"admin"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let own = notices(&f, &mut own).await;
+    let control = notices(&f, &mut control).await;
+    let outside = notices(&f, &mut outside).await;
+    let denied = notices(&f, &mut denied).await;
+    let changed = json!({"type":"channel_members_changed","channel_id":private});
+    assert!(
+        own.contains(&changed),
+        "target={own:?}, control={control:?}, private non-member={outside:?}"
+    );
+    assert!(control.contains(&changed), "control={control:?}");
+    assert_eq!(outside, vec![json!({"type":"members_changed"})]);
+    assert!(denied.is_empty(), "ungranted Guest={denied:?}");
 }
 
 #[fukulow_test::test]
