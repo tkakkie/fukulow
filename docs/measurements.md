@@ -801,6 +801,31 @@ Validation on Node v26.13.0: type check and all 61 tests passed. The corrected s
 
 - **Limits.** Two of 12 scenarios; no 1000/s, maximum, replay or migration; one run per condition; condition 5 and the smoke-record spec differences still apply. Raw artifacts stay outside Git.
 
+## #160 log comparison: replay and migration reference (2026-11-17)
+
+**Reference only; not evidence of a performance pass.** These values come from the INVALID full run (2026-11-16, `1662d5d`) above. They were used, with the settled diagnose WAL, as design input for the #160 decision (maintainer, 2026-11-17: independent `channel_log`, current-state reconciliation). Output is **MAC-RELATIVE**; absolute budgets **NOT EVALUATED (#431)**.
+
+| 50-entry recent page, deleted range (mixed range within about 5%; median of 3; ms / shared buffers) | baseline | events-ids | log-ids |
+|---|---|---|---|
+| 100k positions, cold | 0.43 / 236 | 13 / 3,723 | 0.45 / 209 |
+| 1M positions, cold | 0.57 / 235 | 118 / 34,126 | 0.66 / 209 |
+| 1M positions, warm | 0.25 / 222 | 7.4 / 6,675 | 0.25 / 199 |
+
+- **Replay.** Buffer counts were identical in all three rounds at 1M positions; at 100k, one of three rounds per candidate arm differed on recent pages (cold: events-ids 3,706 vs 3,723, log-ids 299 vs 209; warm similar). Timing spread exceeds the 10% rule. The events-ids page merges `messages_organization_id_channel_id_seq_key` with `channel_events`. At 1M positions its index scan returned 45 rows but read 33,808 buffers, because Edit/Move/Delete churn left dead versions in the recent range. log-ids reads the append-only log, then does 45 primary-key lookups. Pages not in the table: creation-only pages are about equal; deep mutated pages read 9–52% more buffers than baseline in both candidate arms (24–52% at 1M), all under 1 ms. Settled (vacuumed) replay was not measured.
+- **Migration** (1M Messages, blocking SHARE-lock cutover, three rounds; WAL and storage within 0.1% for log-ids and the snapshot arms; events-ids spread 13%, invalid, see the full-run record):
+  - log-ids: about 3.7 s of writer blocking, 455 MiB WAL, +153 MiB storage (+16.1%).
+  - events-ids: about 40 ms.
+  - snapshot arms: about 6.3 s of writer blocking, 830–838 MiB WAL, +545 MiB.
+
+  This is not an online-migration claim.
+- **Unevaluated, handed to #515, #141, #287 and #431.** This covers:
+  - #515: 1000/s and maximum steps; 10 of 12 write scenarios; DB-side latency; settled replay; condition 5 costs; RLS, Unread, Mention and WebSocket paths;
+  - #141: per-chain Move positions;
+  - #287: Edit/Delete costs;
+  - #431: absolute budgets.
+
+  The list and its owners are in #515.
+
 ## #426 Mac relative instrumentation overhead: attempts, NOT EVALUATED (2026-11-16 JST)
 
 **No comparison result.** Procedure as in the #151 / #426 Mac relative record above, at `1662d5d`, patch SHA-256 `a803ace6…e744`, scales tried largest first (1/10, 1/25, 1/50), 30 s pilots, then three B/C, C/B, B/C pairs at the largest sustained scale.
