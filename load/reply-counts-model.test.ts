@@ -66,7 +66,7 @@ test('absolute open-loop schedule never depends on response completion', () => {
   // 10,000 requests span 624 ticks: 160/s offered, independent of responses.
   assert.equal(scheduleTime(0, 9999) - scheduleTime(0, 0), 62400);
 });
-test('start lag misses only strictly beyond one interval', () => {
+test('start lag misses at >= one tick', () => {
   assert.deepEqual(startLag(100, 99), { lagMs: 0, missed: false });
   assert.deepEqual(startLag(100, 100), { lagMs: 0, missed: false });
   assert.deepEqual(startLag(100, 199.999), { lagMs: 99.999, missed: false });
@@ -77,6 +77,7 @@ test('missed deadlines invalidate even a low p95; overload and scheduled latency
   const rows = [run(0), run(1), run(2)];
   assert.equal(judgement('normal', [{ ...run(0), missedDeadlines: 1 }, ...rows.slice(1)], true, true), 'NOT EVALUATED');
   assert.equal(judgement('normal', [{ ...run(0, 100), missedDeadlines: 1 }], true, false), 'NOT EVALUATED');
+  assert.equal(judgement('normal', [{ ...run(0), errors: 1, missedDeadlines: 1 }], true, false), 'NOT EVALUATED');
   assert.equal(judgement('normal', [{ ...run(0), peakInFlight: inFlightCap + 1 }], true, false), 'FAIL');
   assert.equal(judgement('normal', [{ ...run(0), peakInFlight: inFlightCap + 1, missedDeadlines: 1 }], true, false), 'FAIL');
   assert.equal(judgement('normal', rows.map(r => ({ ...r, peakInFlight: inFlightCap })), true, true), 'PASS');
