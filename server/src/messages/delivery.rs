@@ -147,6 +147,8 @@ pub struct Delivery {
     pub(crate) message_serializations: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    #[cfg(test)]
+    held_notification_timeouts: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 impl Delivery {
@@ -177,6 +179,8 @@ impl Default for Delivery {
             message_serializations: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
+            #[cfg(test)]
+            held_notification_timeouts: Default::default(),
         }
     }
 }
@@ -226,6 +230,13 @@ impl Notification {
         };
         let deadline = tokio::time::Instant::now() + NOTIFICATION_TIMEOUT;
         #[cfg(test)]
+        let hold_timeout = self
+            .delivery
+            .held_notification_timeouts
+            .lock()
+            .unwrap()
+            .contains(&self.key.0);
+        #[cfg(test)]
         let delivery = self.delivery.clone();
         #[cfg(test)]
         let gate = PUBLICATION_GATES
@@ -237,13 +248,20 @@ impl Notification {
         let task = tokio::spawn(async move {
             let _work = work;
             let _slots = (channel_slot, organization_slot);
-            self.completed = tokio::time::timeout_at(
+            let publication = tokio::time::timeout_at(
                 deadline,
                 self.delivery
                     .publish(&pool, self.key.0, &message, &self.channel.fanout),
-            )
-            .await
-            .is_ok_and(|result| {
+            );
+            #[cfg(test)]
+            let publication = async {
+                if hold_timeout {
+                    Ok(publication.into_inner().await)
+                } else {
+                    publication.await
+                }
+            };
+            self.completed = publication.await.is_ok_and(|result| {
                 if let Err(error) = &result {
                     crate::observability::database_failure(error);
                 }
@@ -286,6 +304,19 @@ pub(crate) struct LiveQueue {
 impl Delivery {
     pub async fn drained(&self) {
         self.work.drained().await;
+    }
+
+    // Cursor holds alone cannot stabilize reservations: their 10 s deadline also
+    // covers cursor waiting. Configure before spawning; already spawned tasks keep
+    // their setting until completion, even if the test later restores deadlines.
+    #[cfg(test)]
+    pub(crate) fn hold_notification_timeouts(&self, organization: Uuid, hold: bool) {
+        let mut held = self.held_notification_timeouts.lock().unwrap();
+        if hold {
+            held.insert(organization);
+        } else {
+            held.remove(&organization);
+        }
     }
 
     #[cfg(test)]
@@ -880,6 +911,91 @@ mod tests {
         );
         drop(slots);
         assert_eq!(delivery.notification_reservations(), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn organization_cap_snapshot_and_later_send_require_held_notification_timeouts() {
+        for hold_timeout in [false, true] {
+            let delivery = Delivery::default();
+            let organization = Uuid::new_v4();
+            delivery.hold_notification_timeouts(organization, hold_timeout);
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+                .unwrap();
+            let mut hot = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+            let hot_channel = Uuid::new_v4();
+            hot.subscribe(hot_channel);
+            let mut cold = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+            let cold_channel = Uuid::new_v4();
+            cold.subscribe(cold_channel);
+            // Spawn synchronously on a paused current-thread runtime: all reservations
+            // exist before any deadline can fire, just as they do before HTTP 201.
+            let mut gates = Vec::new();
+            for index in 0..MAX_ORGANIZATION_NOTIFICATIONS {
+                let channel = if index == 0 {
+                    hot_channel
+                } else {
+                    Uuid::new_v4()
+                };
+                let message = committed_message(channel);
+                gates.push(pause_publication(message.client_message_id));
+                delivery
+                    .notification(organization, channel, 1)
+                    .spawn(pool.clone(), message);
+            }
+            assert_eq!(
+                delivery.notification_reservations(),
+                (MAX_ORGANIZATION_NOTIFICATIONS, 1)
+            );
+            let mut tasks = std::mem::take(&mut *delivery.tasks.lock().unwrap());
+            tokio::time::advance(NOTIFICATION_TIMEOUT).await;
+            // Every task first polls its blocked publication at/after the deadline.
+            // On this current-thread runtime the entered permit cannot be observed
+            // until that poll (including the timeout check) has returned.
+            for gate in gates {
+                gate.entered.acquire().await.unwrap().forget();
+            }
+            if hold_timeout {
+                assert_eq!(
+                    delivery.notification_reservations(),
+                    (MAX_ORGANIZATION_NOTIFICATIONS, 1)
+                );
+                assert!(!hot.notification_failed.is_failed());
+            } else {
+                for task in tasks.drain(..) {
+                    // Await actual timeout completion, rather than a racing snapshot.
+                    task.await.unwrap();
+                }
+                assert_eq!(delivery.notification_reservations(), (0, 0));
+                assert!(hot.notification_failed.is_failed());
+            }
+            let message = committed_message(cold_channel);
+            let key = message.client_message_id;
+            let gate = pause_publication(key);
+            delivery
+                .notification(organization, cold_channel, 1)
+                .spawn(pool.clone(), message);
+            if hold_timeout {
+                // Cap rejection signals 1011/replay on this Channel too.
+                assert!(cold.notification_failed.is_failed());
+            } else {
+                gate.entered.acquire().await.unwrap().forget();
+                // The stale 512 snapshot cannot require a close: this send was
+                // admitted, and expired hot Channels cannot fail the cold Channel.
+                assert!(!cold.notification_failed.is_failed());
+                assert_eq!(delivery.notification_reservations(), (1, 1));
+            }
+            if let Some(task) = gate.task.lock().unwrap().as_ref() {
+                task.abort();
+            }
+            for task in tasks {
+                task.abort();
+                let _ = task.await;
+            }
+            delivery.flush().await;
+            PUBLICATION_GATES.lock().unwrap().remove(&key);
+            assert_eq!(delivery.notification_reservations(), (0, 0));
+        }
     }
 
     #[test]

@@ -341,8 +341,13 @@ async fn frame(client: &mut Client) -> tungstenite::Message {
         .unwrap()
 }
 async fn event(client: &mut Client) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), read_event(client))
+        .await
+        .unwrap()
+}
+async fn read_event(client: &mut Client) -> Value {
     loop {
-        match frame(client).await {
+        match message_next(client).await.unwrap().unwrap() {
             tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
             tungstenite::Message::Text(text) => {
                 return serde_json::from_str(&text).unwrap_or_else(|error| {
@@ -378,7 +383,16 @@ async fn silent(client: &mut Client) {
     );
 }
 async fn closed(client: &mut Client, code: u16) {
-    let frame = frame(client).await;
+    let frame = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match frame(client).await {
+                tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
+                frame => break frame,
+            }
+        }
+    })
+    .await
+    .unwrap();
     let tungstenite::Message::Close(Some(close)) = &frame else {
         panic!("expected Close(code={code}), got {frame:?}");
     };
