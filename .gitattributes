@@ -56,3 +56,4 @@
 /server/migrations/202611150390_mention_main_unread_covering.sql text eol=lf
 /server/migrations/202611170225_public_channel_topic_positions.sql text eol=lf
 /server/migrations/202611170515_channel_log.sql text eol=lf
+/server/migrations/202611180515_message_receipts.sql text eol=lf

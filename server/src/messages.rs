@@ -26,6 +26,7 @@ mod failure;
 mod limiter;
 mod log;
 mod mentions;
+pub mod receipts;
 pub use fukulow_api::{ListMessagesQuery, Mention, Message, MessagePage, SendMessageRequest};
 pub use limiter::SendLimit;
 pub(crate) mod replies;
@@ -290,6 +291,8 @@ fn created(message: Message) -> Response {
 
 /// The canonical Message for a committed `client_message_id`, or 409 for changed intent.
 /// Access is rechecked first: a retry after access loss is denied, never answered.
+/// Intent is compared with the receipt fixed at creation, never with current state,
+/// and the answer is the Message's current state.
 async fn committed(
     pool: &sqlx::PgPool,
     organization_id: Uuid,
@@ -302,17 +305,11 @@ async fn committed(
         organization_id,
         async |tx: &mut sqlx::PgConnection| {
             require_visible(&mut *tx, organization_id, sender, channel_id).await?;
-            let Some(message) =
-                existing(&mut *tx, organization_id, sender.0, input.client_message_id).await?
-            else {
-                return Ok(None);
-            };
-            let name_key = if message.reply_to.is_none() {
-                topics::name_key(&mut *tx, organization_id, message.topic_id).await?
-            } else {
-                None
-            };
-            canonical(message, channel_id, input, name_key).map(Some)
+            match receipt(&mut *tx, organization_id, sender.0, channel_id, input).await? {
+                None => Ok(None),
+                Some((message, true)) => Ok(Some(message)),
+                Some((_, false)) => Err(MessageError::Conflict),
+            }
         },
     )
     .await
@@ -525,6 +522,36 @@ pub(crate) async fn require_visible<'e, E: sqlx::PgExecutor<'e>>(
     }
 }
 
+/// The committed Message for this send key and whether the request matches its
+/// original-send receipt (S5). Topic intent is the ASCII-lowercased name, as
+/// Topics normalize `name_key`; a Reply carries none.
+async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: Uuid,
+    sender: Uuid,
+    channel_id: Uuid,
+    input: &SendMessageRequest,
+) -> Result<Option<(Message, bool)>, sqlx::Error> {
+    use sqlx::Row;
+    sqlx::query(&mentions::page_sql(
+        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, \
+         send_digest = fukulow_send_digest($4, $5, $6, $7) AS same_intent \
+         FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
+        "p.seq",
+    ))
+    .bind(organization_id)
+    .bind(sender)
+    .bind(input.client_message_id)
+    .bind(channel_id)
+    .bind(&input.body)
+    .bind(input.topic_name.as_ref().map(|name| name.to_ascii_lowercase()))
+    .bind(input.reply_to)
+    .try_map(|row| Ok((message_from_row(&row)?, row.try_get("same_intent")?)))
+    .fetch_optional(executor)
+    .await
+}
+
 async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     organization_id: Uuid,
@@ -543,27 +570,6 @@ async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     .try_map(|row| message_from_row(&row))
     .fetch_optional(executor)
     .await
-}
-
-fn canonical(
-    message: Message,
-    channel_id: Uuid,
-    input: &SendMessageRequest,
-    name_key: Option<String>,
-) -> Result<Message, MessageError> {
-    if message.channel_id != channel_id
-        || message.body != input.body
-        || message.reply_to != input.reply_to
-        || (input.reply_to.is_none()
-            && name_key
-                != input
-                    .topic_name
-                    .as_ref()
-                    .map(|name| name.to_ascii_lowercase()))
-    {
-        return Err(MessageError::Conflict);
-    }
-    Ok(message)
 }
 
 async fn persist(
