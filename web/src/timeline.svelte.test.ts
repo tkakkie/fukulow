@@ -4173,7 +4173,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
       has_more: false,
     })
 
-    net.replyCountPages.c1 = { as_of_seq: 5, counts: [m1, m2, tm1].map(m => ({ message_id: m.id, root_id: m.id, reply_count: m.id === m2.id ? 0 : 1 })) }
+    net.replyCountPages.c1 = { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 5, counts: [m1, m2, tm1].map(m => ({ message_id: m.id, root_id: m.id, reply_count: m.id === m2.id ? 0 : 1 })) }
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -4405,7 +4405,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
       has_more: true,
     })
 
-    net.replyCountPages.c1 = { as_of_seq: 3, counts: [{ message_id: m1.id, root_id: m1.id, reply_count: 2 }] }
+    net.replyCountPages.c1 = { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, counts: [{ message_id: m1.id, root_id: m1.id, reply_count: 2 }] }
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -5132,7 +5132,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
     net.replyChains[`c1:${r1.id}`] = chainPayload
     net.replyChains[`c1:${r2.id}`] = chainPayload
 
-    net.replyCountPages.c1 = { as_of_seq: 3, counts: [{ message_id: mRoot.id, root_id: mRoot.id, reply_count: 2 }] }
+    net.replyCountPages.c1 = { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, counts: [{ message_id: mRoot.id, root_id: mRoot.id, reply_count: 2 }] }
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()

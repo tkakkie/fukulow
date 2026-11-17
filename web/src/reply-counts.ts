@@ -10,7 +10,7 @@ import type { Topics } from './topics'
 type Sync = ReturnType<typeof createSync>
 export type ReplyCountsApi = (channel: string, body: ReplyCountRequest, signal: AbortSignal) => Promise<Result<ReplyCountPage>>
 type Batch = { tickets: CountTicket[]; abort: AbortController; timeout: ReturnType<typeof setTimeout> }
-type Channel = { core: CountCore; view: CountView; batch?: Batch; retry?: ReturnType<typeof setTimeout>; attempt: number; stopped: boolean }
+type Channel = { core: CountCore; view: CountView; batch?: Batch; retry?: ReturnType<typeof setTimeout>; attempt: number; stopped: boolean; expired: boolean }
 const empty: Readonly<Record<string, number | null>> = Object.freeze({})
 
 /** I/O only: Rust owns authority, deduplication, floors and per-root generations. */
@@ -33,6 +33,12 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
   const drop = (id: string, c: Channel) => {
     cancel(c); if (c.retry !== undefined) clearTimeout(c.retry)
     c.core.free(); channels.delete(id)
+  }
+  const recover = (c: Channel) => {
+    cancel(c)
+    if (c.retry !== undefined) clearTimeout(c.retry)
+    c.retry = undefined; c.attempt = 0; c.stopped = false; c.expired = false
+    update(c, { type: 'reset' })
   }
   const defer = () => {
     if (queued || closed) return
@@ -65,7 +71,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       let c = channels.get(id)
       if (!c) {
         const core = createReplyCountCore()
-        channels.set(id, c = { core, view: core.step({ type: 'track', roots: [] }), attempt: 0, stopped: false })
+        channels.set(id, c = { core, view: core.step({ type: 'track', roots: [] }), attempt: 0, stopped: false, expired: false })
       }
       update(c, { type: 'track', roots: [...roots] })
       if (c.batch?.tickets.some(t => !valid(c, t))) cancel(c)
@@ -77,14 +83,14 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
     const tickets = c.view.needed.slice(0, 100)
     if (!tickets.length) return
     update(c, { type: 'begin', tickets })
-    const abort = new AbortController(), account = session
+    const abort = new AbortController(), account = session, { historyEpoch, historyGeneration } = sync.get()
     const batch: Batch = { tickets, abort, timeout: setTimeout(() => {
       if (c.batch !== batch) return
       cancel(c); backoff(c); notify()
     }, options.requestTimeoutMs ?? 30_000) }
     c.batch = batch
-    const current = () => !closed && channels.get(id) === c && c.batch === batch && usable(id)
-    void Promise.resolve().then(() => current() ? options.api(id, { ids: tickets.map(t => t.root) }, abort.signal) : { ok: false, kind: 'network' } as const)
+    const current = () => !closed && channels.get(id) === c && c.batch === batch && usable(id) && sync.get().historyEpoch === historyEpoch
+    void Promise.resolve().then(() => current() ? options.api(id, { ids: tickets.map(t => t.root), history_generation: historyGeneration }, abort.signal) : { ok: false, kind: 'network' } as const)
       .catch((): Result<ReplyCountPage> => ({ ok: false, kind: 'network' }))
       .then(result => {
         // C6: cancellation/timeout/unwatch does not hide a same-Account-Session late 401.
@@ -92,9 +98,12 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
         if (!result.ok && result.kind === 'http' && result.status === 401) { void sync.close(); options.onSessionEnded?.(); return }
         if (!closed && api.isOrganizationUnavailable(result)) { void sync.unavailable(); return }
         if (!current()) return
+        if (result.ok && !sync.observeHistoryGeneration(result.data.history_generation)) return
+        if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
         clearTimeout(batch.timeout); c.batch = undefined
         update(c, { type: 'failed', tickets })
         if (result.ok) {
+          c.expired = false
           for (const t of tickets) {
             const row = result.data.counts.find(row => row.message_id === t.root && row.root_id === t.root)
             if (row) update(c, { type: 'install', ticket: t, watermark: result.data.as_of_seq, count: row.reply_count })
@@ -102,6 +111,9 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
           // Omitted anchors remain unresolved; an insufficient W never gains authority.
           if (tickets.some(t => valid(c, t) && c.view.counts[t.root] === null)) backoff(c)
           else c.attempt = 0
+        } else if (result.kind === 'http' && result.status === 409 && result.error === 'snapshot_expired') {
+          const repeated = c.expired
+          recover(c); c.expired = true; c.stopped = repeated
         } else if (result.kind === 'http' && [403, 404].includes(result.status)) {
           void sync.channelUnavailable(id)
         } else if (result.kind === 'network' || (result.kind === 'http' && (result.status >= 500 || result.status === 429))) backoff(c, result.retryAfterMs)
@@ -117,10 +129,12 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
     const after = sync.get()
     for (const [id, c] of channels) {
       const old = before.channels[id], now = after.channels[id]
-      const reset = (before.connected && !after.connected) || (old && now && (
+      const expired = input.type === 'history_failed' && input.status === 409 && input.error === 'snapshot_expired' &&
+        old && [old.latest, old.older, old.fill].includes(input.request)
+      const reset = before.historyEpoch !== after.historyEpoch || expired || (before.connected && !after.connected) || (old && now && (
         old.versionEpoch !== now.versionEpoch || (old.cursor !== null && now.cursor === null) ||
         (old.fill === undefined && now.fill !== undefined) || (old.wait === undefined && now.wait !== undefined)))
-      if (reset) { cancel(c); update(c, { type: 'reset' }); c.stopped = false }
+      if (reset) recover(c)
     }
     // An ACK can install a body before its stream echo. Count raw current-stream envelopes,
     // not only changed bodies; Rust deduplicates the evidence independently of body retention.
@@ -130,7 +144,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       : input.type === 'events_result' && fillChannel ? input.page.events.filter(e => e.type === 'message' && e.message.channel_id === fillChannel)
       : input.type === 'ack' && result.records.get(input.message.channel_id)?.some(m => m.id === input.message.id)
         ? [{ type: 'message' as const, kind: 'create' as const, seq: input.message.created_seq, message: input.message }] : []
-    for (const event of events) {
+    for (const event of before.historyEpoch === after.historyEpoch ? events : []) {
       if (event.type !== 'message') continue
       const m = event.message, c = channels.get(m.channel_id)
       if (!c || (event.kind === 'create' && event.seq !== m.created_seq)) continue

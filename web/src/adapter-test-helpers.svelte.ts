@@ -199,6 +199,7 @@ export function fakeNetwork() {
       },
     },
     replyCountsApi: async (channel, body) => ok(replyCountPages[channel] ?? {
+      history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: caughtUp[channel] ?? 0,
       counts: body.ids.map(id => ({ message_id: id, root_id: id, reply_count: 0 })),
     }),

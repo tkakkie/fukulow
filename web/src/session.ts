@@ -132,7 +132,7 @@ export function createSession(options: SessionOptions) {
     { sync: replyComposition.sync, topics },
   )
   const replyCounts = createReplyCounts(sync, { replies, topics }, {
-    api: options.replyCountsApi ?? ((channel, body, signal) => api.getReplyCounts(organizationId, channel, body, signal)),
+    api: (channel, body, signal) => observe(options.replyCountsApi ? options.replyCountsApi(channel, body, signal) : api.getReplyCounts(organizationId, channel, body, signal)),
     onSessionEnded: notifyEnded, requestTimeoutMs: options.sync?.requestTimeoutMs, random: options.sync?.random,
   })
   const navigationTargets = createNavigationTargets({

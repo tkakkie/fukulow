@@ -19,7 +19,7 @@ test('authoritative totals survive partial history and cold child navigation and
   for (let i = 0; i < 4; i++) children.push(await send(`既存の返信 ${i + 1}`, root.id))
   const child = children.at(-1)!
   // Only a child is loaded in main; the real count endpoint still returns the whole chain.
-  const timeline: components['schemas']['TimelinePage'] = { as_of_seq: children.at(-1)!.created_seq, has_more: false, items: [{ kind: 'message', message: child }] }
+  const timeline: components['schemas']['TimelinePage'] = { history_generation: root.history_generation, as_of_seq: children.at(-1)!.created_seq, has_more: false, items: [{ kind: 'message', message: child }] }
   await page.route(`**${base}/timeline*`, route => route.fulfill({ json: timeline }))
   await page.route(`**${base}/messages/*/chain*`, async route => {
     const url = new URL(route.request().url()); url.searchParams.set('limit', '2')
@@ -55,7 +55,7 @@ test('authoritative totals survive partial history and cold child navigation and
     release()
     await expect(mainChild.getByRole('button', { name: '返信 5件›', exact: true })).toBeVisible()
     await expect(panel.locator(`[data-message-id="${root.id}"]`).getByRole('button', { name: '返信 5件›', exact: true })).toBeVisible()
-    expect(batches).toEqual([{ ids: [root.id] }])
+    expect(batches).toEqual([{ ids: [root.id], history_generation: root.history_generation }])
     // History adds bodies, never counts; root and every descendant keep the same total.
     const more = panel.getByRole('button', { name: 'さらに返信を読み込む', exact: true })
     await more.click()
