@@ -54,3 +54,4 @@
 /server/migrations/202611140388_invite_expiry_scan.sql text eol=lf
 /server/migrations/202611140389_member_directory_order.sql text eol=lf
 /server/migrations/202611150390_mention_main_unread_covering.sql text eol=lf
+/server/migrations/202611170225_public_channel_topic_positions.sql text eol=lf
