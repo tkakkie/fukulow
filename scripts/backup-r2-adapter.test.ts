@@ -539,3 +539,18 @@ test('FIFO state is promptly refused without pruning and the checker lock is rel
   assert.deepEqual(actual.events, ['state-corrupt', 'checker-failed'])
   assert.ok(statSync(path).isFIFO())
 })
+
+test('locked verification probes cannot freeze otherwise healthy pruning and remain in capacity totals', async () => {
+  const o = prunableOptions(), key = `backups/verification-${randomUUID()}/probe`
+  await o.bucket.put(key, Buffer.from('probe'))
+  const data = await inventory(o.bucket, now)
+  assert.deepEqual(data.malformed, [])
+  assert.ok(data.objects.some(object => object.key === key))
+  const result = await checkBackups({ ...o, state: {}, lock: memoryRunLock() })
+  assert.deepEqual(result.alerts, [])
+  assert.deepEqual(result.deleted, [o.candidate])
+  assert.ok(o.bucket.objects.has(key))
+  // Similar unreserved prefixes remain malformed; only UUID probe namespaces qualify.
+  await o.bucket.put('backups/verification-not-a-probe/archive.dump.age', Buffer.from('partial'))
+  assert.deepEqual((await inventory(o.bucket, now)).malformed, ['backups/verification-not-a-probe/'])
+})

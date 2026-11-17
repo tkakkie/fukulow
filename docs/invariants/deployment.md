@@ -76,6 +76,10 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 | Only owned generated partial directories are swept under the exclusive local backup lock | `scripts/backup-safety.test.ts::partial sweep removes only owned private exact generated directories under the exclusive lock` |
 | Archive rename precedes directory fsync; failed durability confirmation reports failure and preserves archives | `scripts/backup.test.ts::directory fsync follows rename and its failure preserves previous and newly renamed archives` |
 | Backup and drill diagnostics expose only allowlisted stage/error categories, never raw text | `scripts/backup-safety.test.ts::diagnostics allow only fixed stage and error categories and never raw text or code` |
+| Discord backup notifications contain only fixed events or numeric alive data; URLs stay off argv and retries are bounded | `scripts/backup-notify.test.ts::notifier permits only fixed events and numeric alive fields`, `scripts/backup-notify.test.ts::Discord retry is capped at three with Retry-After and URL only on stdin` |
+| The VPS daily run holds both locks through backup and final newest archive read-back | `scripts/backup-r2-daily.test.ts::daily VPS wiring holds both locks through backup and final readback` |
+| Restore selects verified generations and checks downloaded ciphertext before any decryption | `scripts/restore-from-r2.test.ts::R2 restore rejects tampered downloads before decryption and never selects unverified generations` |
+| Locked provider probes count capacity but never generation validity or pruning | `scripts/backup-r2-adapter.test.ts::locked verification probes cannot freeze otherwise healthy pruning and remain in capacity totals` |
 
 | Shared Message.mentions and Channel/Topic Mention counts are required in generated OpenAPI; counts are nonnegative; no Mention event exists | `server/tests/api_contract.rs::mention_contract_requires_one_shared_set_and_nonnegative_counts` |
 
