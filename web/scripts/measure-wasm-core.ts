@@ -201,12 +201,17 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
     const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (rec(seq)).created_seq, message: rec(seq) } })
     const page = (request: number, start: number, length: number) =>
       d.feed({ type: 'history_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: start + length - 1,  messages: Array.from({ length }, (_, i) => rec(start + i)), has_more: true } })
+    // After-cursor fills answer with Channel events since #515 slice 3; only events advance the cursor.
+    const fill = (request: number, start: number, length: number) =>
+      d.feed({ type: 'events_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: true,
+        events: Array.from({ length }, (_, i) => ({ type: 'message' as const, kind: 'create' as const, seq: start + i, message: rec(start + i) })) } })
     d.feed({ type: 'watch', channel }); page(view().latest!, 1, 200)
     d.feed({ type: 'event', connection, subscription: -1, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
     d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
     for (let i = 0; i < 425; i++) event(202 + i * 2)
     d.feed({ type: 'timer_elapsed', id: view().wait! })
-    while (view().fill !== undefined) page(view().fill!, view().cursor! + 1, 200)
+    while (view().fill !== undefined) fill(view().fill!, view().cursor! + 1, 200)
+    if (view().cursor! < 1050 || view().forgottenThrough !== undefined) throw new Error(`Retention trace did not catch up: cursor=${view().cursor}`)
     for (let seq = view().cursor! + 1, end = seq + 450; seq < end; seq++) event(seq)
     const duplicate = rec(view().cursor!)
     d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
@@ -273,7 +278,10 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
         if (r.type === 'history') {
           const hasMore = random(2) === 0
           const messages = Array.from({ length: random(8) }, (_, i) => ({ ...rec((r.seq ?? 190) + i + 1, r.channel), ...(random(5) === 0 ? { sender: 'me', client_message_id: 'c1' } : {}) }))
-          choices.push({ type: 'history_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: messages.at(-1)?.created_seq ?? 0, messages, has_more: hasMore } })
+          choices.push(r.page === 'after'
+            ? { type: 'events_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: hasMore,
+              events: messages.map((m) => ({ type: 'message' as const, kind: 'create' as const, seq: m.created_seq, message: m })) } }
+            : { type: 'history_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: messages.at(-1)?.created_seq ?? 0, messages, has_more: hasMore } })
           choices.push({ type: 'history_failed', request: Number(token), status: [401, 403, 404, 500, 'network', 'timeout'][random(6)] as 401 })
         } else {
           choices.push({ type: 'ack', request: Number(token), message: { ...message, channel_id: r.channel, sender: 'me', client_message_id: r.clientMessageId } })
