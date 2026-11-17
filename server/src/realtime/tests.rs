@@ -231,7 +231,6 @@ async fn fixture_with_configured_pool(pool: &PgPool, size: &str) -> Fixture {
     let restricted = crate::test_app_pool(pool.clone()).await;
     let configured = crate::database::PoolConfig::configured(Some(size), None)
         .unwrap()
-        .options()
         .connect_with(restricted.connect_options().as_ref().clone())
         .await
         .unwrap();
@@ -848,7 +847,6 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
     let f = fixture(&pool).await;
     let exhausted = crate::database::PoolConfig::configured(Some("3"), Some("2000"))
         .unwrap()
-        .options()
         .connect_with(f.state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();

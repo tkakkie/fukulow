@@ -52,7 +52,9 @@ impl PoolConfig {
         })
     }
 
-    pub fn options(self) -> PgPoolOptions {
+    /// Crate-only: app pools are built with `connect`/`connect_with` so their
+    /// connections carry the session startup parameters.
+    pub(crate) fn options(self) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(self.max_connections)
             .acquire_timeout(self.acquire_timeout)
@@ -67,6 +69,11 @@ impl PoolConfig {
     pub async fn connect_with(self, options: PgConnectOptions) -> Result<PgPool, sqlx::Error> {
         self.options().connect_with(session(options)).await
     }
+
+    /// Startup check: fails unless app connections carry the session settings.
+    pub async fn validate_session(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+        validate_session_settings(pool).await
+    }
 }
 
 /// App session settings, sent as startup parameters: no per-connection round
@@ -80,7 +87,7 @@ pub(super) fn session(options: PgConnectOptions) -> PgConnectOptions {
 
 /// Fails startup unless app connections actually carry the session settings,
 /// so a misconfigured connection cannot run unbounded statements.
-pub async fn validate_session_settings(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+async fn validate_session_settings(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let settings: (String, String) =
         sqlx::query_as("SELECT current_setting('statement_timeout'), current_setting('jit')")
             .fetch_one(
