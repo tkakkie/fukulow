@@ -44,11 +44,12 @@ for (const mode of ['success','smoke-success','smoke-refused','smoke-mixed','tam
 }
 
 test('judgement: 500 ms p95 in every round, index use, completeness and denials; missing evidence never passes',()=>{
-  const queries = [{id:'ja2-rare',scalars:2},{id:'ja3-rare',scalars:4},{id:'ja1-frequent',scalars:1},{id:'mixed',scalars:4}];
+  const query = (id: string, value: string) => ({id,raw:` ${value}`,value,scalars:[...value].length});
+  const queries = [query('ja2-rare','麒麟'),query('ja3-rare','abcd'),query('ja1-frequent','開'),query('mixed','a麒b1')];
   const names = denialCases.map(c=>c.name);
   const checks = denialCases.flatMap(c=>[false,true].map(forced=>({case:c.name,forced,found:c.expect.map(probe),expected:c.expect.map(probe)})));
   const definer = {cases:names,results:['none','trgm','bigm','pgroonga'].map(engine=>({engine,cases:names.length*2,checks}))};
-  const ids = queries.map(q=>q.id);
+  const ids = queries.map(q=>[q.id,q.raw] as [string,string]);
   const plans = (index: string[], seq = false) => queries.map(q=>({query:q.id,searchIndex:index.includes(q.id),seqScanMessages:seq}));
   const runs = (p95: number, planList = plans(['ja2-rare','ja3-rare','mixed']), equal = true) => ['trgm','bigm','pgroonga'].flatMap(engine=>[1,2,3].map(round=>({
     manifestHash:'h',round,engine,buildMs:1,relationBytes:1,physicalDeltaBytes:1,walBytesPerInsert:1,write:{query:'w',n:1,p50:1,p95:1,p99:1,tps:1},
@@ -85,7 +86,24 @@ test('judgement: 500 ms p95 in every round, index use, completeness and denials;
   const withChecks = (f: (c: typeof checks) => unknown[]) => ({cases:names,results:definer.results.map(r=>r.engine==='bigm'?{...r,checks:f(r.checks) as typeof checks}:r)});
   assert.equal(by(judge(runs(10),queries,withChecks(c=>c.slice(1)),ids),'trgm').denials,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries,withChecks(c=>[...c.slice(1),c[2]]),ids),'trgm').denials,'NOT EVALUATED');
-  assert.equal(by(judge(runs(10),queries,withChecks(c=>c.map((k,n)=>n===0?{...k,found:[probe(1)]}:k)),ids),'trgm').denials,'NOT EVALUATED');
+  // Complete evidence whose found ids differ from the frozen expectation is a measured FAIL, even with other parts missing.
+  const mismatch = withChecks(c=>c.map((k,n)=>n===0?{...k,found:[probe(1)]}:k));
+  assert.equal(by(judge(runs(10),queries,mismatch,ids),'trgm').denials,'FAIL');
+  assert.equal(by(judge(runs(10),undefined,mismatch,ids),'trgm').status,'FAIL');
+  // A record whose found and expected agree but differ from the frozen expectation is not evidence.
+  assert.equal(by(judge(runs(10),queries,withChecks(c=>c.map((k,n)=>n===0?{...k,found:[],expected:[]}:k)),ids),'trgm').denials,'NOT EVALUATED');
+  assert.equal(by(judge(runs(10),queries,withChecks(c=>c.map((k,n)=>n===0?null as never:k)),ids),'trgm').denials,'NOT EVALUATED');
+  assert.equal(by(judge(runs(10),queries,{cases:names,results:[...definer.results,definer.results[1]!]},ids),'trgm').denials,'NOT EVALUATED');
+  // Malformed artifacts are missing evidence, never a crash.
+  for (const bad of [{},123,null,'x',[null],[{}]]) {
+    assert.equal(by(judge(runs(10),bad,definer,ids),'trgm').status,'NOT EVALUATED');
+    assert.equal(by(judge(runs(10),queries,{cases:names,results:bad},ids),'trgm').denials,'NOT EVALUATED');
+    assert.equal(by(judge(runs(10),queries,bad,ids),'trgm').denials,'NOT EVALUATED');
+    assert.equal(by(judge(runs(10).map(r=>({...r,latencies:bad as never,plans:bad as never})),queries,definer,ids),'trgm').status,'NOT EVALUATED');
+  }
+  // Tampered raw text or scalar counts are not the frozen query list.
+  assert.equal(by(judge(runs(10),queries.map(q=>q.id==='ja3-rare'?{...q,scalars:0}:q),definer,ids),'bigm').index,'NOT EVALUATED');
+  assert.equal(by(judge(runs(10),queries.map(q=>q.id==='ja3-rare'?{...q,raw:'x'}:q),definer,ids),'bigm').latency,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries,withChecks(()=>undefined as never),ids),'trgm').denials,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries,{cases:names,results:definer.results.map(({checks,...r})=>r)},ids),'trgm').denials,'NOT EVALUATED');
   // Three rows from duplicated rounds, or an empty sample, are not three rounds of evidence.

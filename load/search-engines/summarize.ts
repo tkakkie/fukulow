@@ -23,48 +23,66 @@ export const criteria = {p95LimitMs:500,
   // Queries matching only the sparse i%997 rows (explicit, not by name).
   rareQueries:['ja1-rare','ja2-rare','ja3-rare','ascii1-rare','ascii2-rare','ascii-rare','mixed']};
 type Check = {case:string,forced:boolean,found:string[],expected:string[]};
-// Evidence for one engine: every case, unforced and forced, exactly once, with the frozen expectation met.
-const denialEvidence = (checks?: Check[]) => Array.isArray(checks) && checks.length===denialCases.length*2
-  && denialCases.every(c=>[false,true].every(forced=>{
-    const hit = checks.filter(k=>k?.case===c.name && k.forced===forced);
-    const want = JSON.stringify(c.expect.map(probe));
-    return hit.length===1 && JSON.stringify(hit[0]!.expected)===want && JSON.stringify(hit[0]!.found)===want;
-  }));
-// expectedQueries: the frozen manifest's performance query ids, in order; any other query list is not evidence.
-export function judge(runs: JudgedRun[], queries: {id:string,scalars:number}[] | undefined,
-  definer: {cases?:string[],results?:{engine:string,cases:number,checks?:Check[]}[]} | undefined, expectedQueries: string[]) {
-  const frozen = expectedQueries.length>0 && JSON.stringify((queries ?? []).map(q=>q?.id))===JSON.stringify(expectedQueries);
-  if (!frozen) queries = undefined;
+type Query = {id:string,raw:string,value:string,scalars:number};
+// Parsed artifacts are untrusted: a non-array or a non-object element is missing evidence, never a crash.
+const objects = <T,>(value: unknown) => (Array.isArray(value) ? value.filter(v=>v!==null && typeof v==='object') : []) as T[];
+const strings = (value: unknown) => Array.isArray(value) && value.every(v=>typeof v==='string');
+// One engine's denial evidence: every case, unforced and forced, exactly once, recording the frozen expectation.
+// Complete evidence with a found/expected mismatch is a measured FAIL.
+function denialEvidence(checks: unknown): Status {
+  const list = objects<Check>(checks);
+  if (!Array.isArray(checks) || list.length!==checks.length || list.length!==denialCases.length*2) return 'NOT EVALUATED';
+  const hits = denialCases.flatMap(c=>[false,true].map(forced=>({want:JSON.stringify(c.expect.map(probe)),
+    hit:list.filter(k=>k.case===c.name && k.forced===forced)})));
+  if (hits.some(({want,hit})=>hit.length!==1 || !strings(hit[0]!.found) || JSON.stringify(hit[0]!.expected)!==want)) return 'NOT EVALUATED';
+  return hits.every(({want,hit})=>JSON.stringify(hit[0]!.found)===want) ? 'PASS' : 'FAIL';
+}
+// expectedQueries: the frozen manifest's performance [id, raw] pairs, in order. Any other query list, or a
+// scalar count that does not match its normalized value, is not evidence.
+function frozenQueries(queries: unknown, expectedQueries: [string,string][]) {
+  const list = objects<Query>(queries);
+  const valid = Array.isArray(queries) && expectedQueries.length>0 && list.length===queries.length && list.length===expectedQueries.length
+    && list.every((q,i)=>q.id===expectedQueries[i]![0] && q.raw===expectedQueries[i]![1] && typeof q.value==='string'
+      && Number.isInteger(q.scalars) && q.scalars>0 && q.scalars===[...q.value].length);
+  return valid ? list : undefined;
+}
+export function judge(runs: JudgedRun[], rawQueries: unknown, definer: unknown, expectedQueries: [string,string][]) {
+  const queries = frozenQueries(rawQueries,expectedQueries);
+  const record = (definer!==null && typeof definer==='object' ? definer : {}) as {cases?:unknown,results?:unknown};
   return ['trgm','bigm','pgroonga'].map(engine=>{
-    const group = runs.filter(r=>r.engine===engine);
+    const group = objects<JudgedRun>(runs).filter(r=>r.engine===engine);
     const first = group.find(r=>r.round===1);
     const ids = (queries ?? []).map(q=>q.id);
-    const lat = group.flatMap(r=>ids.map(id=>r.latencies?.find(l=>l.query===id)?.p95));
-    const latency: Status = !ids.length || group.length!==3 || new Set(group.map(r=>r.round)).size!==3 || group.some(r=>r.round<1 || r.round>3) ||
-      group.some(r=>ids.some(id=>!(r.latencies?.find(l=>l.query===id)?.n! > 0))) || lat.some(p=>p===undefined || !Number.isFinite(p)) ? 'NOT EVALUATED'
+    const latencyOf = (r: JudgedRun, id: string) => objects<Latency>(r.latencies).find(l=>l.query===id);
+    const lat = group.flatMap(r=>ids.map(id=>latencyOf(r,id)?.p95));
+    const latency: Status = !ids.length || group.length!==3 || new Set(group.map(r=>r.round)).size!==3 || group.some(r=>!(r.round>=1 && r.round<=3)) ||
+      group.some(r=>ids.some(id=>!(Number(latencyOf(r,id)?.n) > 0))) || lat.some(p=>typeof p!=='number' || !Number.isFinite(p)) ? 'NOT EVALUATED'
       : lat.every(p=>p!<=criteria.p95LimitMs) ? 'PASS' : 'FAIL';
-    const slow = group.flatMap(r=>(r.latencies ?? []).filter(l=>l.p95>criteria.p95LimitMs).map(l=>`round ${r.round} ${l.query} ${l.p95.toFixed(1)} ms`));
-    const plans = first?.plans;
+    const slow = group.flatMap(r=>objects<Latency>(r.latencies).filter(l=>typeof l.p95==='number' && l.p95>criteria.p95LimitMs)
+      .map(l=>`round ${r.round} ${l.query} ${l.p95.toFixed(1)} ms`));
+    const plans = Array.isArray(first?.plans) ? objects<Plan>(first.plans) : undefined;
     const required = (queries ?? []).filter(q=>criteria.rareQueries.includes(q.id) && q.scalars>=criteria.minimumLength[engine]!).map(q=>q.id);
     const planFor = (id: string) => plans?.find(p=>p.query===id);
     const index: Status = !plans || !ids.length || !required.length
       || ids.some(id=>typeof planFor(id)?.searchIndex!=='boolean' || typeof planFor(id)?.seqScanMessages!=='boolean') ? 'NOT EVALUATED'
-      : plans.some(p=>p.seqScanMessages) || required.some(id=>!plans.find(p=>p.query===id)?.searchIndex) ? 'FAIL' : 'PASS';
+      : plans.some(p=>p.seqScanMessages===true) || required.some(id=>planFor(id)?.searchIndex!==true) ? 'FAIL' : 'PASS';
     // run.ts completeness(): six actors, the owner index and the direct access path per query.
     const checked = first?.completeness;
     const completeness: Status = checked?.equal===false ? 'FAIL'
       : checked?.equal===true && ids.length>0 && checked.cases===ids.length*8 ? 'PASS' : 'NOT EVALUATED';
     const names = denialCases.map(c=>c.name);
-    const sameCases = JSON.stringify(definer?.cases)===JSON.stringify(names);
-    const everyEngine = ['none','trgm','bigm','pgroonga'].every(e=>{
-      const found = definer?.results?.filter(r=>r.engine===e) ?? [];
-      return found.length===1 && found[0]!.cases===names.length*2 && denialEvidence(found[0]!.checks);
+    const results = objects<{engine?:unknown,cases?:unknown,checks?:unknown}>(record.results);
+    const perEngine = ['none','trgm','bigm','pgroonga'].map(e=>{
+      const found = results.filter(r=>r.engine===e);
+      return found.length===1 && found[0]!.cases===names.length*2 ? denialEvidence(found[0]!.checks) : 'NOT EVALUATED';
     });
-    const denials: Status = sameCases && everyEngine ? 'PASS' : 'NOT EVALUATED';
+    const sameCases = JSON.stringify(record.cases)===JSON.stringify(names);
+    const denials: Status = perEngine.includes('FAIL') ? 'FAIL' : sameCases && perEngine.every(p=>p==='PASS') ? 'PASS' : 'NOT EVALUATED';
     const parts = {latency,index,completeness,denials};
     // A measured failure is reported even when another part lacks evidence; missing evidence never passes.
     const status: Status = Object.values(parts).includes('FAIL') ? 'FAIL' : Object.values(parts).includes('NOT EVALUATED') ? 'NOT EVALUATED' : 'PASS';
-    return {engine,status,...parts,frozenQueries:frozen,slow,searchIndexQueries:plans?.filter(p=>p.searchIndex).map(p=>p.query) ?? [],requiredSearchIndex:required,
+    return {engine,status,...parts,frozenQueries:queries!==undefined,slow,searchIndexQueries:plans?.filter(p=>p.searchIndex===true).map(p=>p.query) ?? [],
+      requiredSearchIndex:required,
       scope:'MAC developer-Mac comparison (maintainer 2026-11-15); not a formal #431 budget; P2 production adoption held (#314)'};
   });
 }
@@ -106,7 +124,7 @@ export function summarize(root: string, publication: 'evaluation'|'smoke' = 'eva
   const result = kind==='smoke' ? {runKind:'smoke',label:'SMOKE / NON-EVALUATION',evaluation:false,formal:false,results:summary} : summary;
   save(`${root}/summary.json`,result);
   const verdict = judge(runs as JudgedRun[],readJson(`${root}/queries.json`),readJson(`${root}/definer.json`),
-    ((manifest.frozen.performance?.querySet ?? []) as [string,string][]).map(([id])=>id));
+    objects<[string,string]>(manifest.frozen.performance?.querySet).filter(q=>strings(q) && q.length===2));
   save(`${root}/judgement.json`,kind==='smoke' ? {label:'SMOKE / NON-EVALUATION',evaluation:false,verdict} : verdict);
   console.log(JSON.stringify(result,null,2));
 
