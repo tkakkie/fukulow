@@ -42,10 +42,14 @@ export const manifestFile = 'load/search-engines/manifest-v2.json';
 export const queryPath = {kind:'SECURITY DEFINER, LANGUAGE sql BEGIN ATOMIC',source:'load/search-engines/definer.sql',
   function:'public.fukulow_search_messages(uuid,text,boolean)',owner:'fukulow_search (NOLOGIN BYPASSRLS; column SELECT on messages, channels, users, channel_members)',
   caller:'fukulow_app only (EXECUTE revoked from PUBLIC); RLS stays enabled on every table',organization:'fukulow_current_org() only; NULL or empty returns no rows',
-  functionSettings:{search_path:'pg_catalog, pg_temp',jit:'off',plan_cache_mode:'force_custom_plan'},pageSize:20,
-  completeness:'non-page form as fukulow_app equals the sequential app-role strpos reference',
-  plans:{app:'EXPLAIN ANALYZE of the call as fukulow_app',body:'auto_explain nested statements of the same call',
-    owner:'direct query as owner with the body planner settings (jit off, no enable_seqscan override)',direct:'access-path probe with enable_seqscan=off'}};
+  emptyQuery:'returns no rows',
+  // Query-path settings only; v1's planner/executor conditions (jit on) stay.
+  functionSettings:{search_path:'pg_catalog, pg_temp',plan_cache_mode:'force_custom_plan'},
+  planCacheReason:'a cached generic plan keeps the query a parameter, so the LIKE pattern would not fold to a constant as in the v1 literal query',
+  pageSize:20,completeness:'non-page form as fukulow_app equals the sequential app-role strpos reference',
+  plans:{app:'EXPLAIN ANALYZE of the call as fukulow_app',body:'auto_explain nested statement of the same call; run fails unless logged',
+    owner:'direct query as owner with app-run settings',ownerV1:'v1-form direct query as owner with enable_seqscan=off',
+    direct:'access-path probe with enable_seqscan=off'}};
 export function snapshot() {
   const files = ['.gitattributes','.node-version','load/package-lock.json',
     ...['load/search-engines','load/search-engines/quality','server/migrations'].flatMap(dir=>

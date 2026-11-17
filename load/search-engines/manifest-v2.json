@@ -1,5 +1,5 @@
 {
-  "sha256": "7c11cc411024f59e75e98c497034109c59dfeaf9d4cee31081d69c40fd2061f5",
+  "sha256": "100f2c74343492212afdf5a0100ecb8b20ee2cbdf6d02582a8fb055eb9c527d8",
   "frozen": {
     "version": 2,
     "date": "2026-11-17",
@@ -52,15 +52,15 @@
       },
       {
         "path": "load/search-engines/definer.sql",
-        "sha256": "6578b6ac7d5a3d6ebfeaa0076dd5753ce69365f77eb76134ade893b7fdb7abeb"
+        "sha256": "996d2f421215ac33b8c542841701f706196c56199952081cade3be2e9f85d2c2"
       },
       {
         "path": "load/search-engines/definer.ts",
-        "sha256": "00438c50e9cfce8251da38f3fdf04331739fa4ea897c6f0418e482aacd5f5b0e"
+        "sha256": "b9b97782f19c02bf3c6acd43aa7c9635a7c999b42be9ab2b37e7b0665a1069aa"
       },
       {
         "path": "load/search-engines/manifest.ts",
-        "sha256": "8303082a2ac4858a80d68237a67c131caa78a796576578a69a81d4a58a7735f1"
+        "sha256": "5011a2ff85f80f499863df2f3e079e74eda6b686eed146a7c82959cb6fb62623"
       },
       {
         "path": "load/search-engines/pgroonga.sql",
@@ -92,7 +92,7 @@
       },
       {
         "path": "load/search-engines/run.ts",
-        "sha256": "4324d88bfbb195043ac6071e9069402eea0b79c0eeec9fa19729d0ba5f2ed926"
+        "sha256": "35269f0829967f6d192d1cabf41e90aafe6f4f9ed5b3d513a782881b40662d1f"
       },
       {
         "path": "load/search-engines/runtime.ts",
@@ -935,17 +935,19 @@
       "owner": "fukulow_search (NOLOGIN BYPASSRLS; column SELECT on messages, channels, users, channel_members)",
       "caller": "fukulow_app only (EXECUTE revoked from PUBLIC); RLS stays enabled on every table",
       "organization": "fukulow_current_org() only; NULL or empty returns no rows",
+      "emptyQuery": "returns no rows",
       "functionSettings": {
         "search_path": "pg_catalog, pg_temp",
-        "jit": "off",
         "plan_cache_mode": "force_custom_plan"
       },
+      "planCacheReason": "a cached generic plan keeps the query a parameter, so the LIKE pattern would not fold to a constant as in the v1 literal query",
       "pageSize": 20,
       "completeness": "non-page form as fukulow_app equals the sequential app-role strpos reference",
       "plans": {
         "app": "EXPLAIN ANALYZE of the call as fukulow_app",
-        "body": "auto_explain nested statements of the same call",
-        "owner": "direct query as owner with the body planner settings (jit off, no enable_seqscan override)",
+        "body": "auto_explain nested statement of the same call; run fails unless logged",
+        "owner": "direct query as owner with app-run settings",
+        "ownerV1": "v1-form direct query as owner with enable_seqscan=off",
         "direct": "access-path probe with enable_seqscan=off"
       }
     }

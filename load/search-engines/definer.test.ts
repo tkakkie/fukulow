@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { definerColumns, denialCases } from './definer.ts';
+import { definerColumns, definerConfig, denialCases } from './definer.ts';
 import { queryPath } from './manifest.ts';
 import { search } from './queries.ts';
 
 const sql = readFileSync(new URL('./definer.sql',import.meta.url),'utf8');
 const code = sql.split('\n').filter(line=>!line.trimStart().startsWith('--')).join('\n');
 
-test('function settings are the ones recorded in the manifest query path',()=>{
-  const settings = Object.fromEntries([...code.matchAll(/^SET (\w+) = (.+)$/gm)].map(m=>[m[1],m[2]]));
+const header = code.slice(code.indexOf('CREATE OR REPLACE FUNCTION'),code.indexOf('BEGIN ATOMIC'));
+test('function settings are exactly the query-path ones recorded in the manifest',()=>{
+  const settings = Object.fromEntries([...header.matchAll(/^SET (\w+) = (.+)$/gm)].map(m=>[m[1],m[2]]));
   assert.deepEqual(settings,queryPath.functionSettings);
+  // proconfig as verified at runtime: nothing that changes v1 planner/executor conditions (no jit).
+  assert.equal(definerConfig,Object.entries(settings).map(([k,v])=>`${k}=${v}`).join(';'));
+  assert.doesNotMatch(header,/\bjit\b|enable_|work_mem|cost/);
+  assert.match(code,/^SET search_path = pg_catalog, public;\nCREATE OR REPLACE FUNCTION/m);
   assert.match(code,/LANGUAGE sql STABLE STRICT SECURITY DEFINER\n/);
   assert.match(code,/\nBEGIN ATOMIC\n/);
 });
@@ -38,7 +43,7 @@ test('column grants equal the columns the verifier expects',()=>{
 });
 test('denials cover each rule with a positive control',()=>{
   const names = denialCases.map(c=>c.name).join('\n');
-  for (const rule of [/other Organization/,/private Channel non-member/,/guest without grant/,/deactivated/,/NULL Organization/,/trailing backslash/])
+  for (const rule of [/other Organization/,/private Channel non-member/,/guest without grant/,/deactivated/,/NULL Organization/,/trailing backslash/,/empty query/])
     assert.match(names,rule);
   assert.ok(denialCases.filter(c=>c.expect.length).length>=4);
 });

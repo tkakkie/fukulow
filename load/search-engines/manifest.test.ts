@@ -22,6 +22,18 @@ test('v2 changes only the query path and sources; performance conditions equal v
   assert.deepEqual([frozen.version,frozen.date],[2,'2026-11-17']);
   assert.ok(frozen.sourceHashes.some(s=>s.path==='load/search-engines/definer.sql'));
 });
+test('queryPath carries no planner or executor setting beyond the query-path need',()=>{
+  assert.deepEqual(Object.keys(frozen.queryPath.functionSettings).sort(),['plan_cache_mode','search_path']);
+  // Every key is reviewed: a new field (e.g. settings:{jit:'off'}) fails here.
+  const keys = (value: unknown, prefix = ''): string[] => value && typeof value==='object'
+    ? Object.entries(value).flatMap(([k,v])=>[prefix+k,...keys(v,prefix+k+'.')]) : [];
+  assert.deepEqual(keys(frozen.queryPath).sort(),['caller','completeness','emptyQuery','function','functionSettings',
+    'functionSettings.plan_cache_mode','functionSettings.search_path','kind','organization','owner','pageSize','planCacheReason',
+    'plans','plans.app','plans.body','plans.direct','plans.owner','plans.ownerV1','source']);
+  const names = Object.keys(settings).concat(['jit','work_mem','statement_timeout','random_page_cost']);
+  for (const value of Object.values(frozen.queryPath).filter(v=>typeof v==='string') as string[])
+    for (const name of names) assert.doesNotMatch(value,new RegExp(`\\b${name}\\s*=`),`${name} in queryPath`);
+});
 test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));

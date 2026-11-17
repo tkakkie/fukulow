@@ -2,6 +2,9 @@
 -- dedicated BYPASSRLS definer so LIKE can be an index condition. Under RLS the
 -- non-LEAKPROOF textlike operator is never pushed into the search index.
 -- Idempotent: reapplied after pg_restore --no-owner --no-acl resets owner/ACLs.
+-- Unsafe window: between pg_restore and this file, the function is owned by the
+-- restoring superuser (so the body runs as superuser) and executable by PUBLIC.
+-- No app connection may use a restored database until this file has run.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'fukulow_search') THEN
@@ -16,17 +19,20 @@ ALTER ROLE fukulow_search NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT 
 
 -- The Organization comes only from the caller's transaction-local context
 -- (NULL or empty: no rows). The acting Member is trusted as in the direct query.
--- BEGIN ATOMIC binds every object at creation, so the caller's search_path or
--- standard_conforming_strings cannot change the body; the pattern is built
--- here, so a caller can never pass an unescaped or trailing-escape pattern.
--- jit=off as on production connections (server/src/database/pool.rs): JIT
--- compile time otherwise dominates large-estimate plans. Custom plans keep the
--- normalized query a constant, as in the direct literal query.
+-- An empty query returns no rows. BEGIN ATOMIC binds every object at creation,
+-- so the caller's search_path or standard_conforming_strings cannot change the
+-- body; the pattern is built here, so a caller can never pass an unescaped or
+-- trailing-escape pattern. Only query-path settings are set on the function
+-- (planner/executor conditions such as jit stay those of v1):
+-- plan_cache_mode=force_custom_plan, because a cached generic plan would keep
+-- $2 a parameter, so the LIKE pattern would not fold to a constant (no trigram
+-- extraction for estimates), unlike the direct literal query of v1.
+-- Pin the creation-time binding, independent of the session's search_path.
+SET search_path = pg_catalog, public;
 CREATE OR REPLACE FUNCTION public.fukulow_search_messages(actor uuid, query text, page boolean)
 RETURNS TABLE (id uuid, created_at timestamptz, body text)
 LANGUAGE sql STABLE STRICT SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
-SET jit = off
 SET plan_cache_mode = force_custom_plan
 BEGIN ATOMIC
 WITH visible AS MATERIALIZED (
