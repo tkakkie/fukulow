@@ -990,3 +990,64 @@ Artifacts record commits, immutable image IDs, machine/settings/harness hashes; 
 - **mixed ≥500 not generated.** At 500/s app CPU averaged ~95% in both arms and k6 dropped 1,100–1,400 send arrivals (p95 ~1–1.5 s). At 1,000 and 2,000/s both arms collapsed (sends ~1,000–1,600 accepted of ~36,000–40,000, mostly 503 and client timeouts; sign-ins 36–54% accepted). Report-only observations there: B's other-Organization reader stayed 100% in every step, while A's had 120/121 in pair 1 at 1,000/s and 110/121, 114/120 and 113/120 at 2,000/s; A's Channel-list reads had 1,500–2,000 other HTTP errors at 2,000/s, B had none.
 - **Pool acquire timeouts: NOT EVALUATED** (no request attribution). Observed `pool timed out` log events by emission step: A mixed 1,000/s 16 / 134 / 28 and 2,000/s 6,208 / 5,954 / 6,464 (pairs 1–3); B none in any run; none in the send scenario. The 10 s client timeout means B's 30 s acquire timeout itself cannot be observed directly.
 - **Limits.** One Mac with all roles shared; sub-2 ms latencies at low steps; no production hardware. #196 stays open.
+
+## #196 B before/after after PR #511: results (2026-11-17 JST, Mac)
+
+**B `956f91e` (PR #388 base) vs A `fa1790b` (`main` after PR #511): the whole diff, not the #511 fix alone. Mac-relative only. Overall: not a pass (FAIL).**
+
+**Method.** As in "#196 B before/after: method", with criteria unchanged; the maintainer approved the arms on 2026-11-17. The run was 10:18–11:19 JST, alone on the same developer Mac. A includes the 65 commits after `7e3762a` (the previous run's A).
+- **Harness:** `ee36849` (PR #503) with two local edits, retained as `harness.patch` (sha256 `1ca41986…`):
+  - the A commit;
+  - the scope string.
+- **Not added:** the per-second latency and `pg_stat_statements` extras.
+- **Images:** B `sha256:9cc380ec…4092`, A `sha256:cdecab3e…d5a2`; k6 `grafana/k6:1.8.2`.
+- **Runner record:** complete (12 runs, no cleanup errors). Raw artifacts are outside Git.
+
+| Scenario | Step (sends/s) | Pair 1 (B/A) | Pair 2 (A/B) | Pair 3 (B/A) | Step result |
+|---|---:|---|---|---|---|
+| send | 250 | FAIL (latency) | FAIL (latency) | FAIL (latency) | **FAIL** |
+| send | 500 | FAIL (latency) | FAIL (latency) | FAIL (latency) | **FAIL** |
+| send | 1,000 | NOT EVALUATED (target load not generated) | FAIL (latency) | FAIL (latency) | **NOT EVALUATED** |
+| send | 2,000 | NOT EVALUATED | NOT EVALUATED | FAIL (latency) | **NOT EVALUATED** |
+| mixed | 250 | NOT EVALUATED (A other-Organization evidence incomplete) | same | same | **NOT EVALUATED; cannot pass** |
+| mixed | 500, 1,000, 2,000 | NOT EVALUATED | NOT EVALUATED | NOT EVALUATED | **NOT EVALUATED** |
+
+- **Send, 250/s:** every arm accepted 15,001 of 15,001 sends (100%), and the other Organization 120 of 120. Success p95/p99 (ms), B vs A:
+
+  | Pair | B p95/p99 | A p95/p99 |
+  |---|---|---|
+  | 1 | 2.69/4.29 | 4.89/15 |
+  | 2 | 2.11/3.70 | 12/19 |
+  | 3 | 2.26/3.97 | 6.30/6.89 |
+
+  At 500/s, every arm reached 100%, and A's p95 was 1.75–3.76 ms against B's 1.32–1.69 ms.
+- **Mixed, 250/s:**
+  - **B** (all three pairs):
+    - sends, Channel-list reads and sign-ins were each 100%;
+    - p95: sends 5.3–13 ms, reads 11–20 ms, sign-ins 28–43 ms;
+    - the other Organization was 120/120 with p95 2.6–8.2 ms;
+    - DB active connections averaged 2.9–4.9.
+  - **A** (all three pairs):
+    - sends 19.3–20.6% (about 6,300 × 503 and 4,000 client timeouts per run, 2,000 drops);
+    - sign-ins 33.4–34.3% (about 780 × 503);
+    - reads were accepted, but with p95 2.8–3.1 s and 5,600–7,500 dropped arrivals;
+    - the other Organization was 120/120, but p95 was 2.7–3.1 s;
+    - DB active connections averaged 13–14 of 20.
+  - The fixed rule gives NOT EVALUATED, because A's continuous other-Organization evidence is incomplete. A's measured success is far below the ≥99% criterion, so this step cannot pass.
+- **Mixed, ≥500/s:** both arms saturate. B's sends were 16–27%; A's were 1.5–3.2%.
+- **Comparison with the previous run.** On the same harness and Mac, the previous run's A (`7e3762a`) passed mixed 250/s: 100% everywhere, sign-in p95 13.9–14.8 ms. This is reference only, since it is a different run, and is not a simple improvement rate.
+
+  So between `7e3762a` and `fa1790b`, Channel-list reads under concurrent sends became over 100× slower than B in the same run (p95 2.8–3.1 s vs 11–20 ms) and saturate the 20-connection pool. The 5 s acquire timeout then turns the starved sends and sign-ins into 503s. **The cause is not identified** (#519). Candidates in that range that touch Channel-list or Unread queries:
+  - #498 (#225 per-Member public positions);
+  - #448 (#355);
+  - #447 (#354);
+  - #391 (Mentions);
+  - #385 (DMs);
+  - #511's session settings.
+- **Pool acquire timeouts:** NOT EVALUATED, because there is no request attribution. The 10 s client timeout means B's 30 s acquire timeout cannot be observed directly.
+- **Limits:**
+  - one Mac with all roles shared;
+  - no production hardware;
+  - A is the whole diff since PR #388's base.
+
+  #196 stays open.
