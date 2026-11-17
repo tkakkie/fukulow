@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { percentile, save } from './bench.ts';
-import { denialCases } from './definer.ts';
+import { denialCases, probe } from './definer.ts';
 
 type Latency = {query:string,n:number,p50:number,p95:number,p99:number,tps:number};
 type Run = {manifestHash:string,runKind?:string,round:number,engine:string,buildMs:number,relationBytes:number,physicalDeltaBytes:number,
@@ -22,7 +22,19 @@ export const criteria = {p95LimitMs:500,
   minimumLength:{trgm:3,bigm:2,pgroonga:2} as Record<string,number>,
   // Queries matching only the sparse i%997 rows (explicit, not by name).
   rareQueries:['ja1-rare','ja2-rare','ja3-rare','ascii1-rare','ascii2-rare','ascii-rare','mixed']};
-export function judge(runs: JudgedRun[], queries?: {id:string,scalars:number}[], definer?: {cases?:string[],results?:{engine:string,cases:number}[]}) {
+type Check = {case:string,forced:boolean,found:string[],expected:string[]};
+// Evidence for one engine: every case, unforced and forced, exactly once, with the frozen expectation met.
+const denialEvidence = (checks?: Check[]) => Array.isArray(checks) && checks.length===denialCases.length*2
+  && denialCases.every(c=>[false,true].every(forced=>{
+    const hit = checks.filter(k=>k?.case===c.name && k.forced===forced);
+    const want = JSON.stringify(c.expect.map(probe));
+    return hit.length===1 && JSON.stringify(hit[0]!.expected)===want && JSON.stringify(hit[0]!.found)===want;
+  }));
+// expectedQueries: the frozen manifest's performance query ids, in order; any other query list is not evidence.
+export function judge(runs: JudgedRun[], queries: {id:string,scalars:number}[] | undefined,
+  definer: {cases?:string[],results?:{engine:string,cases:number,checks?:Check[]}[]} | undefined, expectedQueries: string[]) {
+  const frozen = expectedQueries.length>0 && JSON.stringify((queries ?? []).map(q=>q?.id))===JSON.stringify(expectedQueries);
+  if (!frozen) queries = undefined;
   return ['trgm','bigm','pgroonga'].map(engine=>{
     const group = runs.filter(r=>r.engine===engine);
     const first = group.find(r=>r.round===1);
@@ -44,12 +56,15 @@ export function judge(runs: JudgedRun[], queries?: {id:string,scalars:number}[],
       : checked?.equal===true && ids.length>0 && checked.cases===ids.length*8 ? 'PASS' : 'NOT EVALUATED';
     const names = denialCases.map(c=>c.name);
     const sameCases = JSON.stringify(definer?.cases)===JSON.stringify(names);
-    const everyEngine = ['none','trgm','bigm','pgroonga'].every(e=>definer?.results?.find(r=>r.engine===e)?.cases===names.length*2);
+    const everyEngine = ['none','trgm','bigm','pgroonga'].every(e=>{
+      const found = definer?.results?.filter(r=>r.engine===e) ?? [];
+      return found.length===1 && found[0]!.cases===names.length*2 && denialEvidence(found[0]!.checks);
+    });
     const denials: Status = sameCases && everyEngine ? 'PASS' : 'NOT EVALUATED';
     const parts = {latency,index,completeness,denials};
     // A measured failure is reported even when another part lacks evidence; missing evidence never passes.
     const status: Status = Object.values(parts).includes('FAIL') ? 'FAIL' : Object.values(parts).includes('NOT EVALUATED') ? 'NOT EVALUATED' : 'PASS';
-    return {engine,status,...parts,slow,searchIndexQueries:plans?.filter(p=>p.searchIndex).map(p=>p.query) ?? [],requiredSearchIndex:required,
+    return {engine,status,...parts,frozenQueries:frozen,slow,searchIndexQueries:plans?.filter(p=>p.searchIndex).map(p=>p.query) ?? [],requiredSearchIndex:required,
       scope:'MAC developer-Mac comparison (maintainer 2026-11-15); not a formal #431 budget; P2 production adoption held (#314)'};
   });
 }
@@ -90,7 +105,8 @@ export function summarize(root: string, publication: 'evaluation'|'smoke' = 'eva
   });
   const result = kind==='smoke' ? {runKind:'smoke',label:'SMOKE / NON-EVALUATION',evaluation:false,formal:false,results:summary} : summary;
   save(`${root}/summary.json`,result);
-  const verdict = judge(runs as JudgedRun[],readJson(`${root}/queries.json`),readJson(`${root}/definer.json`));
+  const verdict = judge(runs as JudgedRun[],readJson(`${root}/queries.json`),readJson(`${root}/definer.json`),
+    ((manifest.frozen.performance?.querySet ?? []) as [string,string][]).map(([id])=>id));
   save(`${root}/judgement.json`,kind==='smoke' ? {label:'SMOKE / NON-EVALUATION',evaluation:false,verdict} : verdict);
   console.log(JSON.stringify(result,null,2));
 

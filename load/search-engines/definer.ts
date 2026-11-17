@@ -48,7 +48,7 @@ const probes = [
 ] as const;
 // Senders: the DM probe is sent by participant 2, the revoked probe by Member 9 before revocation.
 const sender = (k: number) => k===10 ? 2 : k===11 ? 9 : 1;
-const probe = (k: number) => uuid(9_000_000+k);
+export const probe = (k: number) => uuid(9_000_000+k);
 // Extra Organization 1 Members, only in the denial database: 7 admin without grants (and DM
 // participant), 8 member with a Channel 21 grant, demoted to guest, 9 member whose private grant is revoked after sending,
 // 10 member keeping that grant (positive control). Channel 90 is a DM between Members 2 and 7.
@@ -114,6 +114,7 @@ export function definerDenials(h: DenialHarness, engines: readonly string[], def
     RAISE EXCEPTION 'expected LIKE escape error'; EXCEPTION WHEN invalid_escape_sequence THEN NULL; END $$;`);
   const results = [];
   for (const engine of ['none',...engines]) {
+    const checks: {case:string,forced:boolean,found:string[],expected:string[]}[] = [];
     const db = `denial_${engine}`;
     h.owner('postgres',`CREATE DATABASE ${db} TEMPLATE denial;`); h.index(db,engine);
     const definer = verifyDefiner(text=>h.owner(db,text),definition);
@@ -125,6 +126,7 @@ export function definerDenials(h: DenialHarness, engines: readonly string[], def
         const found = h.app(db,start+settings+`SELECT id FROM ${definerFunction}('${member(...c.actor)}',${literal(c.query)},false) ORDER BY id;\nCOMMIT;`)
           .split('\n').filter(s=>s && s!==context);
         assert.deepEqual(found,c.expect.map(probe),`Definer denial check failed (${engine}${settings ? ', forced' : ''}): ${c.name}`);
+        checks.push({case:c.name,forced:settings!=='',found,expected:c.expect.map(probe)});
       }
     }
     // Forced: proves the definer body gets a constant pattern usable by the index.
@@ -132,7 +134,7 @@ export function definerDenials(h: DenialHarness, engines: readonly string[], def
     const lines = plan?.log.split('\n').filter(l=>/ Scan on |Index Cond|Recheck Cond/.test(l)).join('\n');
     if (plan) assert.ok(plan.searchIndex,`Forced definer body plan does not use search_body (${engine}):\n`+lines);
     if (plan) assert.ok(plan.folded,`Forced definer body plan has no folded LIKE pattern (${engine}):\n`+lines);
-    results.push({engine,definer,cases:denialCases.length*2,plan:plan?.log ?? ''});
+    results.push({engine,definer,cases:checks.length,checks,plan:plan?.log ?? ''});
     h.drop(db);
   }
   h.drop('denial');
