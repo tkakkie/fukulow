@@ -94,10 +94,20 @@ test('R2 restore refuses an identity file that is not private before any downloa
   writeFileSync(readable, 'AGE-SECRET-KEY-TEST', { mode: 0o600 }); chmodSync(readable, 0o644)
   symlinkSync(privateIdentity, link)
   const inside = join(dirname(new URL(import.meta.url).pathname), 'restore-from-r2.test.ts')
-  for (const identityFile of [readable, link, inside, join(keyRoot, 'missing')]) {
+  const fifo = join(keyRoot, 'fifo')
+  assert.equal(spawnSync('mkfifo', ['-m', '600', fifo]).status, 0)
+  for (const identityFile of [readable, link, inside, fifo, join(keyRoot, 'missing')]) {
     await assert.rejects(restoreFromR2({ bucket, identityFile, decrypt, drill: () => {} }), /stage=restore/)
   }
   assert.equal(decrypts, 0); assert.equal(reads, 0)
-  await restoreFromR2({ bucket, identityFile: privateIdentity, decrypt, drill: () => {} })
-  assert.equal(decrypts, 1)
+  // age gets a private staged copy, never the operator path, so a swap after the check cannot reach it.
+  let staged = ''
+  const stagedDecrypt = (_archive: string, target: string, identity: string) => {
+    decrypts++; staged = identity
+    assert.notEqual(identity, privateIdentity); assert.equal(dirname(identity), dirname(target))
+    assert.equal(statSync(identity).mode & 0o777, 0o600); assert.equal(readFileSync(identity, 'utf8'), 'AGE-SECRET-KEY-TEST')
+    writeFileSync(target, 'dump')
+  }
+  await restoreFromR2({ bucket, identityFile: privateIdentity, decrypt: stagedDecrypt, drill: () => {} })
+  assert.equal(decrypts, 1); assert.ok(staged !== '' && !existsSync(staged))
 })
