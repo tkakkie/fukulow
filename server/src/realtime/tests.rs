@@ -647,6 +647,26 @@ async fn replay_denies_other_organization_and_private_nonmember_with_positive_co
 }
 
 #[fukulow_test::test]
+async fn replay_missing_message_state_closes_without_hiding_log_position(pool: PgPool) {
+    let f = fixture(&pool).await;
+    post(&f, f.channel).await;
+    post(&f, f.channel).await;
+    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=1")
+        .bind(f.organization)
+        .bind(f.channel)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut socket = f.server.connect(&f.token).await;
+    subscribe(&mut socket, f.channel, 0).await;
+    closed(&mut socket, 1011).await;
+    let mut recovered = f.server.connect(&f.token).await;
+    subscribe(&mut recovered, f.channel, 1).await;
+    assert_eq!(event(&mut recovered).await["message"]["seq"], 2);
+    ready(&mut recovered, f.channel, 2).await;
+}
+
+#[fukulow_test::test]
 async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps(
     pool: PgPool,
 ) {
@@ -1095,6 +1115,7 @@ mod commit;
 mod contract;
 mod lifecycle;
 mod limits;
+mod load_fixture;
 mod notification;
 mod session;
 mod watermark;

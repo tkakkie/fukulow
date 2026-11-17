@@ -4,6 +4,11 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 | Rule | Test |
 |---|---|
+| Every committed send appends one scoped Create position; concurrent sends stay consecutive and duplicate retries append nothing | `server/src/messages/tests/channel_log.rs::channel_log_concurrent_sends_and_duplicate_retries_append_exactly_once`, `server/src/messages/tests/context.rs::conflict_lookup_topic_reply_and_mark_read_require_context` |
+| A failed COMMIT rolls back Message, Create log entry, Topic and counter together | `server/src/messages/tests/channel_log.rs::channel_log_failure_rolls_back_message_counter_and_topic` |
+| Log positions survive Message state deletion; replay and shared gap recovery hydrate current bodies and fail closed on missing state | `server/src/messages/tests/channel_log.rs::channel_log_reconciles_current_body_and_fails_closed_on_missing_state` |
+| Channel log backfill preserves every creation position and send identity; Channel and sender foreign keys stay Organization-scoped | `server/src/messages/tests/channel_log.rs::channel_log_migration_backfills_existing_messages_and_scopes_foreign_keys` |
+| Channel log RLS hides foreign Organizations; runtime can read/append but cannot UPDATE, DELETE or TRUNCATE positions | `server/src/database/tests/rls.rs::rls_hides_and_rejects_other_organization_rows_in_every_target_table`, `server/src/messages/tests/channel_log.rs::channel_log_runtime_denies_update_delete_and_truncate_with_read_insert_controls` |
 | Author lookup returns only readable Message authors; every Role needs private grants, Guests also public grants; removed/stale grants deny | `server/src/messages/tests/authors.rs::author_lookup_every_role_private_and_guest_public_denials_have_positive_controls`, `server/src/messages/tests/authors.rs::author_lookup_rechecks_inactive_stale_callers_and_stale_grants_after_auth` |
 | Author lookup omits foreign/unknown/nonauthors, retains departed/deactivated names, collapses duplicates and caps input at 100 | `server/src/messages/tests/authors.rs::author_lookup_scopes_authorship_retains_deactivated_and_departed_and_bounds_batches` |
 | Author lookup rechecks caller activity/revision; authorization, Messages and identities share a non-locking snapshot; prior revocation denies | `server/src/messages/tests/authors.rs::author_lookup_rechecks_inactive_stale_callers_and_stale_grants_after_auth`, `server/src/messages/tests/authors.rs::author_lookup_authorization_and_identities_share_a_nonlocking_snapshot` |
@@ -100,3 +105,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [unread](unread.md): `main_unread_count_uses_covering_range_without_message_heap`
 
 - [deployment](deployment.md): `dm_open_list_and_discovery_use_one_measured_checkout_each`
+
+- [realtime](realtime.md): `replay_missing_message_state_closes_without_hiding_log_position`

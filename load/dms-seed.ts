@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { outsideCheckout } from './dms-workload.ts';
+import { createLog } from './channel-log.ts';
 
 const output = resolve(process.env.DM_SEED_OUT || '');
 if (!process.env.DM_SEED_OUT || !outsideCheckout(output, resolve(import.meta.dirname, '..'))) throw new Error('DM_SEED_OUT must be outside checkout');
@@ -39,6 +40,7 @@ INSERT INTO channel_members(organization_id,channel_id,member_id) VALUES('${org}
 INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES('${org}','${channel}',1);
 INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${channel}','${topic}','Topic',1,1,1);
 INSERT INTO messages(organization_id,channel_id,id,seq,sender,client_message_id,body,topic_id) VALUES('${org}','${channel}','${id('message', 0)}',1,'${members[0].id}','${id('client', 0)}','seed','${topic}');
+${createLog(org, [channel])}
 COMMIT; ANALYZE;`);
 execFileSync('docker', ['exec', '-i', container, 'psql', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1'], { input: sql.join('\n'), stdio: ['pipe', 'ignore', 'inherit'], timeout: 3_600_000, maxBuffer: 16*1024*1024 });
 writeFileSync(output, JSON.stringify({ organization: org, channel, topic, members }), { mode: 0o600 });

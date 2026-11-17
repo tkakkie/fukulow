@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { percentile } from './dms-workload.ts';
+import { createLog } from './channel-log.ts';
 import type { DmList } from '../web/src/api-schema.d.ts';
 const seed = JSON.parse(readFileSync(process.env.DM_SEED_OUT!, 'utf8'));
 const output = process.env.DM_OUTPUT!, org: string = seed.organization, member = seed.members[9999];
@@ -10,7 +11,9 @@ const start = Date.now();
 const settledOnly = process.env.DM_HISTORY_SETTLED_ONLY === '1';
 if (!settledOnly) sql(`INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${org}',id,10000 FROM unnest(${ids}) id ON CONFLICT(organization_id,channel_id) DO UPDATE SET seq=10000;
 INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body)
-SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN '${member.id}'::uuid WHEN c.lower_member_id='${member.id}' THEN c.higher_member_id ELSE c.lower_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,10000) n WHERE c.organization_id='${org}' AND c.id=ANY(${ids}); ANALYZE;`);
+SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN '${member.id}'::uuid WHEN c.lower_member_id='${member.id}' THEN c.higher_member_id ELSE c.lower_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,10000) n WHERE c.organization_id='${org}' AND c.id=ANY(${ids});
+${createLog(org, seed.ids)}
+ANALYZE;`);
 const seedMs = Date.now()-start;
 const counts = readFileSync('server/src/messages/unread.rs', 'utf8').match(/LIST_COUNTS_SQL: &str = r#"([\s\S]+?)"#;/)![1];
 const rows: unknown[] = [];

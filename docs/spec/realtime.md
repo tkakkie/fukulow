@@ -71,9 +71,11 @@ GET `/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain?after_seq&limi
 
 Reply web logic (#140): `createReplySync` owns one open chain per watched Channel, optionally composed over `createTopicSync` so a confirmed Message from a Topic uses the same stream. Open with a confirmed Message; the adapter exposes anchor, root, inherited Topic, sorted canonical Messages, pending sends, loading/error/hasMore and unavailable state. Continue exclusively after the last page record, independently of live appends. Merge pages and Channel ACK/echo/replay records by Message id; `reply_root_id` identifies membership even without the parent. Pages only settle matching own sends (C5), never cursor/gap evidence. Sends target a confirmed chain Message through sync with a new client id and no Topic intent; retry preserves the id/body/parent (C6). Session replacement and close are ordered before sync teardown; clamp/unwatch/C9/C10 discard the chain and fence stale reads. Only a current read's ordinary 403/404 causes C9; reply_chain_not_found fails only the chain; same-session late 401 and organization_unavailable retain C6/C10 meaning after timeout. Components, composer UI and panel integration follow separately.
 
-### Message changes (#160, decided 2026-11-17, not implemented)
+### Message changes (#160, decided 2026-11-17, partly implemented)
 
 Maintainer direction: #160, 2026-11-14, items 1–9; decision 2026-11-17 (`docs/decisions/messages.md`): independent `channel_log`, current-state reconciliation, no as-it-was replay. This design does not change the implemented S/C/P rules above until the implementing Issues ship it. Items marked *proposed* below remain open decisions (list at the end).
+
+Implemented (#515 slice 1): `channel_log` exists with Create entries only; each send appends one in its transaction, and subscribe replay and shared gap recovery read positions only from it. A position whose current state cannot be hydrated fails closed (subscribe closes with 1011; gap recovery latches the failure), so state rows are never removed; a later Delete keeps the deletion marker. Wire shapes, history pages, versions, receipts and `history_generation` are not implemented yet.
 
 #### Positions, state and convergence
 

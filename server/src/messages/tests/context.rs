@@ -35,6 +35,13 @@ async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool)
     let root = sends.join_next().await.unwrap().unwrap();
     assert_eq!(sends.join_next().await.unwrap().unwrap(), root);
     assert_eq!(root["seq"], 1);
+    let logged: Vec<i64> = sqlx::query_scalar("SELECT event_seq FROM channel_log WHERE organization_id=$1 AND channel_id=$2 ORDER BY event_seq")
+        .bind(org).bind(channel).fetch_all(&pools.admin).await.unwrap();
+    assert_eq!(
+        logged,
+        [1],
+        "the in-flight unique-key loser appends nothing"
+    );
     let reply = sent(
         &app,
         &token,
