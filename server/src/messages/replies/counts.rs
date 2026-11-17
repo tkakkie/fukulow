@@ -71,17 +71,17 @@ pub async fn reply_counts(
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        let w = topics::watermark(&state, organization, channel).await?;
-        #[cfg(test)]
-        tests::replies::counts::pause(channel).await;
+        topics::watermark(&state, organization, channel).await?;
         crate::database::organization_read_only(
             &state.pool,
             organization,
             async |tx: &mut sqlx::PgConnection| {
                 require_visible(&mut *tx, organization, member, channel).await?;
-                let history_generation =
-                    history::validate(tx, organization, channel, input.history_generation, Some(w))
+                let (history_generation, w) =
+                    history::page(tx, organization, channel, input.history_generation, None)
                         .await?;
+                #[cfg(test)]
+                tests::replies::counts::pause(channel).await;
                 let counts = sqlx::query(COUNTS_SQL)
                     .bind(organization)
                     .bind(channel)

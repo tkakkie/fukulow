@@ -42,6 +42,29 @@ it('lost notices and delayed COMMIT converge on the existing O5 schedule with no
   c.close(); expect(vi.getTimerCount()).toBe(0)
 })
 
+it('history reset aborts and fences old discovery and open results before restarting every lane', async () => {
+  const c = client(); c.rows = [dm('old')]; await c.ready()
+  c.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  const old = held<Awaited<ReturnType<DmsApi['changes']>>>(), opening = held<Result<Dm>>()
+  c.api.changes.mockReturnValueOnce(old.promise)
+  await vi.advanceTimersByTimeAsync(14_000)
+  const signal = c.api.changes.mock.calls.at(-1)![1]
+  c.api.open.mockReturnValueOnce(opening.promise)
+  const pendingOpen = c.dms.open('peer-old')
+  c.dms.resetHistory(); await flush()
+  expect(signal.aborted).toBe(true)
+  expect(c.dms.get()).toMatchObject({ rows: [], busy: false, budget: 5 })
+  expect(c.dms.get().recoveryPeer).toBeUndefined()
+  old.resolve(ok({ dms: [dm('late')], next_cursor: 'stale', caught_up: true }))
+  opening.resolve(ok(dm('late'))); await pendingOpen; await flush()
+  expect(c.dms.get().rows).toEqual([]); expect(c.select).not.toHaveBeenCalled()
+  c.rows = [dm('new', { as_of_seq: 0 })]; c.api.changes.mockClear()
+  await c.ready(); c.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  expect(c.api.changes.mock.calls.slice(0, 2).map(([q]) => q)).toEqual([{ lane: 'delta' }, { lane: 'coverage' }])
+  expect(c.dms.get().rows.map(r => r.identity.id)).toEqual(['new'])
+  c.close()
+})
+
 it('duplicate reordered notices coalesce behind one in-flight request and one queued demand', async () => {
   const c = client(10_000), old = held<Awaited<ReturnType<DmsApi['changes']>>>()
   c.api.changes.mockReturnValueOnce(old.promise)

@@ -99,13 +99,13 @@ pub async fn reply_chain(
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        let w = topics::watermark(&state, organization, channel).await?;
+        topics::watermark(&state, organization, channel).await?;
         crate::database::organization_read_only(
             &state.pool,
             organization,
             async |tx: &mut sqlx::PgConnection| {
                 require_visible(&mut *tx, organization, member, channel).await?;
-                let history_generation = history::validate(
+                let (history_generation, w) = history::page(
                     tx,
                     organization,
                     channel,
@@ -113,10 +113,6 @@ pub async fn reply_chain(
                     query.as_of_seq,
                 )
                 .await?;
-                if query.as_of_seq.is_some_and(|requested| requested > w) {
-                    return Err(MessageError::InvalidInput);
-                }
-                let w = query.as_of_seq.unwrap_or(w);
                 let root_id: Uuid = sqlx::query_scalar(
                     "SELECT COALESCE(reply_root_id,id) FROM messages \
          WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq<=$4",

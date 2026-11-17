@@ -119,7 +119,7 @@ test('desktop 1280px: second user posts in main and Topics; first user sees badg
   const ownMsg = await postMessage(page.request, orgId, targetChannel.id, 'Aliceの既読メッセージ')
   const markOwn = await secretSafe(() =>
     page.request.put(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/read`, {
-      data: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: ownMsg.created_seq },
+      data: { history_generation: ownMsg.history_generation, read_seq: ownMsg.created_seq },
     }),
   )
   expect(markOwn.ok()).toBe(true)

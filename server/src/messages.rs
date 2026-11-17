@@ -114,7 +114,7 @@ pub async fn list_messages(
         channel_id,
     )
     .await?;
-    let committed_w = topics::watermark(&state, organization_id, channel_id).await?;
+    topics::watermark(&state, organization_id, channel_id).await?;
     crate::database::organization_read_only(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
         match channels::is_visible(
             &mut *tx,
@@ -130,9 +130,7 @@ pub async fn list_messages(
         }
         #[cfg(test)]
         tests::membership::pause_history(channel_id).await;
-        let history_generation = history::validate(tx, organization_id, channel_id, query.history_generation, Some(query.as_of_seq.unwrap_or(committed_w))).await?;
-        if query.as_of_seq.is_some_and(|w| w > committed_w) { return Err(MessageError::InvalidInput); }
-        let w = query.as_of_seq.unwrap_or(committed_w);
+        let (history_generation, w) = history::page(tx, organization_id, channel_id, query.history_generation, query.as_of_seq).await?;
         let ascending = query.after_seq.is_some();
         let sql = if ascending {
             "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \

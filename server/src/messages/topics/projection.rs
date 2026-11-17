@@ -86,13 +86,8 @@ async fn read(
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        let w = super::watermark(state, organization, channel).await?;
-        if query.as_of_seq.is_some_and(|requested| requested > w) {
-            return Err(MessageError::InvalidInput);
-        }
-        let w = query.as_of_seq.unwrap_or(w);
-        // The barrier and its permit are released. Immutable seq <= W is complete;
-        // this fresh statement snapshots authorization and projection data together.
+        super::watermark(state, organization, channel).await?;
+        // Admission resolves prior ambiguous commits; W is selected in the page snapshot.
         let (history_generation, rows) = crate::database::organization_read_only(
             &state.pool,
             organization,
@@ -104,9 +99,14 @@ async fn read(
                     channel,
                 )
                 .await?;
-                let history_generation =
-                    history::validate(tx, organization, channel, query.history_generation, Some(w))
-                        .await?;
+                let (history_generation, w) = history::page(
+                    tx,
+                    organization,
+                    channel,
+                    query.history_generation,
+                    query.as_of_seq,
+                )
+                .await?;
                 let rows = sqlx::query(&page_sql())
                     // Repeated reads otherwise select a much slower generic plan (#326).
                     .persistent(false)

@@ -189,7 +189,13 @@ export function createSession(options: SessionOptions) {
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.error === 'organization_unavailable'),
   })
   activity.hold('capabilities', capabilities)
+  let historyEpoch = sync.get().historyEpoch
   const stopSync = sync.subscribe(() => {
+    if (historyEpoch !== sync.get().historyEpoch) {
+      historyEpoch = sync.get().historyEpoch
+      dms?.resetHistory()
+      navigationTargets.resetHistory()
+    }
     if (!sync.get().connected) activity.disconnected()
     if (sync.get().organization === 'unavailable') terminate()
   })

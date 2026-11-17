@@ -14,20 +14,22 @@ function client() {
   const listMessages = vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([first]).at(-1)?.created_seq ?? 0,  messages: [first], has_more: false }))
   const listTimeline = vi.fn(async (): Promise<Result<TimelinePage>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, items: [{ kind: 'message', message: first }], has_more: false }))
   const markRead = vi.fn(async (_scope, body) => ok(body))
-  const listChannels = vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }))
+  const listChannels = vi.fn(async () => ok({ history_generation: rows[0]?.history_generation ?? first.history_generation, channels: [] }))
   const onEnded = vi.fn(), open = vi.fn(async (): Promise<Result<Dm>> => ok(rows[0]!))
+  const changes = vi.fn(async ({ lane }: import('./api').DmChangesQuery) => ok({ dms: rows.map(({ id, kind, peer }) => ({ id, kind, peer })), next_cursor: lane, caught_up: true }))
+  const listDms = vi.fn(async (q: import('./api').DmListQuery) => ok({ history_generation: rows[0]?.history_generation ?? first.history_generation, dms: q.channel_id ? rows.filter(row => q.channel_id!.includes(row.id)) : rows, next_cursor: null }))
   const session = createSession({ selfId: 'me', organizationId: 'org', onEnded,
     channelsApi: { listChannels, createChannel: async () => ({ ok: false, kind: 'network' }) },
     dmsApi: {
-      changes: async ({ lane }) => ok({ dms: rows.map(({ id, kind, peer }) => ({ id, kind, peer })), next_cursor: lane, caught_up: true }),
-      list: async q => ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: q.channel_id ? rows.filter(row => q.channel_id!.includes(row.id)) : rows, next_cursor: null }),
+      changes,
+      list: listDms,
       open,
     },
     topicsApi: { listTimeline, listTopics: async () => ({ ok: false, kind: 'network' }), getTopicSummary: async () => ({ ok: false, kind: 'network' }), listTopicMessages: async () => ({ ok: false, kind: 'network' }) },
     unreadApi: { listChannels, markRead, getTopicSummary: async () => ({ ok: false, kind: 'network' }) },
     sync: { connect(h) { socket = h; return { send() {}, close() {} } }, api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages, sendMessage: async () => ({ ok: false, kind: 'network' }) }, random: () => 0.5 },
   })
-  return { session, listMessages, listTimeline, markRead, first, onEnded, open,
+  return { session, listMessages, listTimeline, markRead, first, onEnded, open, changes, listDms,
     set rows(value: Dm[]) { rows = value }, get socket() { return socket },
     async ready() { socket.onReady(); socket.onEvent({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000) },
   }
@@ -49,6 +51,31 @@ it('DM discovery neither watches nor marks read and selection bootstraps the fir
   const visit = await c.session.unread.enter({ channel: 'D', topicId: null })
   c.session.unread.presented(visit!, [1]); await flush()
   expect(c.markRead).toHaveBeenCalledWith({ channel: 'D', topicId: null }, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })
+  c.session.close()
+})
+
+it('Organization history reset restarts DM discovery and browsing with fresh lower baselines', async () => {
+  const c = client(); await c.ready()
+  c.session.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  expect(c.session.dms.get().lanes.browse.done).toBe(true)
+  expect(c.session.dms.get().lanes.delta.cursor).toBe('delta')
+  expect(c.session.unread.get('D').unreadCount).toBe(1)
+  const fresh = '00000000-0000-4000-8000-000000000516'
+  c.rows = [dm('D', { history_generation: fresh, as_of_seq: 0, read_seq: 0, unread_count: 0, main_unread_count: 0 })]
+  c.session.sync.observeHistoryGeneration(fresh)
+  expect(c.session.sync.get().historyEpoch).toBe(1)
+  expect(c.session.dms.get().rows).toEqual([])
+  for (const lane of Object.values(c.session.dms.get().lanes)) {
+    expect(lane.cursor).toBeUndefined(); expect(lane.done).toBe(false)
+  }
+  c.changes.mockClear(); c.listDms.mockClear()
+  await c.ready()
+  c.session.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  expect(c.changes.mock.calls.slice(0, 2).map(([q]) => q)).toEqual([{ lane: 'delta' }, { lane: 'coverage' }])
+  expect(c.listDms.mock.calls.some(([q]) => q.cursor === undefined && q.channel_id === undefined)).toBe(true)
+  expect(c.session.dms.get().rows[0]?.baseline?.as_of_seq).toBe(0)
+  expect(c.session.unread.get('D').unreadCount).toBe(0)
+  expect(c.listMessages).not.toHaveBeenCalled(); expect(c.markRead).not.toHaveBeenCalled()
   c.session.close()
 })
 

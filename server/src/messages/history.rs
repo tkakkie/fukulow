@@ -2,6 +2,31 @@ use super::MessageError;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
+/// The commit barrier must complete before opening this snapshot. Choose W here,
+/// alongside M and the mutable rows, rather than using the barrier's older W.
+pub(super) async fn page(
+    tx: &mut PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+    requested: Option<Uuid>,
+    fixed_w: Option<i64>,
+) -> Result<(Uuid, i64), MessageError> {
+    let generation = validate(tx, organization, channel, requested, None).await?;
+    let (latest, floor) = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT seq, mutation_seq FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2",
+    ).bind(organization).bind(channel).fetch_optional(tx).await?.unwrap_or((0, 0));
+    let w = fixed_w.unwrap_or(latest);
+    if w < floor {
+        return Err(MessageError::SnapshotExpired);
+    }
+    if w > latest {
+        return Err(MessageError::InvalidInput);
+    }
+    #[cfg(test)]
+    super::tests::history::pause(channel, "snapshot").await;
+    Ok((generation, w))
+}
+
 /// Call after authorization in the same fresh snapshot as the page data.
 pub(crate) async fn validate(
     tx: &mut PgConnection,

@@ -450,14 +450,33 @@ impl Connection<'_> {
                     if !self.protected(socket, channel_id).await? {
                         return Ok(());
                     }
+                    #[cfg(test)]
+                    super::tests::access_loss::pause(channel_id, "handoff_generation", 0).await;
+                    let history_generation = match self.visible(channel_id, None).await {
+                        Ok(generation) => generation,
+                        Err(MessageError::NotFound) => {
+                            self.unsubscribe(channel_id);
+                            return Self::event(
+                                socket,
+                                ServerEvent::ChannelAccessLost { channel_id },
+                            )
+                            .await;
+                        }
+                        Err(MessageError::OrganizationUnavailable) => {
+                            return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
+                        }
+                        Err(MessageError::Database(error)) => {
+                            tracing::info_span!(target: "fukulow", "database", operation = "websocket_authorize")
+                                .in_scope(|| crate::observability::database_failure(&error));
+                            return Err(1011);
+                        }
+                        Err(_) => return Err(1011),
+                    };
                     self.protected_event(
                         socket,
                         channel_id,
                         ServerEvent::Subscribed {
-                            history_generation: self
-                                .visible(channel_id, None)
-                                .await
-                                .map_err(|_| 1011u16)?,
+                            history_generation,
                             channel_id,
                             caught_up_seq: caught_up_seq.min(latest),
                         },

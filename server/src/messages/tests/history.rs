@@ -1,4 +1,173 @@
 use super::*;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+use tokio::sync::Semaphore;
+
+struct Gate {
+    entered: Semaphore,
+    release: Semaphore,
+}
+type GateKey = (Uuid, &'static str);
+static GATES: LazyLock<Mutex<HashMap<GateKey, Arc<Gate>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(crate) async fn pause(channel: Uuid, phase: &'static str) {
+    let gate = GATES.lock().unwrap().remove(&(channel, phase));
+    if let Some(gate) = gate {
+        gate.entered.add_permits(1);
+        gate.release.acquire().await.unwrap().forget();
+    }
+}
+
+#[fukulow_test::test]
+async fn page_watermarks_share_the_mutation_snapshot_after_the_commit_barrier(pool: PgPool) {
+    let (app, org, _, channel, token) = fixture(&pool).await;
+    let root = sent(
+        &app,
+        &token,
+        channel,
+        json!({"client_message_id":Uuid::new_v4(),"body":"original","topic_name":"Topic"}),
+    )
+    .await;
+    let id = root["id"].as_str().unwrap();
+    let topic = root["topic_id"].as_str().unwrap();
+    let routes = [
+        "messages".to_owned(),
+        "timeline".into(),
+        "topics".into(),
+        format!("topics/{topic}/messages"),
+        format!("messages/{id}/chain"),
+        "reply-counts".into(),
+    ];
+    let mut w = 1;
+    for route in routes {
+        for fixed in [false, true] {
+            if route == "reply-counts" && fixed {
+                continue;
+            }
+            let gate = Arc::new(Gate {
+                entered: Semaphore::new(0),
+                release: Semaphore::new(0),
+            });
+            GATES
+                .lock()
+                .unwrap()
+                .insert((channel, "barrier"), gate.clone());
+            let read = {
+                let (app, token, route, id) =
+                    (app.clone(), token.clone(), route.clone(), id.to_owned());
+                tokio::spawn(async move {
+                    let query = if fixed {
+                        format!("?as_of_seq={w}")
+                    } else {
+                        String::new()
+                    };
+                    request(
+                        &app,
+                        if route == "reply-counts" {
+                            "POST"
+                        } else {
+                            "GET"
+                        },
+                        &format!("/api/v1/channels/{channel}/{route}{query}"),
+                        &token,
+                        if route == "reply-counts" {
+                            json!({"ids":[id]})
+                        } else {
+                            Value::Null
+                        },
+                    )
+                    .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+            // An Edit commits after the barrier read of W and before page BEGIN.
+            w += 1;
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("UPDATE channel_message_sequences SET seq=$3, mutation_seq=$3 WHERE organization_id=$1 AND channel_id=$2")
+                .bind(org).bind(channel).bind(w).execute(&mut *tx).await.unwrap();
+            sqlx::query("UPDATE messages SET version=$3,body='edited' WHERE organization_id=$1 AND channel_id=$2")
+                .bind(org).bind(channel).bind(w).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            gate.release.add_permits(1);
+            let response = read.await.unwrap();
+            assert_eq!(
+                response.status(),
+                if fixed {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::OK
+                },
+                "{route}, fixed={fixed}"
+            );
+            let data = body(response).await;
+            if fixed {
+                assert_eq!(
+                    data,
+                    json!({"error":"snapshot_expired"}),
+                    "{route}: no partial page"
+                );
+            } else {
+                assert_eq!(data["as_of_seq"], w, "{route}");
+                if route != "reply-counts" {
+                    assert!(data.to_string().contains("edited"), "{route}: {data}");
+                }
+            }
+        }
+    }
+}
+
+#[fukulow_test::test]
+async fn mutation_after_snapshot_watermark_cannot_replace_the_page_body(pool: PgPool) {
+    for fixed in [false, true] {
+        let (app, org, _, channel, token) = fixture(&pool).await;
+        sent(&app, &token, channel, input(Uuid::new_v4(), "original")).await;
+        let gate = Arc::new(Gate {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        GATES
+            .lock()
+            .unwrap()
+            .insert((channel, "snapshot"), gate.clone());
+        let read = {
+            let (app, token) = (app.clone(), token.clone());
+            tokio::spawn(async move {
+                request(
+                    &app,
+                    "GET",
+                    &format!(
+                        "/api/v1/channels/{channel}/messages{}",
+                        if fixed { "?as_of_seq=1" } else { "" }
+                    ),
+                    &token,
+                    Value::Null,
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE channel_message_sequences SET seq=2,mutation_seq=2 WHERE organization_id=$1 AND channel_id=$2").bind(org).bind(channel).execute(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE messages SET body='edited',version=2 WHERE organization_id=$1 AND channel_id=$2").bind(org).bind(channel).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        gate.release.add_permits(1);
+        let response = read.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let data = body(response).await;
+        assert_eq!(data["as_of_seq"], 1);
+        assert_eq!(data["messages"][0]["body"], "original");
+        assert_eq!(data["messages"][0]["version"], 1);
+    }
+}
 
 #[fukulow_test::test]
 async fn bootstrap_uses_explicit_event_watermark_without_visible_messages(pool: PgPool) {

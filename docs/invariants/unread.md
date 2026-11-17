@@ -83,3 +83,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [sync](sync.md): `a plain create below a retired mutation version floor still enters Unread`
 
 - [sync](sync.md): `Organization generation resets every Channel and preserves send intent and late 401 in both cores`
+
+- [sync](sync.md): `Organization history reset restarts DM discovery and browsing with fresh lower baselines`

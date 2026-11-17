@@ -180,6 +180,8 @@ test('reselecting the current Channel leaves history unchanged and Back leaves f
 })
 
 test('C9 reselect retries once per click without History writes or automatic retries', async ({ page }) => {
+  const baseline = await page.request.get(`/api/v1/orgs/${org}/channels`)
+  const { history_generation } = await baseline.json() as import('../src/api-schema.d.ts').ChannelList
   let subscriptions = 0
   let allow = false
   await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => {
@@ -188,7 +190,7 @@ test('C9 reselect retries once per click without History writes or automatic ret
       if (message.type !== 'subscribe' || message.channel_id !== first) return
       subscriptions++
       const response: import('../src/api-schema.d.ts').ServerEvent = allow
-        ? { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: first, caught_up_seq: 0 }
+        ? { history_generation, type: 'subscribed', channel_id: first, caught_up_seq: 0 }
         : { type: 'error', channel_id: first, code: 'channel_not_found' }
       ws.send(JSON.stringify(response))
     })

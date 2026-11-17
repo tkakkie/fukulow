@@ -6,6 +6,21 @@ import type { Result, TopicSummaryResponse } from './api'
 const target: NavigationTarget = { organizationId: 'org', channelId: 'channel', topicId: 'topic', panel: 'reply:message' }
 const failure = (error: string, status = 404): Result<never> => ({ ok: false, kind: 'http', status, error })
 
+it('history reset fences pending hints and reboots the current target without cached anchors', async () => {
+  let complete!: (result: Result<TopicSummaryResponse>) => void
+  const topic = vi.fn(() => new Promise<Result<TopicSummaryResponse>>(resolve => { complete = resolve }))
+  const channelUnavailable = vi.fn()
+  const resolver = createNavigationTargets({ topic, reply: async () => failure('reply_chain_not_found'), channelUnavailable })
+  const old = resolver.load(target), late = complete
+  resolver.resetHistory()
+  expect(topic).toHaveBeenCalledTimes(2)
+  late(failure('channel not found')); await old
+  expect(channelUnavailable).not.toHaveBeenCalled()
+  expect(resolver.get().topic.status).toBe('loading')
+  complete(failure('topic_not_found')); await Promise.resolve(); await Promise.resolve()
+  resolver.close()
+})
+
 it('resource-not-found denies only that URL hint; Channel denial is C9 and Organization denial remains C10', async () => {
   for (const [error, status, calls] of [['topic_not_found', 404, 0], ['reply_chain_not_found', 404, 0], ['organization_unavailable', 404, 0], ['channel not found', 404, 2], ['forbidden', 403, 2]] as const) {
     const channelUnavailable = vi.fn()

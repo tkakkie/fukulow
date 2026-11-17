@@ -153,7 +153,7 @@ pub async fn topic_history(
         channel,
     )
     .await?;
-    let w = watermark(&state, organization, channel).await?;
+    watermark(&state, organization, channel).await?;
     crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
         require_visible(
             &mut *tx,
@@ -163,9 +163,7 @@ pub async fn topic_history(
         )
         .await?;
         reject_dm_topics(tx,organization,channel).await?;
-        let history_generation = history::validate(tx, organization, channel, query.history_generation, query.as_of_seq).await?;
-        if query.as_of_seq.is_some_and(|requested| requested > w) { return Err(MessageError::InvalidInput); }
-        let w = query.as_of_seq.unwrap_or(w);
+        let (history_generation, w) = history::page(tx, organization, channel, query.history_generation, query.as_of_seq).await?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
             .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
         if !exists {
@@ -218,11 +216,14 @@ pub(super) async fn watermark(
     organization: Uuid,
     channel: Uuid,
 ) -> Result<i64, MessageError> {
-    state.message_delivery.latest_seq(&state.pool, organization, channel).await.map_err(|error| {
+    let w = state.message_delivery.latest_seq(&state.pool, organization, channel).await.map_err(|error| {
         if matches!(&error, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock) {
             MessageError::ProjectionAdmissionRejected
         } else {
             MessageError::Database(error)
         }
-    })
+    })?;
+    #[cfg(test)]
+    tests::history::pause(channel, "barrier").await;
+    Ok(w)
 }

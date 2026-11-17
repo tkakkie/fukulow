@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dmListState, stepDmList } from '../web/src/dm-list.ts';
 import { demandFormalMix, retainFormalCohort, assertFormalCohort } from './dms-formal-mix.ts';
-const dm=(id:string)=>({id,kind:'dm' as const,peer:{id:'peer-'+id,name:'Peer',active:true},capabilities:{can_add_members:{allowed:false},can_remove_members:{allowed:false},can_manage_managers:{allowed:false},can_leave:{allowed:false}},as_of_seq:0,read_seq:0,unread_count:0,main_unread_count:0,mention_unread_count:0});
+const dm=(id:string)=>({history_generation:'00000000-0000-4000-8000-000000000515',id,kind:'dm' as const,peer:{id:'peer-'+id,name:'Peer',active:true},capabilities:{can_add_members:{allowed:false},can_remove_members:{allowed:false},can_manage_managers:{allowed:false},can_leave:{allowed:false}},as_of_seq:0,read_seq:0,unread_count:0,main_unread_count:0,mention_unread_count:0});
 for(const retained of [0,50,200])test(`successful multi-page discovery and concurrent creates preserve ${retained}-row samples across repeated O5 runs`,()=>{
   let state=dmListState(),serial=0;
   state.rows=Array.from({length:retained},()=>({identity:dm(String(++serial)),access:++state.serial,used:++state.clock}));
@@ -20,7 +20,7 @@ for(const retained of [0,50,200])test(`successful multi-page discovery and concu
       const rows=request.lane==='held'?(request.ids??[]).map(dm):Array.from({length:50},()=>dm(String(++serial)));
       const cursor=`${request.lane}-${run}-${used}`;
       const discovery=request.lane==='delta'||request.lane==='coverage';
-      const data=discovery?{dms:rows.map(({id,kind,peer})=>({id,kind,peer})),next_cursor:cursor,caught_up:false}:{dms:rows,next_cursor:cursor};
+      const data=discovery?{dms:rows.map(({id,kind,peer})=>({id,kind,peer})),next_cursor:cursor,caught_up:false}:{history_generation:'00000000-0000-4000-8000-000000000515',dms:rows,next_cursor:cursor};
       state=stepDmList(state,{type:'result',request,data}).state;
       if(request.lane!=='held')cursors.set(request.lane,cursor);
       state=retainFormalCohort(state,retained);assertFormalCohort(state,retained);

@@ -26,6 +26,7 @@ test.beforeEach(async ({ page }) => {
 test('same-chain navigation preserves cached scroll and list identity and reveals uncached anchors in one read', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   const root = await sendApiMessage(page.request, { body: '長い返信の起点' })
+  const history_generation = root.history_generation
   const messages: Message[] = [root, ...Array.from({ length: 10_000 }, (_, i) => ({
     ...root, id: crypto.randomUUID(), created_seq: i + 2, version: i + 2, deleted: false, client_message_id: crypto.randomUUID(),
     reply_to: root.id, reply_root_id: root.id,
@@ -33,7 +34,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
   }))]
   const base = `/api/v1/orgs/${orgId}/channels/${channelId}`
   const far = messages[8999]!
-  const timeline: components['schemas']['TimelinePage'] = { history_generation: '00000000-0000-4000-8000-000000000515',
+  const timeline: components['schemas']['TimelinePage'] = { history_generation,
     as_of_seq: 10_001, has_more: false,
     items: [root, far, messages.at(-1)!].map(message => ({ kind: 'message', message })),
   }
@@ -42,7 +43,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
   await page.routeWebSocket(`**/api/v1/orgs/${orgId}/ws`, ws => {
     ws.onMessage(data => {
       const message = JSON.parse(String(data)) as components['schemas']['ClientMessage']
-      if (message.type === 'subscribe') ws.send(JSON.stringify({ history_generation: '00000000-0000-4000-8000-000000000515',
+      if (message.type === 'subscribe') ws.send(JSON.stringify({ history_generation,
         type: 'subscribed', channel_id: message.channel_id, caught_up_seq: 10_001,
       } satisfies components['schemas']['Subscribed']))
     })
@@ -54,7 +55,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
     const after = Number(url.searchParams.get('after_seq') ?? 0)
     reads.push({ anchor: url.pathname.split('/').at(-2)!, after })
     const pageMessages = messages.filter(m => m.created_seq > after).slice(0, Number(url.searchParams.get('limit') ?? 50))
-    const data: components['schemas']['ReplyChainPage'] = { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (pageMessages).at(-1)?.created_seq ?? 0,
+    const data: components['schemas']['ReplyChainPage'] = { history_generation, as_of_seq: (pageMessages).at(-1)?.created_seq ?? 0,
       root_id: root.id, messages: pageMessages, has_more: pageMessages.at(-1)!.created_seq < 10_001,
     }
     if (after === 150 && heldRead) await heldRead
