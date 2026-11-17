@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { isIP } from 'node:net';
 import { readConfig, quote, type Config } from './dms-formal-config.ts';
 import { execute, checked, transferImage, type Executor } from './dms-formal-exec.ts';
 import { requireHeadroom, GiB, summaryLimit } from './dms-formal-storage.ts';
@@ -90,6 +91,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       if(!value || !/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(value))throw new Error('SSH HostName must be a routable IPv4 address or DNS name');return value;
     };
     const [appAddress,dbAddress]=local?['localhost','db']:await Promise.all([address(config.app),address(config.db)]);
+    if(!local && isIP(appAddress))throw new Error('Remote app SSH HostName must be a DNS hostname: HTTPS clients omit TLS SNI for IP addresses, which Caddy strict_sni_host rejects');
     const pin=(file:string,pattern:RegExp)=>{const value=pattern.exec(readFileSync(`${checkout}/${file}`,'utf8'))?.[1];if(!value)throw new Error('Missing repository image pin');return value;};
     const common={id,overhead,pilot,pilotImage:config.pilotImage,pilotSeconds:config.pilotSeconds ?? 60,target:config.target ?? 'ssh',loadScale:load.factor,load,limits:local?(config.limits ?? localLimits):undefined,sourceCheckout:checkout,localRoot:root,label,patchSha256,scenario:overhead||config.scenario==='smoke'?'main':config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:totalArms,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
     json('private-state.json',{...common,hosts});
