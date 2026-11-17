@@ -1,0 +1,27 @@
+[Unit]
+Description=Fukulow encrypted off-VPS backup
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=fukulow-backup
+Group=fukulow-backup
+# This operator-owned file contains only FUKULOW_BACKUP_CONFIG, an absolute path.
+EnvironmentFile=/etc/fukulow/backup-path.env
+WorkingDirectory=/opt/fukulow
+ExecStart=/usr/bin/node /opt/fukulow/scripts/backup-r2-daily.ts ${FUKULOW_BACKUP_CONFIG}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# The operator needs access to the Docker socket for Compose pg_dump; socket
+# access carries Docker authority. Do not hide the socket or deployment files.
+
+[Install]
+WantedBy=multi-user.target

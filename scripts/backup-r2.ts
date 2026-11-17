@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { createReadStream } from 'node:fs'
-import { lstat, mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
+import { constants, createReadStream } from 'node:fs'
+import { lstat, mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { backup } from './backup.ts'
 import { checksum, sha256, verifiedGeneration, type BackupBucket, type Manifest, parseManifest } from './backup-r2-model.ts'
 import { listObjects, runLockKey } from './backup-r2-list.ts'
-import { acquireLocalLock, privateDirectory, SafeFailure, sweepPartials, type RunLock } from './backup-safety.ts'
+import { acquireLocalLock, assertLocalLock, privateDirectory, SafeFailure, sweepPartials, type RunLock } from './backup-safety.ts'
 
 export interface Request { method: 'PUT' | 'HEAD' | 'GET' | 'DELETE'; key: string; headers: Record<string, string>; query?: Record<string, string>; body?: Buffer; digestOnly?: boolean }
 export interface Response { status: number; headers: Record<string, string>; body: Buffer; digest?: { sha256: string; size: number } }
@@ -57,9 +57,20 @@ export async function privateCurlConfig(configFile: string): Promise<string> {
     return path
   } catch { throw new Error('Private external curl config required') }
 }
+// Operator JSON and recipient reads share the curl config privacy contract, with
+// descriptor checks so FIFOs and symlink replacements cannot block or escape it.
+export async function readPrivateFile(configFile: string): Promise<string> {
+  const path = await privateCurlConfig(configFile)
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600 || info.size > 65_536) throw new Error('Private external config required')
+    return await handle.readFile('utf8')
+  } finally { await handle.close() }
+}
 export async function curlRunner(configFile: string, baseUrl: string, execute = executeCurl): Promise<Runner> {
   const path = await privateCurlConfig(configFile)
-  if (!/^https:\/\//.test(baseUrl) || /[\r\n"]/.test(baseUrl)) throw new Error('Invalid transport configuration')
+  if (!/^https:\/\//.test(baseUrl) || /[\r\n"\\]/.test(baseUrl)) throw new Error('Invalid transport configuration')
   return async request => {
     const directory = await mkdtemp(join(tmpdir(), 'backup-curl-'))
     try {
@@ -128,7 +139,7 @@ export async function fileDigest(path: string) {
 }
 export async function runBackup(options: {
   directory: string; recipient: string; bucket: UploadBucket
-  lock: RunLock
+  lock: RunLock; localLock?: () => void
   now: () => number; notify: (event: string) => Promise<void>
   dump?: (directory: string, capture: () => void) => string; encrypt?: (source: string, target: string, recipient: string) => void
 }) {
@@ -144,12 +155,13 @@ async function runBackupLocked(options: Parameters<typeof runBackup>[0]) {
   try {
     if (!options.recipient.trim()) throw new Error('Missing recipient')
     const directory = privateDirectory(options.directory)
-    release = acquireLocalLock(directory)
+    if (options.localLock) assertLocalLock(directory, options.localLock)
+    else release = acquireLocalLock(directory)
     sweepPartials(directory)
     // Conservative snapshot bound after preflight, immediately before pg_dump starts.
     let captureTime: string | undefined
     const capture = () => { captureTime = new Date(options.now()).toISOString() }
-    const source = options.dump ? options.dump(directory, capture) : backup(directory, capture, { localLock: release })
+    const source = options.dump ? options.dump(directory, capture) : backup(directory, capture, { localLock: options.localLock ?? release })
     if (!captureTime) throw new Error('Missing capture timestamp')
     temporary = await mkdtemp(join(options.directory, '.partial-age-'))
     const target = join(temporary, 'archive.dump.age')

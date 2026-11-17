@@ -51,7 +51,8 @@ export async function verifiedGeneration(bucket: Pick<ReadBucket, 'head' | 'get'
 }
 export async function inventory(bucket: ReadBucket, now: number) {
   const objects = await bucket.list()
-  const prefixes = new Set(objects.map(o => o.key.slice(0, o.key.lastIndexOf('/') + 1)))
+  // Locked provider probes are capacity only: never generations or prune candidates.
+  const prefixes = new Set(objects.filter(o => !/^backups\/verification-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\//.test(o.key)).map(o => o.key.slice(0, o.key.lastIndexOf('/') + 1)))
   const verified: Generation[] = [], malformed: string[] = []
   for (const prefix of prefixes) {
     try { verified.push(await verifiedGeneration(bucket, prefix, now)) } catch { malformed.push(prefix) }

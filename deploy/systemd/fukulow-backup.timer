@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Fukulow encrypted backup
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 UTC
+Persistent=true
+Unit=fukulow-backup.service
+
+[Install]
+WantedBy=timers.target

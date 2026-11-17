@@ -41,19 +41,22 @@ function field(node: Element, name: string, optional = false): string | undefine
   if (children.length !== 1 || children[0].children.length) throw new Error('Invalid listing field')
   return children[0].text
 }
-export async function listObjects(run: Runner, maxPages = 10_000): Promise<ObjectInfo[]> {
-  if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error('Invalid listing cap')
+export async function listObjects(run: Runner, maxPages = 10_000, maxKeys = 1000, prefix = ''): Promise<ObjectInfo[]> {
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1 || !Number.isInteger(maxKeys) || maxKeys < 1 || maxKeys > 1000) throw new Error('Invalid listing cap')
   const objects: ObjectInfo[] = [], keys = new Set<string>(), tokens = new Set<string>()
   let continuation: string | undefined
   for (let page = 0; page < maxPages; page++) {
     const response = await run({ method: 'GET', key: '', headers: {}, query: {
-      'list-type': '2', 'max-keys': '1000', ...(continuation ? { 'continuation-token': continuation } : {}),
+      'list-type': '2', 'max-keys': String(maxKeys), ...(prefix ? { prefix } : {}), ...(continuation ? { 'continuation-token': continuation } : {}),
     } })
     if (response.status !== 200) throw new Error('Listing failed')
     const root = xml(response.body), truncated = field(root, 'IsTruncated'), next = field(root, 'NextContinuationToken', true)
-    // This request enumerates all keys, without offsets, grouping or encoding.
+    // Inventory defaults to all keys; provider probes explicitly scope their own prefix.
+    // Neither permits offsets, grouping, encoding or a mismatched scope.
     // Validate every page before accepting any inventory, even after continuation.
-    for (const name of ['Prefix', 'StartAfter', 'Delimiter']) {
+    const echoedPrefix = field(root, 'Prefix', true)
+    if (prefix ? echoedPrefix !== prefix : echoedPrefix !== undefined && echoedPrefix !== '') throw new Error('Inconsistent listing scope')
+    for (const name of ['StartAfter', 'Delimiter']) {
       const value = field(root, name, true)
       if (value !== undefined && value !== '') throw new Error('Inconsistent listing scope')
     }
@@ -61,11 +64,11 @@ export async function listObjects(run: Runner, maxPages = 10_000): Promise<Objec
     const echo = field(root, 'ContinuationToken', true)
     if ((truncated !== 'true' && truncated !== 'false') || (echo !== undefined && echo !== continuation)) throw new Error('Inconsistent listing')
     const contents = root.children.filter(child => child.name === 'Contents'), count = field(root, 'KeyCount')
-    if (!/^\d+$/.test(count ?? '') || Number(count) !== contents.length || contents.length > 1000) throw new Error('Inconsistent listing count')
+    if (!/^\d+$/.test(count ?? '') || Number(count) !== contents.length || contents.length > maxKeys) throw new Error('Inconsistent listing count')
     for (const entry of contents) {
       const key = field(entry, 'Key'), size = field(entry, 'Size'), modified = field(entry, 'LastModified')
       const uploaded = Date.parse(modified ?? '')
-      if (!key || keys.has(key) || !/^\d+$/.test(size ?? '') || !Number.isSafeInteger(Number(size)) ||
+      if (!key || !key.startsWith(prefix) || keys.has(key) || !/^\d+$/.test(size ?? '') || !Number.isSafeInteger(Number(size)) ||
         !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(modified ?? '') || !Number.isFinite(uploaded)) throw new Error('Invalid listing object')
       keys.add(key)
       if (key !== runLockKey) objects.push({ key, size: Number(size), uploaded, checksum: '' })
