@@ -50,6 +50,7 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 | Evicted Mention evidence stays bounded and counts unresolved until refreshed; retained Unread evidence contains no names or bodies | `web/src/mention-unread.test.ts::Mention eviction stays unresolved until sufficient baselines and retains no names or bodies` |
 
 | Exact main Unread and Mention counts use a covering Message range after VACUUM; the range excludes own sends without Message heap fetches | `server/src/messages/tests/unread/measurement.rs::main_unread_count_uses_covering_range_without_message_heap` |
+| Topic count plans under RLS skip fully read Topics and read prefixes; only unread Message ranges are scanned in Custom, Generic and Auto modes | `server/src/messages/tests/unread/measurement.rs::unread_topic_counts_read_only_unread_topic_ranges` |
 
 | Later versions replace the same Message's Unread Mention evidence; tombstones stop contributing | `web/src/mention-unread.test.ts::Unread replaces Mention evidence by version for edits and tombstones of the same Message` |
 
