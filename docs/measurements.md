@@ -811,11 +811,11 @@ Validation on Node v26.13.0: type check and all 61 tests passed. The corrected s
 | 1M positions, cold | 0.57 / 235 | 118 / 34,126 | 0.66 / 209 |
 | 1M positions, warm | 0.25 / 222 | 7.4 / 6,675 | 0.25 / 199 |
 
-- **Replay.** Buffer counts were identical in all three rounds at 1M positions; at 100k one round differed (events-ids 3,706, log-ids 299). Timing spread exceeds the 10% rule. The events-ids page merges `messages_organization_id_channel_id_seq_key` with `channel_events`. At 1M positions its index scan returned 45 rows but read 33,808 buffers, because Edit/Move/Delete churn left dead versions in the recent range. log-ids reads the append-only log, then does 45 primary-key lookups. Creation-only pages are about equal; deep mutated pages read 23–52% more buffers in both candidate arms than baseline, all under 1 ms. Settled (vacuumed) replay was not measured.
+- **Replay.** Buffer counts were identical in all three rounds at 1M positions; at 100k, one of three rounds per candidate arm differed on recent pages (cold: events-ids 3,706 vs 3,723, log-ids 299 vs 209; warm similar). Timing spread exceeds the 10% rule. The events-ids page merges `messages_organization_id_channel_id_seq_key` with `channel_events`. At 1M positions its index scan returned 45 rows but read 33,808 buffers, because Edit/Move/Delete churn left dead versions in the recent range. log-ids reads the append-only log, then does 45 primary-key lookups. Creation-only pages are about equal; deep mutated pages read 9–52% more buffers than baseline in both candidate arms (24–52% at 1M), all under 1 ms. Settled (vacuumed) replay was not measured.
 - **Migration** (1M Messages, blocking SHARE-lock cutover, three rounds; WAL and storage within 0.1% for log-ids and the snapshot arms; events-ids spread 13%, invalid, see the full-run record):
   - log-ids: about 3.7 s of writer blocking, 455 MiB WAL, +153 MiB storage (+16.1%).
   - events-ids: about 40 ms.
-  - snapshot arms: about 6.4 s, 830–838 MiB WAL, +545 MiB.
+  - snapshot arms: about 6.3 s of writer blocking, 830–838 MiB WAL, +545 MiB.
 
   This is not an online-migration claim.
 - **Unevaluated, handed to #515, #141, #287 and #431.** This covers:
