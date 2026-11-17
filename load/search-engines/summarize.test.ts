@@ -51,7 +51,7 @@ test('judgement: 500 ms p95 in every round, index use, completeness and denials;
   const runs = (p95: number, planList = plans(['ja2-rare','ja3-rare','mixed']), equal = true) => ['trgm','bigm','pgroonga'].flatMap(engine=>[1,2,3].map(round=>({
     manifestHash:'h',round,engine,buildMs:1,relationBytes:1,physicalDeltaBytes:1,walBytesPerInsert:1,write:{query:'w',n:1,p50:1,p95:1,p99:1,tps:1},
     latencies:queries.map(q=>({query:q.id,n:100,p50:1,p95:round===2&&engine==='bigm'?p95:10,p99:p95,tps:1})),
-    ...(round===1?{plans:planList,completeness:{equal}}:{})})));
+    ...(round===1?{plans:planList,completeness:{equal,cases:queries.length*8}}:{})})));
   const by = (r: ReturnType<typeof judge>, e: string) => r.find(x=>x.engine===e)!;
   const pass = judge(runs(500),queries,definer);
   assert.deepEqual(pass.map(r=>r.status),['PASS','PASS','PASS']);
@@ -61,7 +61,15 @@ test('judgement: 500 ms p95 in every round, index use, completeness and denials;
   assert.equal(by(judge(runs(10,plans(['ja3-rare','mixed'])),queries,definer),'bigm').index,'FAIL');
   assert.equal(by(judge(runs(10,plans(['ja3-rare','mixed'])),queries,definer),'trgm').index,'PASS');
   assert.equal(by(judge(runs(10,plans(['ja2-rare','ja3-rare','mixed'],true)),queries,definer),'pgroonga').index,'FAIL');
-  assert.equal(by(judge(runs(10,undefined,false),queries,definer),'trgm').completeness,'NOT EVALUATED');
+  assert.equal(by(judge(runs(10,undefined,false),queries,definer),'trgm').completeness,'FAIL');
+  assert.equal(by(judge(runs(10).map(r=>r.round===1?{...r,completeness:{equal:true,cases:3}}:r),queries,definer),'trgm').completeness,'NOT EVALUATED');
+  assert.equal(by(judge(runs(10).map(r=>r.round===1?{...r,completeness:undefined}:r),queries,definer),'trgm').completeness,'NOT EVALUATED');
+  // A plan without boolean flags, or a query list with no gated rare query, is not evidence.
+  assert.equal(by(judge(runs(10).map(r=>r.round===1?{...r,plans:r.plans!.map(p=>({query:p.query}) as never)}:r),queries,definer),'trgm').index,'NOT EVALUATED');
+  const common = queries.filter(q=>q.id==='ja1-frequent');
+  assert.equal(by(judge(runs(10),common,definer),'trgm').index,'NOT EVALUATED');
+  // A measured failure is reported as FAIL even when another part lacks evidence.
+  assert.equal(by(judge(runs(500.1),queries,undefined),'bigm').status,'FAIL');
   assert.equal(by(judge(runs(10),queries,undefined),'trgm').status,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),undefined,definer),'trgm').status,'NOT EVALUATED');
   assert.equal(by(judge(runs(10).filter(r=>r.round!==3),queries,definer),'trgm').latency,'NOT EVALUATED');

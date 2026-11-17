@@ -10,7 +10,7 @@ type Run = {manifestHash:string,runKind?:string,round:number,engine:string,build
   write:Latency,walBytesPerInsert:number,latencies?:Latency[]};
 const readJson = (path: string) => { try { return JSON.parse(readFileSync(path,'utf8')); } catch { return undefined; } };
 type Plan = {query:string,searchIndex:boolean,seqScanMessages:boolean};
-type JudgedRun = Run & {plans?:Plan[],completeness?:{equal:boolean}};
+type JudgedRun = Run & {plans?:Plan[],completeness?:{equal:boolean,cases?:number}};
 type Status = 'PASS'|'FAIL'|'NOT EVALUATED';
 // Criteria fixed before the 1M re-measurement (#153, maintainer 2026-11-17); never changed after results.
 // Developer-Mac evidence (maintainer 2026-11-15), not a formal #431 budget; P2 production adoption stays held (#314).
@@ -34,15 +34,21 @@ export function judge(runs: JudgedRun[], queries?: {id:string,scalars:number}[],
     const slow = group.flatMap(r=>(r.latencies ?? []).filter(l=>l.p95>criteria.p95LimitMs).map(l=>`round ${r.round} ${l.query} ${l.p95.toFixed(1)} ms`));
     const plans = first?.plans;
     const required = (queries ?? []).filter(q=>criteria.rareQueries.includes(q.id) && q.scalars>=criteria.minimumLength[engine]!).map(q=>q.id);
-    const index: Status = !plans || !ids.length || ids.some(id=>!plans.find(p=>p.query===id)) ? 'NOT EVALUATED'
+    const planFor = (id: string) => plans?.find(p=>p.query===id);
+    const index: Status = !plans || !ids.length || !required.length
+      || ids.some(id=>typeof planFor(id)?.searchIndex!=='boolean' || typeof planFor(id)?.seqScanMessages!=='boolean') ? 'NOT EVALUATED'
       : plans.some(p=>p.seqScanMessages) || required.some(id=>!plans.find(p=>p.query===id)?.searchIndex) ? 'FAIL' : 'PASS';
-    const completeness: Status = first?.completeness?.equal===true ? 'PASS' : 'NOT EVALUATED';
+    // run.ts completeness(): six actors, the owner index and the direct access path per query.
+    const checked = first?.completeness;
+    const completeness: Status = checked?.equal===false ? 'FAIL'
+      : checked?.equal===true && ids.length>0 && checked.cases===ids.length*8 ? 'PASS' : 'NOT EVALUATED';
     const names = denialCases.map(c=>c.name);
     const sameCases = JSON.stringify(definer?.cases)===JSON.stringify(names);
     const everyEngine = ['none','trgm','bigm','pgroonga'].every(e=>definer?.results?.find(r=>r.engine===e)?.cases===names.length*2);
     const denials: Status = sameCases && everyEngine ? 'PASS' : 'NOT EVALUATED';
     const parts = {latency,index,completeness,denials};
-    const status: Status = Object.values(parts).includes('NOT EVALUATED') ? 'NOT EVALUATED' : Object.values(parts).includes('FAIL') ? 'FAIL' : 'PASS';
+    // A measured failure is reported even when another part lacks evidence; missing evidence never passes.
+    const status: Status = Object.values(parts).includes('FAIL') ? 'FAIL' : Object.values(parts).includes('NOT EVALUATED') ? 'NOT EVALUATED' : 'PASS';
     return {engine,status,...parts,slow,searchIndexQueries:plans?.filter(p=>p.searchIndex).map(p=>p.query) ?? [],requiredSearchIndex:required,
       scope:'MAC developer-Mac comparison (maintainer 2026-11-15); not a formal #431 budget; P2 production adoption held (#314)'};
   });
