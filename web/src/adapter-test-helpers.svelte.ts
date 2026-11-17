@@ -71,6 +71,7 @@ export function fakeNetwork() {
   const topicLists: Record<string, Result<TopicPage>> = {}
   const topicSummaries: Record<string, Result<TopicSummaryResponse>> = {}
   const topicMessages: Record<string, Result<MessagePage>> = {}
+  const replyCountPages: Record<string, import('./api').ReplyCountPage> = {}
   const replyChains: Record<string, Result<ReplyChainPage>> = {}
   const replyHistory: { channel: string; anchor: string; query?: { after_seq?: number; limit?: number } }[] = []
   const sends: ({ channel: string; body: SendMessageRequest } & Deferred<Result<Message>>)[] = []
@@ -139,7 +140,7 @@ export function fakeNetwork() {
       main_unread_count: 0,
     }
   }
-  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'unreadApi' | 'sync'> => ({
+  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'replyCountsApi' | 'unreadApi' | 'sync'> => ({
     channelsApi: {
       listChannels() {
         const d = deferred<Result<{ history_generation: string;  channels: Channel[] }>>()
@@ -197,6 +198,11 @@ export function fakeNetwork() {
         }
       },
     },
+    replyCountsApi: async (channel, body) => ok(replyCountPages[channel] ?? {
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: caughtUp[channel] ?? 0,
+      counts: body.ids.map(id => ({ message_id: id, root_id: id, reply_count: 0 })),
+    }),
     repliesApi: {
       async listReplyChain(channel, anchor, query) {
         replyHistory.push({ channel, anchor, query })
@@ -302,7 +308,7 @@ export function fakeNetwork() {
     topicLists,
     topicSummaries,
     topicMessages,
-    replyChains,
+    replyChains, replyCountPages,
     replyHistory,
     sends,
     lists,

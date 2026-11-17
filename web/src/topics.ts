@@ -717,6 +717,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     return () => { listeners.delete(listener) }
   }
   return {
+    countMessages(channel: string): Iterable<Message>[] {
+      const w = windows.get(channel)
+      return w ? [w.messages.values(), ...[...w.topics.values()].map(t => t.messages.values())] : []
+    },
     subscribe,
     activityAccess(channel: string) {
       const w = windows.get(channel)

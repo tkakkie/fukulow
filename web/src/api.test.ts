@@ -204,3 +204,14 @@ it('uses generated account security bodies with PUT or POST and preserves 403 wi
     expect(await run(f)).toEqual({ ok: true, data: undefined })
   }
 })
+
+it('posts exact Reply count batches with no-store and cancellation in the selected Organization and Channel', async () => {
+  const { getReplyCounts } = await import('./api')
+  const data: import('./api').ReplyCountPage = { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 5, counts: [{ message_id: 'child', root_id: 'root', reply_count: 10001 }] }
+  const f = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(data), { status: 200 }))
+  const abort = new AbortController()
+  expect(await getReplyCounts('org/1', 'c 1', { ids: ['child'], history_generation: data.history_generation }, abort.signal, f)).toEqual({ ok: true, data })
+  expect(f).toHaveBeenCalledWith('/api/v1/orgs/org%2F1/channels/c%201/reply-counts', {
+    credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: ['child'], history_generation: data.history_generation }), cache: 'no-store', signal: abort.signal,
+  })
+})

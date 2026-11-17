@@ -13,7 +13,7 @@
     discardAndFocusComposer,
     focusTarget,
   } from './focus-management'
-  import { countRepliesByMessageId, type RepliesAdapter } from './replies.svelte'
+  import { type RepliesAdapter } from './replies.svelte'
   import { foldTopicName, type ChannelSync } from './sync.svelte'
   import {
     applyTimelineScrollAction,
@@ -118,9 +118,7 @@
       ? (scrolledFirstUnreadId ?? entry.firstUnread?.id ?? null)
       : null,
   )
-  const replyCounts = $derived(
-    countRepliesByMessageId([s.messages, view.messages, rState?.messages ?? []]),
-  )
+  const replyCounts = $derived(replies?.counts ?? {})
   const channelUnavailable = $derived(s.status === 'unavailable' || tState.unavailable)
   const topicUnavailable = $derived(
     !organizationUnavailable && !channelUnavailable && (topicStatus === 'unavailable' || view.notFound),
@@ -593,7 +591,7 @@
                 mentions={m.mentions}
                 {resolveMentionName}
                 {selfId}
-                replyCount={replyCounts.get(m.id) ?? 0}
+                replyCount={replyCounts[m.reply_root_id ?? m.id] ?? null}
                 focusable
                 rovingTabindex={rovingRowId === m.id ? 0 : -1}
                 onopenreplies={onopenreplies && !targetUnavailable

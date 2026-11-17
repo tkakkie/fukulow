@@ -13,7 +13,7 @@
     discardAndFocusComposer,
     focusTarget,
   } from './focus-management'
-  import { countRepliesByMessageId, type RepliesAdapter } from './replies.svelte'
+  import { type RepliesAdapter } from './replies.svelte'
   import type { ChannelSync } from './sync.svelte'
   import {
     applyTimelineScrollAction,
@@ -134,13 +134,7 @@
       ? (scrolledFirstUnreadId ?? entry.firstUnread?.id ?? null)
       : null,
   )
-  const replyCounts = $derived(
-    countRepliesByMessageId([
-      s.messages,
-      lines.flatMap((l) => (l.kind === 'message' ? [l.message] : [])),
-      rState?.messages ?? [],
-    ]),
-  )
+  const replyCounts = $derived(replies?.counts ?? {})
   const mainPending = $derived(s.pending.filter((p) => !p.replyTo && !p.topicId))
   const effectiveStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
     targetUnavailable
@@ -588,7 +582,7 @@
                 mentions={line.message.mentions}
                 {resolveMentionName}
                 {selfId}
-                replyCount={replyCounts.get(line.message.id) ?? 0}
+                replyCount={replyCounts[line.message.reply_root_id ?? line.message.id] ?? null}
                 focusable
                 rovingTabindex={rovingRowId === line.message.id ? 0 : -1}
                 onopenreplies={onopenreplies && !targetUnavailable

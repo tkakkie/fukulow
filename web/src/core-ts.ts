@@ -20,3 +20,5 @@ export function createCore(selfId: string): SyncCore {
     },
   }
 }
+
+export { createReplyCountCore } from './reply-count-core-ts'

@@ -219,3 +219,18 @@ mod tests {
         Ok(())
     }
 }
+
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct WasmReplyCounts(crate::reply_counts::ReplyCounts);
+#[wasm_bindgen]
+impl WasmReplyCounts {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn step(&mut self, input: &str) -> Result<String, JsValue> {
+        let input = serde_json::from_str(input).map_err(error)?;
+        serde_json::to_string(&self.0.step(input)).map_err(error)
+    }
+}

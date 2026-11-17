@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { countRepliesByMessageId, repliesAdapter } from './replies.svelte'
+import { repliesAdapter } from './replies.svelte'
 import { syncAdapter } from './sync.svelte'
 import { ok, reply, replyClient, root } from './reply-test-helpers'
 import { mount, settle } from './adapter-test-helpers.svelte'
@@ -68,15 +68,6 @@ it('composition close and replacement clear observed chains and fence adapter re
   expect(view.last.messages).toEqual([])
   await adapter.open(root()); expect(adapter.state.messages).toEqual([])
   await view.unmount(); expect(vi.getTimerCount()).toBe(0)
-})
-
-it('countRepliesByMessageId deduplicates messages across sources and counts by reply_root_id and reply_to', () => {
-  const m1 = root()
-  const r2 = reply(2, 'id1')
-  const r3 = reply(3, 'id2')
-  const counts = countRepliesByMessageId([[m1, r2], [m1, r2, r3]])
-  expect(counts.get('id1')).toBe(2)
-  expect(counts.get('id2')).toBe(1)
 })
 
 it('channel.reply(replyRootId) manages per-chain drafts, hasUnsavedChanges, submit, detached refusal restore and restore()', async () => {
