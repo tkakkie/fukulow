@@ -24,14 +24,17 @@ export async function measure(url: string, cookie: string, scenario: Scenario, r
   const start = performance.now();
   const perReader = pilot ? 50 : 2500;
   await Promise.all(Array.from({ length: readers }, async (_, reader) => {
+    let due = performance.now();
     for (let i = 0; i < perReader; i++) {
-      const iterationStart = performance.now();
       try { run.latencies.push(await request(reader * perReader + i)); }
       catch { run.errors++; check(); }
-      // At most 160 opens/s. Slow responses reduce throughput; never catch up in a burst.
+      // Absolute schedule at 160 opens/s, so timer overshoot does not accumulate. A reader
+      // more than one interval behind restarts its schedule: slow responses reduce
+      // throughput and never trigger a catch-up burst.
       if (i + 1 < perReader) {
-        const remaining = intervalMs - (performance.now() - iterationStart);
-        if (remaining > 0) await new Promise(r => setTimeout(r, Math.ceil(remaining)));
+        due = Math.max(due + intervalMs, performance.now() - intervalMs);
+        const remaining = due - performance.now();
+        if (remaining > 0) await new Promise(r => setTimeout(r, remaining));
       }
     }
   }));
