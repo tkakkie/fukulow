@@ -48,7 +48,7 @@ RUN find server/src api-types/src client-core/src -name "*.rs" -exec touch {} +
 COPY --from=web /app/web/dist web/dist
 RUN cargo build --locked --release -p fukulow-server
 
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 RUN groupadd --gid 10001 fukulow \
  && useradd --uid 10001 --gid fukulow --no-create-home --shell /usr/sbin/nologin fukulow
 COPY --from=server /app/target/release/fukulow-server /usr/local/bin/fukulow-server
