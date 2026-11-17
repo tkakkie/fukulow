@@ -2,8 +2,8 @@
  * Pilot: node load/reply-counts-run.ts --pilot --out /private/tmp/fk409p-pilot
  * Formal: node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal
  * Builds the current release Dockerfile before any samples; no .env/Compose.
- * Open-loop arrivals: 4 requests per 25 ms tick (160/s, as load/scheduler.ts), independent
- * of responses. A start lag >=25 ms stops dispatch without catch-up and invalidates the run.
+ * Open-loop arrivals: 16 requests per 100 ms tick (160/s, as load/scheduler.ts), independent
+ * of responses. A start lag >=100 ms stops dispatch without catch-up and invalidates the run.
  * Peak in-flight >256 aborts as FAIL (1.6 s of arrivals bounds overload).
  * No concurrent writes/subscribers, plain loopback HTTP (no TLS/proxy).
  * Static exact-count acceptance, not server capacity.
@@ -128,7 +128,7 @@ try {
     host: { cpus: cpus(), memory: totalmem(), platform: platform(), release: release(), arch: arch() }, node: process.version,
     docker: JSON.parse(docker('info', '--format', '{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
     pgImage, scenarios: Object.fromEntries(scenarios.map(s => [s, { ...sizing(s), targetMs: target(s) }])), perTick, tickMs, nominalRate, inFlightCap, samples: pilot ? 200 : 10000, repeats: pilot ? 1 : 3,
-    method: 'Nearest-rank; open-loop 160/s as 4 requests per 25 ms tick (load/scheduler.ts model), no response waits, shifting or catch-up. Start lag >=25 ms stops dispatch: NOT EVALUATED. In-flight >256 aborts: FAIL (1.6 s of arrivals bounds overload). Primary scheduled-start to full body; secondary send-to-body; validation excluded. Record lag p99/max and peak in-flight. First request then 100 sequential warm-ups; 10000 samples/repeat. Static dataset; no writes/subscribers/proxy/TLS. First after DB restart, OS caches retained. Exact results checked every request. Default production role/pool/settings.',
+    method: 'Nearest-rank; open-loop 160/s as 16 requests per 100 ms tick (load/scheduler.ts model), no response waits, shifting or catch-up. Start lag >=100 ms stops dispatch: NOT EVALUATED. In-flight >256 aborts: FAIL (1.6 s of arrivals bounds overload). Primary scheduled-start to full body; secondary send-to-body; validation excluded. Record lag p99/max and peak in-flight. First request then 100 sequential warm-ups; 10000 samples/repeat. Static dataset; no writes/subscribers/proxy/TLS. First after DB restart, OS caches retained. Exact results checked every request. Default production role/pool/settings.',
     sourceHashes: Object.fromEntries(files.map(p => [p, createHash('sha256').update(readFileSync(p)).digest('hex')])), snapshot: snapshot() });
   writeArtifact('source.patch', command('git', ['diff', 'HEAD']));
   console.log('Building release app before measurement');

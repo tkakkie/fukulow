@@ -58,19 +58,19 @@ test('fixed targets cannot pass pilot, incomplete, missing, errors or target mis
 });
 
 test('absolute open-loop schedule never depends on response completion', () => {
-  assert.equal(perTick, 4);
-  assert.equal(tickMs, 25);
-  for (const k of [0, 1, 2, 3]) assert.equal(scheduleTime(123, k), 123);
-  assert.equal(scheduleTime(123, 4), 148);
-  assert.equal(scheduleTime(123, 9999), 123 + 2499 * 25);
-  // 10,000 requests span 2,499 ticks: 160/s offered, independent of responses.
-  assert.equal(scheduleTime(0, 9999) - scheduleTime(0, 0), 62475);
+  assert.equal(perTick, 16);
+  assert.equal(tickMs, 100);
+  for (const k of [0, 1, 15]) assert.equal(scheduleTime(123, k), 123);
+  assert.equal(scheduleTime(123, 16), 223);
+  assert.equal(scheduleTime(123, 9999), 123 + 624 * 100);
+  // 10,000 requests span 624 ticks: 160/s offered, independent of responses.
+  assert.equal(scheduleTime(0, 9999) - scheduleTime(0, 0), 62400);
 });
 test('start lag misses only strictly beyond one interval', () => {
   assert.deepEqual(startLag(100, 99), { lagMs: 0, missed: false });
   assert.deepEqual(startLag(100, 100), { lagMs: 0, missed: false });
-  assert.deepEqual(startLag(100, 124.999), { lagMs: 24.998999999999995, missed: false });
-  assert.deepEqual(startLag(100, 125), { lagMs: 25, missed: true });
+  assert.deepEqual(startLag(100, 199.999), { lagMs: 99.999, missed: false });
+  assert.deepEqual(startLag(100, 200), { lagMs: 100, missed: true });
   assert.equal(startLag(100, 1000).missed, true);
 });
 test('missed deadlines invalidate even a low p95; overload and scheduled latency fail', () => {
