@@ -532,7 +532,7 @@ test('app pool settings forward defaults, overrides and invalid empty values onl
       { FUKULOW_DB_MAX_CONNECTIONS: '', FUKULOW_DB_ACQUIRE_TIMEOUT_MS: '' }]) {
       const config = JSON.parse(execFileSync('docker', args(profile),
         { cwd, env: { ...env, ...overrides }, encoding: 'utf8' }))
-      for (const [name, fallback] of [['FUKULOW_DB_MAX_CONNECTIONS', '20'], ['FUKULOW_DB_ACQUIRE_TIMEOUT_MS', '1000']]) {
+      for (const [name, fallback] of [['FUKULOW_DB_MAX_CONNECTIONS', '20'], ['FUKULOW_DB_ACQUIRE_TIMEOUT_MS', '5000']]) {
         assert.equal(config.services.app.environment[name], overrides[name as keyof typeof overrides] ?? fallback)
         assert.equal(config.services.migrate.environment[name], undefined)
       }

@@ -64,7 +64,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             .as_deref(),
     )?;
     let pool = fukulow_server::database::PoolConfig::from_env()?
-        .options()
         .connect(&database_url)
         .await
         .map_err(|error| {
@@ -79,6 +78,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|_| "Listener bind failed (diagnostics suppressed)")?;
+    // Before serving; kept after the bind so the #151 baseline patch context is unchanged.
+    fukulow_server::database::PoolConfig::validate_session(&pool).await?;
     tracing::info!(target: "fukulow", event = "server_listening");
     let signal = fukulow_server::signal()?;
     let shutdown = fukulow_server::shutdown::Shutdown::default();

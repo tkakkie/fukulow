@@ -134,7 +134,6 @@ async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
     let f = fixture(&pool).await;
     let isolated_pool = crate::database::PoolConfig::configured(Some("3"), None)
         .unwrap()
-        .options()
         .connect_with(f.state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
