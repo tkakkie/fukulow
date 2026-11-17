@@ -18,14 +18,15 @@ test('manifest v2 stays as recorded for the #153 1M run',()=>{
 });
 test('v3 changes only the version and sourceHashes; every condition equals v2',()=>{
   const strip = ({version,sourceHashes,...rest}: Record<string,unknown>) => rest;
-  const v2 = recorded(2).frozen;
-  assert.deepEqual(strip(frozen),strip(v2));
-  assert.equal(frozen.version,3);
+  // Recorded v3, not the live snapshot: the guarantee must not depend on the local Node version.
+  const v2 = recorded(2).frozen, v3 = recorded(3).frozen;
+  assert.deepEqual(strip(v3),strip(v2));
+  assert.equal(v3.version,3);
   const before = new Map(v2.sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
-  const changed = frozen.sourceHashes.filter(s=>before.get(s.path)!==s.sha256).map(s=>s.path);
+  const changed = v3.sourceHashes.filter((s: {path:string;sha256:string})=>before.get(s.path)!==s.sha256).map((s: {path:string})=>s.path);
   // Reviewed: the slice-4 migration, its column grants, its LF attribute line and the version pointer itself.
   assert.deepEqual(changed,['.gitattributes','deploy/db-grants.sql','load/search-engines/manifest.ts','server/migrations/202611190515_history_generation.sql']);
-  assert.ok(v2.sourceHashes.every((s: {path:string})=>frozen.sourceHashes.some(t=>t.path===s.path)));
+  assert.ok(v2.sourceHashes.every((s: {path:string})=>v3.sourceHashes.some((t: {path:string})=>t.path===s.path)));
 });
 test('manifest v1 stays as recorded for the 2026-11-17 results',()=>{
   const v1 = recorded(1);
