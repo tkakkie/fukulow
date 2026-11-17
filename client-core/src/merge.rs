@@ -196,6 +196,8 @@ impl Step<'_> {
         }
         self.cap_versions(id, TOTAL_MESSAGE_LIMIT);
         if recovery && self.channel(id).watched {
+            // A snapshot started before this rejected state cannot satisfy its recovery.
+            self.invalidate(id, false);
             self.history(id, Page::Latest, None);
         }
         self.settle(id, &valid);

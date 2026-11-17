@@ -34,7 +34,7 @@ it('keeps duplicate Mention arrays stable and accepts a refreshed display name',
   expect(renamed.state.channels.A.messages[0].mentions![0].name).toBe('Renamed')
 })
 
-function boot() {
+function boot(seq = 100) {
   let state = initialState('me')
   const feed = (input: Input) => {
     if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
@@ -46,8 +46,8 @@ function boot() {
   const connection = state.connection!
   feed({ type: 'connection_ready', connection })
   const latest = feed({ type: 'watch', channel: 'A' }).find(e => e.type === 'fetch_history')!
-  feed({ type: 'history_result', request: latest.id, page: { messages: [record(100)], has_more: true } })
-  feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } })
+  feed({ type: 'history_result', request: latest.id, page: { messages: [record(seq)], has_more: true } })
+  feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: seq } })
   const event = (seq: number) => feed({ type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   return { feed, event, get: () => state, connection }
 }
@@ -795,7 +795,8 @@ it('retiring odd creations 1 through 801 never silently loses create 2', () => {
   expect(state.channels.A.messages).toEqual([])
   for (const seq of [1, 2]) feed({ type: 'event', connection, event: { type: 'message', seq, kind: 'create', message: record(seq) } })
   expect(state.channels.A.cursor).toBe(2)
-  expect(state.channels.A.latest).toBe(recovery)
+  expect(state.requests[recovery]).toMatchObject({ stale: true })
+  recovery = state.channels.A.latest!
   const superseded = recovery
   const reretirement = feed({ type: 'settle_history', channel: 'A', messages: [{ ...record(3000), version: 20_000 }] })
   recovery = id(reretirement, 'fetch_history')
@@ -805,9 +806,64 @@ it('retiring odd creations 1 through 801 never silently loses create 2', () => {
   feed({ type: 'history_result', request: recovery, page: { messages: [record(1), record(2)], has_more: false } })
   expect(state.channels.A.messages).toContainEqual(record(2))
   expect(state.channels.A.cursor).toBe(2)
-  // Even after the first recovery, a fenced record must request fresh authority.
+  expect(state.channels.A.retiredThrough).toBeUndefined()
   expect(feed({ type: 'event', connection, event: { type: 'message', seq: 3, kind: 'create', message: record(3) } }))
-    .toContainEqual(expect.objectContaining({ type: 'fetch_history', page: 'latest' }))
+    .not.toContainEqual(expect.objectContaining({ type: 'fetch_history', page: 'latest' }))
+  expect(state.channels.A.messages).toContainEqual(record(3))
+})
+
+it('a rejected mutation fences an already in-flight latest snapshot and requires a replacement', () => {
+  const d = boot(22_000)
+  d.feed({ type: 'settle_history', channel: 'A', messages: [
+    { ...record(19_000), version: 19_500 },
+    ...Array.from({ length: 1500 }, (_, i) => ({ ...record(20_000 + i), version: 22_002 + i })),
+  ] })
+  expect(d.get().channels.A.retiredVersions).toContainEqual({ start: 19_000, end: 19_000 })
+  expect(d.get().channels.A.messages.some(m => m.id === 'id19000')).toBe(false)
+  const stale = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
+  const effects = d.feed({ type: 'event', connection: d.connection, event: {
+    type: 'message', seq: 22_001, kind: 'delete', message: { ...record(19_000), version: 22_001, deleted: true },
+  } })
+  const fresh = id(effects, 'fetch_history')
+  expect(fresh).not.toBe(stale)
+  expect(d.get().requests[stale]).toMatchObject({ stale: true })
+  const before = d.get().channels.A.messages
+  d.feed({ type: 'history_result', request: stale, page: {
+    messages: [{ ...record(19_000), version: 19_500 }, record(22_002)], has_more: false,
+  } })
+  expect(d.get().channels.A.messages).toBe(before)
+  expect(d.get().channels.A.latest).toBe(fresh)
+  expect(d.get().channels.A.cursor).toBe(22_001)
+  d.feed({ type: 'history_result', request: fresh, page: {
+    messages: [{ ...record(19_000), version: 22_001, deleted: true }], has_more: false,
+  } })
+  expect(d.get().channels.A.latest).toBeUndefined()
+  expect(d.get().channels.A.messages.find(m => m.id === 'id19000')).toMatchObject({ version: 22_001, deleted: true })
+  expect(d.get().channels.A.messages.find(m => m.id === 'id19000')).not.toHaveProperty('body')
+})
+
+it('an authoritative latest snapshot releases covered overflow fences for late own-send ACKs', () => {
+  for (const has_more of [false, true]) {
+    const d = boot()
+    const send = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'late', body: 'late' }), 'send')
+    const retired = Array.from({ length: 401 }, (_, i) => 2 * i + 1)
+    const retained = Array.from({ length: 1500 }, (_, i) => 1000 + i)
+    const recovery = id(d.feed({ type: 'settle_history', channel: 'A', messages:
+      [...retired, ...retained].map((seq, i) => ({ ...record(seq), version: 10_000 + i })) }), 'fetch_history')
+    expect(d.get().channels.A.retiredThrough).toBe(801)
+    d.feed({ type: 'history_result', request: recovery, page: { messages: [record(600), record(802)], has_more } })
+    expect(d.get().channels.A.retiredThrough).toBe(has_more ? 599 : undefined)
+    const own = { ...record(700), sender: 'me', client_message_id: 'late', body: 'late' }
+    const effects = d.feed({ type: 'ack', request: send, message: own })
+    expect(d.get().channels.A.pending).toEqual([])
+    expect(d.get().channels.A.messages).toContainEqual(own)
+    expect(effects).not.toContainEqual(expect.objectContaining({ type: 'fetch_history', page: 'latest' }))
+    const older = d.event(2)
+    if (has_more) {
+      expect(older).toContainEqual(expect.objectContaining({ type: 'fetch_history', page: 'latest' }))
+      expect(d.get().channels.A.messages).not.toContainEqual(record(2))
+    } else expect(d.get().channels.A.messages).toContainEqual(record(2))
+  }
 })
 
 it('a held identity accepts version 9 after its version 5 evidence retires', () => {

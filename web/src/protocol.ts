@@ -320,7 +320,11 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       c.hasOlder = true
     }
     capVersions(id, TOTAL_MESSAGE_LIMIT)
-    if (recovery && c.watched) history(id, 'latest')
+    if (recovery && c.watched) {
+      // A snapshot started before this rejected state cannot satisfy its recovery.
+      invalidate(id)
+      history(id, 'latest')
+    }
     settle(id, valid)
     if (source !== 'window' && source !== 'projection') {
       const ranges = [...c.advancing.map(r => ({ ...r })), ...positions.filter(seq => c.cursor === null || seq > c.cursor).map(seq => ({ start: seq, end: seq }))]
@@ -539,6 +543,14 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const before = c.cursor
       const bootstrap = c.cursor === null && r.page === 'latest'
       if (bootstrap) { c.cursor = input.page.messages.at(-1)?.created_seq ?? 0; c.streamBase = c.cursor }
+      if (r.page === 'latest' && c.retiredThrough !== undefined) {
+        // Release only the creation range covered by this authoritative page.
+        if (!input.page.has_more) c.retiredThrough = undefined
+        else if (input.page.messages[0]) {
+          const through = Math.min(c.retiredThrough, input.page.messages[0].created_seq - 1)
+          c.retiredThrough = through > 0 ? through : undefined
+        }
+      }
       merge(r.channel, input.page.messages, 'window')
       // Latest/before has_more is older; after has_more must never overwrite it.
       if (r.page !== 'after') {

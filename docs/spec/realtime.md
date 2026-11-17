@@ -17,6 +17,8 @@ When evidence is checkpointed, summaries/counts with insufficient W or read-posi
 
 Each timeline mounts viewport rows plus overscan, measuring attached rows only. Paging preserves the visible anchor; an unpinned full window holds its bodies while arrivals remain available through latest navigation. Keyboard navigation uses retained Message IDs, mounting a destination before focus. A removed focus target falls back to the Composer. First-Unread entry can page beyond the body cap; a visit's marker is restored whenever its retained row is mounted again.
 
+A rejected fenced state invalidates history requests already in flight and starts a fresh latest request; a pre-rejection snapshot cannot satisfy recovery. An accepted latest page releases the scalar retired boundary only over its covered creation range: below its first Message remains fenced when older history exists; a complete page clears the boundary. Exact retired-identity fences remain in force for unheld records.
+
 ### Server guarantees (implemented and tested)
 Tests are in `server/src/messages/tests.rs` (M), `server/src/realtime/tests.rs` (R) and `web/src/protocol.test.ts` (W).
 - For all sends, including non-Replies, Account Session authentication precedes input validation (400/413/415), which precedes organization_unavailable (404) and Channel authorization, then the send limit (429), then admission (503). Topic, timeline and history GET projection routes keep organization_unavailable (404) before query validation (400); the Reply chain GET validates first.

@@ -87,6 +87,17 @@ impl Step<'_> {
                     c.stream_base = c.cursor;
                 }
                 let first = result.messages.first().map(|m| m.created_seq);
+                if page == Page::Latest {
+                    // Release only the creation range covered by this authoritative page.
+                    if !result.has_more {
+                        c.retired_through = None;
+                    } else if let Some(first) = first {
+                        c.retired_through = c
+                            .retired_through
+                            .map(|through| through.min(first - 1))
+                            .filter(|through| *through > 0);
+                    }
+                }
                 self.merge(id, result.messages, Source::Window);
                 let c = self.channel(id);
                 if page != Page::After
