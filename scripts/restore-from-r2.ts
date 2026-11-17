@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { inventory, parseManifest, sha256, type ReadBucket } from './backup-r2-model.ts'
-import { curlRunner, fileDigest, objectTransport, privateCurlConfig, readPrivateFile } from './backup-r2.ts'
+import { curlRunner, fileDigest, objectTransport, readPrivateFile } from './backup-r2.ts'
 import { diagnostic, safeFailure } from './backup-safety.ts'
 import { restoreDrill } from './restore-drill.ts'
 
@@ -17,12 +17,16 @@ export async function restoreFromR2(options: {
   let directory: string | undefined
   try {
     // The offline identity follows the private-file custody rule: owned, 0600, no symlink, outside the checkout.
-    const identityFile = await privateCurlConfig(options.identityFile)
+    // It is read once through a pinned descriptor and age gets a staged copy, so a swap after the check cannot
+    // hand age a FIFO or a different key.
+    const identity = await readPrivateFile(options.identityFile)
     const data = await inventory(options.bucket, (options.now ?? Date.now)())
     const generation = options.prefix ? data.verified.find(g => g.prefix === options.prefix) : data.verified[0]
     if (!generation) throw new Error('No verified restore source')
     directory = await mkdtemp(join(tmpdir(), 'backup-restore-'))
     const archive = join(directory, 'archive.dump.age'), dump = join(directory, 'archive.dump')
+    const identityFile = join(directory, 'identity')
+    await writeFile(identityFile, identity, { mode: 0o600, flag: 'wx' })
     const manifest = await options.bucket.get(generation.prefix + 'manifest.json')
     const bytes = await options.bucket.get(generation.prefix + 'archive.dump.age')
     // Verify the exact selected manifest too: a replacement after inventory is unsafe.
