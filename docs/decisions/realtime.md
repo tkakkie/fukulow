@@ -117,6 +117,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 new sends hold`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [messages](messages.md): `#160 An independent, Organization-scoped`, `#160 Replay uses current-state`, `#160 Event position and Message`, `#160 Required before any mutation`
 - [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
 
 - [auth](auth.md): `#305 owns the deactivation transaction`
