@@ -93,3 +93,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [replies](replies.md): `keeps an unresolved descendant Reply visible and retryable after selecting its root and evicting the parent`
 
 - [unread](unread.md): `Mention suffix requires both watermark and position and deduplicates only within its Channel`, `Mention access generation rejects a previous generation REST response while the new baseline stays visible`
+
+- [replies](replies.md): `reconciles delayed and out of order baselines with a unique live suffix without advancing any cursor`, `recoverable resets discard baselines evidence and floors before installing a rewound history`, `terminal loss clears counts cancels requests and fences late success without a refetch`

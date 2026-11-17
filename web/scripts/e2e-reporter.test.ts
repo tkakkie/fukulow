@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { FullResult, TestCase, TestError, TestResult, TestStep } from '@playwright/test/reporter'
@@ -109,7 +109,10 @@ describe('restricted E2E diagnostics', () => {
         file: 'web/e2e/smoke.spec.ts', titlePath: ['built app is served by the server'],
         status: 'passed', expectedStatusPassed: true, annotations: [{ type: 'slow' }],
       }])
-      const root = resolve(import.meta.dirname, '../..')
+      // This reporter unit fixture contains only the smoke case, independent of product invariant additions.
+      const root = directory
+      await mkdir(join(root, 'docs/invariants'), { recursive: true })
+      await writeFile(join(root, 'docs/invariants/web.md'), '| Rule | Test |\n|---|---|\n| App smoke passes | `web/e2e/smoke.spec.ts::built app is served by the server` |\n')
       expect(checkE2EInvariants(root, path)).toEqual([])
       reporter.onTestEnd({ ...entry } as TestCase, { ...attempt, status: 'passed' })
       await reporter.onEnd(completed)

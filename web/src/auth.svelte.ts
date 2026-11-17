@@ -56,7 +56,7 @@ const defaults: AuthDeps = {
       },
       replies(id: string) {
         let adapter = replyAdapters.get(id)
-        if (!adapter) replyAdapters.set(id, (adapter = repliesAdapter(session.replies, id)))
+        if (!adapter) replyAdapters.set(id, (adapter = repliesAdapter(session.replies, id, session.replyCounts)))
         return adapter
       },
       unread(id: string) {

@@ -3,6 +3,7 @@
 Web client. Writing rules and the other parts: [index](../decisions.md).
 
 ## Web client
+- #409 Revision 2 keeps Reply totals in a separate Rust projection, tracking any chain member. A 400-record evidence cap checkpoints floors and root generations before refetch. Reason: paging, duplicate replay and stale snapshots must not change authority; protocol state stays out of Svelte.
 - #465: wasm is the default; SYNC_CORE=ts builds the one-sprint rollback (#467 removes it). Vite rejects mixed bundles. Shell mounts during core load; sync starts after it (#466); failure shows an error. One dispatch notifies before ordered effects. #466 on this head and maintainer review gate merge.
 - #465: JSON deltas retain unchanged JS Channel/array identities, reuse retained Message indices and intern body text once per step. Bounded request/timer reads leave State in Rust. A matched format probe favored JSON (PR evidence); #466 acceptance remains separate.
 - #465: manifest-listed wasm and glue chunks receive immutable caching; wasm MIME is application/wasm. CSP adds only wasm-unsafe-eval, allowing compilation without general unsafe-eval. Both proxy browser suites verify it.

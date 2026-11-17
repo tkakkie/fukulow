@@ -6,6 +6,7 @@ import { createChannelMembers } from './channel-members'
 import { createChannels, type ChannelsApi } from './channels'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import { repliesApi, type RepliesApi } from './replies'
+import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
 import type { SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
@@ -20,6 +21,7 @@ export type SessionOptions = {
   onEnded: () => void
   channelsApi?: ChannelsApi
   topicsApi?: TopicsApi
+  replyCountsApi?: ReplyCountsApi
   repliesApi?: RepliesApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
@@ -129,6 +131,10 @@ export function createSession(options: SessionOptions) {
     },
     { sync: replyComposition.sync, topics },
   )
+  const replyCounts = createReplyCounts(sync, { replies, topics }, {
+    api: options.replyCountsApi ?? ((channel, body, signal) => api.getReplyCounts(organizationId, channel, body, signal)),
+    onSessionEnded: notifyEnded, requestTimeoutMs: options.sync?.requestTimeoutMs, random: options.sync?.random,
+  })
   const navigationTargets = createNavigationTargets({
     topic: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
     reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
@@ -225,7 +231,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, unread, channels, dms, navigationTargets,
+    sync, topics, replies, replyCounts, unread, channels, dms, navigationTargets,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
@@ -247,7 +253,7 @@ export function createSession(options: SessionOptions) {
     close() {
       closed = true
       stopActivity(); activity.close(); capabilities.close()
-      navigationTargets.close()
+      navigationTargets.close(); replyCounts.close()
       stopFollowing(); stopSync(); stopMemberAccess()
       memberControllers.forEach(c => c.close()); memberControllers.clear()
       channels.close()

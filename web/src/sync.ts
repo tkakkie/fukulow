@@ -6,6 +6,7 @@ import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { createCore } from '#sync-core'
+import type { SyncCore } from './protocol-types'
 import type { ChannelState, Effect, Input } from './protocol-types'
 
 export type TimelineApi = {
@@ -115,6 +116,7 @@ export function createSync(options: SyncOptions) {
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
   const noticeListeners = new Set<(notice: ActivityNotice) => void>()
+  const inputListeners = new Set<(input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void>()
   const listeners = new Set<(changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const composerListeners = new Map<string, Set<() => void>>()
@@ -358,6 +360,7 @@ export function createSync(options: SyncOptions) {
     for (const key of changedReplyComposers) {
       replyComposerListeners.get(key)?.forEach(l => l())
     }
+    inputListeners.forEach(listener => listener(input, result, previous))
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 
@@ -819,6 +822,7 @@ export function createSync(options: SyncOptions) {
   }
 
   return {
+    onInput(listener: (input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void) { inputListeners.add(listener); return () => { inputListeners.delete(listener) } },
     onActivity(listener: (notice: ActivityNotice) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
     get: () => state,
     request: (id: number) => core.request(id),

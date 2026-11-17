@@ -2430,7 +2430,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const sessionModel = {
       channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets), close: rawSession.close,
     }
     let deactivated = false
@@ -4108,7 +4108,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -4173,6 +4173,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       has_more: false,
     })
 
+    net.replyCountPages.c1 = { as_of_seq: 5, counts: [m1, m2, tm1].map(m => ({ message_id: m.id, root_id: m.id, reply_count: m.id === m2.id ? 0 : 1 })) }
+
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 3)
@@ -4234,7 +4236,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // 1. Open Reply chain panel from main timeline by clicking 返信
     const m1Row = host.querySelector(`#main-content [data-message-id="${m1.id}"]`)!
-    const m1ReplyBtn = buttonsByText(m1Row, '返信')[0]
+    const m1ReplyBtn = buttonsByText(m1Row, '返信 1件›')[0]
     expect(m1ReplyBtn).toBeDefined()
     m1ReplyBtn.focus()
     m1ReplyBtn.click()
@@ -4344,7 +4346,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     const tm1Row = host.querySelector(`#main-content [data-message-id="${tm1.id}"]`)!
-    const tm1ReplyBtn = buttonsByText(tm1Row, '返信')[0]
+    const tm1ReplyBtn = buttonsByText(tm1Row, '返信 1件›')[0]
     tm1ReplyBtn.focus()
     tm1ReplyBtn.click()
     flushSync()
@@ -4382,7 +4384,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -4402,6 +4404,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       messages: [m1, r1],
       has_more: true,
     })
+
+    net.replyCountPages.c1 = { as_of_seq: 3, counts: [{ message_id: m1.id, root_id: m1.id, reply_count: 2 }] }
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -4581,7 +4585,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -4797,7 +4801,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -4974,7 +4978,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -5104,7 +5108,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -5127,6 +5131,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.replyChains[`c1:${mRoot.id}`] = chainPayload
     net.replyChains[`c1:${r1.id}`] = chainPayload
     net.replyChains[`c1:${r2.id}`] = chainPayload
+
+    net.replyCountPages.c1 = { as_of_seq: 3, counts: [{ message_id: mRoot.id, root_id: mRoot.id, reply_count: 2 }] }
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -5209,8 +5215,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(rootItem.classList.contains('reply-panel__item--root')).toBe(true)
     expect(r1Item.classList.contains('reply-panel__item--root')).toBe(false)
     expect(buttonsByText(rootItem, '返信 2件›')).toHaveLength(1)
-    expect(buttonsByText(r1Item, '返信 1件›')).toHaveLength(1)
-    expect(buttonsByText(r2Item, '返信')).toHaveLength(1)
+    expect(buttonsByText(r1Item, '返信 2件›')).toHaveLength(1)
+    expect(buttonsByText(r2Item, '返信 2件›')).toHaveLength(1)
 
     // Roving tabindex defaults to the latest row (r2)
     const panelRows = queryAll(panel, '.ui-message-row[data-focusable="true"]')
@@ -5260,7 +5266,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     })
 
     // 2. Clicking the inline 返信 button on r2 replaces the chain with r2.id and focuses Reply Composer
-    const r2ReplyBtn = buttonsByText(panel.querySelector(`[data-message-id="${r2.id}"]`)!, '返信')[0]
+    const r2ReplyBtn = buttonsByText(panel.querySelector(`[data-message-id="${r2.id}"]`)!, '返信 2件›')[0]
     r2ReplyBtn.focus()
     r2ReplyBtn.click()
     flushSync()
@@ -5302,7 +5308,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -5471,7 +5477,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
       close: rawSession.close,
     }
@@ -5612,7 +5618,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
@@ -5818,7 +5824,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
@@ -5986,7 +5992,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
@@ -6186,7 +6192,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
@@ -6388,7 +6394,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
@@ -6503,7 +6509,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
@@ -6643,7 +6649,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channels: channelsAdapter(rawSession.channels),
       sync: syncAdapter(rawSession.sync),
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
@@ -6881,7 +6887,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         channel: (id: string) => (id === 'c1' ? wrappedC1 : baseSync.channel(id)),
       },
       topics: (id: string) => topicsAdapter(rawSession.topics, id),
-      replies: (id: string) => repliesAdapter(rawSession.replies, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
       unread: (id: string) => {
         let a = unreadAdapters.get(id)
         if (!a) {
