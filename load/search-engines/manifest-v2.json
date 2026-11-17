@@ -1,5 +1,5 @@
 {
-  "sha256": "d106fcdbd6bc6f2b8278d2ff890b5fe44f1d1cfd78a03a540a01c9a8e060d4a0",
+  "sha256": "28ba902ecdea50ea16fe6c042a1c0af7fd867dd161d08719a7063d8a772b93f4",
   "frozen": {
     "version": 2,
     "date": "2026-11-17",
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "69ecfaa44b82b1bcb16b53c6b1c6556ef0f4f9fe255898225e711aabf508a78b"
+        "sha256": "fe89e59c1324acf8ebb494271457a45975b81f7900fd37e385b4b865f59aa540"
       },
       {
         "path": ".node-version",
@@ -20,7 +20,7 @@
       },
       {
         "path": "deploy/db-grants.sql",
-        "sha256": "04ecf89f7bdbb77eeed7c44339437df0f580893ec7790dd4eee44ff6671bdb69"
+        "sha256": "ceaca5ecd45eef5f9e813cdc42ff42e9c270df56599d008cb2965b40e340aa3c"
       },
       {
         "path": "deploy/db-role-settings.sql",
@@ -56,7 +56,7 @@
       },
       {
         "path": "load/search-engines/definer.ts",
-        "sha256": "a2267c3952428f4a81cc22e5118a51539c06d2da985d23b79ff9d2b072ad36c5"
+        "sha256": "467f8b9af7d3a70cb50610ae14ba5971fee3ce48c9566a6280cca5138ef38cc3"
       },
       {
         "path": "load/search-engines/manifest.ts",
@@ -108,7 +108,7 @@
       },
       {
         "path": "load/search-engines/summarize.ts",
-        "sha256": "336f221675f614fa4c36e4630900ea268cdcbd350ce80c02df4bf91ba340d678"
+        "sha256": "b901797f0a648cfe2cf4f3b568996a1e93a38785ac5b3eca03e0e2d50fae0f8a"
       },
       {
         "path": "load/search-engines/trgm.sql",
@@ -225,10 +225,6 @@
       {
         "path": "server/migrations/202611170225_public_channel_topic_positions.sql",
         "sha256": "dfd0ee562b17ad14861ab34dfeeaab0d4f6200c8463f5f059cda513ee8dde19d"
-      },
-      {
-        "path": "server/migrations/202611170515_channel_log.sql",
-        "sha256": "8fcb2c959e81b10ee283db3a7da67b9fbbd36f124d0fff35c2ae5c631109d69c"
       }
     ],
     "quality": {

@@ -43,24 +43,49 @@ const probes = [
   [1,1,0,'denialprobe public','2026-11-14'],[2,1,1,'denialprobe private','2026-11-14'],[3,1,10,'denialprobe public later','2026-11-14'],
   [4,1,0,'denialprobe outside range','2026-01-01'],[5,2,0,'denialprobe other organization','2026-11-14'],
   [6,2,0,'abz oracle','2026-11-14'],[7,2,0,'ab\\z oracle','2026-11-14'],[8,1,0,'ab\\y own','2026-11-14'],
+  [9,1,21,'denialprobe private ungranted','2026-11-14'],[10,1,90,'denialprobe direct message','2026-11-14'],
+  [11,1,23,'denialprobe private revoked','2026-11-14'],
 ] as const;
+// Senders: the DM probe is sent by participant 2, the revoked probe by Member 9 before revocation.
+const sender = (k: number) => k===10 ? 2 : k===11 ? 9 : 1;
 const probe = (k: number) => uuid(9_000_000+k);
+// Extra Organization 1 Members, only in the denial database: 7 admin without grants (and DM
+// participant), 8 member demoted to guest, 9 member whose private grant is revoked after sending,
+// 10 member keeping that grant (positive control). Channel 90 is a DM between Members 2 and 7.
+const extraMembers = `${[[7,'admin'],[8,'member'],[9,'member'],[10,'member']].map(([u,role])=>
+  `INSERT INTO accounts VALUES ('${member(1,u as number)}','synthetic-1-${u}@example.invalid','measurement-only');
+INSERT INTO users (organization_id,id,account_id,name,role) VALUES ('${org(1)}','${member(1,u as number)}','${member(1,u as number)}','Synthetic Member ${u}','${role}');`).join('\n')}
+INSERT INTO channels (organization_id,id,kind,lower_member_id,higher_member_id) VALUES ('${org(1)}','${channel(1,90)}','dm','${member(1,2)}','${member(1,7)}');
+INSERT INTO channel_message_sequences VALUES ('${org(1)}','${channel(1,90)}',1);
+INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ('${org(1)}','${channel(1,90)}','${member(1,2)}'),('${org(1)}','${channel(1,90)}','${member(1,7)}'),
+  ('${org(1)}','${channel(1,23)}','${member(1,9)}'),('${org(1)}','${channel(1,23)}','${member(1,10)}');`;
+// Applied after the probes: revocation after the Message was sent, then demotion to Guest.
+const grantChanges = `DELETE FROM channel_members WHERE organization_id='${org(1)}' AND channel_id='${channel(1,23)}' AND member_id='${member(1,9)}';
+UPDATE users SET role='guest' WHERE organization_id='${org(1)}' AND id='${member(1,8)}';`;
 // 20,000 filler rows in Channel 0 make the per-Channel btree unselective, so a
 // forced plan (enable_seqscan=off) must show the body's folded LIKE pattern as a
 // search_body index condition. Filler never matches any denial query.
 const filler = `INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,created_at)
 SELECT '${org(1)}',md5('filler'||n)::uuid,'${channel(1,0)}',10000+n,'${member(1,1)}',md5('filler'||n)::uuid,'filler message '||n,'2026-11-13'
 FROM generate_series(1,20000) n;`;
-export const probeSql = filler+`\nINSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,created_at) VALUES
-${probes.map(([k,o,c,body,at])=>`('${org(o)}','${probe(k)}','${channel(o,c)}',${1000+k},'${member(o,1)}','${probe(k)}',${literal(body)},'${at}')`).join(',\n')}; ANALYZE;`;
+export const probeSql = extraMembers+'\n'+filler+`\nINSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,created_at) VALUES
+${probes.map(([k,o,c,body,at])=>`('${org(o)}','${probe(k)}','${channel(o,c)}',${1000+k},'${member(o,sender(k))}','${probe(k)}',${literal(body)},'${at}')`).join(',\n')};
+${grantChanges} ANALYZE;`;
 
 type Context = number|null|'';
 // Fixture: Member 1 owner (grants Channels 0-19), 2 member (grants c%5=0), 3 guest
-// (grants 0-7), 4 guest without grant, 5 reactivated with stale grants, 6 deactivated.
+// (grants 0-7), 4 guest without grant, 5 reactivated with stale grants, 6 deactivated;
+// denial database only: 7-10 and the DM in extraMembers above.
 // Even Channels are public, odd private. Each denial has a positive control.
 export const denialCases: {name:string,context:Context,actor:[number,number],query:string,expect:number[]}[] = [
-  {name:'owner sees public, granted private and later public',context:1,actor:[1,1],query:'denialprobe',expect:[1,2,3]},
-  {name:'private Channel non-member is denied',context:1,actor:[1,2],query:'denialprobe',expect:[1,3]},
+  {name:'owner sees public, granted private and later public; private Channel and DM non-member Owner is denied',context:1,actor:[1,1],query:'denialprobe',expect:[1,2,3]},
+  {name:'private Channel non-member is denied; DM participant sees the DM',context:1,actor:[1,2],query:'denialprobe',expect:[1,3,10]},
+  {name:'private Channel non-member Admin is denied; DM participant Admin sees the DM',context:1,actor:[1,7],query:'denialprobe',expect:[1,3,10]},
+  {name:'DM non-participant is denied',context:1,actor:[1,3],query:'denialprobe direct',expect:[]},
+  {name:'DM participant finds the DM Message (positive control)',context:1,actor:[1,2],query:'denialprobe direct',expect:[10]},
+  {name:'access revoked after the Message was sent is denied',context:1,actor:[1,9],query:'denialprobe',expect:[1,3]},
+  {name:'kept grant still sees the revoked Member\'s Message (positive control)',context:1,actor:[1,10],query:'denialprobe',expect:[1,3,11]},
+  {name:'Member demoted to Guest without a public grant is denied',context:1,actor:[1,8],query:'denialprobe',expect:[]},
   {name:'guest sees only granted Channels',context:1,actor:[1,3],query:'denialprobe',expect:[1,2]},
   {name:'guest without grant is denied',context:1,actor:[1,4],query:'denialprobe',expect:[]},
   {name:'stale grant after reactivation is denied',context:1,actor:[1,5],query:'denialprobe',expect:[1,3]},
