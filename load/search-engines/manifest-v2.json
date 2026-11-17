@@ -1,5 +1,5 @@
 {
-  "sha256": "100f2c74343492212afdf5a0100ecb8b20ee2cbdf6d02582a8fb055eb9c527d8",
+  "sha256": "cbeec7fd08f2ee040cea704bdd57aee4d2e5ea0a4c0b8c8eb7f5b1f40ecb9fc5",
   "frozen": {
     "version": 2,
     "date": "2026-11-17",
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "6f0a720a9d2a12d1f31a0d86fecd218da4a10c8a2779bf2d9ec1898ef0cb27a0"
+        "sha256": "fe89e59c1324acf8ebb494271457a45975b81f7900fd37e385b4b865f59aa540"
       },
       {
         "path": ".node-version",
@@ -56,7 +56,7 @@
       },
       {
         "path": "load/search-engines/definer.ts",
-        "sha256": "b9b97782f19c02bf3c6acd43aa7c9635a7c999b42be9ab2b37e7b0665a1069aa"
+        "sha256": "a2267c3952428f4a81cc22e5118a51539c06d2da985d23b79ff9d2b072ad36c5"
       },
       {
         "path": "load/search-engines/manifest.ts",
@@ -92,7 +92,7 @@
       },
       {
         "path": "load/search-engines/run.ts",
-        "sha256": "35269f0829967f6d192d1cabf41e90aafe6f4f9ed5b3d513a782881b40662d1f"
+        "sha256": "0c36049701a47ca0022b2c7241af86f071eae260678851efa4954eb069e0313b"
       },
       {
         "path": "load/search-engines/runtime.ts",
@@ -221,6 +221,10 @@
       {
         "path": "server/migrations/202611150390_mention_main_unread_covering.sql",
         "sha256": "66bba5ea888ebebc7614059659a1c894f701d0c9220e4c319bdc1b6252109be0"
+      },
+      {
+        "path": "server/migrations/202611170225_public_channel_topic_positions.sql",
+        "sha256": "dfd0ee562b17ad14861ab34dfeeaab0d4f6200c8463f5f059cda513ee8dde19d"
       }
     ],
     "quality": {

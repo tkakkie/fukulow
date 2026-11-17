@@ -78,7 +78,7 @@ export const denialCases: {name:string,context:Context,actor:[number,number],que
 
 export type DenialHarness = {owner:(db:string,text:string)=>string,app:(db:string,text:string)=>string,create:(db:string)=>void,
   index:(db:string,engine:string)=>unknown,drop:(db:string)=>void,
-  plan:(db:string,query:string,actor:number,settings:string)=>{log:string,searchIndex:boolean}};
+  plan:(db:string,query:string,actor:number,settings:string)=>{log:string,searchIndex:boolean,folded:boolean}};
 export function definerDenials(h: DenialHarness, engines: readonly string[], definition: string) {
   h.create('denial'); h.owner('denial',probeSql);
   // Positive control: the unescaped pattern fails on other-Organization rows (22025).
@@ -101,8 +101,9 @@ export function definerDenials(h: DenialHarness, engines: readonly string[], def
     }
     // Forced: proves the definer body gets a constant pattern usable by the index.
     const plan = engine==='none' ? null : h.plan(db,'denialprobe',1,'SET LOCAL enable_seqscan=off;\n');
-    if (plan) assert.ok(plan.searchIndex,`Forced definer body plan does not use search_body (${engine}):\n`+
-      plan.log.split('\n').filter(l=>/ Scan on |Index Cond/.test(l)).join('\n'));
+    const lines = plan?.log.split('\n').filter(l=>/ Scan on |Index Cond|Recheck Cond/.test(l)).join('\n');
+    if (plan) assert.ok(plan.searchIndex,`Forced definer body plan does not use search_body (${engine}):\n`+lines);
+    if (plan) assert.ok(plan.folded,`Forced definer body plan has no folded LIKE pattern (${engine}):\n`+lines);
     results.push({engine,definer,cases:denialCases.length*2,plan:plan?.log ?? ''});
     h.drop(db);
   }

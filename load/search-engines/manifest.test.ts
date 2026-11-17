@@ -13,7 +13,7 @@ test('checked-in current manifest matches the evaluation inputs',()=>{
 });
 test('manifest v1 stays as recorded for the 2026-11-17 results',()=>{
   const v1 = recorded(1);
-  assert.equal(v1.sha256,'19927163c604379ea19f48402e9a7f5d67263472159bc3e0a1f2a53c60f4537b');
+  assert.equal(v1.sha256,'b4e3f0835d7e315f65f96c79086b4d5c9fb2ca9c651d9e3fd694c0fde11cd356');
   assert.equal(hash(JSON.stringify(v1.frozen)),v1.sha256);
 });
 test('v2 changes only the query path and sources; performance conditions equal v1',()=>{

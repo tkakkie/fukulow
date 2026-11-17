@@ -105,7 +105,9 @@ COMMIT;`);
   if (bodies.length!==1 || outer.length!==1 || !/\bCTE visible\b/.test(bodies[0]!) || !/plan_cache_mode = 'force_custom_plan'/.test(bodies[0]!))
     throw new Error(`Function body plan not logged: ${query}`);
   const body = bodies[0]!;
-  return {log,searchIndex:/ on search_body\b/.test(body),seqScanMessages:/Seq Scan on messages\b/.test(body)};
+  // Folded: the LIKE pattern is a literal in the body plan, not a replace() expression of $2.
+  return {log,searchIndex:/ on search_body\b/.test(body),folded:/~~ '%[^']*%'::text/.test(body) && !/\breplace\(/.test(body),
+    seqScanMessages:/Seq Scan on messages\b/.test(body)};
 }
 // pg_get_functiondef hash of the first install; every later database must match.
 let definition = '';
