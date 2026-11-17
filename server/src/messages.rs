@@ -30,6 +30,7 @@ pub mod receipts;
 pub use fukulow_api::{ListMessagesQuery, Mention, Message, MessagePage, SendMessageRequest};
 pub use limiter::SendLimit;
 pub(crate) mod replies;
+pub use replies::counts::{ReplyCount, ReplyCountPage, ReplyCountRequest, reply_counts};
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub(crate) mod topics;
 pub(crate) mod unread;

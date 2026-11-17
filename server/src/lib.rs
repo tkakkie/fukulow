@@ -221,6 +221,10 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(messages::mark_topic_read),
         )
         .route(
+            "/api/v1/orgs/{org}/channels/{id}/reply-counts",
+            axum::routing::post(messages::reply_counts),
+        )
+        .route(
             "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain",
             get(messages::reply_chain),
         )

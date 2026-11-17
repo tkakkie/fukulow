@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) mod counts;
+
 #[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ReplyChainQuery {

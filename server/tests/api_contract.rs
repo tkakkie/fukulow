@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 38 operations document shutdown, including author lookup, Account security actions and Invite listing/revocation.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 268;
+// All 39 operations document shutdown, including Reply counts, author lookup, Account security and Invite management.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 276;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -218,14 +218,15 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                     assert!(description.contains("persistence has not started"));
                 } else if (path.contains("/timeline")
                     || path.contains("/topics")
-                    || path.ends_with("/chain"))
+                    || path.ends_with("/chain")
+                    || path.ends_with("/reply-counts"))
                     && !path.ends_with("/read")
                 {
                     assert!(description.contains("Projection watermark admission unavailable"));
                 }
             }
         }
-        assert_eq!(operations, 38);
+        assert_eq!(operations, 39);
     }
 }
 
@@ -264,7 +265,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 38);
+    assert_eq!(requests.len(), 39);
     requests.extend(
         [
             "/",
@@ -1453,4 +1454,56 @@ fn dm_contract_has_fixed_kind_strict_open_and_separate_discovery_identities() {
             1
         );
     }
+}
+
+#[test]
+fn reply_count_contract_has_bounded_post_baseline_and_uniform_errors() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    let operation = &document["paths"]["/api/v1/orgs/{org}/channels/{id}/reply-counts"]["post"];
+    assert_eq!(operation["security"], json!([{"cookie":[]},{"bearer":[]}]));
+    assert_eq!(
+        operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ReplyCountRequest"
+    );
+    let ids = &schemas["ReplyCountRequest"]["properties"]["ids"];
+    assert_eq!(ids["minItems"], 1);
+    assert_eq!(ids["maxItems"], 100);
+    assert_eq!(ids["items"]["format"], "uuid");
+    assert_eq!(
+        schemas["ReplyCountPage"]["properties"]["as_of_seq"]["minimum"],
+        0
+    );
+    assert_eq!(
+        schemas["ReplyCount"]["properties"]["reply_count"]["format"],
+        "int64"
+    );
+    assert_eq!(
+        schemas["ReplyCount"]["properties"]["reply_count"]["minimum"],
+        0
+    );
+    for (schema, fields) in [
+        ("ReplyCountPage", vec!["as_of_seq", "counts"]),
+        ("ReplyCount", vec!["message_id", "root_id", "reply_count"]),
+    ] {
+        for field in fields {
+            assert!(
+                schemas[schema]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field))
+            );
+        }
+    }
+    assert_eq!(
+        operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ReplyCountPage"
+    );
+    for status in ["400", "401", "404", "413", "415", "500", "503"] {
+        assert_eq!(
+            operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorBody"
+        );
+    }
+    assert!(operation["responses"]["503"]["headers"]["Retry-After"].is_object());
 }

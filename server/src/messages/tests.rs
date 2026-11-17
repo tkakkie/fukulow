@@ -941,7 +941,7 @@ mod fanout;
 
 mod topics;
 
-mod replies;
+pub(super) mod replies;
 
 pub(super) mod removal;
 

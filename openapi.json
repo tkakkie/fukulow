@@ -1975,6 +1975,152 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/channels/{id}/reply-counts": {
+      "post": {
+        "tags": [
+          "crate::messages::replies::counts"
+        ],
+        "operationId": "reply_counts",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyCountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Exact chain counts at as_of_seq; unknown or foreign ids omitted; no-store, no side effects, cursor-neutral",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplyCountPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed ids or body, or input length outside 1..=100 before deduplication; validated before Organization/Channel authorization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found; authorization denials precede watermark admission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Expected application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or commit barrier timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/channels/{id}/timeline": {
       "get": {
         "tags": [
@@ -6083,6 +6229,71 @@
             "minimum": 1
           }
         }
+      },
+      "ReplyCount": {
+        "type": "object",
+        "required": [
+          "message_id",
+          "root_id",
+          "reply_count"
+        ],
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reply_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Exact number of live Replies in the entire chain, excluding the root.",
+            "minimum": 0
+          },
+          "root_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ReplyCountPage": {
+        "type": "object",
+        "required": [
+          "as_of_seq",
+          "counts"
+        ],
+        "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Committed Channel watermark W. Both anchors and Replies are bounded by W.\nThis baseline is a projection and never advances a sync cursor or read position.",
+            "minimum": 0
+          },
+          "counts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplyCount"
+            },
+            "description": "One entry per distinct requested id visible in this Channel at W, sorted by id.\nUnknown and foreign ids are omitted without distinction."
+          }
+        }
+      },
+      "ReplyCountRequest": {
+        "type": "object",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Root or descendant ids. Limit applies before duplicate ids are merged.",
+            "maxItems": 100,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
       },
       "RevokeOtherSessionsRequest": {
         "type": "object",
