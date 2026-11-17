@@ -297,6 +297,7 @@ async fn subscribe(client: &mut Client, channel: Uuid, after: i64) {
     control(
         client,
         ClientMessage::Subscribe {
+            history_generation: None,
             channel_id: channel,
             after_seq: after,
         },
@@ -364,8 +365,14 @@ async fn read_event(client: &mut Client) -> Value {
     }
 }
 async fn ready(client: &mut Client, channel: Uuid, seq: i64) {
+    let mut subscribed = event(client).await;
+    assert!(Uuid::parse_str(subscribed["history_generation"].as_str().unwrap()).is_ok());
+    subscribed
+        .as_object_mut()
+        .unwrap()
+        .remove("history_generation");
     assert_eq!(
-        event(client).await,
+        subscribed,
         json!({"type":"subscribed", "channel_id":channel, "caught_up_seq":seq})
     );
 }
@@ -1139,6 +1146,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 
 mod commit;
 mod contract;
+mod history;
 mod lifecycle;
 mod limits;
 mod load_fixture;

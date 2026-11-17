@@ -4,6 +4,10 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 | Rule | Test |
 |---|---|
+| Epochs initialize once; explicit owner rotation changes only selected Organizations; runtime writes cannot rotate them | `server/src/messages/tests/history.rs::history_generation_rotation_is_explicit_scoped_and_owner_only` |
+| Empty latest history returns a trusted event watermark independent of visible creation positions | `server/src/messages/tests/history.rs::bootstrap_uses_explicit_event_watermark_without_visible_messages` |
+| Fixed-W Message/main/Topic/Reply pages below M return only snapshot_expired; Creates preserve old W and fresh pages recover | `server/src/messages/tests/history.rs::fixed_windows_expire_atomically_but_creations_keep_old_watermarks` |
+| Generation/expiry checks hide private, Guest-public, DM and foreign Channels; stale epochs deny counts/sends without changing receipts | `server/src/messages/tests/history.rs::generation_and_expiry_denials_preserve_channel_authorization`, `server/src/messages/tests/history.rs::generation_guards_counts_sends_and_dm_denials_without_changing_receipts` |
 | Event pages exclude tails above the shared committed watermark, including out-of-order commit visibility | `server/src/messages/tests/channel_log.rs::channel_event_pages_exclude_uncommitted_tail_until_shared_watermark_advances` |
 | Event pages deny ungranted Guests, DM nonparticipants of every Role, lost grants and Memberships; extracted authorization is rechecked | `server/src/messages/tests/channel_log.rs::channel_event_pages_deny_ungranted_public_guests_and_dm_nonparticipants_with_controls`, `server/src/messages/tests/channel_log.rs::channel_event_pages_recheck_extracted_authorization_after_access_and_membership_loss` |
 | Every committed send appends one scoped Create position; concurrent sends stay consecutive and duplicate retries append nothing | `server/src/messages/tests/channel_log.rs::channel_log_concurrent_sends_and_duplicate_retries_append_exactly_once`, `server/src/messages/tests/context.rs::conflict_lookup_topic_reply_and_mark_read_require_context` |

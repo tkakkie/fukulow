@@ -9,7 +9,7 @@ import { flush, msg, ok, row, summary } from './unread-test-helpers'
 /** Bounded upstream windows isolate the Unread controller's retention from sync/projection storage. */
 export function retentionClient() {
   let state = initialState('me'), records = new Map<number, Message>(), through = 0
-  let channelRow = row({ as_of_seq: 0, read_seq: 0, main_unread_count: 0, unread_count: 0 })
+  let channelRow = row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, read_seq: 0, main_unread_count: 0, unread_count: 0 })
   const baselines = new Map<string, TopicBaseline>()
   const listeners = new Set<() => void>(), topicListeners = new Set<() => void>()
   const marks: { scope: UnreadScope; read_seq: number }[] = []
@@ -18,15 +18,15 @@ export function retentionClient() {
     position: baseline.summary.last_seq, latestMessage: baseline.summary.latest_message,
     messageCount: baseline.summary.message_count, summaryError: null }))
   const api: UnreadApi = {
-    listChannels: async () => ok({ channels: [channelRow] }),
-    markRead: async (scope, body) => { marks.push({ scope, ...body }); return ok(body) },
+    listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channelRow] }),
+    markRead: async (scope, body) => { marks.push({ scope, ...body }); return ok({ ...body, history_generation: '00000000-0000-4000-8000-000000000515' }) },
     getTopicSummary: async (_channel, topic) => {
       const b = baselines.get(topic)!
-      return ok({ as_of_seq: b.asOfSeq, topic: b.summary })
+      return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: b.asOfSeq, topic: b.summary })
     },
   }
   // Only the upstream observations/lifecycle used by Unread are implemented by this test double.
-  const sync = { request: (id: number) => state.requests[id], timer: (id: number) => state.timers[id], get: () => state, subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l) } },
+  const sync = { observeHistoryGeneration: (generation: string) => { state = { ...state, historyGeneration: generation }; return true }, request: (id: number) => state.requests[id], timer: (id: number) => state.timers[id], get: () => state, subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l) } },
     close: async () => {}, unavailable: async () => {} } as unknown as ReturnType<typeof createSync>
   const topics = { subscribe(l: () => void) { topicListeners.add(l); return () => { topicListeners.delete(l) } },
     get: () => ({ unavailable: false, lines: projectionRows.map(message => ({ kind: 'message', message })), topics: topicLines(),
@@ -56,12 +56,12 @@ export function retentionClient() {
     setList(run: () => Promise<Result<ChannelList>>) { api.listChannels = run },
     setMark(run: UnreadApi['markRead']) { api.markRead = run },
     async baseline(asOfSeq: number, readSeq: number, mainCount: number, count: number) {
-      channelRow = row({ as_of_seq: asOfSeq, read_seq: readSeq, main_unread_count: mainCount, unread_count: count })
+      channelRow = row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: asOfSeq, read_seq: readSeq, main_unread_count: mainCount, unread_count: count })
       await unread.refresh()
     },
     async boot(messages: Message[] = [msg(1)]) {
       for (const id of ['T', 'U']) baselines.set(id, { asOfSeq: 0, summary: summary(id, 0, 0, 0) })
-      state = { ...state, running: true, connected: true, channels: { A: { state: 'ready', watched: true, cursor: 0,
+      state = { ...state, running: true, connected: true, channels: { A: { state: 'ready', watched: true, mutationSeq: 0, cursor: 0,
         messages: [], versions: {}, retiredVersions: [], versionEpoch: 0, advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 } } }
       capture(() => listeners.forEach(l => l())); await flush()
       feed(messages); await flush()

@@ -66,6 +66,7 @@ async fn live_serialization_is_once_per_fanout_including_shared_gap_recovery(poo
 fn measure_live_frame_serialization_and_sharing() {
     use std::{hint::black_box, time::Instant};
     let message = messages::Message {
+        history_generation: uuid::Uuid::nil(),
         id: Uuid::new_v4(),
         channel_id: Uuid::new_v4(),
         created_seq: 2,

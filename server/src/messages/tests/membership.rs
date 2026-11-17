@@ -78,6 +78,8 @@ async fn deactivation_after_auth_is_organization_unavailable_for_history_and_sen
             history_auth,
             Ok(Path((organization, channel))),
             Ok(Query(ListMessagesQuery {
+                as_of_seq: None,
+                history_generation: None,
                 after_seq: None,
                 before_seq: None,
                 limit: None,
@@ -96,6 +98,7 @@ async fn deactivation_after_auth_is_organization_unavailable_for_history_and_sen
             DeferredOrganizationAuth(Some(send_auth)),
             Ok(Path((organization, channel))),
             ApiJson(SendMessageRequest {
+                history_generation: None,
                 reply_to: None,
                 topic_name: None,
                 client_message_id: Uuid::new_v4(),
@@ -149,6 +152,7 @@ async fn queued_send_rechecks_member_revision_and_private_grant_after_begin(pool
             (sender, 0),
             channel,
             SendMessageRequest {
+                history_generation: None,
                 reply_to: None,
                 topic_name: None,
                 client_message_id: key,
@@ -256,6 +260,7 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
         let first = Uuid::new_v4();
         sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) VALUES ($1,$2,$3,1,$4,$5,'before loss')")
             .bind(organization).bind(first).bind(channel).bind(sender).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO channel_message_sequences (organization_id,channel_id,seq) VALUES ($1,$2,1)").bind(organization).bind(channel).execute(&pool).await.unwrap();
         let auth = captured_auth(&pool, &token).await;
         let next_auth = captured_auth(&pool, &token).await;
         let state = AppState::for_test(pool.clone()).await;
@@ -269,6 +274,8 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
             auth,
             Ok(Path((organization, channel))),
             Ok(Query(ListMessagesQuery {
+                as_of_seq: None,
+                history_generation: None,
                 after_seq: None,
                 before_seq: None,
                 limit: None,
@@ -310,6 +317,8 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
             next_auth,
             Ok(Path((organization, channel))),
             Ok(Query(ListMessagesQuery {
+                as_of_seq: None,
+                history_generation: None,
                 after_seq: Some(0),
                 before_seq: None,
                 limit: None,

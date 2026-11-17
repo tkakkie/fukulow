@@ -44,8 +44,8 @@ async function ready(client: ReturnType<typeof controllerClient>) {
   await client.feed({ type: 'session_start' })
   await client.feed({ type: 'connection_ready' })
   const history = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
 }
 
 it('reconnect full jitter stays in range and capped across repeated failures including the first 4008', async () => {
@@ -79,7 +79,7 @@ it('reconnect jitter resets only on confirmed subscription and cancels timers on
       await client.feed({ type: 'timer_elapsed', respond_to: wait })
       await client.feed({ type: 'connection_ready' })
     }
-    await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+    await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
     const wait = (await client.feed({ type: 'socket_closed', code: 1011 })).find(e => e.type === 'wait')!
     expect(wait.ms).toBe(250)
     if (end === 'close') await client.sync.close()
@@ -114,7 +114,7 @@ it('injected reconnect randomness never changes deterministic fill backoff', asy
 it('controller keeps admission 503 retryable and retries manually with the same key', async () => {
   const message = { ...record(101), sender: 'me', client_message_id: 'c1', body: 'hello' }
   const fetchMock = vi.fn<typeof fetch>()
-    .mockResolvedValueOnce(new Response(JSON.stringify({ messages: [record(100)], has_more: true }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: true }), { status: 200 }))
     .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'send admission unavailable' }), {
       status: 503, headers: { 'Retry-After': '3' },
     }))
@@ -126,7 +126,7 @@ it('controller keeps admission 503 retryable and retries manually with the same 
   await client.sync.start()
   await client.feed({ type: 'connection_ready' })
   await client.sync.watch('A')
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hello' })
   expect(fetchMock).toHaveBeenCalledTimes(2)
   expect(client.sync.get().channels.A.pending[0].state).toBe('unknown')
@@ -138,7 +138,7 @@ it('controller keeps admission 503 retryable and retries manually with the same 
   for (const [path, init] of fetchMock.mock.calls.slice(1)) {
     expect(path).toBe('/api/v1/orgs/o/channels/A/messages')
     expect(init?.method).toBe('POST')
-    expect(JSON.parse(init?.body as string)).toEqual({ client_message_id: 'c1', body: 'hello' })
+    expect(JSON.parse(init?.body as string)).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515', client_message_id: 'c1', body: 'hello' })
   }
   expect(client.sync.getTimeline('A').get().pending).toEqual([])
   expect(client.sync.getTimeline('A').get().messages).toContainEqual(message)
@@ -159,11 +159,11 @@ it('controller resumes from the pre-ack cursor after a lost echo and replay conv
   const wait = (await client.feed({ type: 'socket_closed', code: 1006 })).find(e => e.type === 'wait')!
   await client.feed({ type: 'timer_elapsed', respond_to: wait })
   expect(await client.feed({ type: 'connection_ready' })).toContainEqual(
-    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }),
+    expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel: 'A', after_seq: 100 }),
   )
   await client.feed({ type: 'message', kind: 'create', seq: (message).created_seq, channel: 'A', message })
   await client.feed({ type: 'message', kind: 'create', seq: (message).created_seq, channel: 'A', message })
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 101 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 101 })
   expect(client.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, pending: [] })
   expect(timeline.get()).toMatchObject({ status: 'ready', messages: [record(100), message], pending: [] })
   await client.sync.close()
@@ -176,13 +176,13 @@ it('controller ignores malformed wire events and processes later valid events on
   await client.sync.start()
   socket.onopen?.()
   const latest = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: latest, messages: [record(100)], has_more: true })
   const snapshot = client.sync.get()
   for (const event of [
     { type: 'message' }, { type: 'message', kind: 'create', seq: 101, message: null }, { type: 'message', kind: 'create', seq: 101, message: {} },
     { type: 'message', kind: 'create', seq: ({ ...record(101), created_seq: '101' }).created_seq, message: { ...record(101), created_seq: '101' } },
     { type: 'subscribed', channel_id: 'A' },
-    { type: 'subscribed', channel_id: 'A', caught_up_seq: '100' },
+    { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: '100' },
     { type: 'error', channel_id: 'A' },
     { type: 'error', channel_id: {}, code: 'channel_not_found' },
   ]) {
@@ -191,7 +191,7 @@ it('controller ignores malformed wire events and processes later valid events on
     expect(client.sync.get()).toEqual(snapshot)
   }
   expect(socket.close).not.toHaveBeenCalled()
-  socket.onmessage?.({ data: JSON.stringify({ type: 'subscribed', channel_id: 'A', caught_up_seq: 100 }) })
+  socket.onmessage?.({ data: JSON.stringify({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 100 }) })
   socket.onmessage?.({ data: JSON.stringify({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) }) })
   await flush()
   expect(client.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, messages: [record(100), record(101)] })
@@ -231,7 +231,7 @@ it('controller fences prior Organization/session HTTP, socket and timer work inc
   expect(history.completed).toBe(false)
   old.onClose(4001); old.onReady(); old.onEvent({ type: 'message', kind: 'create', seq: (record(999)).created_seq, message: record(999) })
   await client.feed({ type: 'send_failed', respond_to: send, status: 401 })
-  await client.feed({ type: 'history_result', respond_to: history, messages: [record(999)], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(999)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [record(999)], has_more: false })
   expect(send.completed).toBe(true)
   expect(history.completed).toBe(true)
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
@@ -291,7 +291,7 @@ it('scheduled grace and fill backoff execute with fake time, without overlap or 
   expect(fills()).toHaveLength(1)
   await vi.advanceTimersByTimeAsync(1)
   expect(fills()).toHaveLength(2)
-  await client.feed({ type: 'history_result', respond_to: fills()[1], messages: [record(101), record(102), record(103), record(104)], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(101), record(102), record(103), record(104)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: fills()[1], messages: [record(101), record(102), record(103), record(104)], has_more: false })
   expect(client.sync.get().channels.A.cursor).toBe(104)
   await client.sync.close()
   expect(vi.getTimerCount()).toBe(0)
@@ -342,14 +342,14 @@ it('same-connection stale subscription replies cannot confirm or refuse a later 
   await client.feed({ type: 'session_start' })
   await client.feed({ type: 'connection_ready' })
   const history = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
   // First subscribe is still awaiting its reply while the user changes selection twice.
   await client.sync.unwatch('A')
   await client.sync.watch('A')
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 0 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 0 })
   expect(client.sync.get().channels.A.state).toBe('loading')
   expect(client.sync.get().channels.A.cursor).toBe(100)
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(client.sync.get().channels.A.state).toBe('ready')
   await client.sync.unwatch('A')
   await client.sync.watch('A')
@@ -359,7 +359,7 @@ it('same-connection stale subscription replies cannot confirm or refuse a later 
   expect(client.sync.get().channels.A.state).toBe('loading')
   await vi.advanceTimersByTimeAsync(500)
   await client.feed({ type: 'connection_ready' })
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(client.sync.get().channels.A.state).toBe('ready')
   await client.sync.close()
 })
@@ -371,9 +371,9 @@ it('an explicit retry after a terminal refusal fetches and subscribes again thro
   const t = client.sync.getTimeline('A')
   expect(t.get().status).toBe('unavailable')
   const history = (await client.feed({ type: 'refresh', channel: 'A' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
   expect(t.get().status).toBe('ready')
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(t.get().status).toBe('ready')
   await client.sync.close()
 })
@@ -417,8 +417,8 @@ it('controller async channel_not_found marks a confirmed Channel unavailable wit
   await vi.advanceTimersByTimeAsync(60_000)
   expect(client.allEffects).toHaveLength(count)
   expect(await client.feed({ type: 'watch', channel: 'A' })).toContainEqual(
-    expect.objectContaining({ type: 'subscribe', after_seq: 100 }))
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+    expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', after_seq: 100 }))
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(client.sync.get().channels.A.state).toBe('ready')
   await client.sync.close()
 })
@@ -438,7 +438,7 @@ it('ambiguous async error during rewatch reconnects without attributing it to th
   await client.feed({ type: 'connection_ready' })
   expect(client.sync.get().channels.A.subscription!.id).not.toBe(subscription)
   old.onEvent({ type: 'error', channel_id: 'A', code: 'channel_not_found' })
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(client.sync.get().channels.A.state).toBe('ready')
   // A genuine refusal is terminal on the fresh connection, just like an initial subscribe refusal.
   await client.feed({ type: 'error_event', channel: 'A', code: 'channel_not_found' })
@@ -458,7 +458,7 @@ it('controller clamp preserves refusals and same-key retries while fencing old s
   const old = await send('old')
   await client.sync.unwatch('A')
   await client.sync.watch('A')
-  const effects = await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+  const effects = await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 60 })
   const latest = effects.find(e => e.type === 'fetch_history')!
   expect(effects).toContainEqual(expect.objectContaining({ type: 'unsubscribe', channel: 'A' }))
   expect(client.sync.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
@@ -472,7 +472,7 @@ it('controller clamp preserves refusals and same-key retries while fencing old s
   expect(client.sync.get().channels.A.pending.find(p => p.clientMessageId === 'new')?.state).toBe('sending')
   await client.feed({ type: 'ack', respond_to: valid, message: { ...record(61), sender: 'me', client_message_id: 'new' } })
   await client.feed({ type: 'send_failed', respond_to: retry, status: 409 })
-  await client.feed({ type: 'history_result', respond_to: latest, messages: [record(60)], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(60)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: latest, messages: [record(60)], has_more: true })
   expect(client.sync.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
     .toEqual([['failed', 'failed'], ['unknown', 'failed'], ['old', 'unknown']])
   expect(client.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([60, 61])
@@ -485,7 +485,7 @@ it('controller send failure and timeout during re-bootstrap preserve newer send 
   const old = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })).find(e => e.type === 'send')!
   await client.sync.unwatch('A')
   await client.sync.watch('A')
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 60 })
   const retry = (await client.feed({ type: 'user_retry', client_message_id: 'c1' })).find(e => e.type === 'send')!
   await client.feed({ type: 'send_failed', respond_to: old, status: 403 })
   expect(client.sync.get().session).toBe('signed_in')
@@ -516,9 +516,9 @@ it('controller repeated watch clamp unwatch stays below the 256 server subscript
   for (let n = 0; n < 257; n++) {
     const channel = `clamp-${n}`
     const latest = (await client.feed({ type: 'watch', channel })).find(e => e.type === 'fetch_history')!
-    await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100, channel)], has_more: false })
+    await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100, channel)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: latest, messages: [record(100, channel)], has_more: false })
     expect(active.size).toBe(2)
-    await client.feed({ type: 'subscribed', channel, caught_up_seq: 0 })
+    await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel, caught_up_seq: 0 })
     await client.sync.unwatch(channel)
     expect(active).toEqual(new Set(['A']))
   }
@@ -530,8 +530,8 @@ it('controller notifies only changed Channels and preserves unrelated timeline s
   const client = controllerClient()
   await ready(client)
   const history = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: history, messages: [record(1, 'B')], has_more: false })
-  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'B')]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [record(1, 'B')], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'B', caught_up_seq: 1 })
   const a = client.sync.getTimeline('A'), b = client.sync.getTimeline('B')
   const global = vi.fn(), changed = vi.fn(), unrelated = vi.fn()
   client.sync.subscribe(global)
@@ -570,7 +570,7 @@ it('controller incremental history merge preserves canonical records and pending
   const keep = client.sync.get().channels.A.pending[1]
   const older = (await client.feed({ type: 'load_older', channel: 'A' })).find(e => e.type === 'fetch_history')!
   const canonical = { ...record(99), version: 200, sender: 'me', client_message_id: 'match', body: 'canonical' }
-  await client.feed({ type: 'history_result', respond_to: older, messages: [record(99), record(97), canonical, record(98)], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(99), record(97), canonical, record(98)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: older, messages: [record(99), record(97), canonical, record(98)], has_more: false })
   expect(client.sync.get().channels.A.messages).toEqual([record(97), record(98), canonical, record(100)])
   expect(client.sync.get().channels.A.pending).toEqual([keep])
   expect(client.sync.get().channels.A.pending[0]).toBe(keep)
@@ -580,7 +580,7 @@ it('controller incremental history merge preserves canonical records and pending
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
   const fill = client.allEffects.at(-1)!
   await client.feed({ type: 'message', kind: 'create', seq: (record(101)).created_seq, channel: 'A', message: record(101) })
-  await client.feed({ type: 'history_result', respond_to: fill,
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(103), record(102), record(101), record(103)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: fill,
     messages: [record(103), record(102), record(101), record(103)], has_more: false })
   expect(client.sync.get().channels.A.cursor).toBe(103)
   expect(client.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([97, 98, 99, 100, 101, 102, 103])
@@ -594,7 +594,7 @@ it('controller: a late 401 from a pre-clamp send in the same session means Sign 
   const old = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })).find(e => e.type === 'send')!
   await client.sync.unwatch('A')
   await client.sync.watch('A')
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 60 })
   await client.feed({ type: 'send_failed', respond_to: old, status: 401 })
   expect(client.sync.get().session).toBe('sign_in_required')
   await client.sync.close()
@@ -604,14 +604,14 @@ it('controller skips unchanged Channels during olderError bookkeeping and keeps 
   const client = controllerClient()
   await ready(client)
   const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(10, 'B')], has_more: true })
-  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 10 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(10, 'B')]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: bLatest, messages: [record(10, 'B')], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'B', caught_up_seq: 10 })
   const bOlder = (await client.feed({ type: 'load_older', channel: 'B' })).find(e => e.type === 'fetch_history')!
   await client.feed({ type: 'history_failed', respond_to: bOlder, status: 'network' })
 
   const cLatest = (await client.feed({ type: 'watch', channel: 'C' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: cLatest, messages: [record(1, 'C')], has_more: false })
-  await client.feed({ type: 'subscribed', channel: 'C', caught_up_seq: 1 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'C')]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: cLatest, messages: [record(1, 'C')], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'C', caught_up_seq: 1 })
 
   const b = client.sync.getTimeline('B')
   const c = client.sync.getTimeline('C')
@@ -691,8 +691,8 @@ it('controller clears olderError in the same dispatch when a non-stale before fe
   const client = controllerClient()
   await ready(client)
   const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
-  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'B')]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'B', caught_up_seq: 1 })
 
   const a = client.sync.getTimeline('A')
   const b = client.sync.getTimeline('B')
@@ -726,8 +726,8 @@ it('controller clears olderError in the same dispatch when a non-stale before fe
   const client = controllerClient()
   await ready(client)
   const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
-  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'B')]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'B', caught_up_seq: 1 })
 
   const a = client.sync.getTimeline('A')
   const b = client.sync.getTimeline('B')
@@ -744,7 +744,7 @@ it('controller clears olderError in the same dispatch when a non-stale before fe
     .find(e => e.type === 'fetch_history' && e.page === 'before')!
   const latest = (await client.feed({ type: 'refresh', channel: 'A' }))
     .find(e => e.type === 'fetch_history' && e.page === 'latest')!
-  await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: latest, messages: [record(100)], has_more: false })
   expect(a.get()).toMatchObject({ hasOlder: false, loadingOlder: true, olderError: false })
 
   await client.feed({ type: 'history_failed', respond_to: older, status: 'network' })
@@ -767,7 +767,7 @@ it('ambiguous access-loss events during pending subscribe or rewatch reconnect w
     else {
       await client.feed({ type: 'session_start' }); await client.feed({ type: 'connection_ready' })
       const first = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
-      await client.feed({ type: 'history_result', respond_to: first, messages: [record(100)], has_more: false })
+      await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: first, messages: [record(100)], has_more: false })
     }
     const old = client.sockets[0]
     const effects = await client.feed({ type: 'channel_access_lost', channel: 'A' })
@@ -783,8 +783,8 @@ it('ignores access loss after unwatch without reconnecting', async () => {
     try {
       await ready(client)
       const bLatest = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
-      await client.feed({ type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
-      await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 1 })
+      await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'B')]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: bLatest, messages: [record(1, 'B')], has_more: false })
+      await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'B', caught_up_seq: 1 })
       await client.sync.unwatch('A')
       if (phase === 'pending') {
         await client.sync.watch('A')

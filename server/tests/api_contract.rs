@@ -25,7 +25,7 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // All 40 operations document shutdown, including Reply counts, author lookup, Account security and Invite management.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 282;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 294;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -735,6 +735,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         &[
             (
                 ClientMessage::Subscribe {
+                    history_generation: None,
                     channel_id,
                     after_seq: 0,
                 },
@@ -744,6 +745,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         ],
     );
     let message = Message {
+        history_generation: uuid::Uuid::nil(),
         id: Uuid::from_u128(2),
         channel_id,
         created_seq: 1,
@@ -808,6 +810,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
             ),
             (
                 ServerEvent::Subscribed {
+                    history_generation: uuid::Uuid::nil(),
                     channel_id,
                     caught_up_seq: 1,
                 },
@@ -1037,7 +1040,10 @@ fn unread_openapi_exposes_positions_counts_and_scoped_monotonic_updates() {
         schemas["MarkReadRequest"]["properties"]["read_seq"]["minimum"],
         0
     );
-    assert_eq!(schemas["ReadPosition"]["required"], json!(["read_seq"]));
+    assert_eq!(
+        schemas["ReadPosition"]["required"],
+        json!(["history_generation", "read_seq"])
+    );
     let channel = &schemas["UnreadChannel"]["allOf"][1];
     for field in ["as_of_seq", "read_seq", "main_unread_count", "unread_count"] {
         assert!(
@@ -1530,7 +1536,7 @@ fn message_state_wire_has_creation_version_and_body_free_tombstones() {
         assert!(!required.contains(&json!(field)));
     }
     let mut message: Message = serde_json::from_value(json!({
-        "id":Uuid::from_u128(1), "channel_id":Uuid::from_u128(2),
+        "history_generation":Uuid::nil(), "id":Uuid::from_u128(1), "channel_id":Uuid::from_u128(2),
         "client_message_id":Uuid::from_u128(3), "sender":Uuid::from_u128(4),
         "created_seq":1, "version":1, "deleted":false, "body":"original", "mentions":[],
         "created_at":"2026-11-17T00:00:00Z", "topic_id":null, "reply_to":null, "reply_root_id":null

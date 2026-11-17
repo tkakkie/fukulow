@@ -17,6 +17,8 @@ export type ChannelState = {
   state: 'loading' | 'ready' | 'unavailable'
   watched: boolean
   cursor: number | null
+  snapshotSeq?: number
+  mutationSeq: number
   messages: Message[]
   versions: Record<string, [number, boolean, number]>
   retiredVersions: { start: number; end: number }[]
@@ -42,11 +44,13 @@ export type ChannelState = {
 /** `stale`: invalidated by a history-generation change (unwatch, unavailable, clamp). Its late result never changes
  *  Channel state, but a 401 still means Sign in because the session is the same (C6/C8). */
 type Request =
-  | { type: 'history'; channel: string; page: 'latest' | 'before' | 'after'; seq?: number; stale?: true }
+  | { type: 'history'; mutationSeq: number; channel: string; page: 'latest' | 'before' | 'after'; seq?: number; stale?: true }
   | { type: 'send'; channel: string; clientMessageId: string; stale?: true }
 type Timer = { purpose: Purpose; channel?: string; clientMessageId?: string }
 export type State = {
   selfId: string
+  historyGeneration?: string
+  historyEpoch: number
   organization: 'available' | 'unavailable'
   session: 'signed_in' | 'sign_in_required'
   running: boolean
@@ -62,16 +66,17 @@ export type State = {
 export type Effect =
   | { type: 'connect'; id: number }
   | { type: 'close' }
-  | { type: 'subscribe'; id: number; channel: string; after_seq: number }
+  | { type: 'subscribe'; history_generation?: string; id: number; channel: string; after_seq: number }
   | { type: 'unsubscribe'; channel: string }
-  | { type: 'fetch_history'; id: number; channel: string; page: 'latest' | 'after' | 'before'; seq?: number }
-  | (SendTarget & { type: 'send'; id: number; channel: string; client_message_id: string; body: string })
+  | { type: 'fetch_history'; history_generation?: string; as_of_seq?: number; id: number; channel: string; page: 'latest' | 'after' | 'before'; seq?: number }
+  | (SendTarget & { type: 'send'; history_generation?: string; id: number; channel: string; client_message_id: string; body: string })
   | { type: 'wait'; id: number; purpose: Exclude<Purpose, 'send_retry'>; channel?: string; attempt: number }
   | { type: 'wait'; id: number; purpose: 'send_retry'; channel: string; delayMs: number }
   | { type: 'cancel_timer'; id: number }
   | { type: 'sign_in' }
 export type Input = (
   | { type: 'session_start' | 'session_replaced'; selfId: string }
+  | { type: 'history_generation'; generation?: string }
   | { type: 'stop' | 'organization_unavailable' }
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
@@ -81,7 +86,7 @@ export type Input = (
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
   | { type: 'events_result'; request: number; page: components['schemas']['ChannelEventPage'] }
   | { type: 'history_result'; request: number; page: MessagePage }
-  | { type: 'history_failed'; request: number; status: Failure }
+  | { type: 'history_failed'; request: number; status: Failure; error?: string }
   | { type: 'settle_history'; channel: string; messages: Message[] }
   | { type: 'send_failed'; request: number; status: Failure; retryAfterMs?: number; error?: string }
   | { type: 'ack'; request: number; message: Message }
@@ -94,10 +99,10 @@ const withoutDeletedContent = (message: Message): Message => {
 }
 
 export function initialState(selfId = ''): State {
-  return { selfId, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
+  return { selfId, historyEpoch: 0, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
     reconnectAttempt: 0, channels: {}, requests: {}, timers: {} }
 }
-const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [], versions: {}, retiredVersions: [], versionEpoch: 0,
+const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, mutationSeq: 0, messages: [], versions: {}, retiredVersions: [], versionEpoch: 0,
   advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 })
 const sameFields = <T extends object>(a: T, b: T) => {
   const keys = Object.keys(a) as (keyof T)[]
@@ -199,7 +204,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     const n = token()
     c.state = 'loading'
     c.subscription = { id: n, after: c.cursor, confirmed: false, watermark: c.cursor }
-    effects.push({ type: 'subscribe', id: n, channel: id, after_seq: c.cursor })
+    effects.push({ type: 'subscribe', history_generation: state.historyGeneration, id: n, channel: id, after_seq: c.cursor })
   }
   const history = (id: string, page: 'latest' | 'before' | 'after', seq?: number) => {
     const c = channel(id)
@@ -208,8 +213,34 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     const n = token()
     c[key] = n
     c.historyError = false
-    state.requests[n] = { type: 'history', channel: id, page, seq }
-    effects.push({ type: 'fetch_history', id: n, channel: id, page, seq })
+    state.requests[n] = { type: 'history', mutationSeq: c.mutationSeq, channel: id, page, seq }
+    effects.push({ type: 'fetch_history', history_generation: state.historyGeneration, as_of_seq: page === 'before' ? c.snapshotSeq : undefined, id: n, channel: id, page, seq })
+  }
+  const expireWindow = (id: string, retry: boolean) => {
+    for (const [key, r] of Object.entries(state.requests)) if (r.type === 'history' && r.channel === id && r.page !== 'after') state.requests[Number(key)] = { ...r, stale: true }
+    const c = channel(id)
+    c.messages = []; c.hasOlder = false; c.snapshotSeq = undefined; c.latest = c.older = undefined; c.historyError = !retry
+    if (retry) history(id, 'latest')
+  }
+  const resetHistory = (generation?: string) => {
+    cancel(state.reconnectWait); state.reconnectWait = undefined
+    state.historyGeneration = generation; state.historyEpoch++
+    for (const [id, old] of Object.entries(state.channels)) {
+      if (old.subscription && state.connected) effects.push({ type: 'unsubscribe', channel: id })
+      invalidate(id, true)
+      const pending = old.pending.map(p => {
+        cancel(p.retryWait)
+        return { ...p, retryWait: undefined, state: p.state === 'sending' || p.state === 'throttled' ? 'unknown' as const : p.state }
+      })
+      state.channels[id] = { ...emptyChannel(), watched: old.watched, pending, state: old.state === 'unavailable' ? 'unavailable' : 'loading' }
+    }
+    state.connected = false; connect()
+    for (const [id, c] of Object.entries(state.channels)) if (c.watched && c.state !== 'unavailable') history(id, 'latest')
+  }
+  const acceptGeneration = (generation: string) => {
+    if (state.historyGeneration !== undefined && state.historyGeneration !== generation) { resetHistory(generation); return false }
+    state.historyGeneration = generation
+    return true
   }
   const capVersions = (id: string, limit: number) => {
     if (Object.keys(state.channels[id].versions).length <= limit) return
@@ -282,6 +313,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     const accepted: Message[] = []
     let recovery = false
     for (let m of [...byId.values()].sort((a, b) => a.created_seq - b.created_seq)) {
+      if (m.version > m.created_seq || m.deleted) c.mutationSeq = Math.max(c.mutationSeq, m.version)
       const version = c.versions[m.id]
       const index = merged.findIndex(held => held.id === m.id)
       const held = merged[index]
@@ -352,7 +384,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     const sending: Pending = { ...p, state: 'sending', request: n, retryWait: undefined }
     c.pending = c.pending.includes(p) ? c.pending.map(entry => entry === p ? sending : entry) : [...c.pending, sending]
     state.requests[n] = { type: 'send', channel: id, clientMessageId: p.clientMessageId }
-    effects.push({ type: 'send', id: n, channel: id, client_message_id: p.clientMessageId, body: p.body,
+    effects.push({ type: 'send', history_generation: state.historyGeneration, id: n, channel: id, client_message_id: p.clientMessageId, body: p.body,
       ...(p.reply_to ? { reply_to: p.reply_to } : {}),
       ...(p.topic_name ? { topic_name: p.topic_name } : {}) })
   }
@@ -406,10 +438,16 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
   if (!state.running) return finish()
 
   switch (input.type) {
+    case 'history_generation':
+      if (input.generation !== undefined) acceptGeneration(input.generation)
+      else resetHistory()
+      break
     case 'settle_history':
       // Projection pages settle C5 without entering the sync window or contiguity evidence (P1).
-      if (state.channels[input.channel]?.watched && state.channels[input.channel].state !== 'unavailable')
+      if (state.channels[input.channel]?.watched && state.channels[input.channel].state !== 'unavailable') {
+        if (input.messages[0] && !acceptGeneration(input.messages[0].history_generation)) break
         merge(input.channel, input.messages, 'projection')
+      }
       break
     case 'connection_ready':
       if (input.connection !== state.connection || state.connected) break
@@ -487,6 +525,9 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (!c?.watched || c.state === 'unavailable' || !c.subscription) break
       if (e.type !== 'message' && input.subscription !== undefined && input.subscription !== c.subscription.id) break
       c = channel(id)
+      if (e.type === 'message' && !acceptGeneration(e.message.history_generation)) break
+      if (e.type === 'subscribed' && !acceptGeneration(e.history_generation)) break
+      if (e.type === 'error' && e.code === 'history_generation_changed') { resetHistory(); break }
       if (e.type === 'message') { if (e.kind === 'create' && e.message.created_seq !== e.seq) break; merge(id, [e.message], 'stream', e.seq); reconcile(id) }
       else if (e.type === 'channel_access_lost') unavailable(id)
       else if (e.type === 'error') {
@@ -522,9 +563,15 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (!r || r.type !== 'history') break
       delete state.requests[input.request]
       if (r.stale) { if (input.type === 'history_failed' && input.status === 401) stop(true); break }
+      if (input.type !== 'history_failed' && !acceptGeneration(input.page.history_generation)) break
       const c = channel(r.channel)
       c[r.page === 'latest' ? 'latest' : r.page === 'before' ? 'older' : 'fill'] = undefined
       if (input.type === 'history_failed') {
+        if (input.status === 409 && input.error === 'history_generation_changed') { resetHistory(); break }
+        if (input.status === 409 && input.error === 'snapshot_expired') {
+          expireWindow(r.channel, r.page !== 'latest')
+          break
+        }
         if (input.status === 401) stop(true)
         else if (input.status === 403 || input.status === 404) unavailable(r.channel)
         else if (r.page === 'after') {
@@ -540,9 +587,11 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         else { c.fillAttempt = 0; reconcile(r.channel, true) }
         break
       }
+      if (r.mutationSeq < c.mutationSeq && input.page.as_of_seq < c.mutationSeq) { c.snapshotSeq = undefined; c.latest = c.older = undefined; history(r.channel, 'latest'); break }
+      c.snapshotSeq = input.page.as_of_seq
       const before = c.cursor
       const bootstrap = c.cursor === null && r.page === 'latest'
-      if (bootstrap) { c.cursor = input.page.messages.at(-1)?.created_seq ?? 0; c.streamBase = c.cursor }
+      if (bootstrap) { c.cursor = input.page.as_of_seq; c.streamBase = c.cursor }
       if (r.page === 'latest' && c.retiredThrough !== undefined) {
         // Release only the creation range covered by this authoritative page.
         if (!input.page.has_more) c.retiredThrough = undefined
@@ -573,7 +622,10 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       delete state.requests[input.request]
       if (r.stale) { if (input.type === 'send_failed' && input.status === 401) stop(true); break }
       const c = channel(r.channel)
-      if (input.type === 'ack') { merge(r.channel, [input.message], 'ack'); reconcile(r.channel) }
+      if (input.type === 'send_failed' && input.status === 409 && input.error === 'history_generation_changed') { resetHistory(); break }
+      if (input.type === 'ack') {
+        if (!acceptGeneration(input.message.history_generation)) break
+        merge(r.channel, [input.message], 'ack'); reconcile(r.channel) }
       else {
         if (input.status === 401) { stop(true); break }
         const p = c.pending.find(p => p.clientMessageId === r.clientMessageId && p.request === input.request)

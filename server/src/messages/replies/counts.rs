@@ -4,6 +4,7 @@ use sqlx::Row;
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReplyCountRequest {
+    pub history_generation: Option<Uuid>,
     /// Root or descendant ids. Limit applies before duplicate ids are merged.
     #[schema(min_items = 1, max_items = 100)]
     pub ids: Vec<Uuid>,
@@ -20,6 +21,7 @@ pub struct ReplyCount {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReplyCountPage {
+    pub history_generation: Uuid,
     /// Committed Channel watermark W. Both anchors and Replies are bounded by W.
     /// This baseline is a projection and never advances a sync cursor or read position.
     #[schema(minimum = 0)]
@@ -47,6 +49,7 @@ pub(crate) const COUNTS_SQL: &str = "WITH anchors AS MATERIALIZED (\
     responses((status = 200, description = "Exact chain counts at as_of_seq; unknown or foreign ids omitted; no-store, no side effects, cursor-neutral", body = ReplyCountPage),
         (status = 400, description = "Malformed ids or body, or input length outside 1..=100 before deduplication; validated before Organization/Channel authorization", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found; authorization denials precede watermark admission", body = ErrorBody),
         (status = 413, description = "Request too large", body = ErrorBody),
         (status = 415, description = "Expected application/json", body = ErrorBody),
@@ -76,6 +79,9 @@ pub async fn reply_counts(
             organization,
             async |tx: &mut sqlx::PgConnection| {
                 require_visible(&mut *tx, organization, member, channel).await?;
+                let history_generation =
+                    history::validate(tx, organization, channel, input.history_generation, Some(w))
+                        .await?;
                 let counts = sqlx::query(COUNTS_SQL)
                     .bind(organization)
                     .bind(channel)
@@ -93,6 +99,7 @@ pub async fn reply_counts(
                 Ok((
                     [(header::CACHE_CONTROL, "no-store")],
                     Json(ReplyCountPage {
+                        history_generation,
                         as_of_seq: w,
                         counts,
                     }),

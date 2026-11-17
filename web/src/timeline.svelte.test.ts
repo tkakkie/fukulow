@@ -1124,7 +1124,7 @@ describe('Channel creation visibility', () => {
     it(`shows the creation form and visibility choices only when can_create_channels is ${allowed}`, async () => {
       const net = fakeNetwork()
       const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
-      net.lists[0]!.resolve(ok({ channels: [] }))
+      net.lists[0]!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }))
       const navigation = createNavigation({
         location: { href: 'http://localhost/' },
         history: { state: null, pushState() {}, replaceState() {} },
@@ -1160,7 +1160,7 @@ describe('Channel creation visibility', () => {
     const props = $state({ allowed: true as boolean | null })
     const net = fakeNetwork()
     const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
-    net.lists[0]!.resolve(ok({ channels: [] }))
+    net.lists[0]!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }))
     const navigation = createNavigation({
       location: { href: 'http://localhost/' }, history: { state: null, pushState() {}, replaceState() {} },
       innerWidth: 1280, addEventListener() {}, removeEventListener() {},
@@ -1207,8 +1207,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     try {
       await c.boot()
       for (let page = 0; page < 7; page++) await c.topics.loadMain('A')
-      c.options.listTopicMessages = async () => ok({ messages: [msg(1, 'T')], has_more: false })
-      const getSummary = vi.fn(async () => ok({ as_of_seq: 1000, topic: summary('T', 1, 1) }))
+      c.options.listTopicMessages = async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(1, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(1, 'T')], has_more: false })
+      const getSummary = vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1000, topic: summary('T', 1, 1) }))
       c.options.getTopicSummary = getSummary
       const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
       const instance = mount(TopicView, { target: host as unknown as Element, props: {
@@ -1280,7 +1280,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const composer = c.sync.getTimeline('A').reply('id1')
     composer.setDraft('親が消えても残る返信'); await composer.submit('id2')
     await c.replies.open('A', root())
-    c.listReplyChain.mockResolvedValue(ok({ root_id: 'id1', messages: [], has_more: false }))
+    c.listReplyChain.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  root_id: 'id1', messages: [], has_more: false }))
     await c.replies.loadMore('A')
     const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
     const instance = mount(ReplyPanel, { target: host as unknown as Element, props: {
@@ -1308,8 +1308,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const net = fakeNetwork()
     const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
     net.socket.onReady()
-    net.pages.general = ok({ messages: [record(1, 'general')], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('general')] }))
+    net.pages.general = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'general')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'general')], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('general')] }))
     await settle(); net.subscribed('general', 1); await settle()
     const ch = syncAdapter(session.sync).channel('general')
     const sends = Array.from({ length: 1000 }, (_, n) => ch.send(`未確認 ${n}`))
@@ -1351,8 +1351,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const net = fakeNetwork()
     const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
     net.socket.onReady()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)
     await settle()
@@ -1442,8 +1442,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const net = fakeNetwork()
     const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
     net.socket.onReady()
-    net.pages.general = ok({ messages: [record(1, 'general')], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('general', 'general')] }))
+    net.pages.general = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'general')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'general')], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('general', 'general')] }))
     await settle()
     net.subscribed('general', 1)
     await settle()
@@ -1539,8 +1539,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const net = fakeNetwork()
     const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
     net.socket.onReady()
-    net.pages.general = ok({ messages: [], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('general', 'general')] }))
+    net.pages.general = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('general', 'general')] }))
     await settle()
     net.subscribed('general', 0)
     await settle()
@@ -1661,8 +1661,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       close: rawSession.close,
     }
     net.socket.onReady()
-    net.pages.c1 = ok({ messages: [], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 0)
     await settle()
@@ -1882,7 +1882,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const chMsg1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'チャンネル本文1', topic_id: null }
     const topicMsg2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '仕様の初回相談', topic_id: 't-1' }
     const chMsg3 = { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: 'チャンネル本文3', topic_id: null }
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       has_more: false,
       items: [
@@ -1904,8 +1904,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: chMsg3 },
       ],
     })
-    net.topicMessages['c1:t-1'] = ok({ messages: [topicMsg2], has_more: false })
-    net.topicSummaries['c1:t-1'] = ok({
+    net.topicMessages['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicMsg2]).at(-1)?.created_seq ?? 0,  messages: [topicMsg2], has_more: false })
+    net.topicSummaries['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       topic: {
         mention_unread_count: 0,
@@ -1921,7 +1921,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     })
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'empty')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general'), channel('c2', 'empty')] }))
 
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
@@ -2018,7 +2018,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       body: '初回のトピック投稿',
       topic_id: 't-2',
     }
-    net.topicSummaries['c1:t-2'] = ok({
+    net.topicSummaries['c1:t-2'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 4,
       topic: {
         mention_unread_count: 0,
@@ -2038,7 +2038,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     bodyTextarea.dispatchEvent(enterEvt)
     await settle()
     expect(net.sends).toHaveLength(1)
-    expect(net.sends[0].body).toEqual({
+    expect(net.sends[0].body).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515',
       client_message_id: 'me-c1',
       body: '初回のトピック投稿',
       topic_name: 'リリース計画',
@@ -2071,7 +2071,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     bodyTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
     flushSync()
 
-    net.topicLists.c1 = ok({
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 5,
       has_more: false,
       topics: [
@@ -2136,7 +2136,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const topicForm = host.querySelector('#main-content form')!
     topicForm.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
     await settle()
-    expect(net.sends.at(-1)?.body).toEqual({
+    expect(net.sends.at(-1)?.body).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515',
       client_message_id: 'me-c2',
       body: 'トピックからの返信',
       topic_name: '仕様相談',
@@ -2253,7 +2253,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       channelMembers: vi.fn(() => channelMembers), close: rawSession.close,
     }
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     let href = '/o/org-1/c/c1'
     const navigation = createNavigation({
       location: { get href() { return href } },
@@ -2295,7 +2295,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(host.querySelector('#panel-content')?.textContent).not.toContain('を追加')
     // A fresh snapshot of the same Channel must preserve the live panel/controller.
     const loading = rawSession.channels.load()
-    net.lists.at(-1)!.resolve(ok({ channels: [channel('c1', 'renamed')] }))
+    net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'renamed')] }))
     await loading; await settle()
     expect(sessionModel.channelMembers).toHaveBeenCalledOnce()
     navigation.navigate({ type: 'close' }); await settle()
@@ -2312,10 +2312,10 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     for (const outcome of ['active', 'deactivated', 'omitted', 'failed', 'view changed'] as const) {
       vi.useFakeTimers()
       const net = fakeNetwork()
-      net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [
+      net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, has_more: false, items: [
         { kind: 'message', message: { ...record(1, 'c1'), sender: 'known' } },
       ] })
-      net.timelines.c2 = ok({ as_of_seq: 0, has_more: false, items: [] })
+      net.timelines.c2 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, has_more: false, items: [] })
       const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...net.options('me') })
       const sessionModel = {
         channels: channelsAdapter(rawSession.channels), sync: syncAdapter(rawSession.sync),
@@ -2335,7 +2335,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         id: 'known', name: '古いキャッシュ名', deactivated: false,
       })
       net.socket.onReady()
-      net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'other')] }))
+      net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general'), channel('c2', 'other')] }))
       let href = '/o/org-1/c/c1'
       const navigation = createNavigation({
         location: { get href() { return href } },
@@ -2415,15 +2415,15 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const latest = { ...record(9, 'c1'), sender: 'known', body: '最新トピック本文', topic_id: 't-1' }
     const recent = { ...record(10, 'c1'), sender: 'known', body: '最新チャンネル本文' }
     const summary = { mention_unread_count: 0, id: 't-1', name: '相談', first_seq: 3, last_seq: 9, message_count: 2, latest_message: latest, read_seq: 9, unread_count: 0 }
-    net.timelines.c1 = ok({ as_of_seq: 10, has_more: true, items: [
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, has_more: true, items: [
       { kind: 'topic', topic: summary }, { kind: 'message', message: recent },
     ] })
-    net.topicSummaries['c1:t-1'] = ok({ as_of_seq: 10, topic: summary })
-    net.replyChains[`c1:${root.id}`] = ok({ root_id: root.id, messages: [root], has_more: true })
-    net.replyChains[`c1:${root.id}:1`] = ok({ root_id: root.id, messages: [reply], has_more: false })
+    net.topicSummaries['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: summary })
+    net.replyChains[`c1:${root.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root]).at(-1)?.created_seq ?? 0,  root_id: root.id, messages: [root], has_more: true })
+    net.replyChains[`c1:${root.id}:1`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply]).at(-1)?.created_seq ?? 0,  root_id: root.id, messages: [reply], has_more: false })
     const base = net.options('me')
     const topicReads = vi.fn(async (_channel: string, _topic: string, query?: { before_seq?: number }) =>
-      query?.before_seq ? ok({ messages: [older], has_more: false }) : ok({ messages: [latest], has_more: true }))
+      query?.before_seq ? ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([older]).at(-1)?.created_seq ?? 0,  messages: [older], has_more: false }) : ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([latest]).at(-1)?.created_seq ?? 0,  messages: [latest], has_more: true }))
     const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...base,
       topicsApi: { ...base.topicsApi!, listTopicMessages: topicReads },
     })
@@ -2443,7 +2443,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     })
     await memberController.load()
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     let href = '/o/org-1/c/c1/t/t-1'
     const navigation = createNavigation({
       location: { get href() { return href } },
@@ -2469,7 +2469,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(lookup).not.toHaveBeenCalled()
     buttonsByText(host, '以前のメッセージを読み込む')[0].click()
     await settle()
-    expect(topicReads).toHaveBeenLastCalledWith('c1', 't-1', { before_seq: 9 })
+    expect(topicReads).toHaveBeenLastCalledWith('c1', 't-1', {as_of_seq: 9, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 9 })
     navigation.navigate({ type: 'reply', messageId: root.id })
     await settle()
     await settle()
@@ -2534,7 +2534,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
       const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'トピック履歴1', topic_id: 't-1' }
       const m2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: 'チャンネル本文2', topic_id: null }
-      net.timelines.c1 = ok({
+      net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 2,
         has_more: false,
         items: [
@@ -2555,8 +2555,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           { kind: 'message', message: m2 },
         ],
       })
-      net.topicMessages['c1:t-1'] = ok({ messages: [m1], has_more: false })
-      net.topicSummaries['c1:t-1'] = ok({
+      net.topicMessages['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1]).at(-1)?.created_seq ?? 0,  messages: [m1], has_more: false })
+      net.topicSummaries['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 2,
         topic: {
           mention_unread_count: 0,
@@ -2572,7 +2572,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       })
 
       net.socket.onReady()
-      net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+      net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
 
       let href = '/o/org-1/c/c1/t/t-1'
       let historyState: unknown = null
@@ -2672,7 +2672,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       ...net.options('me'),
     })
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 0)
     await settle()
@@ -2762,7 +2762,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const m5 = { ...record(5, 'c1'), id: 'm-5', sender: 'other', body: 'クランプ前メッセージ', topic_id: 't-1' }
     const m10 = { ...record(10, 'c1'), id: 'm-10', sender: 'other', body: 'ブートストラップ末尾', topic_id: null }
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 10,
       has_more: false,
       items: [
@@ -2783,8 +2783,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: m10 },
       ],
     })
-    net.topicMessages['c1:t-1'] = ok({ messages: [m5], has_more: false })
-    net.topicSummaries['c1:t-1'] = ok({
+    net.topicMessages['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m5]).at(-1)?.created_seq ?? 0,  messages: [m5], has_more: false })
+    net.topicSummaries['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 10,
       topic: {
         mention_unread_count: 0,
@@ -2800,7 +2800,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     })
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
 
     let href = '/o/org-1/c/c1/t/t-1'
     let historyState: unknown = null
@@ -2850,7 +2850,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // Reconnect with C8 clamp (caught_up_seq=2 < after_seq=10)
     const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'クランプ後のTopic履歴', topic_id: 't-1' }
     const m2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: 'クランプ後の末尾', topic_id: null }
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 2,
       has_more: false,
       items: [
@@ -2871,7 +2871,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: m2 },
       ],
     })
-    net.topicMessages['c1:t-1'] = ok({ messages: [m1], has_more: false })
+    net.topicMessages['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1]).at(-1)?.created_seq ?? 0,  messages: [m1], has_more: false })
 
     net.socket.onClose(1006)
     await vi.advanceTimersByTimeAsync(500)
@@ -2918,7 +2918,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'タイムライン既知トピック', topic_id: 't-known' }
     const m2 = { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一覧で取得される古いトピック', topic_id: 't-older' }
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 2,
       has_more: true,
       items: [
@@ -2942,7 +2942,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicLists.c1 = { ok: false, kind: 'http', status: 503 }
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
 
     let href = '/o/org-1/c/c1?panel=topics'
     let historyState: unknown = null
@@ -2992,7 +2992,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const retryBtn = queryAll(panel, 'button').find((b) => b.textContent.trim() === '再試行')
     expect(retryBtn).toBeDefined()
 
-    net.topicLists.c1 = ok({
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 2,
       has_more: false,
       topics: [
@@ -3035,8 +3035,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
   it('announces the first live Message after opening a Topic whose name was still loading', async () => {
     vi.useFakeTimers()
-    let resolveNavSummary!: (res: ReturnType<typeof ok<{ as_of_seq: number; topic: TopicSummary }>>) => void
-    const navSummaryPromise = new Promise<ReturnType<typeof ok<{ as_of_seq: number; topic: TopicSummary }>>>((r) => {
+    let resolveNavSummary!: (res: ReturnType<typeof ok<{ history_generation: string;  as_of_seq: number; topic: TopicSummary }>>) => void
+    const navSummaryPromise = new Promise<ReturnType<typeof ok<{ history_generation: string;  as_of_seq: number; topic: TopicSummary }>>>((r) => {
       resolveNavSummary = r
     })
     const net = fakeNetwork()
@@ -3071,11 +3071,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     }
 
     const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: '既存本文', topic_id: null }
-    net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
-    net.topicMessages['c1:t-slow'] = ok({ messages: [], has_more: false })
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
+    net.topicMessages['c1:t-slow'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false })
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
 
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
@@ -3132,7 +3132,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // Now resolve the Topic name (without changing currentTimeline)
     const mSlow = { ...record(1, 'c1'), id: 'm-slow', sender: 'other', body: '初回', topic_id: 't-slow' }
     resolveNavSummary(
-      ok({
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 1,
         topic: {
           mention_unread_count: 0,
@@ -3184,7 +3184,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           if (topicId === 't-retry') {
             summaryCalls++
             if (summaryCalls === 1) return { ok: false, kind: 'http', status: 503 }
-            return ok({
+            return ok({ history_generation: '00000000-0000-4000-8000-000000000515',
               as_of_seq: 2,
               topic: {
                 mention_unread_count: 0,
@@ -3220,11 +3220,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     }
 
     const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'root', topic_id: null }
-    net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
-    net.topicLists.c1 = ok({ as_of_seq: 1, has_more: false, topics: [] })
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, has_more: false, topics: [] })
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
 
     let href = '/o/org-1/c/c1?panel=topics'
     let historyState: unknown = null
@@ -3309,7 +3309,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           if (topicId === 't-503') {
             retryableCalls++
             if (!allowSuccess) return { ok: false, kind: 'http', status: 503 }
-            return ok({
+            return ok({ history_generation: '00000000-0000-4000-8000-000000000515',
               as_of_seq: 2,
               topic: {
                 mention_unread_count: 0,
@@ -3349,11 +3349,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     }
 
     const m1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: 'root', topic_id: null }
-    net.timelines.c1 = ok({ as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
-    net.topicLists.c1 = ok({ as_of_seq: 1, has_more: false, topics: [] })
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, has_more: false, items: [{ kind: 'message', message: m1 }] })
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, has_more: false, topics: [] })
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
 
     let href = '/o/org-1/c/c1?panel=topics'
     let historyState: unknown = null
@@ -3456,7 +3456,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
   it('focuses the returning Topic summary line after a delayed timeline load, and falls back to Composer only when ready and absent or on timeline error', async () => {
     type TimelineRes =
       | ReturnType<
-          typeof ok<{
+          typeof ok<{ history_generation: string;
             as_of_seq: number
             has_more: boolean
             items: Array<
@@ -3516,8 +3516,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     }
 
     const topicMsg1 = { ...record(1, 'c1'), id: 'm-1', sender: 'other', body: '遅延表示の初回本文', topic_id: 't-delayed' }
-    net.topicMessages['c1:t-delayed'] = ok({ messages: [topicMsg1], has_more: false })
-    net.topicSummaries['c1:t-delayed'] = ok({
+    net.topicMessages['c1:t-delayed'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicMsg1]).at(-1)?.created_seq ?? 0,  messages: [topicMsg1], has_more: false })
+    net.topicSummaries['c1:t-delayed'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       topic: {
         mention_unread_count: 0,
@@ -3532,8 +3532,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       },
     })
     const c2TopicMsg = { ...record(1, 'c2'), id: 'm-c2-1', sender: 'other', body: '旧トピック本文', topic_id: 't-absent' }
-    net.topicMessages['c2:t-absent'] = ok({ messages: [c2TopicMsg], has_more: false })
-    net.topicSummaries['c2:t-absent'] = ok({
+    net.topicMessages['c2:t-absent'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([c2TopicMsg]).at(-1)?.created_seq ?? 0,  messages: [c2TopicMsg], has_more: false })
+    net.topicSummaries['c2:t-absent'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       topic: {
         mention_unread_count: 0,
@@ -3548,8 +3548,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       },
     })
     const c3TopicMsg = { ...record(1, 'c3'), id: 'm-c3-1', sender: 'other', body: 'エラーチャンネル本文', topic_id: 't-err' }
-    net.topicMessages['c3:t-err'] = ok({ messages: [c3TopicMsg], has_more: false })
-    net.topicSummaries['c3:t-err'] = ok({
+    net.topicMessages['c3:t-err'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([c3TopicMsg]).at(-1)?.created_seq ?? 0,  messages: [c3TopicMsg], has_more: false })
+    net.topicSummaries['c3:t-err'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       topic: {
         mention_unread_count: 0,
@@ -3565,7 +3565,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     })
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'other'), channel('c3', 'broken')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general'), channel('c2', 'other'), channel('c3', 'broken')] }))
 
     let href = '/o/org-1/c/c1/t/t-delayed'
     let historyState: unknown = null
@@ -3625,7 +3625,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // Resolve the delayed main timeline load -> summary line renders and receives focus (not Composer)
     resolveC1Timeline(
-      ok({
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 1,
         has_more: false,
         items: [
@@ -3679,7 +3679,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const c2RootMsg = { ...record(2, 'c2'), id: 'm-c2-2', sender: 'other', body: '最新通常投稿', topic_id: null }
     resolveC2Timeline(
-      ok({
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 2,
         has_more: true,
         items: [{ kind: 'message', message: c2RootMsg }],
@@ -3748,7 +3748,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     }
 
     const topicMsg1 = { ...record(1, 'c1'), id: 'm-1', sender: 'me', body: 'キーボード初回投稿', topic_id: 't-kbd' }
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       has_more: false,
       items: [
@@ -3768,8 +3768,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         },
       ],
     })
-    net.topicMessages['c1:t-kbd'] = ok({ messages: [topicMsg1], has_more: false })
-    net.topicSummaries['c1:t-kbd'] = ok({
+    net.topicMessages['c1:t-kbd'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicMsg1]).at(-1)?.created_seq ?? 0,  messages: [topicMsg1], has_more: false })
+    net.topicSummaries['c1:t-kbd'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       topic: {
         mention_unread_count: 0,
@@ -3785,7 +3785,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     })
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
 
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
@@ -3891,7 +3891,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
   it('never steals focus when the user moves focus elsewhere before a delayed Topic summary line appears', async () => {
     type TimelineRes = ReturnType<
-      typeof ok<{
+      typeof ok<{ history_generation: string;
         as_of_seq: number
         has_more: boolean
         items: Array<{
@@ -3947,8 +3947,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       ['c1', 't-1', m1],
       ['c2', 't-2', m2],
     ] as const) {
-      net.topicMessages[`${ch}:${tid}`] = ok({ messages: [msg], has_more: false })
-      net.topicSummaries[`${ch}:${tid}`] = ok({
+      net.topicMessages[`${ch}:${tid}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg]).at(-1)?.created_seq ?? 0,  messages: [msg], has_more: false })
+      net.topicSummaries[`${ch}:${tid}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 1,
         topic: {
           mention_unread_count: 0,
@@ -3965,7 +3965,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     }
 
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'other')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general'), channel('c2', 'other')] }))
 
     let href = '/o/org-1/c/c1/t/t-1'
     let historyState: unknown = null
@@ -4022,7 +4022,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(testDoc.activeElement).toBe(railChannelBtn)
 
     resolveC1Timeline(
-      ok({
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 1,
         has_more: false,
         items: [
@@ -4070,7 +4070,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(testDoc.activeElement).toBe(panelToggleBtn)
 
     resolveC2Timeline(
-      ok({
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 1,
         has_more: false,
         items: [
@@ -4120,7 +4120,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const r1 = { ...record(4, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: '既存の返信1' }
     const tr1 = { ...record(5, 'c1'), topic_id: 't-1', reply_to: tm1.id, reply_root_id: tm1.id, body: 'トピック内への返信1' }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       has_more: false,
       items: [
@@ -4142,7 +4142,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         },
       ],
     })
-    net.topicSummaries['c1:t-1'] = ok({
+    net.topicSummaries['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       topic: {
         mention_unread_count: 0,
@@ -4156,24 +4156,24 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         unread_count: 0,
       },
     })
-    net.topicMessages['c1:t-1'] = ok({ messages: [tm1], has_more: false })
-    net.replyChains[`c1:${m1.id}`] = ok({
+    net.topicMessages['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([tm1]).at(-1)?.created_seq ?? 0,  messages: [tm1], has_more: false })
+    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: false,
     })
-    net.replyChains[`c1:${m2.id}`] = ok({
+    net.replyChains[`c1:${m2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,
       root_id: m2.id,
       messages: [m2],
       has_more: false,
     })
-    net.replyChains[`c1:${tm1.id}`] = ok({
+    net.replyChains[`c1:${tm1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([tm1, tr1]).at(-1)?.created_seq ?? 0,
       root_id: tm1.id,
       messages: [tm1, tr1],
       has_more: false,
     })
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 3)
     await settle()
@@ -4392,18 +4392,18 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const r1 = { ...record(2, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: '返信ページ1' }
     const r2 = { ...record(3, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: '返信ページ2' }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       has_more: false,
       items: [{ kind: 'message', message: m1 }],
     })
-    net.replyChains[`c1:${m1.id}`] = ok({
+    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: true,
     })
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 1)
     await settle()
@@ -4473,7 +4473,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(buttonsByText(panel, 'さらに返信を読み込む')).toHaveLength(1)
 
     // 1. Paging trigger: clicking さらに返信を読み込む fetches after_seq: 2 and appends r2
-    net.replyChains[`c1:${m1.id}`] = ok({
+    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([r2]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [r2],
       has_more: false,
@@ -4486,7 +4486,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(net.replyHistory.at(-1)).toEqual({
       channel: 'c1',
       anchor: m1.id,
-      query: { after_seq: 2 },
+      query: {as_of_seq: 2, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 2 },
     })
     expect(panel.textContent).toContain('返信ページ2')
     expect(buttonsByText(panel, 'さらに返信を読み込む')).toHaveLength(0)
@@ -4590,14 +4590,14 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const m1 = { ...record(1, 'c1'), body: 'C9確認用ルート' }
     const r1 = { ...record(2, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: 'C9確認用返信' }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       has_more: false,
       items: [{ kind: 'message', message: m1 }],
     })
     net.replyChains[`c1:${m1.id}`] = { ok: false, kind: 'network' }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 1)
     await settle()
@@ -4698,7 +4698,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(buttonsByText(panel, '再試行')).toHaveLength(1)
 
     // Retry succeeds
-    net.replyChains[`c1:${m1.id}`] = ok({
+    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: false,
@@ -4809,30 +4809,30 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const rDesc2 = { ...record(3, 'c1'), id: 'cold-desc-2', reply_to: rDesc1.id, reply_root_id: mRoot.id, body: '未ロードの子孫返信2' }
     const mRecent = { ...record(10, 'c1'), id: 'recent-10', body: '最新タイムラインメッセージ' }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 10,
       has_more: true,
       items: [{ kind: 'message', message: mRecent }],
     })
     // Cold URL lookup for rDesc2 with limit: 1 returns the root message (mRoot)
-    net.replyChains[`c1:${rDesc2.id}`] = ok({
+    net.replyChains[`c1:${rDesc2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [mRoot],
       has_more: true,
     })
     // Opening the chain from mRoot returns page 1 ([mRoot, rDesc1], has_more: true), then page 2 ([rDesc2], has_more: false)
-    net.replyChains[`c1:${mRoot.id}:0`] = ok({
+    net.replyChains[`c1:${mRoot.id}:0`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot, rDesc1]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [mRoot, rDesc1],
       has_more: true,
     })
-    net.replyChains[`c1:${mRoot.id}:2`] = ok({
+    net.replyChains[`c1:${mRoot.id}:2`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([rDesc2]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [rDesc2],
       has_more: false,
     })
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 10)
     await settle()
@@ -4921,7 +4921,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     await settle()
     expect(net.sends).toHaveLength(2)
-    expect(net.sends[1].body).toEqual({
+    expect(net.sends[1].body).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515',
       client_message_id: firstClientMsgId,
       body: 'ページング前の子孫URLからの返信',
       reply_to: rDesc2.id,
@@ -4984,7 +4984,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const m2 = { ...record(2, 'c1'), body: '2件目' }
     const m3 = { ...record(3, 'c1'), body: '3件目' }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       has_more: false,
       items: [
@@ -4993,13 +4993,13 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: m3 },
       ],
     })
-    net.replyChains[`c1:${m2.id}`] = ok({
+    net.replyChains[`c1:${m2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,
       root_id: m2.id,
       messages: [m2],
       has_more: false,
     })
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 3)
     await settle()
@@ -5114,12 +5114,12 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const r1 = { ...record(2, 'c1'), id: 'r-1', reply_to: mRoot.id, reply_root_id: mRoot.id, body: '子返信1' }
     const r2 = { ...record(3, 'c1'), id: 'r-2', reply_to: r1.id, reply_root_id: mRoot.id, body: '孫返信2' }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       has_more: false,
       items: [{ kind: 'message', message: mRoot }],
     })
-    const chainPayload = ok({
+    const chainPayload = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot, r1, r2]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [mRoot, r1, r2],
       has_more: false,
@@ -5128,7 +5128,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.replyChains[`c1:${r1.id}`] = chainPayload
     net.replyChains[`c1:${r2.id}`] = chainPayload
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 3)
     await settle()
@@ -5311,7 +5311,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const m1 = { ...record(1, 'c1'), body: 'スクロール検証ルート' }
     const r1 = { ...record(2, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: '初期返信' }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 2,
       has_more: false,
       items: [
@@ -5319,13 +5319,13 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: r1 },
       ],
     })
-    net.replyChains[`c1:${m1.id}`] = ok({
+    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: false,
     })
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 2)
     await settle()
@@ -5449,7 +5449,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
   it('preserves a Reply Composer draft typed while a Topic reply URL is still resolving', async () => {
     const net = fakeNetwork()
     const baseOptions = net.options('me')
-    let resolveChainLookup!: (result: ReturnType<typeof ok<{ root_id: string; messages: ReturnType<typeof record>[]; has_more: boolean }>>) => void
+    let resolveChainLookup!: (result: ReturnType<typeof ok<{ history_generation: string; as_of_seq: number;  root_id: string; messages: ReturnType<typeof record>[]; has_more: boolean }>>) => void
     const rawSession = createSession({
       selfId: 'me',
       organizationId: 'org-1',
@@ -5478,18 +5478,18 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.socket.onReady()
 
     const topicRoot = { ...record(1, 'c1'), id: 'topic-root-1', topic_id: 't-1', body: 'トピック内ルート' }
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 1,
       has_more: false,
       items: [],
     })
-    net.replyChains[`c1:${topicRoot.id}`] = ok({
+    net.replyChains[`c1:${topicRoot.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicRoot]).at(-1)?.created_seq ?? 0,
       root_id: topicRoot.id,
       messages: [topicRoot],
       has_more: false,
     })
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 1)
     await settle()
@@ -5556,7 +5556,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // Now the lookup resolves with topic_id: 't-1'
     resolveChainLookup(
-      ok({
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicRoot]).at(-1)?.created_seq ?? 0,
         root_id: topicRoot.id,
         messages: [topicRoot],
         has_more: false,
@@ -5579,9 +5579,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
   it.each([403, 404])('Topic history %s shows Channel denial and keeps the Topic draft', async status => {
     const net = fakeNetwork()
     const raw = createSession({ selfId: 'me', onEnded: vi.fn(), ...net.options() })
-    net.pages.A = ok({ messages: [{ ...record(10), topic_id: 'T' }], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(10), topic_id: 'T' }]).at(-1)?.created_seq ?? 0,  messages: [{ ...record(10), topic_id: 'T' }], has_more: false })
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle(); net.subscribed('A', 10); await settle()
     const ch = syncAdapter(raw.sync).channel('A')
     ch.topic('T').setDraft('失わないトピック下書き')
@@ -5648,7 +5648,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 0,
     }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 6,
       has_more: false,
       items: [
@@ -5656,16 +5656,16 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'topic', topic: t2Summary },
       ],
     })
-    net.topicLists.c1 = ok({
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 6,
       has_more: false,
       topics: [t1Summary, t2Summary],
     })
-    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 6, topic: t1Summary })
-    net.topicSummaries['c1:t2'] = ok({ as_of_seq: 6, topic: t2Summary })
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, topic: t1Summary })
+    net.topicSummaries['c1:t2'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, topic: t2Summary })
     net.topicSummaries['c1:t3'] = { ok: false, kind: 'http', status: 500 }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'random')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general'), channel('c2', 'random')] }))
     await settle()
     net.subscribed('c1', 6)
     await settle()
@@ -5724,7 +5724,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // Now resolve the Channel-list baseline: c1 has 2 Unread (from t1), c2 has 4 Unread
     net.unreadListResult = null
-    net.unreadChannels.c1 = {
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 1, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
@@ -5732,7 +5732,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 2,
       main_unread_count: 0,
     }
-    net.unreadChannels.c2 = {
+    net.unreadChannels.c2 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 2, main_mention_unread_count: 2,
       ...channel('c2', 'random'),
       as_of_seq: 4,
@@ -5799,7 +5799,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     sessionOpts.topicsApi!.listTimeline = async (ch, query) => {
       timelineCalls++
       if (query?.before_position !== undefined) {
-        return ok({
+        return ok({ history_generation: '00000000-0000-4000-8000-000000000515',
           as_of_seq: 6,
           has_more: false,
           items: [
@@ -5830,7 +5830,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.socket.onReady()
 
     // Initial timeline page has only seq 4..6 (has_more: true); older page has seq 1..3 (containing first Unread m2 at seq 2)
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 6,
       has_more: true,
       items: [
@@ -5839,9 +5839,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: m6 },
       ],
     })
-    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 6, topic: t1Summary })
-    net.replyChains[`c1:${m2.id}`] = ok({ root_id: m2.id, messages: [m2], has_more: false })
-    net.unreadChannels.c1 = {
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, topic: t1Summary })
+    net.replyChains[`c1:${m2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,  root_id: m2.id, messages: [m2], has_more: false })
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
@@ -5850,7 +5850,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 4,
     }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 6)
     await settle()
@@ -5922,7 +5922,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(scrollEl.scrollTop).toBe(50)
 
     // 3. Only m2 (seq 2) and m3 (seq 3) are inside the 100px viewport at scrollTop = 50 -> markRead submitted seq 3 only
-    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } }])
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 3 } }])
     expect(sessionModel.unread('c1').state.main.unreadCount).toBe(2) // m4 and m6 remain Unread
     expect(sessionModel.unread('c1').state.topics.t1?.unreadCount).toBe(1) // Topic t1 remains Unread
 
@@ -5932,7 +5932,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
     expect(host.querySelector('#panel-content')).not.toBeNull()
-    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } }])
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 3 } }])
 
     // 5. While document is hidden, scrolling through m4 and m6 emits no presented intent and sends no markRead
     testDoc.visibilityState = 'hidden'
@@ -5945,7 +5945,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     scrollEl.dispatchEvent(new MiniDomEvent('scroll'))
     flushSync()
     await settle()
-    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } }])
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 3 } }])
     expect(sessionModel.unread('c1').state.main.unreadCount).toBe(2)
 
     // 6. Returning to visible document and scrolling through m4 (index 3) and m6 (index 5) emits presented for confirmed rows, ignoring Topic summary line t1 and failed pending send
@@ -5961,9 +5961,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     expect(net.markReads).toEqual([
-      { scope: { channel: 'c1', topicId: null }, body: { read_seq: 3 } },
-      { scope: { channel: 'c1', topicId: null }, body: { read_seq: 4 } },
-      { scope: { channel: 'c1', topicId: null }, body: { read_seq: 6 } },
+      { scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 3 } },
+      { scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 4 } },
+      { scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 6 } },
     ])
     expect(sessionModel.unread('c1').state.main.unreadCount).toBe(0)
     // Topic summary line in main timeline never marked Topic t1 as read
@@ -6024,7 +6024,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 1,
     }
 
-    net.timelines.c1 = ok({
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       has_more: false,
       items: [
@@ -6032,11 +6032,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'topic', topic: t2Summary },
       ],
     })
-    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 3, topic: t1Summary })
-    net.topicSummaries['c1:t2'] = ok({ as_of_seq: 3, topic: t2Summary })
-    net.topicMessages['c1:t1'] = ok({ messages: [t1m1, t1m2], has_more: false })
-    net.topicMessages['c1:t2'] = ok({ messages: [t2m1], has_more: false })
-    net.unreadChannels.c1 = {
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: t1Summary })
+    net.topicSummaries['c1:t2'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: t2Summary })
+    net.topicMessages['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([t1m1, t1m2]).at(-1)?.created_seq ?? 0,  messages: [t1m1, t1m2], has_more: false })
+    net.topicMessages['c1:t2'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([t2m1]).at(-1)?.created_seq ?? 0,  messages: [t2m1], has_more: false })
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 3,
@@ -6045,7 +6045,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 0,
     }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 3)
     await settle()
@@ -6115,7 +6115,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // Topic t1 shows read marker on t1m1, marks only t1 read, and leaves t2 Unread
     const t1m1Item = host.querySelector(`#main-content [data-message-id="${t1m1.id}"]`)!
     expect(t1m1Item.querySelector('[data-read-marker="true"]')?.textContent.trim()).toBe('未読')
-    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: 't1' }, body: { read_seq: 2 } }])
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: 't1' }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 2 } }])
     expect(sessionModel.unread('c1').state.topics.t1?.unreadCount).toBe(0)
     expect(sessionModel.unread('c1').state.topics.t2?.unreadCount).toBe(1)
     expect(sessionModel.unread('c1').state.unreadCount).toBe(1)
@@ -6177,7 +6177,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
           net.markReads.push({ scope, body })
           const next = markReadResponses.shift()
           if (next) return next
-          return ok({ read_seq: body.read_seq })
+          return ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: body.read_seq })
         },
       },
     })
@@ -6211,8 +6211,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 1,
     }
 
-    net.pages.c1 = ok({ messages: [m1, t1m1], has_more: false })
-    net.timelines.c1 = ok({
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, t1m1]).at(-1)?.created_seq ?? 0,  messages: [m1, t1m1], has_more: false })
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 2,
       has_more: false,
       items: [
@@ -6220,9 +6220,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'topic', topic: t1Summary },
       ],
     })
-    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 2, topic: t1Summary })
-    net.topicMessages['c1:t1'] = ok({ messages: [t1m1], has_more: false })
-    net.unreadChannels.c1 = {
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, topic: t1Summary })
+    net.topicMessages['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([t1m1]).at(-1)?.created_seq ?? 0,  messages: [t1m1], has_more: false })
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 2,
@@ -6231,7 +6231,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 1,
     }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 2)
     await settle()
@@ -6405,13 +6405,13 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       sender: 'other',
       body: `メッセージ${seq}`,
     }))
-    net.pages.c1 = ok({ messages: msgs, has_more: false })
-    net.timelines.c1 = ok({
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (msgs).at(-1)?.created_seq ?? 0,  messages: msgs, has_more: false })
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 6,
       has_more: false,
       items: msgs.map((message) => ({ kind: 'message' as const, message })),
     })
-    net.unreadChannels.c1 = {
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
@@ -6420,7 +6420,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 2,
     }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 6)
     await settle()
@@ -6488,7 +6488,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(host.querySelector('.workspace')?.getAttribute('data-mobile-level')).toBe('view')
     expect(scrollEl.isRenderedVisible()).toBe(true)
     expect(scrollEl.scrollTop).toBe(200)
-    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { read_seq: 6 } }])
+    expect(net.markReads).toEqual([{ scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 6 } }])
 
     navigation.destroy()
     await unmount(instance)
@@ -6519,13 +6519,13 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       sender: 'other',
       body: `メッセージ${seq}`,
     }))
-    net.pages.c1 = ok({ messages: msgs, has_more: false })
-    net.timelines.c1 = ok({
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (msgs).at(-1)?.created_seq ?? 0,  messages: msgs, has_more: false })
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 6,
       has_more: false,
       items: msgs.map((message) => ({ kind: 'message' as const, message })),
     })
-    net.unreadChannels.c1 = {
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 6,
@@ -6534,7 +6534,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 0,
     }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 6)
     await settle()
@@ -6604,7 +6604,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(sessionModel.sync.channel('c1').timeline.status).toBe('unavailable')
 
     // 4. Access returns with boundary 20 and 0 Unread (unchanged rows); user explicitly reselects Channel c1
-    net.unreadChannels.c1 = {
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 20,
@@ -6679,8 +6679,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 4,
     }
 
-    net.pages.c1 = ok({ messages: [...mainMsgs, ...topicMsgs], has_more: false })
-    net.timelines.c1 = ok({
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([...mainMsgs, ...topicMsgs]).at(-1)?.created_seq ?? 0,  messages: [...mainMsgs, ...topicMsgs], has_more: false })
+    net.timelines.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 12,
       has_more: false,
       items: [
@@ -6688,10 +6688,10 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'topic' as const, topic: t1Summary },
       ],
     })
-    net.topicLists.c1 = ok({ as_of_seq: 12, has_more: false, topics: [t1Summary] })
-    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 12, topic: t1Summary })
-    net.topicMessages['c1:t1'] = ok({ messages: topicMsgs, has_more: false })
-    net.unreadChannels.c1 = {
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: t1Summary })
+    net.topicMessages['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (topicMsgs).at(-1)?.created_seq ?? 0,  messages: topicMsgs, has_more: false })
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 12,
@@ -6700,7 +6700,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       main_unread_count: 4,
     }
 
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
     net.subscribed('c1', 12)
     await settle()
@@ -6776,8 +6776,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // 4. Live Message arrives on main Timeline while hidden
     const m7 = { ...record(13, 'c1'), sender: 'other', body: 'メイン新着7' }
     net.unreadChannels.c1.as_of_seq = 13
-    net.topicLists.c1 = ok({ as_of_seq: 13, has_more: false, topics: [t1Summary] })
-    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 13, topic: t1Summary })
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 13, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 13, topic: t1Summary })
     scrollEl.scrollHeight = 350
     net.event({ type: 'message', kind: 'create', seq: (m7).created_seq, message: m7 })
     await settle()
@@ -6793,7 +6793,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(scrollEl.isRenderedVisible()).toBe(true)
     expect(scrollEl.scrollTop).toBe(350)
     expect(host.querySelector(`#main-content [data-message-id="${mainMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
-    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: null }, body: { read_seq: 13 } })
+    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: null }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 13 } })
 
     // 6. Same scenario in TopicView: open Topic t1 -> positions at first Unread (t1m3 at row index 2 = 100px)
     host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!.click()
@@ -6827,8 +6827,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const t1m7 = { ...record(14, 'c1'), sender: 'other', topic_id: 't1', body: 'トピック新着7' }
     net.unreadChannels.c1.as_of_seq = 14
-    net.topicLists.c1 = ok({ as_of_seq: 14, has_more: false, topics: [t1Summary] })
-    net.topicSummaries['c1:t1'] = ok({ as_of_seq: 14, topic: t1Summary })
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 14, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 14, topic: t1Summary })
     topicScrollEl.scrollHeight = 300
     net.event({ type: 'message', kind: 'create', seq: (t1m7).created_seq, message: t1m7 })
     await settle()
@@ -6843,7 +6843,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(topicScrollEl.isRenderedVisible()).toBe(true)
     expect(topicScrollEl.scrollTop).toBe(300)
     expect(host.querySelector(`#main-content [data-message-id="${topicMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
-    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: 't1' }, body: { read_seq: 14 } })
+    expect(net.markReads.at(-1)).toEqual({ scope: { channel: 'c1', topicId: 't1' }, body: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 14 } })
 
     navigation.destroy()
     await unmount(instance)
@@ -6904,9 +6904,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       close: rawSession.close,
     }
     net.socket.onReady()
-    net.pages.c1 = ok({ messages: [record(1, 'c1')], has_more: false })
-    net.pages.c2 = ok({ messages: [record(1, 'c2')], has_more: false })
-    net.unreadChannels.c1 = {
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'c1')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'c1')], has_more: false })
+    net.pages.c2 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'c2')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'c2')], has_more: false })
+    net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),
       as_of_seq: 1,
@@ -6914,7 +6914,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 1,
       main_unread_count: 1,
     }
-    net.unreadChannels.c2 = {
+    net.unreadChannels.c2 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c2', 'random'),
       as_of_seq: 1,
@@ -6922,7 +6922,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       unread_count: 2,
       main_unread_count: 2,
     }
-    net.lists[0].resolve(ok({ channels: [channel('c1', 'general'), channel('c2', 'random')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general'), channel('c2', 'random')] }))
     await settle()
     net.subscribed('c1', 1)
     await settle()
@@ -7086,10 +7086,10 @@ it('DM lists show shared Mention badges beside Unread and DM timelines render ac
   expect(host.querySelectorAll('.ui-badge--mention')).toHaveLength(0)
   await unmount(list)
   const c = fakeNetwork()
-  c.pages.D = ok({ messages: [{ ...record(1, 'D'), body: `@{member:${id}} @{member:${denied}}`, mentions: [{ member_id: id, name: '参加者' }] }], has_more: false })
+  c.pages.D = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(1, 'D'), body: `@{member:${id}} @{member:${denied}}`, mentions: [{ member_id: id, name: '参加者' }] }]).at(-1)?.created_seq ?? 0,  messages: [{ ...record(1, 'D'), body: `@{member:${id}} @{member:${denied}}`, mentions: [{ member_id: id, name: '参加者' }] }], has_more: false })
   const sync = createSession({ selfId: id, organizationId: 'org', onEnded() {},
-    channelsApi: { listChannels: async () => ok({ channels: [] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
-    dmsApi: { changes: async () => ok({ dms: [], next_cursor: 'cursor', caught_up: true }), list: async () => ok({ dms: [], next_cursor: null }), open: async () => ok(baseline) },
+    channelsApi: { listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    dmsApi: { changes: async () => ok({ dms: [], next_cursor: 'cursor', caught_up: true }), list: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: [], next_cursor: null }), open: async () => ok(baseline) },
     ...c.options(id),
   })
   c.socket.onReady(); sync.sync.watch('D'); await settle(); c.subscribed('D', 1)
@@ -7149,16 +7149,16 @@ it('DM access loss hides both retained baseline badges until a renewed controlle
   const { default: DmList } = await import('./DmList.svelte')
   const { dm } = await import('./dm-test-helpers')
   const { dmsAdapter } = await import('./dms.svelte')
-  let baseline = dm('D', { as_of_seq: 1, read_seq: 0, unread_count: 1, main_unread_count: 1, mention_unread_count: 1 })
+  let baseline = dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, read_seq: 0, unread_count: 1, main_unread_count: 1, mention_unread_count: 1 })
   const net = fakeNetwork()
-  net.pages.D = ok({ messages: [{ ...record(1, 'D'), sender: 'peer', mentions: [{ member_id: 'me', name: 'Me' }] }], has_more: false })
+  net.pages.D = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(1, 'D'), sender: 'peer', mentions: [{ member_id: 'me', name: 'Me' }] }]).at(-1)?.created_seq ?? 0,  messages: [{ ...record(1, 'D'), sender: 'peer', mentions: [{ member_id: 'me', name: 'Me' }] }], has_more: false })
   const options = net.options()
   const session = createSession({ ...options, selfId: 'me', organizationId: 'org', onEnded() {},
-    channelsApi: { listChannels: async () => ok({ channels: [] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
-    unreadApi: { ...options.unreadApi!, listChannels: async () => ok({ channels: [] }) },
+    channelsApi: { listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    unreadApi: { ...options.unreadApi!, listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }) },
     dmsApi: {
       changes: async ({ lane }) => ok({ dms: [baseline], next_cursor: lane, caught_up: true }),
-      list: async () => ok({ dms: [baseline], next_cursor: null }), open: async () => ok(baseline),
+      list: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: [baseline], next_cursor: null }), open: async () => ok(baseline),
     },
   })
   net.socket.onReady(); net.event({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000)
@@ -7182,7 +7182,7 @@ it('DM access loss hides both retained baseline badges until a renewed controlle
     expect(session.dms.get().rows[0]?.baseline?.mention_unread_count).toBe(1)
     expect(badge('unread')).toBeUndefined(); expect(badge('mention')).toBeUndefined()
     expect(host.textContent).toContain('未読を確認中')
-    baseline = dm('D', { as_of_seq: 3, read_seq: 1, unread_count: 2, main_unread_count: 2, mention_unread_count: 2 })
+    baseline = dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, read_seq: 1, unread_count: 2, main_unread_count: 2, mention_unread_count: 2 })
     net.event({ type: 'channel_access_gained', channel_id: 'D' }); await vi.advanceTimersByTimeAsync(16_000)
     await settle()
     expect(session.unread.get('D').unreadCount).toBeNull()

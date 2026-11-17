@@ -23,6 +23,8 @@ impl Core {
     pub fn new(self_id: Uuid) -> Self {
         Self {
             session: SessionView {
+                history_generation: None,
+                history_epoch: 0,
                 self_id,
                 organization: Organization::Available,
                 session: Session::SignedIn,

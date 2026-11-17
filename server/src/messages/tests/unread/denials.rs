@@ -224,7 +224,10 @@ async fn unread_rejects_foreign_topics_invalid_inputs_and_stale_member_revision(
                     state,
                     auth,
                     Ok(Path((org, channel))),
-                    ApiJson(MarkReadRequest { read_seq: 100 }),
+                    ApiJson(MarkReadRequest {
+                        history_generation: None,
+                        read_seq: 100,
+                    }),
                 )
                 .await
                 .unwrap_err()
@@ -233,15 +236,24 @@ async fn unread_rejects_foreign_topics_invalid_inputs_and_stale_member_revision(
                     state,
                     auth,
                     Ok(Path((org, channel, t.parse().unwrap()))),
-                    ApiJson(MarkReadRequest { read_seq: 100 }),
+                    ApiJson(MarkReadRequest {
+                        history_generation: None,
+                        read_seq: 100,
+                    }),
                 )
                 .await
                 .unwrap_err()
                 .into_response(),
-                _ => list_channels(state, auth)
-                    .await
-                    .unwrap_err()
-                    .into_response(),
+                _ => list_channels(
+                    state,
+                    auth,
+                    Ok(Query(fukulow_api::HistoryQuery {
+                        history_generation: None,
+                    })),
+                )
+                .await
+                .unwrap_err()
+                .into_response(),
             };
             assert_eq!(
                 body(response).await,

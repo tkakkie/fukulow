@@ -68,3 +68,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [messages](messages.md): `mention_shared_surfaces_keep_sets_and_follow_non_author_rename`
 - [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`
+
+- [messages](messages.md): `fixed_windows_expire_atomically_but_creations_keep_old_watermarks`

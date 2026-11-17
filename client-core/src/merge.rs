@@ -123,6 +123,9 @@ impl Step<'_> {
         let c = self.channel(id);
         let mut messages = None;
         for mut m in incoming {
+            if m.version > m.created_seq || m.deleted {
+                c.mutation_seq = c.mutation_seq.max(m.version);
+            }
             if let Some((version, deleted, _)) = c.versions.get(&m.id) {
                 if *version > m.version || (*deleted && !m.deleted) {
                     continue;

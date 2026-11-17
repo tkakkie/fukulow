@@ -31,6 +31,7 @@ pub enum TimelineItem {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TimelinePage {
+    pub history_generation: Uuid,
     pub as_of_seq: i64,
     /// Ascending W-relative positions, newest last. Continue older with the first position.
     pub items: Vec<TimelineItem>,
@@ -39,6 +40,7 @@ pub struct TimelinePage {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TopicPage {
+    pub history_generation: Uuid,
     pub as_of_seq: i64,
     pub topics: Vec<TopicSummary>,
     pub has_more: bool,
@@ -46,6 +48,7 @@ pub struct TopicPage {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TopicSummaryResponse {
+    pub history_generation: Uuid,
     pub as_of_seq: i64,
     pub topic: TopicSummary,
 }
@@ -54,6 +57,7 @@ pub struct TopicSummaryResponse {
 #[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ListProjectionQuery {
+    pub history_generation: Option<Uuid>,
     /// Omit on the initial page to choose W under the commit barrier; future W is invalid.
     #[param(minimum = 0)]
     #[schema(minimum = 0)]
@@ -127,6 +131,7 @@ pub(super) async fn record(
     responses((status = 200, description = "Ascending Topic Messages; exclusive after_seq XOR before_seq, default 50/max 200, directional has_more; never advances the sync cursor", body = MessagePage),
         (status = 400, description = "Invalid Organization id, Channel id, Topic id, conflicting cursors or limit", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical", body = ErrorBody),
         (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
@@ -158,6 +163,9 @@ pub async fn topic_history(
         )
         .await?;
         reject_dm_topics(tx,organization,channel).await?;
+        let history_generation = history::validate(tx, organization, channel, query.history_generation, query.as_of_seq).await?;
+        if query.as_of_seq.is_some_and(|requested| requested > w) { return Err(MessageError::InvalidInput); }
+        let w = query.as_of_seq.unwrap_or(w);
         let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
             .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
         if !exists {
@@ -197,7 +205,7 @@ pub async fn topic_history(
         }
         Ok((
             [(header::CACHE_CONTROL, "no-store")],
-            Json(MessagePage { messages, has_more }),
+            Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),
         )
             .into_response())
     })

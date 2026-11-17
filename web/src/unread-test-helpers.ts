@@ -11,7 +11,7 @@ export { flush } from './sync-test-helpers'
 import { ok } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 export const msg = (seq: number, topic: string | null = null, sender = 'other', channel = 'A'): Message => ({ ...record(seq, channel), topic_id: topic, sender })
-export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ mention_unread_count: 0, main_mention_unread_count: 0, id: 'A', kind: 'channel', name: 'A', visibility: 'public',
+export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ history_generation: '00000000-0000-4000-8000-000000000515', mention_unread_count: 0, main_mention_unread_count: 0, id: 'A', kind: 'channel', name: 'A', visibility: 'public',
   capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
   as_of_seq: 3, read_seq: 0, main_unread_count: 1, unread_count: 3, ...extra })
 export const summary = (id = 'T', w = 3, p = 0, count = 1): TopicSummary => ({ mention_unread_count: 0, id, name: id, first_seq: 2,
@@ -22,30 +22,30 @@ export function unreadClient(sendMessage?: TimelineApi['sendMessage']) {
   const rows = [row()]
   const summaries = new Map([['T', summary('T', 2)], ['U', summary('U', 3)]])
   const unreadApi = {
-    listChannels: vi.fn(async () => ok({ channels: [...rows] })),
-    markRead: vi.fn<UnreadApi['markRead']>(async (_scope, body) => ok({ ...body })),
-    getTopicSummary: vi.fn<UnreadApi['getTopicSummary']>(async (_c, t) => ok({ as_of_seq: 3, topic: summaries.get(t)! })),
+    listChannels: vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [...rows] })),
+    markRead: vi.fn<UnreadApi['markRead']>(async (_scope, body) => ok({ ...body, history_generation: '00000000-0000-4000-8000-000000000515' })),
+    getTopicSummary: vi.fn<UnreadApi['getTopicSummary']>(async (_c, t) => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summaries.get(t)! })),
   }
   const topicsApi = {
     listTimeline: vi.fn<TopicsApi['listTimeline']>(async channel => {
       const items = history.filter(m => m.topic_id === null).map(message => ({ kind: 'message' as const, message: { ...message, channel_id: channel } }))
-      return ok({ as_of_seq: 3, has_more: false, items: [...items,
+      return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, items: [...items,
         ...[...summaries.values()].map(topic => ({ kind: 'topic' as const, topic: { ...topic, latest_message: { ...topic.latest_message, channel_id: channel } } }))].sort((a, b) =>
         (a.kind === 'message' ? a.message.created_seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.created_seq : b.topic.last_seq)) })
     }),
-    listTopics: vi.fn<TopicsApi['listTopics']>(async () => ok({ as_of_seq: 3, has_more: false, topics: [...summaries.values()] })),
+    listTopics: vi.fn<TopicsApi['listTopics']>(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, topics: [...summaries.values()] })),
     getTopicSummary: unreadApi.getTopicSummary,
-    listTopicMessages: vi.fn<TopicsApi['listTopicMessages']>(async (channel, topic) => ok({ messages: history.filter(m => m.topic_id === topic).map(m => ({ ...m, channel_id: channel })), has_more: false })),
+    listTopicMessages: vi.fn<TopicsApi['listTopicMessages']>(async (channel, topic) => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (history.filter(m => m.topic_id === topic).map(m => ({ ...m, channel_id: channel }))).at(-1)?.created_seq ?? 0,  messages: history.filter(m => m.topic_id === topic).map(m => ({ ...m, channel_id: channel })), has_more: false })),
   }
   const onSessionEnded = vi.fn()
   const c = createUnreadSync({ selfId: 'me', organizationId: 'org', unreadApi, topicsApi, requestTimeoutMs: 1000, onSessionEnded,
     random: () => 0.5,
-    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
+    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
     connect(h) { handlers.push(h); return { send() {}, close() {} } },
   })
   return { ...c, history, rows, summaries, unreadApi, topicsApi, handlers, onSessionEnded,
     async boot() { await c.sync.start(); handlers[0].onReady(); await c.sync.watch('A'); await flush()
-      handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 3 }); await flush() },
+      handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 3 }); await flush() },
     event(m: Message) { handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (m).created_seq, message: m }) },
     async enter(topicId: string | null = null) { if (topicId) await c.topics.loadTopic('A', topicId)
       c.unread.visibility(true); const id = await c.unread.enter({ channel: 'A', topicId }); await flush(); return id! },

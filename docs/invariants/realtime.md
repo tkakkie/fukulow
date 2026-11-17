@@ -4,6 +4,7 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 | Rule | Test |
 |---|---|
+| Old-generation subscribe preserves private denial, refuses authorized stale epochs, and fresh replay/handoff carries the rotated epoch | `server/src/realtime/tests/history.rs::generation_subscribe_denial_hides_private_channels_and_reconnect_uses_rotated_epoch` |
 | Create envelopes keep their log seq when replay hydrates newer Message state; REST and live/replay share created_seq, version and deleted fields | `server/src/realtime/tests.rs::create_envelope_keeps_log_position_when_replay_hydrates_a_newer_version` |
 | Replay closes with 1011 before acknowledging past a log position whose Message state is missing | `server/src/realtime/tests.rs::replay_missing_message_state_closes_without_hiding_log_position` |
 | Live Messages serialize once per fan-out, including shared gap recovery, independent of socket count; zero recipients may serialize zero times | `server/src/realtime/tests/shared_frame.rs::live_serialization_is_once_per_fanout_including_shared_gap_recovery` |

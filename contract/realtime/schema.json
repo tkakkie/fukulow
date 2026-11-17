@@ -528,6 +528,7 @@
           "type": "object",
           "required": ["type", "channel", "caught_up_seq"],
           "properties": {
+            "history_generation": { "type": "string" },
             "type": { "const": "subscribed" },
             "channel": { "$ref": "#/$defs/ChannelRef" },
             "caught_up_seq": { "$ref": "#/$defs/Cursor" }
@@ -541,7 +542,7 @@
           "properties": {
             "type": { "const": "error" },
             "channel": { "$ref": "#/$defs/ChannelRef" },
-            "code": { "enum": ["channel_not_found", "subscription_limit", "invalid_input"] }
+            "code": { "enum": ["channel_not_found", "subscription_limit", "invalid_input", "history_generation_changed"] }
           },
           "additionalProperties": false
         },
@@ -652,6 +653,7 @@
       "$comment": "A confirmed Message as the server record. Give created_seq, or from+to for consecutive Messages (each gets its own created_seq). Defaults: sender 'other', body 'm<seq>', id 'id<seq>', created_at fixed per created_seq, client_message_id absent (a distinct one per Message, never equal to any fixture label), no Topic. version defaults to created_seq; deleted defaults to false and omits body when true. topic (Planned, P1): the Message's fixture-local Topic. Semantic: created_seq XOR (from and to).",
       "type": "object",
       "properties": {
+        "history_generation": { "type": "string" },
         "from": {
           "$ref": "#/$defs/Seq"
         },
@@ -738,6 +740,7 @@
           "type": "object",
           "required": ["type", "channel", "caught_up_seq"],
           "properties": {
+            "history_generation": { "type": "string" },
             "type": { "const": "subscribed" },
             "channel": { "$ref": "#/$defs/Label" },
             "caught_up_seq": { "$ref": "#/$defs/Cursor" },
@@ -756,7 +759,7 @@
           "$comment": "An error event arrived (code of ErrorEvent).",
           "type": "object",
           "required": ["type", "code"],
-          "properties": { "type": { "const": "error_event" }, "channel": { "$ref": "#/$defs/Label" }, "code": { "enum": ["channel_not_found", "subscription_limit", "invalid_input"] } },
+          "properties": { "type": { "const": "error_event" }, "channel": { "$ref": "#/$defs/Label" }, "code": { "enum": ["channel_not_found", "subscription_limit", "invalid_input", "history_generation_changed"] } },
           "additionalProperties": false
         },
         {
@@ -764,6 +767,8 @@
           "type": "object",
           "required": ["type", "respond_to", "messages", "has_more"],
           "properties": {
+            "history_generation": { "type": "string" },
+            "as_of_seq": { "$ref": "#/$defs/Cursor" },
             "type": { "const": "history_result" },
             "respond_to": { "$ref": "#/$defs/Label" },
             "messages": { "type": "array", "items": { "$ref": "#/$defs/MessageSpec" } },
@@ -775,7 +780,7 @@
           "$comment": "A Channel event page from /events; positions, never creation ordering, prove C3 coverage.",
           "type": "object", "required": ["type", "respond_to", "events", "has_more"],
           "properties": {
-            "type": { "const": "events_result" }, "respond_to": { "$ref": "#/$defs/Label" },
+            "history_generation": { "type": "string" }, "type": { "const": "events_result" }, "respond_to": { "$ref": "#/$defs/Label" },
             "events": { "type": "array", "items": {
               "type": "object", "required": ["seq", "kind", "message"],
               "properties": { "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "move", "delete"] }, "message": { "$ref": "#/$defs/MessageSpec" } }, "additionalProperties": false
@@ -786,7 +791,7 @@
           "$comment": "A history request failed.",
           "type": "object",
           "required": ["type", "respond_to", "status"],
-          "properties": { "type": { "const": "history_failed" }, "respond_to": { "$ref": "#/$defs/Label" }, "status": { "$ref": "#/$defs/Status" } },
+          "properties": { "error": { "enum": ["history_generation_changed", "snapshot_expired"] }, "type": { "const": "history_failed" }, "respond_to": { "$ref": "#/$defs/Label" }, "status": { "$ref": "#/$defs/Status" } },
           "additionalProperties": false
         },
         {

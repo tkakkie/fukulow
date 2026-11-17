@@ -45,3 +45,12 @@ BEGIN
         GRANT SELECT, INSERT ON public.channel_log TO fukulow_app;
     END IF;
 END $$;
+
+-- Restore epochs cannot be chosen or rotated by the runtime role. Setup uses the default.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='organizations' AND column_name='history_generation') THEN
+        REVOKE INSERT, UPDATE ON public.organizations FROM fukulow_app;
+        GRANT INSERT (organization_id, name), UPDATE (organization_id, name) ON public.organizations TO fukulow_app;
+    END IF;
+END $$;

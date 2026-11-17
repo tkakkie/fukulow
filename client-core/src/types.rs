@@ -100,6 +100,9 @@ pub struct ChannelView {
     pub state: Availability,
     pub watched: bool,
     pub cursor: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_seq: Option<i64>,
+    pub mutation_seq: i64,
     pub messages: Rc<Vec<Rc<Message>>>,
     pub versions: Rc<std::collections::BTreeMap<Uuid, (i64, bool, i64)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +141,8 @@ impl Default for ChannelView {
             state: Availability::Loading,
             watched: false,
             cursor: None,
+            snapshot_seq: None,
+            mutation_seq: 0,
             messages: Rc::default(),
             versions: Rc::default(),
             retired_through: None,
@@ -166,6 +171,8 @@ impl ChannelView {
         self.state == other.state
             && self.watched == other.watched
             && self.cursor == other.cursor
+            && self.snapshot_seq == other.snapshot_seq
+            && self.mutation_seq == other.mutation_seq
             && Rc::ptr_eq(&self.messages, &other.messages)
             && Rc::ptr_eq(&self.versions, &other.versions)
             && Rc::ptr_eq(&self.retired_versions, &other.retired_versions)
@@ -196,6 +203,8 @@ impl ChannelView {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     History {
+        #[serde(rename = "mutationSeq")]
+        mutation_seq: i64,
         channel: Uuid,
         page: Page,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,6 +255,9 @@ pub enum Input {
     SessionReplaced {
         #[serde(rename = "selfId")]
         self_id: Uuid,
+    },
+    HistoryGeneration {
+        generation: Option<Uuid>,
     },
     Stop,
     OrganizationUnavailable,
@@ -307,6 +319,7 @@ pub enum Input {
     HistoryFailed {
         request: Token,
         status: Failure,
+        error: Option<String>,
     },
     SettleHistory {
         channel: Uuid,
@@ -343,6 +356,8 @@ pub enum Effect {
     },
     Close,
     Subscribe {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        history_generation: Option<Uuid>,
         id: Token,
         channel: Uuid,
         after_seq: i64,
@@ -351,6 +366,10 @@ pub enum Effect {
         channel: Uuid,
     },
     FetchHistory {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        history_generation: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        as_of_seq: Option<i64>,
         id: Token,
         channel: Uuid,
         page: Page,
@@ -358,6 +377,8 @@ pub enum Effect {
         seq: Option<i64>,
     },
     Send {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        history_generation: Option<Uuid>,
         id: Token,
         channel: Uuid,
         client_message_id: Uuid,
@@ -393,6 +414,9 @@ pub struct StepResult {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_generation: Option<Uuid>,
+    pub history_epoch: u64,
     pub self_id: Uuid,
     pub organization: Organization,
     pub session: Session,

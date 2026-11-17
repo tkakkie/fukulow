@@ -15,7 +15,7 @@ fn production_ids_are_uuids_and_negative_subscription_fences_are_valid() {
     assert!(
         serde_json::from_value::<StepInput>(json!({
             "type":"event","connection":1,"subscription":-1,
-            "event":{"type":"subscribed","channel_id":Uuid::nil(),"caught_up_seq":0}
+            "event":{"history_generation":Uuid::nil(),"type":"subscribed","channel_id":Uuid::nil(),"caught_up_seq":0}
         }))
         .is_ok()
     );
@@ -64,7 +64,7 @@ fn event_page_records_replace_each_identity_in_native_output() -> Result<(), Box
     let mut core = Core::new(self_id);
     let mut feed = |value| core.step(serde_json::from_value::<StepInput>(value).unwrap());
     let message = |seq, version| {
-        json!({"id":Uuid::from_u128(seq), "channel_id":channel,
+        json!({"history_generation":Uuid::nil(),"id":Uuid::from_u128(seq), "channel_id":channel,
         "created_seq":seq, "version":version, "deleted":false, "client_message_id":Uuid::from_u128(seq + 1000),
         "sender":Uuid::from_u128(3), "body":"body", "created_at":"2026-01-01T00:00:00Z", "topic_id":null, "reply_to":null,"reply_root_id":null,"mentions":[]})
     };
@@ -83,10 +83,10 @@ fn event_page_records_replace_each_identity_in_native_output() -> Result<(), Box
         })
         .ok_or("missing history")?;
     feed(
-        json!({"type":"history_result","request":history,"page":{"messages":[message(100,100)],"has_more":false}}),
+        json!({"type":"history_result","request":history,"page":{"history_generation":Uuid::nil(),"as_of_seq":100,"messages":[message(100,100)],"has_more":false}}),
     );
     let subscribed = feed(
-        json!({"type":"event","connection":1,"event":{"type":"subscribed","channel_id":channel,"caught_up_seq":102}}),
+        json!({"type":"event","connection":1,"event":{"history_generation":Uuid::nil(),"type":"subscribed","channel_id":channel,"caught_up_seq":102}}),
     );
     let fill = subscribed
         .effects
@@ -100,7 +100,7 @@ fn event_page_records_replace_each_identity_in_native_output() -> Result<(), Box
         })
         .ok_or("missing fill")?;
     let result = feed(
-        json!({"type":"events_result","request":fill,"page":{"events":[
+        json!({"type":"events_result","request":fill,"page":{"history_generation":Uuid::nil(),"events":[
         {"type":"message","seq":101,"kind":"edit","message":message(1,101)},
         {"type":"message","seq":102,"kind":"edit","message":message(1,102)}],"has_more":false}}),
     );

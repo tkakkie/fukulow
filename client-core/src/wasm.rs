@@ -165,12 +165,12 @@ mod tests {
         step(json!({"type":"connection_ready", "connection":1}))?;
         step(json!({"type":"watch", "channel":id}))?;
         let message = |seq| {
-            json!({"id":Uuid::from_u128(seq), "channel_id":id, "created_seq":seq,"version":seq,"deleted":false,
+            json!({"history_generation":Uuid::nil(),"id":Uuid::from_u128(seq), "channel_id":id, "created_seq":seq,"version":seq,"deleted":false,
             "sender":id,"client_message_id":Uuid::from_u128(seq), "body":"one body",
             "created_at":"2026-01-01T00:00:00Z", "topic_id":null, "reply_to":null, "reply_root_id":null, "mentions":[]})
         };
         let history = step(
-            json!({"type":"history_result", "request":3, "page":{"messages":[message(1)], "has_more":false}}),
+            json!({"type":"history_result", "request":3, "page":{"history_generation":Uuid::nil(),"as_of_seq":1,"messages":[message(1)], "has_more":false}}),
         )?;
         assert_eq!(history["bodies"], json!(["one body"]));
         assert_eq!(
@@ -180,7 +180,7 @@ mod tests {
         assert!(history.get("requests").is_none());
         assert!(history.get("timers").is_none());
         let confirmed = step(
-            json!({"type":"event", "connection":1, "event":{"type":"subscribed", "channel_id":id,"caught_up_seq":1}}),
+            json!({"type":"event", "connection":1, "event":{"history_generation":Uuid::nil(),"type":"subscribed", "channel_id":id,"caught_up_seq":1}}),
         )?;
         assert!(
             confirmed["channels"][id.to_string()]

@@ -13,9 +13,9 @@ export function replyClient(requestTimeoutMs = 30_000) {
   const handlers: RealtimeHandlers[] = []
   const controls: unknown[] = []
   const listMessages = vi.fn(async (channel: string): Promise<Result<MessagePage>> =>
-    ({ ok: true, data: { messages: [{ ...root(), channel_id: channel }], has_more: false } }))
+    ({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...root(), channel_id: channel }]).at(-1)?.created_seq ?? 0,  messages: [{ ...root(), channel_id: channel }], has_more: false } }))
   const listReplyChain = vi.fn(async (): Promise<Result<ReplyChainPage>> =>
-    ({ ok: true, data: { root_id: 'id1', messages: [root(), reply(3)], has_more: true } }))
+    ({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), reply(3)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [root(), reply(3)], has_more: true } }))
   let id = 0
   const sendMessage = vi.fn(async (channel: string, body: SendMessageRequest): Promise<Result<Message>> =>
     ({ ok: true, data: { ...reply(4, body.reply_to ?? 'id1'), channel_id: channel, sender: 'me', client_message_id: body.client_message_id, body: body.body } }))
@@ -29,7 +29,7 @@ export function replyClient(requestTimeoutMs = 30_000) {
   return { ...client, source, listMessages, sendMessage, listReplyChain, handlers, controls, onSessionEnded,
     async boot() {
       await client.sync.start(); handlers[0].onReady(); await client.sync.watch('A')
-      handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 1 }); await flush()
+      handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 1 }); await flush()
     },
     event(message: Message) { handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (message).created_seq, message }) },
   }

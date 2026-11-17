@@ -45,7 +45,7 @@ it('resolves the API Topic name and exposes a retryable network failure without 
   await resolver.load(target)
   expect(topic).toHaveBeenCalledTimes(1)
   expect(resolver.get().topic.status).toBe('error')
-  topic.mockResolvedValue({ ok: true, data: { as_of_seq: 1, topic: { name: '日報' } } as TopicSummaryResponse })
+  topic.mockResolvedValue({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, topic: { name: '日報' } } as TopicSummaryResponse })
   await resolver.load(target, true)
   expect(resolver.get().topic).toEqual({ status: 'ready', name: '日報' })
   resolver.close()
@@ -61,7 +61,7 @@ it('turns a stalled URL hint into a retryable error after ten seconds and fences
     await vi.advanceTimersByTimeAsync(10_000)
     await loading
     expect(resolver.get().topic.status).toBe('error')
-    finish({ ok: true, data: { as_of_seq: 1, topic: { name: '遅い応答' } } as TopicSummaryResponse })
+    finish({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, topic: { name: '遅い応答' } } as TopicSummaryResponse })
     await Promise.resolve()
     expect(resolver.get().topic.status).toBe('error')
     resolver.close()

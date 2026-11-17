@@ -26,7 +26,9 @@ impl Runner {
                 .flat_map(Seq::values)
                 .map(|seq| self.records[&(channel, seq)].clone())
                 .collect::<Vec<_>>();
-            let expected = json!({"root_id":self.posts[&spec.expect.root]["id"],"messages":records,"has_more":spec.expect.has_more});
+            assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+            assert!(page["as_of_seq"].is_i64());
+            let expected = json!({"history_generation":page["history_generation"],"as_of_seq":page["as_of_seq"],"root_id":self.posts[&spec.expect.root]["id"],"messages":records,"has_more":spec.expect.has_more});
             if status != spec.expect.status || page != expected {
                 eprintln!(
                     "chain: expected status {} {expected}, got {status} {page}",

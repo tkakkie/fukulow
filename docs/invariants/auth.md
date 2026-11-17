@@ -135,3 +135,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [replies](replies.md): `reply_counts_deny_other_organization`, `reply_counts_deny_private_nonmember`, `reply_counts_deny_guest_without_public_grant`, `reply_counts_deny_dm_nonparticipant`, `reply_counts_bound_anchors_and_descendants_by_watermark_before_data_snapshot`, `reply_counts_reauthorize_member_revision_and_grant_after_barrier_wait`, `reply_counts_wait_out_ambiguous_commit_and_preserve_rollback_baseline`
 
 - [messages](messages.md): `channel_event_pages_deny_private_nonmembers_and_foreign_organizations_with_controls`
+
+- [messages](messages.md): `generation_and_expiry_denials_preserve_channel_authorization`, `history_generation_rotation_is_explicit_scoped_and_owner_only`

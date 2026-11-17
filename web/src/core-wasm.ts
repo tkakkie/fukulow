@@ -30,7 +30,7 @@ const sameFields = (a: object, b: object) => {
   const left = a as Record<string, unknown>, right = b as Record<string, unknown>
   return [...Object.keys(a), ...Object.keys(b)].every(key => left[key] === right[key])
 }
-const sameMessage = (a: Message, b: Message) => a.id === b.id && a.channel_id === b.channel_id && a.created_seq === b.created_seq && a.version === b.version && a.deleted === b.deleted &&
+const sameMessage = (a: Message, b: Message) => a.history_generation === b.history_generation && a.id === b.id && a.channel_id === b.channel_id && a.created_seq === b.created_seq && a.version === b.version && a.deleted === b.deleted &&
   a.client_message_id === b.client_message_id && a.sender === b.sender && a.body === b.body && a.created_at === b.created_at &&
   (!a.deleted || (!('body' in a) && !('mentions' in a))) && a.topic_id === b.topic_id && a.reply_to === b.reply_to && a.reply_root_id === b.reply_root_id &&
   (a.mentions ?? []).length === (b.mentions ?? []).length && (a.mentions ?? []).every((m, i) => m.member_id === b.mentions![i].member_id && m.name === b.mentions![i].name)
@@ -63,7 +63,7 @@ export function createCore(selfId: string): SyncCore {
         if (!patch) { delete channelViews[id]; continue }
         const before = view.channels[id]
         const next = { retiredThrough: undefined, heldThrough: undefined, forgottenThrough: undefined, lastUsed: undefined, retainedCount: undefined,
-          streamBase: undefined, latest: undefined, older: undefined, fill: undefined, wait: undefined, subscription: undefined,
+          streamBase: undefined, snapshotSeq: undefined, latest: undefined, older: undefined, fill: undefined, wait: undefined, subscription: undefined,
           ...patch,
           messages: patch.messages ?? before?.messages ?? [],
           pending: patch.pending ?? before?.pending ?? [],

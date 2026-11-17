@@ -15,7 +15,7 @@ it('keeps fetched Reply pages contiguous when the newest 200 same-chain records 
   for (let seq = 801; seq <= 1000; seq++) c.event(reply(seq))
   c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
     const after = query?.after_seq ?? 0
-    return ok({ root_id: 'id1', has_more: after + 50 < 1000,
+    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1))).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: after + 50 < 1000,
       messages: Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1)) })
   })
   await c.replies.open('A', root())
@@ -32,12 +32,12 @@ it('Topic-list history cannot establish the main continuation or skip unfetched 
   const c = windowClient(); await c.boot()
   for (let page = 0; page < 7; page++) await c.topics.loadMain('A')
   expect(c.topics.get('A').main.before).toBe(601)
-  c.options.listTopics = async () => ok({ as_of_seq: 1000, has_more: false,
+  c.options.listTopics = async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1000, has_more: false,
     topics: Array.from({ length: 50 }, (_, i) => summary(`old-${i}`, i + 1, 1)) })
   await c.topics.loadList('A')
   expect(c.topics.get('A').main.before).toBe(601)
   await c.topics.loadMain('A')
-  expect(c.mainQueries.at(-1)).toEqual({ as_of_seq: 1000, before_position: 601 })
+  expect(c.mainQueries.at(-1)).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1000, before_position: 601 })
   expect(c.topics.get('A').lines.find(l => l.kind === 'message')).toMatchObject({ message: { created_seq: 551 } })
   await c.close()
 })
@@ -57,7 +57,7 @@ it('keeps an unresolved descendant Reply visible and retryable after selecting i
       await c.replies.send('A', 'unknown Reply', 'id2')
     }
     await c.replies.open('A', root())
-    c.listReplyChain.mockResolvedValue(ok({ root_id: 'id1', messages: [], has_more: false }))
+    c.listReplyChain.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  root_id: 'id1', messages: [], has_more: false }))
     await c.replies.loadMore('A')
     for (let seq = 3; seq <= 500; seq++) c.event(reply(seq))
     expect(c.replies.get('A').messages.some(m => m.id === 'id2')).toBe(false)
@@ -86,9 +86,9 @@ it('bounds interleaved Topic evidence and rejects stale counts until a safe base
   expect(c.topics.get('A').topics.find(t => t.topicId === 'T')?.messageCount).toBeNull()
   await flush()
   // A response older than discarded evidence cannot restore count authority.
-  held.resolve(ok({ as_of_seq: 10, topic: summary('T', 10, 3) })); await flush()
+  held.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: summary('T', 10, 3) })); await flush()
   expect(c.topics.get('A').topics.find(t => t.topicId === 'T')?.messageCount).toBeNull()
-  c.topicsApi.getTopicSummary.mockResolvedValue(ok({ as_of_seq: 1010, topic: summary('T', 1009, 503) }))
+  c.topicsApi.getTopicSummary.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1010, topic: summary('T', 1009, 503) }))
   await c.topics.loadSummary('A', 'T')
   c.event(11, 'T'); c.event(1009, 'T'); c.event(1011, 'T')
   expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 504, position: 1011 })
@@ -118,8 +118,8 @@ it('caps disjoint cursor evidence and refetches its forgotten final sequence wit
   feed({ type: 'session_start', selfId: 'me' })
   feed({ type: 'connection_ready', connection: state.connection! })
   feed({ type: 'watch', channel: 'A' })
-  feed({ type: 'history_result', request: state.channels.A.latest!, page: { messages: [record(1)], has_more: false } })
-  feed({ type: 'event', connection: state.connection!, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 1 } })
+  feed({ type: 'history_result', request: state.channels.A.latest!, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1)]).at(-1)?.created_seq ?? 0,  messages: [record(1)], has_more: false } })
+  feed({ type: 'event', connection: state.connection!, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 1 } })
   for (let seq = 3; seq <= 2001; seq += 2) feed({ type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   expect(state.channels.A.advancing.length).toBeLessThanOrEqual(EVIDENCE_LIMIT)
   expect(state.channels.A.cursor).toBe(1)
@@ -127,13 +127,13 @@ it('caps disjoint cursor evidence and refetches its forgotten final sequence wit
   while (state.channels.A.cursor! < 2000) {
     const request = effects.find(e => e.type === 'fetch_history')!
     const after = state.channels.A.cursor!, end = Math.min(2000, after + 200)
-    effects = feed({ type: 'events_result', request: request.id, page: {
+    effects = feed({ type: 'events_result', request: request.id, page: { history_generation: '00000000-0000-4000-8000-000000000515',
       events: Array.from({ length: end - after }, (_, i) => ({ type: 'message', seq: after + i + 1, kind: 'create', message: record(after + i + 1) })), has_more: true } })
   }
   expect(state.channels.A.cursor).toBe(2000)
   const final = effects.find(e => e.type === 'fetch_history')!
   expect(final).toMatchObject({ seq: 2000, page: 'after' })
-  feed({ type: 'events_result', request: final.id, page: { events: [{ type: 'message', seq: 2001, kind: 'create', message: record(2001) }], has_more: false } })
+  feed({ type: 'events_result', request: final.id, page: { history_generation: '00000000-0000-4000-8000-000000000515', events: [{ type: 'message', seq: 2001, kind: 'create', message: record(2001) }], has_more: false } })
   expect(state.channels.A).toMatchObject({ cursor: 2001, advancing: [], wait: undefined })
 })
 

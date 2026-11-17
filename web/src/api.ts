@@ -95,8 +95,8 @@ export type ListMessagesQuery = NonNullable<
   import('./api-schema').operations['list_messages']['parameters']['query']
 >
 
-export const listChannels = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
-  call<components['schemas']['ChannelList']>(f, `${orgPath(organizationId)}/channels`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
+export const listChannels = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal, query?: NonNullable<import('./api-schema').operations['list_channels']['parameters']['query']>) =>
+  call<components['schemas']['ChannelList']>(f, `${orgPath(organizationId)}/channels${querySuffix(query ?? {})}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
   call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)
@@ -107,6 +107,7 @@ export type DmChangesQuery = import('./api-schema').operations['dm_changes']['pa
 export const listDms = (org: string, query: DmListQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) => {
   const params = new URLSearchParams()
   if (query.cursor !== undefined) params.set('cursor', query.cursor)
+  if (query.history_generation !== undefined) params.set('history_generation', query.history_generation)
   for (const id of query.channel_id ?? []) params.append('channel_id', id)
   return call<components['schemas']['DmList']>(f, `${orgPath(org)}/dms${params.size ? `?${params}` : ''}`, { cache: 'no-store', signal }, true)
 }
@@ -171,8 +172,8 @@ export const listTimeline = (organizationId: string, channelId: string, query: L
 export const listTopics = (organizationId: string, channelId: string, query: ListTopicsQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
   call<TopicPage>(f, `${channelPath(organizationId, channelId)}/topics${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
-export const getTopicSummary = (organizationId: string, channelId: string, topicId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
-  call<TopicSummaryResponse>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
+export const getTopicSummary = (organizationId: string, channelId: string, topicId: string, f: typeof fetch = fetch, signal?: AbortSignal, query: NonNullable<import('./api-schema').operations['topic_summary']['parameters']['query']> = {}) =>
+  call<TopicSummaryResponse>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch) =>
   call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store' }, true)

@@ -26,7 +26,7 @@ for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
       const json = (body: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
       if (path === '/api/v1/me') return json({ account: { id: 'account', email: 'test@example.invalid' }, organizations: [organization] })
       if (path === '/api/v1/orgs/o/me') return json({ organization, member: members[0] })
-      if (path === '/api/v1/orgs/o/channels') return json({ channels: [] })
+      if (path === '/api/v1/orgs/o/channels') return json({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] })
       if (path === '/api/v1/orgs/o/invites') return json({ invites: [] })
       if (path === '/api/v1/orgs/o/members') return json({ members })
       if (path === '/api/v1/orgs/o/members/target/deactivate' && req.method === 'POST') {

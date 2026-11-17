@@ -81,3 +81,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [realtime](realtime.md): `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`
 
 - [sync](sync.md): `a plain create below a retired mutation version floor still enters Unread`
+
+- [sync](sync.md): `Organization generation resets every Channel and preserves send intent and late 401 in both cores`
