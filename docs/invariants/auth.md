@@ -139,3 +139,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [messages](messages.md): `generation_and_expiry_denials_preserve_channel_authorization`, `history_generation_rotation_is_explicit_scoped_and_owner_only`
 
 - [realtime](realtime.md): `stale_generation_subscribe_denials_cover_guest_dm_roles_and_foreign_organization`, `subscribe_handoff_generation_recheck_preserves_access_and_organization_loss`
+
+- [realtime](realtime.md): `unrelated_channel_transition_keeps_a_paused_revocation`

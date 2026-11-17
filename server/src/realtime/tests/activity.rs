@@ -1904,8 +1904,8 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
         started: Arc<AtomicBool>,
     }
     impl ActivityChange for OrderedChange {
-        fn retire(&mut self) {
-            self.inner.retire();
+        fn retire(&mut self, channel: Option<Uuid>) {
+            self.inner.retire(channel);
         }
         fn committed(self: Box<Self>, pool: PgPool) {
             self.started.store(true, Ordering::SeqCst);
@@ -2045,8 +2045,72 @@ async fn permission_change_keeps_target_gain_after_its_own_recheck(pool: PgPool)
 }
 
 #[fukulow_test::test]
+async fn unrelated_channel_transition_keeps_a_paused_revocation(pool: PgPool) {
+    let mut cases = Vec::new();
+    for (manager, phase) in [false, true].into_iter().flat_map(|manager| {
+        ["revocation", "snapshot", "revoked", "handoff"].map(move |phase| (manager, phase))
+    }) {
+        let f = fixture(&pool).await;
+        owner(&pool, &f).await;
+        let (target, token) = member(&pool, f.organization).await;
+        let a = channel(&pool, f.organization, f.member, true).await;
+        let b = channel(&pool, f.organization, f.member, true).await;
+        grant(&pool, &f, a, target).await;
+        if manager {
+            grant(&pool, &f, b, target).await;
+        }
+        let mut socket = connect(&f, &token).await;
+        // Pause A before selection, authorization, enqueue or first handoff.
+        let gate = crate::channels::activity::pause_member(f.organization, a, phase, Some(target));
+        let response = request(
+            &f.app,
+            "DELETE",
+            &format!("/api/v1/channels/{a}/members/{target}"),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let (method, path, body) = if manager {
+            (
+                "PATCH",
+                format!("/api/v1/channels/{b}/members/{target}"),
+                json!({"manager":true}),
+            )
+        } else {
+            (
+                "POST",
+                format!("/api/v1/channels/{b}/members"),
+                json!({"member_id":target}),
+            )
+        };
+        let response = request(&f.app, method, &path, &f.token, body).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        gate.release.add_permits(1);
+        let received = notices(&f, &mut socket).await;
+        eprintln!("manager={manager}, phase={phase}: {received:?}");
+        cases.push((manager, phase, received, a));
+    }
+    for (manager, phase, received, a) in cases {
+        assert_eq!(
+            received
+                .iter()
+                .filter(|event| **event == json!({"type":"channel_access_revoked","channel_id":a}))
+                .count(),
+            1,
+            "manager={manager}, phase={phase}: {received:?}"
+        );
+    }
+}
+
+#[fukulow_test::test]
 async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool: PgPool) {
-    for phase in ["snapshot", "revoked", "handoff"] {
+    for phase in ["revocation", "snapshot", "revoked", "handoff"] {
         let f = fixture(&pool).await;
         owner(&pool, &f).await;
         let (target, token) = member(&pool, f.organization).await;
@@ -2080,7 +2144,7 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let mut gained = Vec::new();
-        if phase == "snapshot" {
+        if matches!(phase, "revocation" | "snapshot") {
             loop {
                 let event = raw_event(&mut own).await;
                 let ready = event["type"] == "channel_access_gained";
@@ -2111,6 +2175,52 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
         );
         post(&f, private).await;
         assert_eq!(notices(&f, &mut own).await, vec![activity(private, 1)]);
+    }
+}
+
+#[fukulow_test::test]
+async fn role_change_rejects_a_paused_old_channel_revocation(pool: PgPool) {
+    for phase in ["revocation", "snapshot", "revoked", "handoff"] {
+        let f = fixture(&pool).await;
+        owner(&pool, &f).await;
+        let (target, token) = member(&pool, f.organization).await;
+        let a = channel(&pool, f.organization, f.member, true).await;
+        grant(&pool, &f, a, target).await;
+        // Keep a usable public grant as a post-change authorization control.
+        grant(&pool, &f, f.channel, target).await;
+        let mut socket = connect(&f, &token).await;
+        let gate = crate::channels::activity::pause_member(f.organization, a, phase, Some(target));
+        let response = request(
+            &f.app,
+            "DELETE",
+            &format!("/api/v1/channels/{a}/members/{target}"),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let response = request(
+            &f.app,
+            "PATCH",
+            &format!("/api/v1/orgs/{}/members/{target}/role", f.organization),
+            &f.token,
+            json!({"role":"guest"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        gate.release.add_permits(1);
+        let received = notices(&f, &mut socket).await;
+        assert!(
+            !received.contains(&json!({"type":"channel_access_revoked","channel_id":a})),
+            "{phase}: {received:?}"
+        );
+        post(&f, f.channel).await;
+        assert_eq!(notices(&f, &mut socket).await, vec![activity(f.channel, 1)]);
     }
 }
 
@@ -2150,8 +2260,8 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
         }
     }
     impl ActivityChange for DelayedChange {
-        fn retire(&mut self) {
-            self.change.retire();
+        fn retire(&mut self, channel: Option<Uuid>) {
+            self.change.retire(channel);
         }
         fn committed(self: Box<Self>, pool: PgPool) {
             tokio::spawn(async move {

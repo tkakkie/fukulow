@@ -308,7 +308,7 @@ async fn mutate_inner(
     }).await?;
     if changed {
         let mut notice = notice;
-        if let Some(notice) = notice.as_mut() { notice.retire(); }
+        if let Some(notice) = notice.as_mut() { notice.retire(Some(channel)); }
         if !matches!(mutation, Mutation::Manager(_)) {
             state.session_changes.recheck_subscriptions(&state.pool, auth::SubscriptionScope::Channel(org, channel)).await;
         }
