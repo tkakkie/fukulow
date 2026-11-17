@@ -200,7 +200,8 @@ async fn delete_grant_reports_revocation_with_and_without_an_active_subscription
 
     struct RecheckBeforePublication {
         access: crate::channels::AccessChanges,
-        gates: [Arc<TestGate>; 2],
+        // Not an array: the module-direction driver ICEs on array lengths in local items.
+        gates: Vec<Arc<TestGate>>,
     }
     impl SubscriptionRecheck for RecheckBeforePublication {
         fn check<'a>(
@@ -263,10 +264,10 @@ async fn delete_grant_reports_revocation_with_and_without_an_active_subscription
         let mut socket = connect(&f, &token).await;
         if subscribed {
             subscribe(&mut socket, private, 0).await;
-            assert_eq!(
-                raw_event(&mut socket).await,
-                json!({"type":"subscribed","channel_id":private,"caught_up_seq":0})
-            );
+            let reply = raw_event(&mut socket).await;
+            assert_eq!(reply["type"], "subscribed");
+            assert_eq!(reply["channel_id"], json!(private));
+            assert_eq!(reply["caught_up_seq"], 0);
         }
         // Main starts the publisher first; this gate forces its after-state query
         // to follow the completed recheck under either mutation ordering.
@@ -281,7 +282,7 @@ async fn delete_grant_reports_revocation_with_and_without_an_active_subscription
             .session_changes
             .set_subscription_recheck(Arc::new(RecheckBeforePublication {
                 access: f.state.message_delivery.channel_access.clone(),
-                gates: [gate.clone(), member_gate],
+                gates: vec![gate.clone(), member_gate],
             }));
         let response = request(
             &f.app,
