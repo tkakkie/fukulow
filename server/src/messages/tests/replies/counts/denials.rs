@@ -22,13 +22,14 @@ async fn denial(pool: PgPool, case: &str) {
         "guest_public" | "private_guest" => "guest",
         _ => "member",
     };
-    sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2")
+    let updated = sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2")
         .bind(target_org)
         .bind(actor)
         .bind(role)
         .execute(&pool)
         .await
         .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
     let app = crate::app(state.clone());
@@ -68,6 +69,17 @@ async fn denial(pool: PgPool, case: &str) {
         None
     };
     match case {
+        "revoked" => {
+            let response = request(
+                &app,
+                "DELETE",
+                &format!("/api/v1/orgs/{org}/channels/{channel}/members/{actor}"),
+                &token,
+                Value::Null,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
         "deactivated" | "stale_revision" => {
             sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
                 .bind(org)
@@ -172,6 +184,46 @@ async fn denial(pool: PgPool, case: &str) {
 async fn reply_counts_deny_other_organization(pool: PgPool) {
     denial(pool, "foreign_organization").await;
 }
+
+#[fukulow_test::test]
+async fn reply_counts_deny_foreign_channel_in_own_organization(pool: PgPool) {
+    let (app, _, _, channel_a, author_a) = fixture(&pool).await;
+    let (_, org_b, _, channel_b, author_b) = fixture(&pool).await;
+    let root_a = sent(&app, &author_a, channel_a, input(Uuid::new_v4(), "Root A")).await;
+    sent(
+        &app,
+        &author_a,
+        channel_a,
+        reply_input(Uuid::new_v4(), &root_a),
+    )
+    .await;
+    let ids = [id(&root_a)];
+    assert_eq!(
+        page(&app, &author_a, channel_a, &ids).await["counts"],
+        json!([entry(id(&root_a), id(&root_a), 1)])
+    );
+    let root_b = sent(&app, &author_b, channel_b, input(Uuid::new_v4(), "Root B")).await;
+    assert_eq!(
+        page(&app, &author_b, channel_b, &[id(&root_b)]).await["counts"],
+        json!([entry(id(&root_b), id(&root_b), 0)])
+    );
+    for (channel, ids) in [(channel_a, ids), (Uuid::new_v4(), [Uuid::new_v4()])] {
+        error(
+            request(
+                &app,
+                "POST",
+                &format!("/api/v1/orgs/{org_b}/channels/{channel}/reply-counts"),
+                &author_b,
+                json!({"ids":ids}),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "channel not found",
+        )
+        .await;
+    }
+}
+
 #[fukulow_test::test]
 async fn reply_counts_deny_private_nonmember(pool: PgPool) {
     denial(pool, "private_member").await;
