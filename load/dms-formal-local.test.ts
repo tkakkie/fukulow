@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { readConfig } from './dms-formal-config.ts';
 import { arrivalRate, scaledSocketMember } from './dms-formal-scenarios.ts';
-import { scaledLoad, apparentBytes, dockerfileBases } from './dms-formal-local.ts';
+import { scaledLoad, apparentBytes, dockerfileBases, harnessCaddyfile, localRedirect } from './dms-formal-local.ts';
 import { concurrentBrowsingReasons, type OfferedBucket } from './dms-formal-concurrency.ts';
 import { overheadConditionKeys, overheadOrder, overheadMetrics, overheadClasses, judgeOverhead, type OverheadArm } from './dms-formal-overhead.ts';
 import { execute } from './dms-formal-exec.ts';
@@ -153,4 +153,20 @@ test('local build checks only external Dockerfile bases, not earlier stage names
   const dockerfile='FROM rust:1@sha256:a AS rust-base\nFROM rust-base AS wasm\nFROM node:2@sha256:b AS web\nFROM Rust-Base as server\nFROM debian:3@sha256:c\n  from --platform=linux/arm64 alpine:4@sha256:d AS tools\nFROM --platform=linux/arm64 tools\n';
   assert.deepEqual(dockerfileBases(dockerfile),['rust:1@sha256:a','node:2@sha256:b','debian:3@sha256:c','alpine:4@sha256:d']);
   assert.deepEqual(dockerfileBases(readFileSync(resolve(import.meta.dirname,'../Dockerfile'),'utf8')).every(pin=>/@sha256:[a-f0-9]{64}$/.test(pin)),true);
+});
+
+test('local Caddyfile redirects to the requested host; remote keeps production; drift fails closed', () => {
+  const production = readFileSync(new URL('../deploy/Caddyfile', import.meta.url), 'utf8');
+  const local = harnessCaddyfile(production, true), remote = harnessCaddyfile(production, false);
+  assert.ok(production.includes(localRedirect));
+  assert.ok(!local.includes('{$FUKULOW_DOMAIN:localhost}{uri}'));
+  assert.match(local, /\t\tredir https:\/\/\{host\}\{uri\} 308/);
+  assert.ok(remote.includes(localRedirect));
+  for (const out of [local, remote]) assert.equal(out.split('\n{$FUKULOW_DOMAIN:localhost} {\n\ttls internal\n').length, 2);
+  assert.match(local, /\nhttp:\/\/localhost, http:\/\/host\.docker\.internal \{\n/);
+  assert.ok(remote.includes('\nhttp://{$FUKULOW_DOMAIN:localhost} {\n'));
+  assert.equal(local.replace('redir https://{host}{uri} 308', 'redir https://{$FUKULOW_DOMAIN:localhost}{uri} 308').replace('http://localhost, http://host.docker.internal {', 'http://{$FUKULOW_DOMAIN:localhost} {'), remote);
+  assert.throws(() => harnessCaddyfile(production.replace('\nhttp://{$FUKULOW_DOMAIN:localhost} {\n', '\nhttp://{$APP_DOMAIN} {\n'), true), /HTTP site block/);
+  assert.throws(() => harnessCaddyfile(production.replace(localRedirect, '\t\tredir https://example.test{uri} 308'), true), /exactly one/);
+  assert.throws(() => harnessCaddyfile(production.replace('\n{$FUKULOW_DOMAIN:localhost} {\n', '\n{$APP_DOMAIN} {\n'), false), /site block/);
 });

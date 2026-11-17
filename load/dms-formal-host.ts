@@ -16,7 +16,7 @@ import { histogramsSql } from './dms-formal-histograms.ts';
 import { baselinePaths, baselineSource } from './pool-overhead-baseline.ts';
 import { overheadOrder } from './dms-formal-overhead.ts';
 import { reportOverheadArm } from './dms-formal-overhead-results.ts';
-import { scaledLoad, localIdentity, localCopy, sha256File, dockerfileBases, type LocalLimits } from './dms-formal-local.ts';
+import { scaledLoad, localIdentity, localCopy, sha256File, dockerfileBases, harnessCaddyfile, localNames, type LocalLimits } from './dms-formal-local.ts';
 import { reportPilot } from './dms-formal-pilot.ts';
 import { reportAttempt } from './dms-formal-results.ts';
 export type HostState = { target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
@@ -108,10 +108,10 @@ async function app(s: HostState) {
   if(s.target!=='local')await docker(['network','create','--label',`dm-formal=${s.id}`,`${s.id}-edge`]);
   save(`${root}/app.env`, `DATABASE_URL=postgres://fukulow_app:${s.appPassword}@${s.dbAddress}:5432/fukulow\nFUKULOW_DB_MAX_CONNECTIONS=32\nFUKULOW_COOKIE_SECURE=true\nFUKULOW_ADDR=0.0.0.0:8080\nFUKULOW_SETUP_TOKEN=${s.setupToken}\nFUKULOW_TRUSTED_PROXIES=${s.id}-caddy\nFUKULOW_CLIENT_IP_HEADER=x-forwarded-for\n`);
   // Resolve the proxy's address first, preserving production trusted-proxy semantics.
-  const caddyfile = readFileSync(`${root}/harness/deploy/Caddyfile`,'utf8').replace('\n\t@static', '\n\ttls internal\n\t@static');
+  const caddyfile = harnessCaddyfile(readFileSync(`${root}/harness/deploy/Caddyfile`,'utf8'),s.target==='local');
   save(`${root}/Caddyfile`,caddyfile);
   await docker(['volume','create','--label',`dm-formal=${s.id}`,`${s.id}-caddy-data`]);
-  await docker(['run','-d','--log-driver','json-file','--log-opt','max-size=10m','--log-opt','max-file=3','--name',`${s.id}-caddy`,'--label',`dm-formal=${s.id}`,'--network',`${s.id}-edge`,'-p',s.target==='local'?'127.0.0.1:443:443':'443:443','-e',`FUKULOW_DOMAIN=${s.target==='local'?'localhost, host.docker.internal':s.appAddress}`,'-v',`${root}/Caddyfile:/etc/caddy/Caddyfile:ro`,'-v',`${s.id}-caddy-data:/data`,s.caddy]);
+  await docker(['run','-d','--log-driver','json-file','--log-opt','max-size=10m','--log-opt','max-file=3','--name',`${s.id}-caddy`,'--label',`dm-formal=${s.id}`,'--network',`${s.id}-edge`,'-p',s.target==='local'?'127.0.0.1:443:443':'443:443','-e',`FUKULOW_DOMAIN=${s.target==='local'?localNames.join(', '):s.appAddress}`,'-v',`${root}/Caddyfile:/etc/caddy/Caddyfile:ro`,'-v',`${s.id}-caddy-data:/data`,s.caddy]);
   const proxy = await docker(['inspect','--format','{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',`${s.id}-caddy`]);
   const env = readFileSync(`${root}/app.env`,'utf8').replace(`${s.id}-caddy`,proxy);
   save(`${root}/app.env`,env);
