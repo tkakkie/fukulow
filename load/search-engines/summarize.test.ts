@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { hash } from './manifest.ts';
 import { judge, summarize } from './summarize.ts';
+import { denialCases } from './definer.ts';
 
 for (const mode of ['success','smoke-success','smoke-refused','smoke-mixed','tampered','missing-status','failed-cleanup','invalid-status','wrong-status-hash','missing-completed','missing-finished','wrong-completion-hash']) {
   test(`summary requires verified frozen completion: ${mode}`,t=>{
@@ -43,10 +44,11 @@ for (const mode of ['success','smoke-success','smoke-refused','smoke-mixed','tam
 }
 
 test('judgement: 500 ms p95 in every round, index use, completeness and denials; missing evidence never passes',()=>{
-  const queries = [{id:'ja2-rare',scalars:2},{id:'ja3-rare',scalars:4},{id:'ja1-frequent',scalars:1}];
-  const definer = {cases:['a','b'],results:['none','trgm','bigm','pgroonga'].map(engine=>({engine,cases:4}))};
+  const queries = [{id:'ja2-rare',scalars:2},{id:'ja3-rare',scalars:4},{id:'ja1-frequent',scalars:1},{id:'mixed',scalars:4}];
+  const names = denialCases.map(c=>c.name);
+  const definer = {cases:names,results:['none','trgm','bigm','pgroonga'].map(engine=>({engine,cases:names.length*2}))};
   const plans = (index: string[], seq = false) => queries.map(q=>({query:q.id,searchIndex:index.includes(q.id),seqScanMessages:seq}));
-  const runs = (p95: number, planList = plans(['ja2-rare','ja3-rare']), equal = true) => ['trgm','bigm','pgroonga'].flatMap(engine=>[1,2,3].map(round=>({
+  const runs = (p95: number, planList = plans(['ja2-rare','ja3-rare','mixed']), equal = true) => ['trgm','bigm','pgroonga'].flatMap(engine=>[1,2,3].map(round=>({
     manifestHash:'h',round,engine,buildMs:1,relationBytes:1,physicalDeltaBytes:1,walBytesPerInsert:1,write:{query:'w',n:1,p50:1,p95:1,p99:1,tps:1},
     latencies:queries.map(q=>({query:q.id,n:100,p50:1,p95:round===2&&engine==='bigm'?p95:10,p99:p95,tps:1})),
     ...(round===1?{plans:planList,completeness:{equal}}:{})})));
@@ -54,13 +56,21 @@ test('judgement: 500 ms p95 in every round, index use, completeness and denials;
   const pass = judge(runs(500),queries,definer);
   assert.deepEqual(pass.map(r=>r.status),['PASS','PASS','PASS']);
   // trgm needs 3 scalars, so ja2-rare without search_body is not required for trgm.
-  assert.deepEqual(by(pass,'trgm').requiredSearchIndex,['ja3-rare']);
+  assert.deepEqual(by(pass,'trgm').requiredSearchIndex,['ja3-rare','mixed']);
   assert.equal(by(judge(runs(500.1),queries,definer),'bigm').latency,'FAIL');
-  assert.equal(by(judge(runs(10,plans(['ja3-rare'])),queries,definer),'bigm').index,'FAIL');
-  assert.equal(by(judge(runs(10,plans(['ja3-rare'])),queries,definer),'trgm').index,'PASS');
-  assert.equal(by(judge(runs(10,plans(['ja2-rare','ja3-rare'],true)),queries,definer),'pgroonga').index,'FAIL');
+  assert.equal(by(judge(runs(10,plans(['ja3-rare','mixed'])),queries,definer),'bigm').index,'FAIL');
+  assert.equal(by(judge(runs(10,plans(['ja3-rare','mixed'])),queries,definer),'trgm').index,'PASS');
+  assert.equal(by(judge(runs(10,plans(['ja2-rare','ja3-rare','mixed'],true)),queries,definer),'pgroonga').index,'FAIL');
   assert.equal(by(judge(runs(10,undefined,false),queries,definer),'trgm').completeness,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries,undefined),'trgm').status,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),undefined,definer),'trgm').status,'NOT EVALUATED');
   assert.equal(by(judge(runs(10).filter(r=>r.round!==3),queries,definer),'trgm').latency,'NOT EVALUATED');
+  // An explicitly listed rare query without a "rare" name is still gated.
+  assert.equal(by(judge(runs(10,plans(['ja2-rare','ja3-rare'])),queries,definer),'trgm').index,'FAIL');
+  // Three rows from duplicated rounds, or an empty sample, are not three rounds of evidence.
+  assert.equal(by(judge(runs(10).map(r=>r.round===3?{...r,round:2}:r),queries,definer),'trgm').latency,'NOT EVALUATED');
+  assert.equal(by(judge(runs(10).map(r=>({...r,latencies:r.latencies.map(l=>({...l,n:0}))})),queries,definer),'trgm').latency,'NOT EVALUATED');
+  // Denials need the current case list on every engine, the baseline included.
+  assert.equal(by(judge(runs(10),queries,{...definer,cases:['a','b'],results:definer.results.map(r=>({...r,cases:4}))}),'trgm').denials,'NOT EVALUATED');
+  assert.equal(by(judge(runs(10),queries,{...definer,results:definer.results.filter(r=>r.engine!=='none')}),'trgm').denials,'NOT EVALUATED');
 });

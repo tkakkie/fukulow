@@ -58,7 +58,8 @@ INSERT INTO users (organization_id,id,account_id,name,role) VALUES ('${org(1)}',
 INSERT INTO channels (organization_id,id,kind,lower_member_id,higher_member_id) VALUES ('${org(1)}','${channel(1,90)}','dm','${member(1,2)}','${member(1,7)}');
 INSERT INTO channel_message_sequences VALUES ('${org(1)}','${channel(1,90)}',1);
 INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ('${org(1)}','${channel(1,90)}','${member(1,2)}'),('${org(1)}','${channel(1,90)}','${member(1,7)}'),
-  ('${org(1)}','${channel(1,23)}','${member(1,9)}'),('${org(1)}','${channel(1,23)}','${member(1,10)}');`;
+  ('${org(1)}','${channel(1,23)}','${member(1,9)}'),('${org(1)}','${channel(1,23)}','${member(1,10)}'),
+  ('${org(1)}','${channel(1,21)}','${member(1,8)}');`;
 // Applied after the probes: revocation after the Message was sent, then demotion to Guest.
 const grantChanges = `DELETE FROM channel_members WHERE organization_id='${org(1)}' AND channel_id='${channel(1,23)}' AND member_id='${member(1,9)}';
 UPDATE users SET role='guest' WHERE organization_id='${org(1)}' AND id='${member(1,8)}';`;
@@ -82,10 +83,12 @@ export const denialCases: {name:string,context:Context,actor:[number,number],que
   {name:'private Channel non-member is denied; DM participant sees the DM',context:1,actor:[1,2],query:'denialprobe',expect:[1,3,10]},
   {name:'private Channel non-member Admin is denied; DM participant Admin sees the DM',context:1,actor:[1,7],query:'denialprobe',expect:[1,3,10]},
   {name:'DM non-participant is denied',context:1,actor:[1,3],query:'denialprobe direct',expect:[]},
+  {name:'DM non-participant Owner is denied',context:1,actor:[1,1],query:'denialprobe direct',expect:[]},
+  {name:'DM non-participant Member is denied',context:1,actor:[1,10],query:'denialprobe direct',expect:[]},
   {name:'DM participant finds the DM Message (positive control)',context:1,actor:[1,2],query:'denialprobe direct',expect:[10]},
   {name:'access revoked after the Message was sent is denied',context:1,actor:[1,9],query:'denialprobe',expect:[1,3]},
   {name:'kept grant still sees the revoked Member\'s Message (positive control)',context:1,actor:[1,10],query:'denialprobe',expect:[1,3,11]},
-  {name:'Member demoted to Guest without a public grant is denied',context:1,actor:[1,8],query:'denialprobe',expect:[]},
+  {name:'Member demoted to Guest loses public access and keeps only its explicit grant',context:1,actor:[1,8],query:'denialprobe',expect:[9]},
   {name:'guest sees only granted Channels',context:1,actor:[1,3],query:'denialprobe',expect:[1,2]},
   {name:'guest without grant is denied',context:1,actor:[1,4],query:'denialprobe',expect:[]},
   {name:'stale grant after reactivation is denied',context:1,actor:[1,5],query:'denialprobe',expect:[1,3]},
