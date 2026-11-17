@@ -16,6 +16,22 @@ SELECT p.channel_id, p.read_seq,
  GROUP BY p.channel_id, p.read_seq
 "#;
 
+// Reconstruct LIST_COUNTS_SQL at main 4fa2ba0 by reversing only #356's
+// materialized lower-bound column and removal of the second position join.
+fn before_rls_seq_bound() -> String {
+    crate::messages::unread::LIST_COUNTS_SQL
+        .replace(
+            "t.id, t.last_seq,\n        COALESCE(tr.read_seq, p.initial_seq) AS read_seq",
+            "t.id, t.last_seq",
+        )
+        .replace(
+            "FROM unread_topics t\n",
+            "FROM unread_topics t\n    LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = c.channel_id\n        AND tr.member_id = $2 AND tr.topic_id = t.id\n",
+        )
+        .replace("m.seq > t.read_seq", "m.seq > COALESCE(tr.read_seq, p.initial_seq)")
+        .replace("t.last_seq > t.read_seq", "t.last_seq > COALESCE(tr.read_seq, p.initial_seq)")
+}
+
 // Pool executors release connections asynchronously, including protocol drain,
 // rollback and ping. Prove both quiescence and visibility before inspecting plans.
 async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<(), String> {
@@ -274,7 +290,8 @@ async fn unread_topic_counts_read_only_unread_topic_ranges(pool: PgPool) {
             .await
             .unwrap();
         // EXPLAIN with bound parameters replans its inner query. PREPARE/EXECUTE
-        // exercises the selected cache mode, including Auto's five Custom plans.
+        // exercises the selected cache mode. Auto may choose either plan;
+        // both are covered by the forced modes.
         sqlx::raw_sql(&format!(
             "PREPARE unread_topic_range(uuid,uuid,bigint,uuid[]) AS {}",
             crate::messages::unread::LIST_COUNTS_SQL
@@ -300,6 +317,41 @@ async fn unread_topic_counts_read_only_unread_topic_ranges(pool: PgPool) {
         // may be scanned: only its 25 unread Messages fit the bound.
         bounded_message_work(&plan, (PER_TOPIC / 2) as f64)
             .unwrap_or_else(|error| panic!("{mode}: {error}\n{plan}"));
+        // #356's regression reads the whole 50-Message Topic, including its
+        // read prefix, and must fail the same 25-Message bound in every mode.
+        sqlx::raw_sql(&format!(
+            "PREPARE unread_topic_before_rls(uuid,uuid,bigint,uuid[]) AS {}",
+            before_rls_seq_bound()
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let execute_before_rls = format!("EXECUTE unread_topic_before_rls{arguments}");
+        for _ in 0..if mode == "auto" { 6 } else { 1 } {
+            let row = sqlx::query(&execute_before_rls)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(row.get::<i64, _>("unread_count"), PER_TOPIC / 2, "{mode}");
+        }
+        let before_rls: Value = sqlx::query_scalar(&explain(&execute_before_rls))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DEALLOCATE unread_topic_before_rls")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded_message_work(&before_rls, PER_TOPIC as f64).unwrap(),
+            PER_TOPIC as f64,
+            "{mode}: {before_rls}"
+        );
+        let error = bounded_message_work(&before_rls, (PER_TOPIC / 2) as f64).unwrap_err();
+        assert!(
+            error.contains("read 50 Messages, bound 25"),
+            "{mode}: {error}"
+        );
         if mode == "force_generic_plan" {
             // Negative control: #220's reviewed full-history query must fail the same check.
             sqlx::raw_sql(&format!(

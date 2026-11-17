@@ -44,7 +44,7 @@ pub struct ReadPosition {
 // exactly bounded by its counter, including own and already-read Messages.
 // Materialize the Member's unread Topic candidates once, rather than rescan
 // every Topic under RLS per Channel. Carry the lower bound as a column: PostgreSQL
-// treats a correlated COALESCE as potentially leaky and keeps it out of RLS index quals.
+// does not recognise COALESCE as leakproof, so it stays out of RLS index quals.
 pub(super) const LIST_COUNTS_SQL: &str = r#"
 WITH unread_topics AS MATERIALIZED (
     SELECT t.organization_id, t.channel_id, t.id, t.last_seq,
