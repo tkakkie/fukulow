@@ -30,6 +30,9 @@ export const docker = (...args: string[]) => command('docker',args);
 // app-role psql/pgbench sessions get the production 10s limit.
 export const sql = (container: string, db: string, text: string, role = 'fukulow') =>
   command('docker',['exec','-i',...(role==='fukulow_app'?appSessionArguments:[]),container,'psql','-XqAt','-v','VERBOSITY=verbose','-v','ON_ERROR_STOP=1','-U',role,'-d',db],text);
+// Owner session whose NOTICEs (auto_explain plans) are kept, in order, with the rows.
+export const sqlWithNotices = (container: string, db: string, text: string) =>
+  command('docker',['exec','-i',container,'sh','-c','exec psql -XqAt -v ON_ERROR_STOP=1 -U fukulow -d "$1" 2>&1','sh',db],text);
 export const save = (path: string, value: unknown) => writeFileSync(path,JSON.stringify(value,null,2)+'\n');
 export const percentile = (xs: number[], p: number) => {
   const sorted = [...xs].sort((a,b)=>a-b);

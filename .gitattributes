@@ -9,7 +9,10 @@
 /load/search-engines/bench.ts text eol=lf
 /load/search-engines/bigm.sql text eol=lf
 /load/search-engines/cleanup.ts text eol=lf
+/load/search-engines/definer.sql text eol=lf
+/load/search-engines/definer.ts text eol=lf
 /load/search-engines/manifest-v1.json text eol=lf
+/load/search-engines/manifest-v2.json text eol=lf
 /load/search-engines/manifest.ts text eol=lf
 /load/search-engines/pgroonga.sql text eol=lf
 /load/search-engines/quality/dataset.ts text eol=lf

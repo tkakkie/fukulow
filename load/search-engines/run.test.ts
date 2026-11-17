@@ -8,9 +8,10 @@ import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
+import { manifestFile } from './manifest.ts';
 
 const runners = ['./run.ts','./quality/run.ts'];
-const manifest = JSON.parse(readFileSync(new URL('./manifest-v1.json',import.meta.url),'utf8'));
+const manifest = JSON.parse(readFileSync(new URL(`../../${manifestFile}`,import.meta.url),'utf8'));
 const manifestHash = manifest.sha256;
 // A fresh build has a different identity even when its runtime matches.
 const imageId = 'sha256:'+'b'.repeat(64);

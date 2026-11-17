@@ -7,9 +7,10 @@ import { existsSync, mkdirSync, realpathSync, readFileSync, readdirSync, writeFi
 import { arch, cpus, totalmem } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmark, CommandTimeoutError, command, docker, save, sql } from './bench.ts';
+import { benchmark, CommandTimeoutError, command, docker, save, sql, sqlWithNotices } from './bench.ts';
 import { channel, copySql, finishSql, fixtureSql, generate, literal, member, org } from './seed.ts';
-import { begin, normalizedQuery, pattern, queries, search, visibility, writeSql } from './queries.ts';
+import { begin, normalizedQuery, pattern, queries, search, searchCall, visibility, writeSql } from './queries.ts';
+import { definerDenials, verifyDefiner } from './definer.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 process.chdir(root);
@@ -48,7 +49,7 @@ function create(db: string) {
   for (const migration of migrations) owner(db,`BEGIN;\n${readFileSync(`server/migrations/${migration}`,'utf8')}\nCOMMIT;`);
   verifySession(text=>owner(db,text));
   verifySession(text=>app(db,text),'app');
-  owner(db,file('schema.sql')); owner(db,grants); owner(db,fixtureSql());
+  owner(db,file('schema.sql')); owner(db,grants); owner(db,file('definer.sql')); owner(db,fixtureSql());
 }
 function seedDb(db: string, rows: number) {
   const meta = generate(`${out}/messages.tsv`,rows); save(`${out}/${db}-seed.json`,meta);
@@ -85,6 +86,23 @@ function checkRls(db: string) {
   return {facts,access,cross};
 }
 
+// The function body's executed plan: auto_explain logs nested statements of
+// the exact app call (SET ROLE fukulow_app in an owner session, since LOAD
+// needs a superuser) as NOTICEs. Planner settings are the app run's.
+function bodyPlan(db: string, call: string, settings = '') {
+  return sqlWithNotices(container,db,`LOAD 'auto_explain';
+SET auto_explain.log_min_duration=0; SET auto_explain.log_nested_statements=on; SET auto_explain.log_analyze=on;
+SET auto_explain.log_buffers=on; SET auto_explain.log_settings=on; SET auto_explain.log_level=notice; SET client_min_messages=notice;
+${begin()}SET LOCAL ROLE fukulow_app;
+${settings}${call};
+COMMIT;`);
+}
+// Nested plans log without query text; the body is the one with Query Parameters.
+function planFacts(log: string) {
+  const body = log.split(/^NOTICE: {2}/m).find(part=>part.includes('Query Parameters:')) ?? '';
+  return {bodyLogged:body!=='',searchIndex:/ on search_body\b/.test(body),seqScanMessages:/Seq Scan on messages\b/.test(body),
+    jitOff:/jit = 'off'/.test(body)};
+}
 const normalized: {id:string,raw:string,value:string}[] = [];
 function ids(db: string, query: string, role = 'fukulow_app', sequential = false) {
   const settings = sequential ? 'SET LOCAL enable_indexscan=off; SET LOCAL enable_bitmapscan=off; SET LOCAL enable_indexonlyscan=off;' : '';
@@ -96,7 +114,7 @@ function completeness(db: string, dest: string) {
   for (const q of normalized) {
     for (const actor of [1,2,3,4,5,6]) {
       const ref = ids(db,search(q.value,actor,false,true),'fukulow_app',true);
-      const actual = ids(db,search(q.value,actor,false));
+      const actual = ids(db,searchCall(q.value,actor,false));
       if (actual !== ref) throw new Error(`Completeness mismatch: app ${q.id} actor ${actor}`);
       report.push({query:q.id,actor,rows:actual ? actual.split('\n').length:0,sha256:digest(actual),equal:true});
     }
@@ -112,7 +130,7 @@ function completeness(db: string, dest: string) {
     if (direct!==directRef) throw new Error(`Extension access-path mismatch ${q.id}: ${direct} != ${directRef}`);
     report.push({query:q.id,actor:'owner-direct-index',digest:direct,equal:true});
     // Page order and deterministic tie-breaker must match the reference too.
-    if (ids(db,search(q.value)) !== ids(db,search(q.value,2,true,true),'fukulow_app',true)) throw new Error(`Page mismatch ${q.id}`);
+    if (ids(db,searchCall(q.value)) !== ids(db,search(q.value,2,true,true),'fukulow_app',true)) throw new Error(`Page mismatch ${q.id}`);
   }
   save(dest,report);
   return {cases:report.length,equal:true};
@@ -130,10 +148,10 @@ async function restoreDrill() {
     const start = performance.now();
     docker('exec',container,'pg_restore','-U','fukulow','-d','restored','--exit-on-error','--no-owner','--no-acl','/tmp/drill.dump');
     const restoreMs = performance.now()-start;
-    owner('restored',grants);
+    owner('restored',grants); owner('restored',file('definer.sql'));
     const after = owner('restored',"SELECT count(*),md5(string_agg(id::text||body,'|' ORDER BY id)) FROM messages;");
     if (before!==after) throw new Error('Dump/restore data mismatch');
-    report.push({engine,before,after,restoreMs,rls:checkRls('restored'),completeness:completeness('restored',`${out}/${engine}-restore-completeness.json`),
+    report.push({engine,before,after,restoreMs,definer:verifyDefiner(text=>owner('restored',text)),rls:checkRls('restored'),completeness:completeness('restored',`${out}/${engine}-restore-completeness.json`),
       extensions:owner('restored','SELECT extname,extversion FROM pg_extension ORDER BY 1;')});
     owner('postgres','DROP DATABASE restored WITH (FORCE); DROP DATABASE drill WITH (FORCE);');
     note(`dump/restore ${engine} verified`);
@@ -186,6 +204,8 @@ async function restoreDrill() {
     || normalized.find(q=>q.id==='bom')?.value!=='\ufeff開発\ufeff') throw new Error('Normalization/trim mismatch');
   save(`${out}/queries.json`,normalized.map(q=>({...q,scalars:[...q.value].length})));
   await restoreDrill();
+  save(`${out}/definer.json`,definerDenials({owner,app,create,index:(db: string,engine: string)=>index(db,engine as Engine),drop:(db: string)=>owner('postgres',`DROP DATABASE ${db} WITH (FORCE);`),
+    plan:bodyPlan},engines));
   save(`${out}/dataset.json`,seedDb('base',count)); note(`seeded ${count} Messages`);
   save(`${out}/rls.json`,checkRls('base'));
   for (let round=0;round<conditions.rounds;round++) {
@@ -207,20 +227,27 @@ async function restoreDrill() {
       const row: Record<string,unknown> = {manifestHash:manifest.sha256,runKind:kind,image:imageRecord,round:round+1,engine,...build};
       if (engine!=='none') {
         // Exactly one complete sweep of all queries before latency sampling.
-        for (const q of normalized) app('measured',begin()+search(q.value)+'; COMMIT;');
+        for (const q of normalized) app('measured',begin()+searchCall(q.value)+'; COMMIT;');
         const latencies = [];
         for (const q of normalized) {
-          const measured = await benchmark(container,'measured',begin()+search(q.value)+';\nCOMMIT;',`${dest}/${q.id}`,transactions,conditions.clients);
+          const measured = await benchmark(container,'measured',begin()+searchCall(q.value)+';\nCOMMIT;',`${dest}/${q.id}`,transactions,conditions.clients);
           latencies.push({query:q.id,...measured});
           note(`round ${round+1} ${engine} ${q.id} p95=${measured.p95.toFixed(3)} ms`);
         }
         row.latencies=latencies;
         if (round===0) {
+          const plans = [];
           for (const q of normalized) {
-            writeFileSync(`${dest}/${q.id}-app-plan.txt`,app('measured',begin()+`EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)}; COMMIT;`));
-            writeFileSync(`${dest}/${q.id}-owner-plan.txt`,owner('measured',`SET enable_seqscan=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)};`));
+            writeFileSync(`${dest}/${q.id}-app-plan.txt`,app('measured',begin()+`EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${searchCall(q.value)}; COMMIT;`));
+            const body = bodyPlan('measured',searchCall(q.value));
+            writeFileSync(`${dest}/${q.id}-body-plan.txt`,body);
+            plans.push({query:q.id,...planFacts(body)});
+            // Direct query as owner with the function body's planner settings
+            // (jit off, nothing else); v1 forced enable_seqscan=off here only.
+            writeFileSync(`${dest}/${q.id}-owner-plan.txt`,owner('measured',`SET jit=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)};`));
             writeFileSync(`${dest}/${q.id}-direct-plan.txt`,owner('measured',`SET enable_seqscan=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) SELECT id FROM messages WHERE normalized_body LIKE ${literal(pattern(q.value))} ESCAPE E'\\\\';`));
           }
+          row.plans=plans;
           row.completeness=completeness('measured',`${dest}/completeness.json`);
         }
       }
