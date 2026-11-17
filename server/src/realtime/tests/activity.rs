@@ -194,6 +194,137 @@ async fn other_organization_socket_of_same_account_receives_nothing(pool: PgPool
     assert!(notices(&f, &mut denied).await.is_empty());
 }
 #[fukulow_test::test]
+async fn delete_grant_reports_revocation_with_and_without_an_active_subscription(pool: PgPool) {
+    use crate::auth::{SubscriptionRecheck, SubscriptionScope};
+    use crate::channels::activity::{TestGate, pause_member};
+
+    struct RecheckBeforePublication {
+        access: crate::channels::AccessChanges,
+        gates: [Arc<TestGate>; 2],
+    }
+    impl SubscriptionRecheck for RecheckBeforePublication {
+        fn check<'a>(
+            &'a self,
+            pool: &'a PgPool,
+            scope: SubscriptionScope,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let result = self.access.check(pool, scope).await;
+                for gate in &self.gates {
+                    gate.release.add_permits(1);
+                }
+                result
+            })
+        }
+        fn failed(&self, scope: SubscriptionScope) {
+            self.access.failed(scope);
+        }
+    }
+
+    async fn frames(f: &Fixture, socket: &mut Client) -> Vec<Value> {
+        f.state
+            .message_delivery
+            .channel_access
+            .activity
+            .drained()
+            .await;
+        let nonce = Uuid::new_v4().as_bytes().to_vec();
+        // Both observed access loss and the drained notice buffer precede recv/Pong.
+        socket
+            .send(tungstenite::Message::Ping(nonce.clone().into()))
+            .await
+            .unwrap();
+        let mut result = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+            {
+                tungstenite::Message::Pong(bytes) if bytes.as_ref() == nonce => return result,
+                tungstenite::Message::Ping(_) => socket.flush().await.unwrap(),
+                tungstenite::Message::Text(text) => {
+                    result.push(serde_json::from_str(&text).unwrap())
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+    }
+
+    let mut cases = Vec::new();
+    for subscribed in [true, false] {
+        let f = fixture(&pool).await;
+        owner(&pool, &f).await;
+        let (target, token) = member(&pool, f.organization).await;
+        let private = channel(&pool, f.organization, f.member, true).await;
+        grant(&pool, &f, private, target).await;
+        let mut socket = connect(&f, &token).await;
+        if subscribed {
+            subscribe(&mut socket, private, 0).await;
+            assert_eq!(
+                raw_event(&mut socket).await,
+                json!({"type":"subscribed","channel_id":private,"caught_up_seq":0})
+            );
+        }
+        // Main starts the publisher first; this gate forces its after-state query
+        // to follow the completed recheck under either mutation ordering.
+        let gate = pause_member(f.organization, Uuid::nil(), "target_state", Some(target));
+        // Keep main's concurrent member-list publisher before Authorization::new,
+        // so it cannot contribute an unrelated unproved query to the recheck.
+        let member_gate = pause_member(f.organization, private, "snapshot", None);
+        // Hold the target's list handoff so its two directory publications
+        // coalesce before collection, independent of socket scheduling.
+        let handoff = pause_member(f.organization, Uuid::nil(), "handoff", Some(target));
+        f.state
+            .session_changes
+            .set_subscription_recheck(Arc::new(RecheckBeforePublication {
+                access: f.state.message_delivery.channel_access.clone(),
+                gates: [gate.clone(), member_gate],
+            }));
+        let response = request(
+            &f.app,
+            "DELETE",
+            &format!("/api/v1/channels/{private}/members/{target}"),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        f.state
+            .message_delivery
+            .channel_access
+            .activity
+            .drained()
+            .await;
+        handoff.release.add_permits(1);
+        let received = frames(&f, &mut socket).await;
+        eprintln!("subscribed={subscribed}: {received:?}");
+        let mut expected = vec![
+            json!({"type":"channel_access_revoked","channel_id":private}),
+            json!({"type":"channel_list_changed"}),
+            json!({"type":"members_changed"}),
+        ];
+        if subscribed {
+            expected.push(json!({"type":"channel_access_lost","channel_id":private}));
+        }
+        // A7 promises no ordering between the two event streams or different keys.
+        let mut received = received;
+        received.sort_by_key(Value::to_string);
+        expected.sort_by_key(Value::to_string);
+        cases.push((subscribed, received, expected));
+    }
+    for (subscribed, received, expected) in cases {
+        assert_eq!(received, expected, "subscribed={subscribed}");
+    }
+}
+#[fukulow_test::test]
 async fn revoked_grant_receives_revocation_then_no_activity(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;

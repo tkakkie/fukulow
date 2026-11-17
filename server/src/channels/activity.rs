@@ -177,6 +177,7 @@ struct InFlight {
 #[derive(Default)]
 struct Buffer {
     epoch: u64,
+    transition_epoch: u64,
     directory_epoch: u64,
     pending: VecDeque<Pending>,
     reset: bool,
@@ -364,12 +365,18 @@ impl Activity {
             .collect()
     }
     pub(crate) fn retire(&self, organization: Uuid, member: Uuid) {
+        self.retire_inner(organization, member, false);
+    }
+    fn retire_inner(&self, organization: Uuid, member: Uuid, transition: bool) {
         for (entry, _) in self
             .snapshot(organization)
             .into_iter()
             .filter(|(e, _)| e.member.0 == member)
         {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if transition {
+                b.transition_epoch = b.transition_epoch.wrapping_add(1);
+            }
             b.epoch = b.epoch.wrapping_add(1);
             b.pending.clear();
             b.proofs.clear();
@@ -976,7 +983,10 @@ impl auth::activity::ActivityChanges for Activity {
                 .snapshot(organization)
                 .into_iter()
                 .filter(|(entry, _)| entry.member.0 == target)
-                .map(|(entry, epoch)| (entry.id, epoch))
+                .map(|(entry, _)| {
+                    let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    (entry.id, b.transition_epoch)
+                })
                 .collect();
             Ok(Box::new(TargetChange {
                 activity: self.clone(),
@@ -1002,7 +1012,8 @@ impl auth::activity::ActivityChange for TargetChange {
         }
         self.retired = true;
         // Retire old work synchronously with observed transition, before starting another snapshot.
-        self.activity.retire(self.organization, self.target);
+        self.activity
+            .retire_inner(self.organization, self.target, true);
         self.activity.directory_epochs = Some(Arc::new(
             self.activity.advance_directory_epochs(self.organization),
         ));
@@ -1022,6 +1033,14 @@ impl auth::activity::ActivityChange for TargetChange {
         tokio::spawn(async move {
             let _slot = slot;
             let work = async {
+                #[cfg(test)]
+                test_pause(
+                    self.organization,
+                    Uuid::nil(),
+                    "target_state",
+                    Some(self.target),
+                )
+                .await;
                 let after = crate::database::organization_read_only(
                     &pool,
                     self.organization,
@@ -1167,11 +1186,14 @@ impl Activity {
         let captured: Vec<_> = self
             .snapshot(organization)
             .into_iter()
-            .filter(|(e, epoch)| {
+            .filter(|(e, _)| {
                 e.member.0 == target
-                    && registrations
-                        .get(&e.id)
-                        .is_some_and(|before| *epoch == before.wrapping_add(1))
+                    && registrations.get(&e.id).is_some_and(|before| {
+                        // Subscription loss can retire ordinary work again. Only
+                        // this mutation may advance its captured transition token.
+                        let b = e.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                        b.transition_epoch == before.wrapping_add(1)
+                    })
             })
             .collect();
         #[cfg(test)]
