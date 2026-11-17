@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { batch, id, sizing, scheduleTime, startLag, intervalMs, inFlightCap, stats, judgement, ranges, type Run } from './reply-counts-model.ts';
+import { batch, id, sizing, scheduleTime, startLag, perTick, tickMs, inFlightCap, stats, judgement, ranges, type Run } from './reply-counts-model.ts';
 test('nearest rank percentiles, boundaries, invalid and immutable inputs', () => {
   const a = [5, 1, 3, 2, 4];
   assert.deepEqual(stats(a), { n: 5, p50: 3, p95: 5, p99: 5, max: 5 });
@@ -58,15 +58,19 @@ test('fixed targets cannot pass pilot, incomplete, missing, errors or target mis
 });
 
 test('absolute open-loop schedule never depends on response completion', () => {
-  assert.equal(intervalMs, 6.25);
-  for (const k of [0, 1, 2, 9999]) assert.equal(scheduleTime(123, k), 123 + k * 6.25);
-  assert.equal(scheduleTime(123, 9999) - scheduleTime(123, 0), 62493.75);
+  assert.equal(perTick, 4);
+  assert.equal(tickMs, 25);
+  for (const k of [0, 1, 2, 3]) assert.equal(scheduleTime(123, k), 123);
+  assert.equal(scheduleTime(123, 4), 148);
+  assert.equal(scheduleTime(123, 9999), 123 + 2499 * 25);
+  // 10,000 requests span 2,499 ticks: 160/s offered, independent of responses.
+  assert.equal(scheduleTime(0, 9999) - scheduleTime(0, 0), 62475);
 });
 test('start lag misses only strictly beyond one interval', () => {
   assert.deepEqual(startLag(100, 99), { lagMs: 0, missed: false });
   assert.deepEqual(startLag(100, 100), { lagMs: 0, missed: false });
-  assert.deepEqual(startLag(100, 106.25), { lagMs: 6.25, missed: false });
-  assert.deepEqual(startLag(100, 106.251), { lagMs: 6.251000000000005, missed: true });
+  assert.deepEqual(startLag(100, 124.999), { lagMs: 24.998999999999995, missed: false });
+  assert.deepEqual(startLag(100, 125), { lagMs: 25, missed: true });
   assert.equal(startLag(100, 1000).missed, true);
 });
 test('missed deadlines invalidate even a low p95; overload and scheduled latency fail', () => {

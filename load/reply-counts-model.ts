@@ -2,14 +2,17 @@ import { createHash } from 'node:crypto';
 export const roots = 25_000;
 export const seed = 409;
 export const nominalRate = 160;
-export const intervalMs = 1000 / nominalRate;
+// Same tick model as load/scheduler.ts (#57): a fixed batch per tick, and a tick
+// started a whole tick late invalidates the run instead of catching up.
+export const perTick = 4;
+export const tickMs = perTick * 1000 / nominalRate;
 // 256 outstanding requests allow 1.6 s of arrivals, far beyond either p95 target,
 // while bounding generator/server resource use when the server cannot keep up.
 export const inFlightCap = 256;
-export const scheduleTime = (start: number, k: number) => start + k * intervalMs;
+export const scheduleTime = (start: number, k: number) => start + Math.floor(k / perTick) * tickMs;
 export function startLag(scheduled: number, actual: number) {
   const lagMs = Math.max(0, actual - scheduled);
-  return { lagMs, missed: lagMs > intervalMs };
+  return { lagMs, missed: lagMs >= tickMs };
 }
 export const scenarios = ['normal', 'long10000', 'long100000'] as const;
 export type Scenario = typeof scenarios[number];
