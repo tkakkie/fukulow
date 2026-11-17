@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { inventory, parseManifest, sha256, type ReadBucket } from './backup-r2-model.ts'
-import { curlRunner, fileDigest, objectTransport, readPrivateFile } from './backup-r2.ts'
+import { curlRunner, fileDigest, objectTransport, privateCurlConfig, readPrivateFile } from './backup-r2.ts'
 import { diagnostic, safeFailure } from './backup-safety.ts'
 import { restoreDrill } from './restore-drill.ts'
 
@@ -16,6 +16,8 @@ export async function restoreFromR2(options: {
 }) {
   let directory: string | undefined
   try {
+    // The offline identity follows the private-file custody rule: owned, 0600, no symlink, outside the checkout.
+    const identityFile = await privateCurlConfig(options.identityFile)
     const data = await inventory(options.bucket, (options.now ?? Date.now)())
     const generation = options.prefix ? data.verified.find(g => g.prefix === options.prefix) : data.verified[0]
     if (!generation) throw new Error('No verified restore source')
@@ -35,7 +37,7 @@ export async function restoreFromR2(options: {
         if (result.status !== 0) throw new Error('Decryption failed')
       } finally { closeSync(output) }
     })
-    decrypt(archive, dump, options.identityFile)
+    decrypt(archive, dump, identityFile)
     const plaintext = await fileDigest(dump)
     if (plaintext.size !== generation.manifest.plaintext.size || plaintext.sha256 !== generation.manifest.plaintext.sha256) throw new Error('Plaintext integrity check failed')
     await (options.drill ?? restoreDrill)(dump)

@@ -64,3 +64,25 @@ test('systemd daily calendar and persistence match the schedule contract', () =>
   assert.match(service, /^User=fukulow-backup$/m)
   assert.match(service, /^ExecStart=.*scripts\/backup-r2-daily.ts \$\{FUKULOW_BACKUP_CONFIG\}$/m)
 })
+test('the default dump reuses the lock the daily entry point already holds', async t => {
+  const { directory, configFile } = fixture(t), now = Date.now()
+  const fake = await fakeS3(() => now); t.after(fake.close)
+  const bin = mkdtempSync(join(tmpdir(), 'daily-docker-')); t.after(() => rmSync(bin, { recursive: true, force: true }))
+  writeFileSync(join(bin, 'docker'), String.raw`#!/usr/bin/env node
+const args = process.argv.slice(2)
+if (args.includes('--version')) console.log('pg_dump (PostgreSQL) 18.6')
+else if (args.includes('pg_dump')) process.stdout.write('archive-data')
+else if (args.includes('pg_restore')) require('node:fs').readFileSync(0)
+`, { mode: 0o700 })
+  const path = process.env.PATH; process.env.PATH = `${bin}:${path}`
+  t.after(() => { process.env.PATH = path })
+  const events: string[] = []
+  await runDaily(configFile, {
+    runner: async () => fake.runner('backups'), notifier: async () => async event => { events.push(event) },
+    lockFactory: () => memoryRunLock(), now: () => now,
+    // No dump stub: the real backup() runs and must not try to take .backup-run.lock again.
+    daily: options => dailyBackup({ ...options, encrypt: (_s, target) => writeFileSync(target, 'cipher') }),
+  })
+  assert.ok(!events.includes('backup-failed'), events.join(','))
+  assert.ok(!existsSync(join(directory, '.backup-run.lock')))
+})

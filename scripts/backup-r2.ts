@@ -161,7 +161,7 @@ async function runBackupLocked(options: Parameters<typeof runBackup>[0]) {
     // Conservative snapshot bound after preflight, immediately before pg_dump starts.
     let captureTime: string | undefined
     const capture = () => { captureTime = new Date(options.now()).toISOString() }
-    const source = options.dump ? options.dump(directory, capture) : backup(directory, capture, { localLock: release })
+    const source = options.dump ? options.dump(directory, capture) : backup(directory, capture, { localLock: options.localLock ?? release })
     if (!captureTime) throw new Error('Missing capture timestamp')
     temporary = await mkdtemp(join(options.directory, '.partial-age-'))
     const target = join(temporary, 'archive.dump.age')
