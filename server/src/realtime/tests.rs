@@ -1115,6 +1115,7 @@ mod commit;
 mod contract;
 mod lifecycle;
 mod limits;
+mod load_fixture;
 mod notification;
 mod session;
 mod watermark;

@@ -1,6 +1,7 @@
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
+import { createLog } from './channel-log.ts'
 import { resolve, sep } from 'node:path'
 const output = process.env.ACTIVITY_SEED_OUT
 const checkout = resolve(import.meta.dirname, '..')
@@ -24,7 +25,7 @@ for (let index = 0; index < 313; index++) {
   }
 }
 for (let index = 1; index < 10; index++) sql.push(`INSERT INTO channels (organization_id,id,name,visibility) VALUES ('${org}','${randomUUID()}','Load ${index}','public');`)
-sql.push('COMMIT;')
+sql.push(createLog(org, [channel]), 'COMMIT;')
 const result = spawnSync('docker', ['exec', '-i', container, 'psql', '-U', 'postgres', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1'], { input: sql.join('\n'), encoding: 'utf8' })
 if (result.status !== 0) throw new Error('Disposable load seed failed; no credentials printed')
 writeFileSync(output, JSON.stringify({ organization: org, channel, topic, tokens }), { mode: 0o600 })
