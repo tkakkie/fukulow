@@ -4,7 +4,6 @@ import { createServer as createSecureServer, type ServerOptions } from 'node:htt
 import { networkInterfaces } from 'node:os'
 import { day, checksum, sha256, type BackupBucket, type ObjectInfo } from './backup-r2-model.ts'
 import type { Request, Response, Runner } from './backup-r2.ts'
-import { runLockKey } from './backup-r2-list.ts'
 
 export type Fault = 'lost-response' | 'truncated' | 'bad-checksum' | '5xx'
 export class FakeBucket implements BackupBucket {
@@ -12,7 +11,7 @@ export class FakeBucket implements BackupBucket {
   calls: string[] = []
   now: () => number
   constructor(now: () => number) { this.now = now }
-  async list() { this.calls.push('LIST'); return [...this.objects.keys()].filter(key => key !== runLockKey).map(key => this.info(key)!) }
+  async list() { this.calls.push('LIST'); return [...this.objects.keys()].map(key => this.info(key)!) }
   info(key: string): ObjectInfo | null {
     const o = this.objects.get(key)
     return o ? { key, size: o.body.length, checksum: checksum(sha256(o.body)), uploaded: o.uploaded } : null
@@ -26,7 +25,7 @@ export class FakeBucket implements BackupBucket {
   }
   locked(key: string) {
     const o = this.objects.get(key)
-    return o && key !== runLockKey && !key.startsWith('verification/') && this.now() - o.uploaded < (key.startsWith('restore-verified/') ? 40 : 35) * day
+    return o && !key.startsWith('verification/') && this.now() - o.uploaded < (key.startsWith('restore-verified/') ? 40 : 35) * day
   }
   async put(key: string, body: Buffer) {
     if (this.locked(key)) throw new Error('Locked')

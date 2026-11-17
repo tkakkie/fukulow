@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path'
-import { bucketRunLock, curlRunner, dailyBackup, objectTransport, readPrivateFile, recheckNewest, type Runner } from './backup-r2.ts'
+import { curlRunner, dailyBackup, objectTransport, readPrivateFile, recheckNewest } from './backup-r2.ts'
 import { discordNotifier } from './backup-notify.ts'
-import { acquireLocalLock, diagnostic, privateDirectory, SafeFailure, safeFailure, type RunLock } from './backup-safety.ts'
+import { acquireLocalLock, diagnostic, privateDirectory, SafeFailure, safeFailure } from './backup-safety.ts'
 
 export interface DailyConfig {
   directory: string; recipientFile: string; curlConfigFile: string; baseUrl: string; notifierConfigFile: string
@@ -13,7 +13,7 @@ export async function readDailyConfig(path: string): Promise<DailyConfig> {
   return value
 }
 export async function runDaily(configFile: string, dependencies: {
-  runner?: typeof curlRunner; notifier?: typeof discordNotifier; lockFactory?: (run: Runner) => RunLock
+  runner?: typeof curlRunner; notifier?: typeof discordNotifier
   daily?: typeof dailyBackup; recheck?: typeof recheckNewest; now?: () => number
 } = {}) {
   let notify: ((event: string) => Promise<void>) | undefined
@@ -23,16 +23,14 @@ export async function runDaily(configFile: string, dependencies: {
     const run = await (dependencies.runner ?? curlRunner)(config.curlConfigFile, config.baseUrl)
     const bucket = objectTransport(run), now = dependencies.now ?? Date.now
     const recipient = (await readPrivateFile(config.recipientFile)).trim()
-    await (dependencies.lockFactory ?? bucketRunLock)(run)(async () => {
-      const directory = privateDirectory(config.directory)
-      let release: (() => void) | undefined
-      try {
-        release = acquireLocalLock(directory)
-        await (dependencies.daily ?? dailyBackup)({ directory, recipient, bucket, now, localLock: release,
-          lock: async work => work(), notify: async event => { if (event !== 'backup-failed') await notify!(event) } })
-        await (dependencies.recheck ?? recheckNewest)(bucket, now())
-      } finally { release?.() }
-    })
+    const directory = privateDirectory(config.directory)
+    let release: (() => void) | undefined
+    try {
+      release = acquireLocalLock(directory)
+      await (dependencies.daily ?? dailyBackup)({ directory, recipient, bucket, now, localLock: release,
+        notify: async event => { if (event !== 'backup-failed') await notify!(event) } })
+      await (dependencies.recheck ?? recheckNewest)(bucket, now())
+    } finally { release?.() }
   } catch (error) {
     try { await notify?.('backup-failed') } catch { /* Fixed lifecycle failure remains observable below. */ }
     throw error instanceof SafeFailure ? error : safeFailure('publish', error)

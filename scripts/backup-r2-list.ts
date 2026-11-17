@@ -1,7 +1,6 @@
 import type { ObjectInfo } from './backup-r2-model.ts'
 import type { Runner } from './backup-r2.ts'
 
-export const runLockKey = 'coordination/run.lock'
 interface Element { name: string; text: string; children: Element[] }
 function xml(body: Buffer): Element {
   const source = body.toString('utf8').replace(/^<\?xml[^?]*\?>\s*/, '')
@@ -71,7 +70,7 @@ export async function listObjects(run: Runner, maxPages = 10_000, maxKeys = 1000
       if (!key || !key.startsWith(prefix) || keys.has(key) || !/^\d+$/.test(size ?? '') || !Number.isSafeInteger(Number(size)) ||
         !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(modified ?? '') || !Number.isFinite(uploaded)) throw new Error('Invalid listing object')
       keys.add(key)
-      if (key !== runLockKey) objects.push({ key, size: Number(size), uploaded, checksum: '' })
+      objects.push({ key, size: Number(size), uploaded, checksum: '' })
     }
     if (truncated === 'false') {
       if (next !== undefined) throw new Error('Unexpected continuation token')

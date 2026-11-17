@@ -1,0 +1,26 @@
+name = "backup-checker"
+main = "index.ts"
+compatibility_date = "2026-11-17"
+workers_dev = false
+
+[triggers]
+crons = ["0 * * * *"]
+
+[[durable_objects.bindings]]
+name = "CHECKER"
+class_name = "BackupChecker"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BackupChecker"]
+
+[[r2_buckets]]
+binding = "BACKUPS"
+bucket_name = "REPLACE_BACKUP_BUCKET"
+
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "REPLACE_IMAGES_BUCKET"
+
+# Configure privately after approval: DISCORD_WEBHOOK_URL, ANALYTICS_URL,
+# ANALYTICS_TOKEN, ANALYTICS_ACCOUNT. No endpoints, IDs or secrets belong here.

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.backup.tsbuildinfo",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true
+  },
+  "include": ["../scripts/backup*.ts", "../scripts/restore-from-r2*.ts", "../workers/backup-checker/**/*.ts"]
+}
