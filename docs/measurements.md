@@ -1034,7 +1034,7 @@ Artifacts record commits, immutable image IDs, machine/settings/harness hashes; 
     - reads: all accepted, but p95 2.8–3.1 s;
     - other Organization: 120/120 within the step, but p95 2.7–3.1 s;
     - mean active DB connections: 13–14;
-    - no HTTP 500s.
+    - no other HTTP errors (statuses other than 2xx/429/503).
 
   A's success rates are far below the ≥99% that would apply. A's send and read lanes also dropped arrivals (sends about 2,000; reads 5,656–7,484 per run).
 - **Other Organization, whole run including drains (recorded, not judged).**
@@ -1047,9 +1047,9 @@ Artifacts record commits, immutable image IDs, machine/settings/harness hashes; 
   - B's sends: 9.0–27.2%;
   - A's sends: 0.94–3.2%.
 
-  A also returned HTTP 500s at 1,000/s (550–4,912 per run) and at 2,000/s (1,392–6,662 per run). B returned none.
+  A also had other HTTP errors (not 429/503; status not recorded), excluding the reader: 550–4,912 per run at 1,000/s and 1,392–6,662 at 2,000/s. B had none.
 - **Pool acquire timeouts: NOT EVALUATED** (no request attribution). Observed `pool timed out` log events: 0 in every run and step. The 10 s client timeout means B's 30 s acquire timeout itself cannot be observed directly.
-- **Comparison with the previous run (reference only, not an improvement rate).** In this run, A's mixed 250/s read p95 was 140–270× B's (2.8–3.1 s vs 11–20 ms). The previous run's A `7e3762a` passed mixed 250/s (100% everywhere). That points to the range `7e3762a..fa1790b`. This is not verified, and the mechanism is not identified (#519).
+- **Comparison with the previous run (reference only, not an improvement rate).** In this run, A's mixed 250/s read p95 was about 160–240× B's in the same pair (2.8–3.1 s vs 11–20 ms). The previous run's A `7e3762a` passed mixed 250/s (100% everywhere). That points to the range `7e3762a..fa1790b`. This is not verified, and the mechanism is not identified (#519).
 - **Limits.**
   - One Mac with all roles shared.
   - No production hardware.
