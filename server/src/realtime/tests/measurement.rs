@@ -240,7 +240,12 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
 
 // Same held-cursor/Router/WebSocket method as #178/#189, across Organizations.
 // The configurable expected cap allows the identical probe to run on the baseline.
-async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize) {
+async fn organization_reservation_probe(
+    pool: PgPool,
+    offered: usize,
+    cap: usize,
+    hold_timeouts: bool,
+) {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect_with((*pool.connect_options()).clone())
@@ -292,7 +297,7 @@ async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize
     let reader = tokio::spawn(async move {
         let mut cursors = HashMap::new();
         for _ in 0..320 {
-            let message = event(&mut healthy).await;
+            let message = read_event(&mut healthy).await;
             let channel = message["message"]["channel_id"]
                 .as_str()
                 .unwrap()
@@ -307,10 +312,20 @@ async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize
     while let Some(result) = requests.join_next().await {
         result.unwrap();
     }
-    reader.await.unwrap();
     f.state.message_delivery.flush().await;
+    // Drain concurrently, but start the delivery deadline after every producer
+    // has finished: a slow HTTP burst must not consume the reader's work budget.
+    tokio::time::timeout(Duration::from_secs(5), reader)
+        .await
+        .unwrap()
+        .unwrap();
     let healthy_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+    // Keep the cap saturated through the snapshot and A's later probe send.
+    // Publication cursor holds do not stop notification deadlines from expiring.
+    f.state
+        .message_delivery
+        .hold_notification_timeouts(f.organization, hold_timeouts);
     let mut holders = Vec::new();
     let mut hot = Vec::new();
     for _ in 0..offered.div_ceil(40) {
@@ -335,9 +350,18 @@ async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize
     }
     let start = std::time::Instant::now();
     for index in 0..offered {
+        // Bound HTTP admission while retaining the full notification backlog.
+        // Spread this window across Channels so all send permits can make progress.
+        if hold_timeouts && requests.len() == messages::MAX_IN_FLIGHT_NOTIFICATIONS {
+            requests.join_next().await.unwrap().unwrap();
+        }
         let app = f.app.clone();
         let token = f.token.clone();
-        let channel = hot[index / 40];
+        let channel = if hold_timeouts {
+            hot[index % hot.len()]
+        } else {
+            hot[index / 40]
+        };
         requests.spawn(async move {
             let response = request(
                 &app,
@@ -390,6 +414,9 @@ async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize
     }
     f.state.message_delivery.flush().await;
     assert_eq!(f.state.message_delivery.notification_reservations(), (0, 0));
+    f.state
+        .message_delivery
+        .hold_notification_timeouts(f.organization, false);
     let next = post(&f, f.channel).await;
     assert_eq!(event(&mut affected).await["message"], next);
     if b_closed {
@@ -402,7 +429,7 @@ async fn organization_reservation_probe(pool: PgPool, offered: usize, cap: usize
     assert_eq!(event(&mut b_socket).await["message"], next);
     f.state.message_delivery.flush().await;
     eprintln!(
-        "MEASURE_ORG offered={offered} cap={cap} healthy_deliveries=320 healthy_ms={healthy_ms:.3} fill_ms={fill_ms:.3} reservations={} org_entries={} execution_free=40 b_1011={b_closed} b_ms={b_ms:.3} a_1011={a_closed} a_ms={a_ms:.3} a_replay_ms={replay_ms:.3} released={:?} a_live_recovered=true b_live_recovered=true",
+        "MEASURE_ORG offered={offered} cap={cap} held_timeouts={hold_timeouts} healthy_deliveries=320 healthy_ms={healthy_ms:.3} fill_ms={fill_ms:.3} reservations={} org_entries={} execution_free=40 b_1011={b_closed} b_ms={b_ms:.3} a_1011={a_closed} a_ms={a_ms:.3} a_replay_ms={replay_ms:.3} released={:?} a_live_recovered=true b_live_recovered=true",
         reserved.0,
         reserved.1,
         f.state.message_delivery.notification_reservations()
@@ -421,7 +448,7 @@ async fn measure_organization_notification_reservations(pool: PgPool) {
         .unwrap_or_else(|_| "512".into())
         .parse()
         .unwrap();
-    organization_reservation_probe(pool, offered, cap).await;
+    organization_reservation_probe(pool, offered, cap, false).await;
 }
 
 #[fukulow_test::test]
@@ -430,5 +457,6 @@ async fn organization_cap_preserves_other_organization_live_delivery_and_replays
 ) {
     // Offer more than the cap so Organization B's live delivery depends on rejected
     // attempts not keeping global capacity (offered = cap would pass without the fix).
-    organization_reservation_probe(pool, 2048, messages::MAX_ORGANIZATION_NOTIFICATIONS).await;
+    organization_reservation_probe(pool, 2048, messages::MAX_ORGANIZATION_NOTIFICATIONS, true)
+        .await;
 }
