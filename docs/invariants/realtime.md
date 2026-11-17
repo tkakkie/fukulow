@@ -4,6 +4,7 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 | Rule | Test |
 |---|---|
+| Create envelopes keep their log seq when replay hydrates newer Message state; REST and live/replay share created_seq, version and deleted fields | `server/src/realtime/tests.rs::create_envelope_keeps_log_position_when_replay_hydrates_a_newer_version` |
 | Replay closes with 1011 before acknowledging past a log position whose Message state is missing | `server/src/realtime/tests.rs::replay_missing_message_state_closes_without_hiding_log_position` |
 | Live Messages serialize once per fan-out, including shared gap recovery, independent of socket count; zero recipients may serialize zero times | `server/src/realtime/tests/shared_frame.rs::live_serialization_is_once_per_fanout_including_shared_gap_recovery` |
 | Shared live JSON bytes equal ServerEvent::Message on the same refreshed payload, including Topic, Reply, Mention names and escaping | `server/src/realtime/tests/shared_frame.rs::shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed_mentions` |

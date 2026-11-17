@@ -4,6 +4,9 @@ Web real-time client: protocol, sync controller, Organization sync, shared contr
 
 | Rule | Test |
 |---|---|
+| {#message-state-versions} Higher versions replace Message state; equal/lower ACKs, events and pages cannot overwrite it; tombstones retain no body or Mentions | `web/src/protocol.test.ts::runs every implemented protocol-layer client fixture against the protocol`, `web/src/sync.test.ts::runs every implemented client fixture through controller transports and timers` |
+| Deferred announcements discard content when current Message state is a tombstone | `web/src/announcements.test.ts::discards a deferred body when its current Message state is a tombstone` |
+| Mutation version evidence stays bounded after body eviction; retiring evidence fences old reads and requires fresh history before reuse | `web/src/protocol.test.ts::bounds mutation version evidence, fences retired reads and keeps tombstones after body eviction` |
 | Wasm sync matches the TS reference per input, including effects, changed Channels, records and stateChanged | `web/src/client-core-traces.test.ts::records live per-step references for every implemented core fixture and seeded sequences` |
 | Every dispatch notifies global, Channel and composer observers before its effects; repeated stop still notifies global observers | `web/src/sync-boundary.test.ts::notifies each input before its ordered effects and preserves repeated-stop global notifications` |
 | The shell mounts while the core loads; a load failure replaces it with the startup error | `web/src/bootstrap.test.ts::mounts the shell while the core loads, starts the load first and fails only on a load error` |

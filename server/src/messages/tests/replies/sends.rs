@@ -96,7 +96,7 @@ async fn reply_concurrent_duplicates_and_cross_channel_conflict_consume_one_seq_
         }
     }
     let canonical = canonical.unwrap();
-    assert_eq!(canonical["seq"], 2);
+    assert_eq!(canonical["created_seq"], 2);
     assert_eq!(counts(&pool, org, channel).await, (2, 2, 2));
     delivery.flush().await;
     assert_eq!(

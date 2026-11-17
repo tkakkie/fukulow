@@ -13,13 +13,19 @@ pub struct Mention {
 pub struct Message {
     pub id: Uuid,
     pub channel_id: Uuid,
-    /// Per-channel sequence, starting at 1.
+    /// Immutable creation position in the Channel log.
     #[schema(minimum = 1)]
-    pub seq: i64,
+    pub created_seq: i64,
+    /// Last Channel event position affecting this state.
+    #[schema(minimum = 1)]
+    pub version: i64,
+    pub deleted: bool,
     pub client_message_id: Uuid,
     /// Member id of the sender.
     pub sender: Uuid,
-    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub body: Option<String>,
     #[schema(format = DateTime)]
     pub created_at: String,
     #[schema(required = true)]
@@ -31,7 +37,9 @@ pub struct Message {
     #[schema(required = true)]
     pub reply_root_id: Option<Uuid>,
     /// Persisted accepted ids, sorted by UUID, with current retained display names.
-    pub mentions: Vec<Mention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub mentions: Option<Vec<Mention>>,
 }
 
 /// Idempotency key: (organization, sender, client_message_id), derived from the session.
@@ -57,11 +65,11 @@ pub struct SendMessageRequest {
 #[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ListMessagesQuery {
-    /// Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
+    /// Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
     #[param(minimum = 0)]
     #[schema(minimum = 0)]
     pub after_seq: Option<i64>,
-    /// Return seq < before_seq. Cannot combine with after_seq.
+    /// Return created_seq < before_seq. Cannot combine with after_seq.
     #[param(minimum = 1)]
     #[schema(minimum = 1)]
     pub before_seq: Option<i64>,
@@ -73,11 +81,11 @@ pub struct ListMessagesQuery {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MessagePage {
-    /// Always ascending seq (newest last), including latest and before_seq pages.
+    /// Always ascending created_seq (newest last), including latest and before_seq pages.
     pub messages: Vec<Message>,
     /// More messages exist in the queried direction (older for latest/before_seq,
-    /// newer for after_seq). Continue after_seq with the last seq or before_seq
-    /// with the first seq; continue the latest page toward older messages with before_seq.
+    /// newer for after_seq). Continue after_seq with the last created_seq or before_seq
+    /// with the first created_seq; continue the latest page toward older messages with before_seq.
     pub has_more: bool,
 }
 
@@ -96,7 +104,7 @@ pub const CLOSE_RATE_LIMITED: u16 = 4029;
 pub enum ClientMessage {
     Subscribe {
         channel_id: Uuid,
-        /// Replay committed messages with seq > after_seq; 0 starts at the beginning.
+        /// Replay committed Channel events with seq > after_seq; 0 starts at the beginning.
         #[schema(minimum = 0)]
         after_seq: i64,
     },
@@ -105,7 +113,16 @@ pub enum ClientMessage {
     },
 }
 
-/// Server -> client events. Clients dedupe messages by (channel_id, seq).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelEventKind {
+    Create,
+    Edit,
+    Move,
+    Delete,
+}
+
+/// Server -> client events. Event positions and Message state versions are independent.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
@@ -138,6 +155,9 @@ pub enum ServerEvent {
     MembersChanged,
     /// Live and replayed messages have exactly the same canonical shape.
     Message {
+        #[schema(minimum = 1)]
+        seq: i64,
+        kind: ChannelEventKind,
         message: Message,
     },
     /// Sent after committed replay and queued live events have been handed off.

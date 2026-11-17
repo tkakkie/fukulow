@@ -178,7 +178,7 @@ it('access gain during an empty Channel bootstrap subscribes from zero with only
     await c.topics.loadMain('A')
     c.event(1)
     expect(c.sync.get().channels.A.cursor).toBe(1)
-    expect(c.topics.get('A').lines).toMatchObject([{ kind: 'message', message: { seq: 1 } }])
+    expect(c.topics.get('A').lines).toMatchObject([{ kind: 'message', message: { created_seq: 1 } }])
     expect(c.topicsApi.listTimeline).toHaveBeenCalledOnce()
     expect(c.listMessages).not.toHaveBeenCalled()
   } finally { activity.close(); await c.sync.close() }

@@ -31,7 +31,7 @@
         {"input":{"type":"watch","channel":"B"},"effects":{"required":[{"type":"fetch_history","channel":"B","page":"latest","as":"B_f0"}]}},
         {"input":{"type":"history_result","respond_to":"B_f0","messages":[{"from":1,"to":5}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"B","after_seq":5,"as":"B_s0"}]}},
         {"input":{"type":"error_event","channel":"B","code":"subscription_limit"},"effects":{"forbidden":[{"type":"subscribe","channel":"B"},{"type":"fetch_history","channel":"B"},{"type":"wait"}]},"observe":{"channels":{"B":{"state":"unavailable"},"A":{"state":"ready","cursor":100}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]},"B":{"state":"unavailable"}}}}
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]},"B":{"state":"unavailable"}}}}
       ]
     },
     {
@@ -66,7 +66,7 @@
         {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"message","channel":"A","seq":103,"kind":"create","message":{"created_seq":103}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
         {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
         {"input":{"type":"history_failed","respond_to":"g_f","status":404},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"},{"type":"wait"}]},"observe":{"channels":{"A":{"state":"unavailable"}}}}
       ]

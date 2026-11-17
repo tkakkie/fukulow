@@ -87,7 +87,10 @@ async fn send_receipt_matches_original_intent_after_state_changes(pool: PgPool) 
         )
         .await;
         assert_eq!(retry["id"], first["id"]);
-        assert_eq!(retry["seq"], 1);
+        assert_eq!(retry["created_seq"], 1);
+        assert_eq!(retry["version"], 7);
+        assert_eq!(retry["deleted"], false);
+        assert!(retry.get("seq").is_none());
         assert_eq!(retry["body"], "edited");
     }
     // The current state is not the original intent.

@@ -62,7 +62,7 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
         .map(|_| queue.events.try_recv().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(
-        events.iter().map(|m| m.seq).collect::<Vec<_>>(),
+        events.iter().map(|m| m.created_seq).collect::<Vec<_>>(),
         [1, 2, 3, 4]
     );
     assert!(queue.events.try_recv().is_err());
@@ -77,13 +77,19 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     assert_eq!(c["mention_unread_count"], 2);
     let baseline = c["as_of_seq"].as_i64().unwrap();
     for message in [before_main, before_topic] {
-        assert!(message["seq"].as_i64().unwrap() <= baseline);
+        assert!(message["created_seq"].as_i64().unwrap() <= baseline);
     }
     for message in [after_main, after_topic] {
-        assert!(message["seq"].as_i64().unwrap() > baseline);
+        assert!(message["created_seq"].as_i64().unwrap() > baseline);
     }
-    assert_eq!(events.iter().filter(|m| m.seq <= baseline).count(), 2);
-    assert_eq!(events.iter().filter(|m| m.seq > baseline).count(), 2);
+    assert_eq!(
+        events.iter().filter(|m| m.created_seq <= baseline).count(),
+        2
+    );
+    assert_eq!(
+        events.iter().filter(|m| m.created_seq > baseline).count(),
+        2
+    );
     let fresh = channels(&app, &viewer).await;
     let c = &fresh["channels"][0];
     assert_eq!(c["as_of_seq"], 4);
@@ -111,7 +117,7 @@ async fn unread_list_baseline_is_max_seq_for_empty_own_and_read_messages(pool: P
     let last = post(&app, &viewer, channel, Some("Own")).await;
     let read = channels(&app, &viewer).await;
     let c = &read["channels"][0];
-    assert_eq!(c["as_of_seq"], last["seq"]);
+    assert_eq!(c["as_of_seq"], last["created_seq"]);
     assert_eq!(c["as_of_seq"], 4);
     assert_eq!(c["read_seq"], 3);
     assert_eq!(c["unread_count"], 0);
@@ -167,7 +173,7 @@ async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(
         (old["as_of_seq"].as_i64(), old["read_seq"].as_i64()),
         (Some(1), Some(0))
     );
-    assert_eq!(newer["as_of_seq"], message["seq"]);
+    assert_eq!(newer["as_of_seq"], message["created_seq"]);
     assert_eq!(newer["as_of_seq"], 2);
     assert_eq!(newer["unread_count"], 2);
     assert_eq!(old["mention_unread_count"], 1);

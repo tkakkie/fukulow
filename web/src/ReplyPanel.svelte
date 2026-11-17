@@ -149,7 +149,7 @@
   // The active navigation anchor is retained separately from the bounded history.
   const visibleMessages = $derived(
     isCurrentAnchor && rState.anchor?.id === anchorMessageId && !historyMessages.some(m => m.id === anchorMessageId)
-      ? [...historyMessages, rState.anchor].sort((a, b) => a.seq - b.seq)
+      ? [...historyMessages, rState.anchor].sort((a, b) => a.created_seq - b.created_seq)
       : historyMessages,
   )
   const replyCounts = $derived(
@@ -440,7 +440,7 @@
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
-                body={m.body}
+                body={m.body ?? ''}
                 mentions={m.mentions}
                 {resolveMentionName}
                 {selfId}

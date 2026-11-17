@@ -76,7 +76,7 @@ async fn channel_log_failure_rolls_back_message_counter_and_topic(pool: PgPool) 
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(sent(&app, &token, channel, value).await["seq"], 1);
+    assert_eq!(sent(&app, &token, channel, value).await["created_seq"], 1);
     assert_eq!(positions(&pool, org, channel).await, [1]);
 }
 
@@ -88,7 +88,7 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
     }
     let app_pool = crate::test_app_pool(pool.clone()).await;
     sqlx::query(
-        "UPDATE messages SET body='current' WHERE organization_id=$1 AND channel_id=$2 AND seq=2",
+        "UPDATE messages SET body='current', version=3 WHERE organization_id=$1 AND channel_id=$2 AND seq=2",
     )
     .bind(org)
     .bind(channel)
@@ -98,8 +98,15 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
     let page = authorized_replay_page(&app_pool, org, (sender, 0), channel, 0, 3)
         .await
         .unwrap();
-    assert_eq!(page.iter().map(|m| m.seq).collect::<Vec<_>>(), [1, 2, 3]);
-    assert_eq!(page[1].body, "current");
+    assert_eq!(
+        page.iter().map(|m| m.created_seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(page[1].body.as_deref(), Some("current"));
+    assert_eq!(
+        (page[1].seq, page[1].created_seq, page[1].version),
+        (2, 2, 3)
+    );
     sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
         .bind(org)
         .bind(channel)
@@ -123,7 +130,7 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
     early.complete();
     delivery
         .notification(org, channel, 3)
-        .spawn(app_pool, page[2].clone());
+        .spawn(app_pool, (page[2].clone()).message);
     delivery.flush().await;
     assert!(queue.notification_failed.is_failed());
     assert!(queue.events.try_recv().is_err());

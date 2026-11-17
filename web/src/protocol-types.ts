@@ -18,6 +18,9 @@ export type ChannelState = {
   watched: boolean
   cursor: number | null
   messages: Message[]
+  versions: Record<string, [number, boolean]>
+  versionFloor: number
+  versionEpoch: number
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
   advancing: { start: number; end: number }[]
   heldThrough?: number

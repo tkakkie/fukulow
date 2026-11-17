@@ -7,11 +7,14 @@ pub(crate) enum Source {
     Window,
     Ack,
     Stream,
+    Projection,
 }
 fn same_message(a: &Message, b: &Message) -> bool {
     a.id == b.id
         && a.channel_id == b.channel_id
-        && a.seq == b.seq
+        && a.created_seq == b.created_seq
+        && a.version == b.version
+        && a.deleted == b.deleted
         && a.client_message_id == b.client_message_id
         && a.sender == b.sender
         && a.body == b.body
@@ -50,38 +53,120 @@ impl Step<'_> {
         }
     }
     pub fn merge(&mut self, id: Uuid, records: Vec<Message>, source: Source) {
-        let valid: Vec<_> = records.into_iter().filter(|m| m.channel_id == id).collect();
-        if !valid.is_empty() {
-            if let Some((_, r)) = self.out.records.iter_mut().find(|(key, _)| *key == id) {
-                *r = valid.clone();
-            } else {
-                self.out.records.push((id, valid.clone()));
+        self.merge_event(id, records, source, None);
+    }
+    pub fn merge_event(
+        &mut self,
+        id: Uuid,
+        records: Vec<Message>,
+        source: Source,
+        event_seq: Option<i64>,
+    ) {
+        let valid: Vec<_> = records
+            .into_iter()
+            .filter(|m| m.channel_id == id)
+            .map(|mut m| {
+                if m.deleted {
+                    m.body = None;
+                    m.mentions = None;
+                }
+                m
+            })
+            .collect();
+        if source == Source::Projection
+            && valid.iter().all(|m| {
+                !m.deleted
+                    && m.version == m.created_seq
+                    && self.core.channel(id).is_none_or(|c| {
+                        c.messages
+                            .iter()
+                            .find(|held| held.id == m.id)
+                            .is_none_or(|held| {
+                                held.version > m.version
+                                    || (!self.refresh_mentions && held.mentions == m.mentions)
+                            })
+                    })
+            })
+        {
+            self.settle(id, &valid);
+            return;
+        }
+        let positions: Vec<_> = event_seq.map_or_else(
+            || valid.iter().map(|m| m.created_seq).collect(),
+            |seq| vec![seq],
+        );
+        let mut accepted = Vec::new();
+        let mut incoming: BTreeMap<Uuid, Message> = BTreeMap::new();
+        for m in &valid {
+            if incoming
+                .get(&m.id)
+                .is_none_or(|held| m.version > held.version)
+            {
+                incoming.insert(m.id, m.clone());
             }
         }
-        let incoming: BTreeMap<_, _> = valid.iter().map(|m| (m.seq, m)).collect();
+        let mut incoming: Vec<_> = incoming.into_values().collect();
+        incoming.sort_by_key(|m| m.created_seq);
         let refresh = self.refresh_mentions;
         let c = self.channel(id);
         let mut messages = None;
-        for m in incoming.values() {
-            let position = c.messages.partition_point(|entry| entry.seq < m.seq);
-            if c.messages
-                .get(position)
-                .is_some_and(|entry| entry.seq == m.seq && !refresh && same_message(entry, m))
+        for mut m in incoming {
+            if let Some((version, deleted)) = c.versions.get(&m.id) {
+                if *version > m.version || (*deleted && !m.deleted) {
+                    continue;
+                }
+            } else if m.version <= c.version_floor
+                && (source == Source::Stream || source == Source::Ack)
             {
                 continue;
             }
-            let result = messages.get_or_insert_with(|| (*c.messages).clone());
-            let position = result.partition_point(|entry| entry.seq < m.seq);
-            if result.get(position).is_some_and(|entry| entry.seq == m.seq) {
-                result[position] = Rc::new((*m).clone());
+            // Creation-only state needs no retained floor once its body is evicted.
+            if (m.deleted || m.version > m.created_seq)
+                && c.versions.get(&m.id) != Some(&(m.version, m.deleted))
+            {
+                Rc::make_mut(&mut c.versions).insert(m.id, (m.version, m.deleted));
+            }
+            let position = c
+                .messages
+                .partition_point(|entry| entry.created_seq < m.created_seq);
+            if let Some(held) = c.messages.get(position).filter(|entry| entry.id == m.id) {
+                if held.version > m.version {
+                    continue;
+                }
+                if held.version == m.version {
+                    let mentions = m.mentions;
+                    m = (**held).clone();
+                    if !m.deleted {
+                        m.mentions = mentions;
+                    }
+                }
+                accepted.push(m.clone());
+                if !refresh && same_message(held, &m) {
+                    continue;
+                }
             } else {
-                result.insert(position, Rc::new((*m).clone()));
+                accepted.push(m.clone());
+                if source == Source::Projection {
+                    continue;
+                }
+            }
+            let result = messages.get_or_insert_with(|| (*c.messages).clone());
+            let position = result.partition_point(|entry| entry.created_seq < m.created_seq);
+            if result
+                .get(position)
+                .is_some_and(|entry| entry.created_seq == m.created_seq)
+            {
+                result[position] = Rc::new(m);
+            } else {
+                result.insert(position, Rc::new(m));
             }
         }
         if let Some(messages) = messages {
             c.messages = Rc::new(messages);
         }
-        if let Some(max) = valid.iter().map(|m| m.seq).max() {
+        if source != Source::Projection
+            && let Some(max) = positions.iter().copied().max()
+        {
             c.held_through = Some(c.held_through.unwrap_or(0).max(max));
         }
         if c.messages.len() > MAIN_MESSAGE_LIMIT {
@@ -89,7 +174,7 @@ impl Step<'_> {
                 && valid
                     .last()
                     .zip(c.messages.last())
-                    .is_some_and(|(a, b)| a.seq < b.seq);
+                    .is_some_and(|(a, b)| a.created_seq < b.created_seq);
             let start = if older {
                 0
             } else {
@@ -98,19 +183,27 @@ impl Step<'_> {
             c.messages = Rc::new(c.messages[start..start + MAIN_MESSAGE_LIMIT].to_vec());
             c.has_older = true;
         }
+        self.cap_versions(id, TOTAL_MESSAGE_LIMIT);
         self.settle(id, &valid);
-        if source == Source::Window {
+        if source == Source::Projection {
+            accepted.retain(|m| m.deleted || m.version > m.created_seq);
+        }
+        if !accepted.is_empty() {
+            self.out.records.push((id, accepted));
+        }
+        if source == Source::Window || source == Source::Projection {
             return;
         }
         let c = self.channel(id);
         let mut ranges = (*c.advancing).clone();
         ranges.extend(
-            valid
+            positions
                 .iter()
-                .filter(|m| c.cursor.is_none_or(|cursor| m.seq > cursor))
-                .map(|m| Range {
-                    start: m.seq,
-                    end: m.seq,
+                .copied()
+                .filter(|seq| c.cursor.is_none_or(|cursor| *seq > cursor))
+                .map(|seq| Range {
+                    start: seq,
+                    end: seq,
                 }),
         );
         ranges.sort_by_key(|r| r.start);
@@ -126,7 +219,7 @@ impl Step<'_> {
         }
         if source == Source::Stream
             && let Some(mut cursor) = c.cursor
-            && valid.iter().any(|m| m.seq == cursor + 1)
+            && positions.contains(&(cursor + 1))
         {
             while merged.first().is_some_and(|r| r.start <= cursor + 1) {
                 cursor = cursor.max(merged.remove(0).end);
@@ -149,6 +242,27 @@ impl Step<'_> {
         merged.truncate(MAIN_MESSAGE_LIMIT);
         if *c.advancing != merged {
             c.advancing = Rc::new(merged);
+        }
+    }
+    pub(crate) fn cap_versions(&mut self, id: Uuid, limit: usize) {
+        let c = self.channel(id);
+        let mut retired = false;
+        while c.versions.len() > limit {
+            let oldest = c
+                .versions
+                .iter()
+                .min_by_key(|(id, (version, _))| (*version, **id))
+                .map(|(id, value)| (*id, *value));
+            if let Some((key, (version, _))) = oldest {
+                Rc::make_mut(&mut c.versions).remove(&key);
+                c.version_floor = c.version_floor.max(version);
+                retired = true;
+            }
+        }
+        if retired {
+            self.invalidate(id, false);
+            let epoch = self.core.session.next;
+            self.channel(id).version_epoch = epoch;
         }
     }
 }

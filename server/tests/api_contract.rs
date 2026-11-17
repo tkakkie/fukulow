@@ -81,7 +81,7 @@ fn mention_contract_requires_one_shared_set_and_nonnegative_counts() {
     for document in [committed, generated] {
         let schemas = &document["components"]["schemas"];
         assert!(
-            schemas["Message"]["required"]
+            !schemas["Message"]["required"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("mentions"))
@@ -746,15 +746,17 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
     let message = Message {
         id: Uuid::from_u128(2),
         channel_id,
-        seq: 1,
+        created_seq: 1,
+        version: 1,
+        deleted: false,
         client_message_id: Uuid::from_u128(3),
         sender: Uuid::from_u128(4),
-        body: "hello".into(),
+        body: Some("hello".into()),
         created_at: "2026-11-09T00:00:00Z".into(),
         topic_id: None,
         reply_to: None,
         reply_root_id: None,
-        mentions: Vec::new(),
+        mentions: Some(Vec::new()),
     };
     assert_eq!(
         serde_json::to_value(&message).unwrap()["topic_id"],
@@ -792,7 +794,14 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
                 "channel_members_changed",
             ),
             (ServerEvent::MembersChanged, "members_changed"),
-            (ServerEvent::Message { message }, "message"),
+            (
+                ServerEvent::Message {
+                    seq: message.created_seq,
+                    kind: fukulow_api::ChannelEventKind::Create,
+                    message,
+                },
+                "message",
+            ),
             (
                 ServerEvent::ChannelAccessLost { channel_id },
                 "channel_access_lost",
@@ -1506,4 +1515,45 @@ fn reply_count_contract_has_bounded_post_baseline_and_uniform_errors() {
         );
     }
     assert!(operation["responses"]["503"]["headers"]["Retry-After"].is_object());
+}
+
+#[test]
+fn message_state_wire_has_creation_version_and_body_free_tombstones() {
+    let schema = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let message_schema = &schema["components"]["schemas"]["Message"];
+    let required = message_schema["required"].as_array().unwrap();
+    for field in ["created_seq", "version", "deleted"] {
+        assert!(required.contains(&json!(field)));
+    }
+    assert!(message_schema["properties"].get("seq").is_none());
+    for field in ["body", "mentions"] {
+        assert!(!required.contains(&json!(field)));
+    }
+    let mut message: Message = serde_json::from_value(json!({
+        "id":Uuid::from_u128(1), "channel_id":Uuid::from_u128(2),
+        "client_message_id":Uuid::from_u128(3), "sender":Uuid::from_u128(4),
+        "created_seq":1, "version":1, "deleted":false, "body":"original", "mentions":[],
+        "created_at":"2026-11-17T00:00:00Z", "topic_id":null, "reply_to":null, "reply_root_id":null
+    }))
+    .unwrap();
+    let live = serde_json::to_value(&message).unwrap();
+    assert_eq!(live["body"], "original");
+    assert_eq!(live["mentions"], json!([]));
+    message.version = 7;
+    message.deleted = true;
+    message.body = None;
+    message.mentions = None;
+    let tombstone = serde_json::to_value(ServerEvent::Message {
+        seq: 1,
+        kind: fukulow_api::ChannelEventKind::Create,
+        message,
+    })
+    .unwrap();
+    assert_eq!(tombstone["seq"], 1);
+    assert_eq!(tombstone["message"]["created_seq"], 1);
+    assert_eq!(tombstone["message"]["version"], 7);
+    assert_eq!(tombstone["message"]["deleted"], true);
+    for field in ["body", "mentions", "excerpt", "seq"] {
+        assert!(tombstone["message"].get(field).is_none());
+    }
 }

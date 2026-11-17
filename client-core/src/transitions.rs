@@ -109,7 +109,7 @@ impl Step<'_> {
                     .channel(channel)
                     .is_some_and(|c| c.watched && c.state != Availability::Unavailable)
                 {
-                    self.settle(channel, &messages);
+                    self.merge(channel, messages, Source::Projection);
                 }
             }
             Input::ConnectionReady { connection } => {
@@ -195,7 +195,7 @@ impl Step<'_> {
                     && c.has_older
                     && let Some(m) = c.messages.first()
                 {
-                    let seq = m.seq;
+                    let seq = m.created_seq;
                     self.history(id, Page::Before, Some(seq));
                 }
             }
@@ -291,7 +291,7 @@ impl Step<'_> {
             return;
         }
         let id = match &event {
-            ServerEvent::Message { message } => message.channel_id,
+            ServerEvent::Message { message, .. } => message.channel_id,
             ServerEvent::Subscribed { channel_id, .. }
             | ServerEvent::ChannelAccessLost { channel_id } => *channel_id,
             ServerEvent::Error {
@@ -316,8 +316,8 @@ impl Step<'_> {
         }
         self.channel(id);
         match event {
-            ServerEvent::Message { message } => {
-                self.merge(id, vec![message], Source::Stream);
+            ServerEvent::Message { message, seq, .. } => {
+                self.merge_event(id, vec![message], Source::Stream, Some(seq));
                 self.reconcile(id, false);
             }
             ServerEvent::ChannelAccessLost { .. } => self.unavailable(id),

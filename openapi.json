@@ -1384,7 +1384,7 @@
           {
             "name": "after_seq",
             "in": "query",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -1395,7 +1395,7 @@
           {
             "name": "before_seq",
             "in": "query",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -2581,7 +2581,7 @@
           {
             "name": "after_seq",
             "in": "query",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -2592,7 +2592,7 @@
           {
             "name": "before_seq",
             "in": "query",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -5334,6 +5334,15 @@
           }
         }
       },
+      "ChannelEventKind": {
+        "type": "string",
+        "enum": [
+          "create",
+          "edit",
+          "move",
+          "delete"
+        ]
+      },
       "ChannelList": {
         "type": "object",
         "required": [
@@ -5766,7 +5775,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "minimum": 0
           },
           "before_seq": {
@@ -5775,7 +5784,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "minimum": 1
           },
           "limit": {
@@ -5908,15 +5917,15 @@
         "required": [
           "id",
           "channel_id",
-          "seq",
+          "created_seq",
+          "version",
+          "deleted",
           "client_message_id",
           "sender",
-          "body",
           "created_at",
           "topic_id",
           "reply_to",
-          "reply_root_id",
-          "mentions"
+          "reply_root_id"
         ],
         "properties": {
           "body": {
@@ -5933,6 +5942,15 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "created_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Immutable creation position in the Channel log.",
+            "minimum": 1
+          },
+          "deleted": {
+            "type": "boolean"
           },
           "id": {
             "type": "string",
@@ -5966,18 +5984,18 @@
             "format": "uuid",
             "description": "Member id of the sender."
           },
-          "seq": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Per-channel sequence, starting at 1.",
-            "minimum": 1
-          },
           "topic_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last Channel event position affecting this state.",
+            "minimum": 1
           }
         }
       },
@@ -5985,12 +6003,22 @@
         "type": "object",
         "description": "Live and replayed messages have exactly the same canonical shape.",
         "required": [
+          "seq",
+          "kind",
           "message",
           "type"
         ],
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ChannelEventKind"
+          },
           "message": {
             "$ref": "#/components/schemas/Message"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
           },
           "type": {
             "type": "string",
@@ -6009,14 +6037,14 @@
         "properties": {
           "has_more": {
             "type": "boolean",
-            "description": "More messages exist in the queried direction (older for latest/before_seq,\nnewer for after_seq). Continue after_seq with the last seq or before_seq\nwith the first seq; continue the latest page toward older messages with before_seq."
+            "description": "More messages exist in the queried direction (older for latest/before_seq,\nnewer for after_seq). Continue after_seq with the last created_seq or before_seq\nwith the first created_seq; continue the latest page toward older messages with before_seq."
           },
           "messages": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Message"
             },
-            "description": "Always ascending seq (newest last), including latest and before_seq pages."
+            "description": "Always ascending created_seq (newest last), including latest and before_seq pages."
           }
         }
       },
@@ -6401,7 +6429,7 @@
             "$ref": "#/components/schemas/ErrorEvent"
           }
         ],
-        "description": "Server -> client events. Clients dedupe messages by (channel_id, seq).",
+        "description": "Server -> client events. Event positions and Message state versions are independent.",
         "discriminator": {
           "propertyName": "type",
           "mapping": {
@@ -6518,7 +6546,7 @@
           "after_seq": {
             "type": "integer",
             "format": "int64",
-            "description": "Replay committed messages with seq > after_seq; 0 starts at the beginning.",
+            "description": "Replay committed Channel events with seq > after_seq; 0 starts at the beginning.",
             "minimum": 0
           },
           "channel_id": {

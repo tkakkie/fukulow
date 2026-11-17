@@ -194,7 +194,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
                         Some(json!({"client_message_id": Uuid::new_v4(), "body": "headroom"})),
                     )
                     .await;
-                    assert_eq!(sent["seq"], seq);
+                    assert_eq!(sent["created_seq"], seq);
                     let page = http_json(f.server.address, token, channel, None).await;
                     assert_eq!(page["messages"].as_array().unwrap().len(), seq as usize);
                     assert_eq!(page["messages"][seq as usize - 1], sent);
@@ -234,14 +234,14 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     tx.commit().await.unwrap();
     let canonical = admitted_retry.await.unwrap();
     assert_eq!(canonical["client_message_id"], json!(key));
-    assert_eq!(canonical["seq"], 1);
+    assert_eq!(canonical["created_seq"], 1);
     let mut seqs = std::collections::BTreeSet::from([1]);
     while let Some(result) = sending.join_next().await {
         let message = result.unwrap();
         if message["client_message_id"] == json!(key) {
             assert_eq!(message, canonical);
         } else {
-            assert!(seqs.insert(message["seq"].as_i64().unwrap()));
+            assert!(seqs.insert(message["created_seq"].as_i64().unwrap()));
         }
     }
     assert_eq!(
@@ -260,7 +260,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
                 subscribed = true;
             } else {
                 seq += 1;
-                assert_eq!(value["message"]["seq"], seq);
+                assert_eq!(value["message"]["created_seq"], seq);
                 if seq == 1 {
                     assert_eq!(value["message"], canonical);
                 }
@@ -271,7 +271,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     subscribe(&mut recovered, f.channel, 0).await;
     for seq in 1..=STORM_SEQS {
         let value = event(&mut recovered).await;
-        assert_eq!(value["message"]["seq"], seq);
+        assert_eq!(value["message"]["created_seq"], seq);
         if seq == 1 {
             assert_eq!(value["message"], canonical);
         }
@@ -437,7 +437,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
                     )
                     .await;
                     let seq = probes + 1;
-                    assert_eq!(sent["seq"], seq);
+                    assert_eq!(sent["created_seq"], seq);
                     let page = http_json(address, &foreign_token, foreign_channel, None).await;
                     assert_eq!(page["messages"][seq as usize - 1], sent);
                     let mut socket = connect_at(address, &foreign_token).await;
@@ -534,7 +534,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
             Some(json!({"client_message_id": key, "body": "held commit"})),
         )
         .await;
-        assert_eq!(canonical["seq"], 1);
+        assert_eq!(canonical["created_seq"], 1);
         assert_eq!(
             http_json(
                 address,
@@ -552,7 +552,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
             Some(json!({"client_message_id": Uuid::new_v4(), "body": "next"})),
         )
         .await;
-        assert_eq!(next["seq"], 2);
+        assert_eq!(next["created_seq"], 2);
         let mut recovered = connect_at(address, &f.token).await;
         subscribe(&mut recovered, channel, 0).await;
         assert_eq!(event(&mut recovered).await["message"], canonical);
@@ -648,7 +648,7 @@ async fn sixteen_concurrent_sends_leave_reserved_capacity_for_new_subscription(p
     .expect("sends must leave reserved watermark capacity");
     let mut completed = 0;
     while let Some(result) = sends.join_next().await {
-        assert_eq!(result.unwrap()["seq"], 1);
+        assert_eq!(result.unwrap()["created_seq"], 1);
         completed += 1;
     }
     assert_eq!(completed, 16);

@@ -308,7 +308,7 @@ async fn mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic(po
         sent(&app, &author, channel, input(key, &text))
     );
     assert_eq!(a, b);
-    assert_eq!(a["seq"], 1);
+    assert_eq!(a["created_seq"], 1);
     assert_eq!(mention_rows(&pool, org).await, 1);
     for changed in [
         input(key, &format!("{text} changed")),
@@ -364,7 +364,7 @@ async fn mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic(po
     );
     pending.await.unwrap().commit().await.unwrap();
     let retried = sent(&app, &author, channel, input(key, &text)).await;
-    assert_eq!(retried["seq"], 2);
+    assert_eq!(retried["created_seq"], 2);
     assert_eq!(retried["mentions"], a["mentions"]);
     assert_eq!(mention_rows(&pool, org).await, 2);
     // A separate in-process limiter cannot coalesce these duplicate sends;

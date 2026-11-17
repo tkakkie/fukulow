@@ -414,7 +414,7 @@ impl Runner {
         if status == 201 {
             assert_eq!(record["channel_id"], json!(channel));
             assert_eq!(record["sender"], json!(self.members[member].id));
-            let seq = record["seq"].as_i64().unwrap();
+            let seq = record["created_seq"].as_i64().unwrap();
             if let Some(previous) = self.records.insert((channel, seq), record.clone()) {
                 assert_eq!(*record, previous, "retry must return the canonical Message");
             }
@@ -515,7 +515,7 @@ impl Runner {
                         assert_eq!(record["channel_id"], json!(channel));
                         assertions::json(
                             client,
-                            json!({"type":"message","message":record}),
+                            json!({"type":"message","seq":record["created_seq"],"kind":"create","message":record}),
                             Assertion::Message,
                         )
                         .await?;

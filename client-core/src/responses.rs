@@ -55,10 +55,10 @@ impl Step<'_> {
                 let before = c.cursor;
                 let bootstrap = c.cursor.is_none() && page == Page::Latest;
                 if bootstrap {
-                    c.cursor = Some(result.messages.last().map_or(0, |m| m.seq));
+                    c.cursor = Some(result.messages.last().map_or(0, |m| m.created_seq));
                     c.stream_base = c.cursor;
                 }
-                let first = result.messages.first().map(|m| m.seq);
+                let first = result.messages.first().map(|m| m.created_seq);
                 self.merge(
                     id,
                     result.messages,
@@ -75,7 +75,7 @@ impl Step<'_> {
                         || c.messages.is_empty()
                         || first
                             .zip(c.messages.first())
-                            .is_some_and(|(a, b)| a <= b.seq))
+                            .is_some_and(|(a, b)| a <= b.created_seq))
                 {
                     c.has_older = result.has_more;
                 }

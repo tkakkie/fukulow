@@ -98,7 +98,7 @@ it.each(['regrant', 'Session', 'Organization'])('Mention late REST and frames ca
   } else if (boundary === 'Session') await c.sync.replaceSession('new-reader')
   else await c.sync.unavailable()
   late.resolve(ok({ channels: [row({ as_of_seq: 100, mention_unread_count: 99, main_mention_unread_count: 99 })] })); await pending
-  c.handlers[0].onEvent({ type: 'message', message: mentioned(101) }); await flush()
+  c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (mentioned(101)).created_seq, message: mentioned(101) }); await flush()
   expect(c.unread.get('A').mentionUnreadCount).toBe(boundary === 'regrant' ? 0 : null)
   await c.sync.close()
 })
@@ -157,7 +157,7 @@ it('Mention own ACK echo and history settlement never increment counts or move r
   c.rows[0] = row({ main_mention_unread_count: 1, mention_unread_count: 1 })
   await c.boot()
   const composer = c.sync.getTimeline('A')
-  composer.setDraft(ack.body); await composer.submit(); await flush()
+  composer.setDraft(ack.body!); await composer.submit(); await flush()
   c.event(ack); await c.sync.settleHistory('A', [ack]); c.event(ack); await flush()
   expect(c.sync.get().channels.A.pending).toHaveLength(0)
   expect(c.unread.get('A')).toMatchObject({ mentionUnreadCount: 1, main: { position: 0, mentionUnreadCount: 1 } })

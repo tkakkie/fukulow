@@ -27,7 +27,7 @@ async fn reciprocal_sends_complete_without_deadlock_and_allocate_gap_free_seq(po
         .expect("reciprocal DM sends must not deadlock");
         for response in [a, b] {
             assert_eq!(response.status(), StatusCode::CREATED);
-            seqs.push(body(response).await["seq"].as_i64().unwrap());
+            seqs.push(body(response).await["created_seq"].as_i64().unwrap());
         }
     }
     seqs.sort_unstable();
@@ -39,7 +39,7 @@ async fn reciprocal_sends_complete_without_deadlock_and_allocate_gap_free_seq(po
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| m["seq"].as_i64().unwrap())
+        .map(|m| m["created_seq"].as_i64().unwrap())
         .collect();
     persisted.sort_unstable();
     assert_eq!(persisted, seqs);

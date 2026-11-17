@@ -41,10 +41,10 @@ async fn directly_seeded_history_replays_from_zero_after_fixture_create_log(pool
     let mut socket = f.server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
     for seq in 1..=120 {
-        assert_eq!(event(&mut socket).await["message"]["seq"], seq);
+        assert_eq!(event(&mut socket).await["message"]["created_seq"], seq);
     }
     ready(&mut socket, f.channel, 120).await;
     let live = post(&f, f.channel).await;
-    assert_eq!(live["seq"], 121);
+    assert_eq!(live["created_seq"], 121);
     assert_eq!(event(&mut socket).await["message"], live);
 }

@@ -251,7 +251,7 @@ it.each(['ACK', 'echo', 'history', 'discard', 'refusal', 'close', 'session start
       try {
         if (end === 'ACK') net.sends[1].resolve(ok(message))
         else if (end === 'refusal') net.sends[1].resolve({ ok: false, kind: 'http', status: 409 })
-        else if (end === 'echo') net.event({ type: 'message', message })
+        else if (end === 'echo') net.event({ type: 'message', kind: 'create', seq: (message).created_seq, message })
         else if (end === 'history') await sync.settleHistory('A', [message])
         else if (end === 'discard') a.discard(id)
         else if (end === 'close') await sync.close()
@@ -679,7 +679,7 @@ it('typing in composer notifies composer subscribers without changing timeline s
   expect(await a.submit()).toBe(true)
   expect(a.composer.get()).toEqual({ draft: '', topicDraft: '', composerError: null })
   expect(timelineListener).toHaveBeenCalled()
-  expect(a.get().messages.map(m => m.seq)).toEqual([1, 2])
+  expect(a.get().messages.map(m => m.created_seq)).toEqual([1, 2])
   await sync.close()
 })
 

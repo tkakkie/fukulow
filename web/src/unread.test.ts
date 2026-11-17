@@ -570,7 +570,7 @@ it('organization_unavailable and 4003 stop only their Organization while 4001 en
 })
 it('retains a visit boundary while positions advance and takes a new boundary on the next entry', async () => {
   const c = unreadClient(); await c.boot(); const id = await c.enter()
-  expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { seq: 1 }, needsOlder: false })
+  expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { created_seq: 1 }, needsOlder: false })
   c.unread.presented(id, [1]); await flush(); await c.unread.refresh()
   expect(c.unread.get('A').entry?.boundary).toBe(0); expect(c.unread.get('A').main.position).toBe(1)
   // The stale list is below the confirmed position; the next visit waits for recovery.

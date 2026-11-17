@@ -95,14 +95,14 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         if (replies) {
           const chain = replies.get(channel)
           c.reply_chain = { root_id: chain.rootId, topic: chain.topicId ?? undefined,
-            visible: chain.messages.map(m => m.seq), has_more: chain.hasMore, error: chain.error }
+            messages: chain.messages, visible: chain.messages.map(m => m.created_seq), has_more: chain.hasMore, error: chain.error }
         }
         const projection = topics.get(channel)
-        c.main_timeline = projection.lines.map(l => l.kind === 'message' ? { seq: l.message.seq }
+        c.main_timeline = projection.lines.map(l => l.kind === 'message' ? { created_seq: l.message.created_seq }
           : { topic: l.topicId, position: l.position, message_count: l.messageCount })
         const ids = new Set(sync.get().channels[channel].messages.flatMap(m => m.topic_id ? [m.topic_id] : []))
         for (const effect of allEffects) if (effect.channel === channel && typeof effect.topic === 'string') ids.add(effect.topic)
-        c.topics = Object.fromEntries([...ids].map(id => [id, { visible: projection.topic(id).messages.map(m => m.seq) }]))
+        c.topics = Object.fromEntries([...ids].map(id => [id, { messages: projection.topic(id).messages, visible: projection.topic(id).messages.map(m => m.created_seq) }]))
       }
       for (const id of unreadIds) {
         const u = unread!.get(id)
@@ -133,7 +133,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         case 'session_replaced': void client.sync.replaceSession('me'); break
         case 'connection_ready': socket.onReady(); break
         case 'socket_closed': socket.onClose(i.code as number); break
-        case 'message': socket.onEvent({ type: 'message', message: message(i.message, channel) }); break
+        case 'message': socket.onEvent({ type: 'message', kind: 'create', seq: typeof i.seq === 'number' ? i.seq : message(i.message, channel).created_seq, message: message(i.message, channel) }); break
         case 'subscribed': (e?.socket as RealtimeHandlers ?? socket).onEvent({ type: 'subscribed', channel_id: channel,
           caught_up_seq: i.caught_up_seq as number }); break
         case 'channel_access_lost': socket.onEvent({ type: 'channel_access_lost', channel_id: channel }); break

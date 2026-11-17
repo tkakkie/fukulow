@@ -11,9 +11,9 @@
         {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f0"}]}},
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":100}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]}}}}
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]}}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]}}}},
+        {"input":{"type":"message","channel":"A","seq":100,"kind":"create","message":{"created_seq":100}},"effects":{"forbidden":[{"type":"fetch_history","channel":"A"}]},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}]}}}}
       ]
     },
     {
@@ -27,8 +27,8 @@
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[]}}}},
-        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[]}}}}
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[]}}}},
+        {"input":{"type":"ack","respond_to":"c1_s1","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[]}}}}
       ]
     },
     {
@@ -42,8 +42,8 @@
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
-        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":101}],"pending":[]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[]}}}}
+        {"input":{"type":"ack","respond_to":"c1_s1","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":101}],"pending":[]}}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[]}}}}
       ]
     },
     {
@@ -59,7 +59,7 @@
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":"network"},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"unknown"}],"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","times":1,"as":"c1_s2"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
-        {"input":{"type":"ack","respond_to":"c1_s2","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
+        {"input":{"type":"ack","respond_to":"c1_s2","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
       ]
     },
     {
@@ -74,7 +74,7 @@
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":"timeout"},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"cursor":101,"visible":[{"from":51,"to":101}]}}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"cursor":101,"visible":[{"from":51,"to":101}]}}}},
         {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
       ]
     },
@@ -91,7 +91,7 @@
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":"network"},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
         {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f1"}]}},
-        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":52,"to":100},{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}],"has_more":true},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
+        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":52,"to":100},{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}],"has_more":true},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
       ]
     },
     {
@@ -106,10 +106,10 @@
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":"network"},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":301}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
+        {"input":{"type":"message","channel":"A","seq":301,"kind":"create","message":{"created_seq":301}},"effects":{"required":[{"type":"wait","purpose":"reorder_grace","channel":"A","as":"g_t"}],"forbidden":[{"type":"fetch_history","channel":"A"}]}},
         {"input":{"type":"timer_elapsed","respond_to":"g_t"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":100,"as":"g_f","times":1}]}},
         {"input":{"type":"history_result","respond_to":"g_f","messages":[{"from":101,"to":150}],"has_more":true},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":150,"as":"g_f2"}]},"observe":{"channels":{"A":{"cursor":150,"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
-        {"input":{"type":"history_result","respond_to":"g_f2","messages":[{"from":151,"to":159},{"seq":160,"sender":"me","client_message_id":"c1","body":"hello"},{"from":161,"to":200}],"has_more":true},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":200,"as":"g_f3"}]},"observe":{"channels":{"A":{"cursor":200,"pending":[],"records":[{"seq":160,"sender":"me","client_message_id":"c1"}]}}}}
+        {"input":{"type":"history_result","respond_to":"g_f2","messages":[{"from":151,"to":159},{"created_seq":160,"sender":"me","client_message_id":"c1","body":"hello"},{"from":161,"to":200}],"has_more":true},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":200,"as":"g_f3"}]},"observe":{"channels":{"A":{"cursor":200,"pending":[],"records":[{"created_seq":160,"sender":"me","client_message_id":"c1"}]}}}}
       ]
     },
     {
@@ -125,7 +125,7 @@
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":"timeout"},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
         {"input":{"type":"load_older","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"before","seq":51,"as":"A_f1"}]}},
-        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":1,"to":49},{"seq":50,"sender":"me","client_message_id":"c1","body":"hello"}],"has_more":false},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"cursor":100,"visible":[{"from":1,"to":100}]}}}}
+        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":1,"to":49},{"created_seq":50,"sender":"me","client_message_id":"c1","body":"hello"}],"has_more":false},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"cursor":100,"visible":[{"from":1,"to":100}]}}}}
       ]
     },
     {
@@ -143,7 +143,7 @@
         {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f1"}]}},
         {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":51,"to":100}],"has_more":true},"observe":{"channels":{"A":{"cursor":100,"visible":[{"from":51,"to":100}],"pending":[{"client_message_id":"c1","state":"unknown"}]}}}},
         {"input":{"type":"user_retry","client_message_id":"c1"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s2"}]}},
-        {"input":{"type":"ack","respond_to":"c1_s2","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
+        {"input":{"type":"ack","respond_to":"c1_s2","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
       ]
     },
     {
@@ -157,8 +157,8 @@
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"bob","client_message_id":"c1","body":"bob says hi"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[{"client_message_id":"c1","state":"sending"}],"records":[{"seq":101,"sender":"bob"}]}}}},
-        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":102,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":102}],"records":[{"seq":101,"sender":"bob"},{"seq":102,"sender":"me"}]}}}}
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"sender":"bob","client_message_id":"c1","body":"bob says hi"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[{"client_message_id":"c1","state":"sending"}],"records":[{"created_seq":101,"sender":"bob"}]}}}},
+        {"input":{"type":"ack","respond_to":"c1_s1","message":{"created_seq":102,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":102}],"records":[{"created_seq":101,"sender":"bob"},{"created_seq":102,"sender":"me"}]}}}}
       ]
     },
     {
@@ -172,7 +172,7 @@
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"pending":[],"cursor":101}}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}},"observe":{"channels":{"A":{"pending":[],"cursor":101}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":"network"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":413},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
       ]
@@ -189,7 +189,7 @@
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
         {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f1"}]}},
-        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":52,"to":100},{"seq":101,"sender":"me","client_message_id":"c1","body":"hello"}],"has_more":true},"observe":{"channels":{"A":{"pending":[]}}}},
+        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":52,"to":100},{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello"}],"has_more":true},"observe":{"channels":{"A":{"pending":[]}}}},
         {"input":{"type":"send_failed","respond_to":"c1_s1","status":"timeout"},"effects":{"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"pending":[],"visible":[{"from":51,"to":101}]}}}}
       ]
     },
@@ -204,10 +204,10 @@
         {"input":{"type":"history_result","respond_to":"A_f0","messages":[{"from":51,"to":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"A_s0"}]}},
         {"input":{"type":"subscribed","channel":"A","caught_up_seq":100,"respond_to":"A_s0"},"observe":{"channels":{"A":{"state":"ready","cursor":100,"visible":[{"from":51,"to":100}]}}}},
         {"input":{"type":"user_send","channel":"A","client_message_id":"c1","body":"hello"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"c1","as":"c1_s1"}]},"observe":{"channels":{"A":{"pending":[{"client_message_id":"c1","state":"sending"}]}}}},
-        {"input":{"type":"ack","respond_to":"c1_s1","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello","id":"srv101","created_at":"2026-01-01T10:00:00Z"}},"observe":{"channels":{"A":{"pending":[],"records":[{"seq":101,"id":"srv101","created_at":"2026-01-01T10:00:00Z","body":"hello","sender":"me"}]}}}},
-        {"input":{"type":"message","channel":"A","message":{"seq":101,"sender":"me","client_message_id":"c1","body":"hello","id":"srv101","created_at":"2026-01-01T10:00:00Z"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"records":[{"seq":101,"id":"srv101","created_at":"2026-01-01T10:00:00Z"}]}}}},
+        {"input":{"type":"ack","respond_to":"c1_s1","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello","id":"srv101","created_at":"2026-01-01T10:00:00Z"}},"observe":{"channels":{"A":{"pending":[],"records":[{"created_seq":101,"id":"srv101","created_at":"2026-01-01T10:00:00Z","body":"hello","sender":"me"}]}}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello","id":"srv101","created_at":"2026-01-01T10:00:00Z"}},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"records":[{"created_seq":101,"id":"srv101","created_at":"2026-01-01T10:00:00Z"}]}}}},
         {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"A_f1"}]}},
-        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":52,"to":100},{"seq":101,"sender":"me","client_message_id":"c1","body":"hello","id":"srv101","created_at":"2026-01-01T10:00:00Z"}],"has_more":true},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[],"records":[{"seq":101,"id":"srv101","created_at":"2026-01-01T10:00:00Z","body":"hello"}]}}}}
+        {"input":{"type":"history_result","respond_to":"A_f1","messages":[{"from":52,"to":100},{"created_seq":101,"sender":"me","client_message_id":"c1","body":"hello","id":"srv101","created_at":"2026-01-01T10:00:00Z"}],"has_more":true},"observe":{"channels":{"A":{"cursor":101,"visible":[{"from":51,"to":101}],"pending":[],"records":[{"created_seq":101,"id":"srv101","created_at":"2026-01-01T10:00:00Z","body":"hello"}]}}}}
       ]
     }
   ]

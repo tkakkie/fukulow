@@ -39,7 +39,7 @@ it('memoizes chain adapter snapshots while observed and unobserved and forwards 
   expect(active).toBe(1)
   expect(one.last).toBe(initial)
   c.event(reply(2)); await settle()
-  expect(one.last.messages.map(m => m.seq)).toEqual([1, 2, 3])
+  expect(one.last.messages.map(m => m.created_seq)).toEqual([1, 2, 3])
   expect(one.last).toBe(adapter.state)
   expect(one.last).not.toBe(initial)
   await adapter.send('hello')

@@ -85,7 +85,7 @@ async fn unread_grant_holds_baseline_until_access_commit(pool: PgPool) {
     waiting(&pool, "%135%").await;
     assert!(!sending.is_finished());
     grant.commit().await.unwrap();
-    assert_eq!(sending.await.unwrap()["seq"], 1);
+    assert_eq!(sending.await.unwrap()["created_seq"], 1);
     let initial: i64 = sqlx::query_scalar("SELECT initial_seq FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(org).bind(channel).bind(viewer).fetch_one(&pool).await.unwrap();
     assert_eq!(initial, 0);
 }

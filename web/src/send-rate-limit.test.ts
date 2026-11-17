@@ -79,7 +79,7 @@ it('controller cancels throttled retry on settlement, discard, denial, lifecycle
     const wait = effects.find(e => e.type === 'wait')!
     const own = { ...record(99), sender: 'me', client_message_id: 'c1' }
     const t = client.sync.getTimeline('A')
-    if (end === 'echo') await client.feed({ type: 'message', channel: 'A', message: own })
+    if (end === 'echo') await client.feed({ type: 'message', kind: 'create', seq: (own).created_seq, channel: 'A', message: own })
     else if (end === 'projection') await client.sync.settleHistory('A', [own])
     else if (end === 'latest' || end === 'older' || end === 'history 403' || end === 'history 404') {
       const history = (await client.feed({ type: end === 'older' ? 'load_older' : 'refresh', channel: 'A' }))

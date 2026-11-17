@@ -121,7 +121,7 @@ async fn measure_topic_projection_pages(pool: PgPool) {
                     for (index, item) in items.iter().enumerate() {
                         let position = last - 49 + index as i64;
                         if position % 2 == 0 {
-                            assert_eq!(item["message"]["seq"], position);
+                            assert_eq!(item["message"]["created_seq"], position);
                         } else {
                             assert_eq!(item["topic"]["last_seq"], position);
                             assert_eq!(item["topic"]["message_count"], 10);

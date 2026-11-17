@@ -77,7 +77,7 @@
               selected={activeTopicId === t.topicId}
               name={t.baseline?.summary.name ?? 'トピック'}
               messageCount={t.messageCount ?? undefined}
-              latestBody={t.latestMessage.body}
+              latestBody={t.latestMessage.body ?? ''}
               mentions={t.latestMessage.mentions}
               {resolveMentionName}
               mentionUnreadCount={uState?.topics[t.topicId]?.mentionUnreadCount ?? 0}

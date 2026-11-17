@@ -101,6 +101,9 @@ pub struct ChannelView {
     pub watched: bool,
     pub cursor: Option<i64>,
     pub messages: Rc<Vec<Rc<Message>>>,
+    pub versions: Rc<std::collections::BTreeMap<Uuid, (i64, bool)>>,
+    pub version_floor: i64,
+    pub version_epoch: Token,
     pub advancing: Rc<Vec<Range>>,
     pub pending: Rc<Vec<Pending>>,
     pub has_older: bool,
@@ -134,6 +137,9 @@ impl Default for ChannelView {
             watched: false,
             cursor: None,
             messages: Rc::default(),
+            versions: Rc::default(),
+            version_floor: 0,
+            version_epoch: 0,
             advancing: Rc::default(),
             pending: Rc::default(),
             has_older: false,
@@ -158,6 +164,9 @@ impl ChannelView {
             && self.watched == other.watched
             && self.cursor == other.cursor
             && Rc::ptr_eq(&self.messages, &other.messages)
+            && Rc::ptr_eq(&self.versions, &other.versions)
+            && self.version_floor == other.version_floor
+            && self.version_epoch == other.version_epoch
             && Rc::ptr_eq(&self.pending, &other.pending)
             && Rc::ptr_eq(&self.advancing, &other.advancing)
             && match (&self.subscription, &other.subscription) {

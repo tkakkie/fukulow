@@ -46,7 +46,14 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   const echoes: Message[] = []
   a.on('websocket', socket => socket.on('framereceived', ({ payload }) => {
     const event = JSON.parse(String(payload)) as ServerEvent
-    if (event.type === 'message') echoes.push(event.message)
+    if (event.type === 'message') {
+      expect(event.kind).toBe('create')
+      expect(event.seq).toBe(event.message.created_seq)
+      expect(event.message.version).toBeGreaterThanOrEqual(event.message.created_seq)
+      expect(event.message.deleted).toBe(false)
+      expect(event.message).not.toHaveProperty('seq')
+      echoes.push(event.message)
+    }
   }))
 
   // A: fresh or already set-up instance -> setup or sign-in -> channel through the product UI.
@@ -142,6 +149,21 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   await expect(a.locator('li[data-status]')).toHaveCount(0)
   await expect(a.locator('.body', { hasText: text })).toHaveCount(1) // Both echo and ack have completed.
   expect(historyAfterPost).toEqual([])
+  // A fresh authenticated socket resumes the log and receives the identical Message state.
+  const replay = await a.evaluate(async ({ url, channel }) => new Promise<ServerEvent[]>((resolve, reject) => {
+    const ws = new WebSocket(url), events: ServerEvent[] = []
+    const timeout = setTimeout(() => { ws.close(); reject(new Error('Replay handoff timed out')) }, 10_000)
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', channel_id: channel, after_seq: 0 }))
+    ws.onerror = () => { clearTimeout(timeout); ws.close(); reject(new Error('Replay socket failed')) }
+    ws.onmessage = ({ data }) => {
+      const event = JSON.parse(String(data)) as ServerEvent
+      if (event.type === 'message') events.push(event)
+      if (event.type === 'subscribed' && event.channel_id === channel) {
+        clearTimeout(timeout); ws.close(); resolve(events)
+      }
+    }
+  }), { url: sockets.at(-1)!.url(), channel: canonical.channel_id })
+  expect(replay).toEqual([{ type: 'message', seq: canonical.created_seq, kind: 'create', message: canonical }])
   await Promise.all(signIns)
   expect(signIns).toHaveLength(2)
   await a.getByRole('button', { name: 'ログアウト' }).click()

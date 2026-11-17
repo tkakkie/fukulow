@@ -2,6 +2,36 @@ use super::{Message, MessageError, REPLAY_PAGE_SIZE, mentions, message_from_row}
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct ChannelEvent {
+    #[serde(skip)]
+    pub seq: i64,
+    #[serde(skip)]
+    pub kind: fukulow_api::ChannelEventKind,
+    pub message: Message,
+}
+impl ChannelEvent {
+    pub fn create(message: Message) -> Self {
+        Self {
+            seq: message.created_seq,
+            kind: fukulow_api::ChannelEventKind::Create,
+            message,
+        }
+    }
+}
+impl std::ops::Deref for ChannelEvent {
+    type Target = Message;
+    fn deref(&self) -> &Message {
+        &self.message
+    }
+}
+impl std::ops::DerefMut for ChannelEvent {
+    fn deref_mut(&mut self) -> &mut Message {
+        &mut self.message
+    }
+}
+
 pub(super) async fn create(
     tx: &mut PgConnection,
     organization: Uuid,
@@ -13,7 +43,7 @@ pub(super) async fn create(
     )
     .bind(organization)
     .bind(message.channel_id)
-    .bind(message.seq)
+    .bind(message.created_seq)
     .bind(message.id)
     .bind(message.sender)
     .bind(message.client_message_id)
@@ -33,7 +63,7 @@ fn page_sql(channel: usize, authorized: bool) -> String {
             WHERE organization_id=$1 AND channel_id=${channel} AND event_seq>${after} AND event_seq<=${through} {access}
             ORDER BY event_seq LIMIT ${limit}
         )
-        SELECT l.event_seq,l.kind,m.id,m.channel_id,m.seq,m.client_message_id,m.sender,m.body,m.topic_id,
+        SELECT l.event_seq,l.kind,m.id,m.channel_id,m.seq,m.version,m.client_message_id,m.sender,m.body,m.topic_id,
             m.reply_to_id AS reply_to,m.reply_root_id,
             to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
         FROM log_page l LEFT JOIN messages m
@@ -42,7 +72,7 @@ fn page_sql(channel: usize, authorized: bool) -> String {
     )
 }
 
-fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<Message>, sqlx::Error> {
+fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<ChannelEvent>, sqlx::Error> {
     let mut messages = Vec::with_capacity(rows.len());
     let only = rows.len() == 1;
     for row in rows {
@@ -58,7 +88,11 @@ fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<Message>, sqlx::Error
         {
             return Err(sqlx::Error::RowNotFound);
         }
-        messages.push(message_from_row(&row)?);
+        messages.push(ChannelEvent {
+            seq: position,
+            kind: fukulow_api::ChannelEventKind::Create,
+            message: message_from_row(&row)?,
+        });
         after = position;
     }
     Ok(messages)
@@ -70,7 +104,7 @@ pub(crate) async fn replay_page(
     channel: Uuid,
     after: i64,
     through: i64,
-) -> Result<Vec<Message>, sqlx::Error> {
+) -> Result<Vec<ChannelEvent>, sqlx::Error> {
     let sql = mentions::page_sql(&page_sql(2, false), "p.event_seq");
     let rows = crate::database::organization_statement(
         pool,
@@ -99,7 +133,7 @@ pub(crate) async fn authorized_replay_page(
     channel: Uuid,
     after: i64,
     through: i64,
-) -> Result<Vec<Message>, MessageError> {
+) -> Result<Vec<ChannelEvent>, MessageError> {
     let sql = format!(
         "WITH access AS MATERIALIZED (SELECT ({}) AS visible) \
          SELECT access.visible,m.* FROM access LEFT JOIN LATERAL ({}) m ON true ORDER BY m.event_seq",

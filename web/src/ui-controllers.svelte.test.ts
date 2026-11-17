@@ -131,7 +131,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
       // 3. Receive a live Message from another member -> 1 run, announces with resolved sender name
       const announceRunsBeforeLive = announceEffectRuns
       net.event({
-        type: 'message',
+        type: 'message', kind: 'create', seq: ({ ...record(3, 'general'), sender: 'alice', body: 'ようこそ' }).created_seq,
         message: { ...record(3, 'general'), sender: 'alice', body: 'ようこそ' },
       })
       await settle()
@@ -154,7 +154,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     const stop = $effect.root(() => {
       let scrollState = $state(initialTimelineScrollState('c1'))
       let announceState = $state(initialAnnouncementState())
-      const messages = [{ id: 'm1', seq: 1, sender: 'alice', body: 'hi' }]
+      const messages = [{ id: 'm1', created_seq: 1, sender: 'alice', body: 'hi' }]
 
       $effect(() => {
         scrollRuns++
@@ -361,5 +361,5 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
 })
 
 function msgFor(seq: number, sender: string, body: string) {
-  return { id: `m-${seq}`, seq, sender, body }
+  return { id: `m-${seq}`, created_seq: seq, sender, body }
 }

@@ -109,7 +109,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
         let canonical: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap())
                 .unwrap();
-        assert_eq!(canonical["seq"], initial_seq + 1);
+        assert_eq!(canonical["created_seq"], initial_seq + 1);
         assert_eq!(event(&mut between).await["message"], canonical);
         ready(&mut between, f.channel, initial_seq + 1).await;
 
@@ -163,7 +163,7 @@ async fn ambiguous_commit_rollback_allows_gap_free_same_key_retry(pool: PgPool) 
             .is_empty()
     );
     let canonical = send(&f, &f.token, f.channel, key, "rolled back").await;
-    assert_eq!(canonical["seq"], 1);
+    assert_eq!(canonical["created_seq"], 1);
     assert_eq!(event(&mut between).await["message"], canonical);
     assert_eq!(
         send(&f, &f.token, f.channel, key, "rolled back").await,
@@ -221,7 +221,7 @@ async fn definite_commit_failure_does_not_signal_or_consume_sequence(pool: PgPoo
         .await
         .unwrap();
     let canonical = send(&f, &f.token, f.channel, key, "definite").await;
-    assert_eq!(canonical["seq"], 1);
+    assert_eq!(canonical["created_seq"], 1);
     assert_eq!(event(&mut socket).await["message"], canonical);
 }
 
@@ -248,7 +248,7 @@ async fn unresolved_commit_subscription_timeout_closes_and_later_reconnect_recov
     subscribe(&mut recovered, f.channel, 0).await;
     let message = event(&mut recovered).await;
     assert_eq!(message["message"]["client_message_id"], json!(key));
-    assert_eq!(message["message"]["seq"], 1);
+    assert_eq!(message["message"]["created_seq"], 1);
     ready(&mut recovered, f.channel, 1).await;
 }
 
@@ -385,7 +385,7 @@ async fn send_deadline_during_commit_signals_and_reconnect_waits_for_final_messa
     blocker.commit().await.unwrap();
     let canonical = event(&mut recovered).await["message"].clone();
     assert_eq!(canonical["client_message_id"], json!(key));
-    assert_eq!(canonical["seq"], 1);
+    assert_eq!(canonical["created_seq"], 1);
     ready(&mut recovered, f.channel, 1).await;
     assert_eq!(
         send(&f, &f.token, f.channel, key, "deadline").await,
@@ -502,14 +502,14 @@ async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(po
         .await
         .unwrap();
     let canonical = send(&f, &f.token, channel, key, "unknown then rolled back").await;
-    assert_eq!(canonical["seq"], 1);
+    assert_eq!(canonical["created_seq"], 1);
     assert_eq!(event(&mut between).await["message"], canonical);
     assert_eq!(
         send(&f, &f.token, channel, key, "unknown then rolled back").await,
         canonical
     );
     let next = post(&f, channel).await;
-    assert_eq!(next["seq"], 2);
+    assert_eq!(next["created_seq"], 2);
     assert_eq!(event(&mut between).await["message"], next);
     let mut replay = f.server.connect(&f.token).await;
     subscribe(&mut replay, channel, 0).await;

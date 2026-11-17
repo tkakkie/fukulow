@@ -286,7 +286,15 @@ impl Connection<'_> {
                 }
                 after = message.seq;
                 if !self
-                    .protected_event(socket, channel, ServerEvent::Message { message })
+                    .protected_event(
+                        socket,
+                        channel,
+                        ServerEvent::Message {
+                            seq: message.seq,
+                            kind: message.kind,
+                            message: message.message,
+                        },
+                    )
                     .await?
                 {
                     return Ok(());

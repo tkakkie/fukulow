@@ -1,0 +1,140 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "message-version-gating-and-event-cursor",
+      "title": "Create replay hydrates higher versions; equal and lower state never replace, and versions never prove event coverage",
+      "covers": ["C1","C2"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[{"created_seq":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"subscription"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"subscription","caught_up_seq":100}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"version":150,"body":"current"}},"observe":{"channels":{"A":{"cursor":101,"records":[{"created_seq":101,"version":150,"body":"current"}]}}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"version":150,"body":"equal stale copy"}},"observe":{"channels":{"A":{"cursor":101,"records":[{"created_seq":101,"version":150,"body":"current"}]}}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"version":101,"body":"original"}},"observe":{"channels":{"A":{"cursor":101,"records":[{"created_seq":101,"version":150,"body":"current"}]}}}},
+        {"input":{"type":"message","channel":"A","seq":103,"kind":"create","message":{"created_seq":103}},"observe":{"channels":{"A":{"cursor":101}}}},
+        {"input":{"type":"message","channel":"A","seq":102,"kind":"create","message":{"created_seq":102}},"observe":{"channels":{"A":{"cursor":103,"visible":[100,101,102,103],"records":[{"created_seq":101,"version":150,"body":"current"}]}}}}
+      ]
+    },
+    {
+      "id": "stale-ack-after-newer-create-replay",
+      "title": "A stale original-send ACK settles its key without overwriting newer replay state",
+      "covers": ["C1","C2","C5"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[{"created_seq":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"subscription"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"subscription","caught_up_seq":100}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"send","body":"original"},"effects":{"required":[{"type":"send","channel":"A","as":"send"}]}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"version":140,"sender":"me","client_message_id":"send","body":"edited"}},"observe":{"channels":{"A":{"cursor":101,"pending":[]}}}},
+        {"input":{"type":"ack","respond_to":"send","message":{"created_seq":101,"sender":"me","client_message_id":"send","body":"original"}},"observe":{"channels":{"A":{"cursor":101,"pending":[],"records":[{"created_seq":101,"version":140,"body":"edited"}]}}}}
+      ]
+    },
+    {
+      "id": "stale-history-after-newer-state",
+      "title": "Delayed latest and older history pages cannot overwrite newer state",
+      "covers": ["C1","C2"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[{"created_seq":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"subscription"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"subscription","caught_up_seq":100}},
+        {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","page":"latest","as":"refresh"}]}},
+        {"input":{"type":"message","channel":"A","seq":100,"kind":"create","message":{"created_seq":100,"version":140,"body":"edited"}}},
+        {"input":{"type":"history_result","respond_to":"refresh","messages":[{"created_seq":100,"body":"original"}],"has_more":true},"observe":{"channels":{"A":{"cursor":100,"records":[{"created_seq":100,"version":140,"body":"edited"}]}}}},
+        {"input":{"type":"load_older","channel":"A"},"effects":{"required":[{"type":"fetch_history","page":"before","as":"older"}]}},
+        {"input":{"type":"message","channel":"A","seq":99,"kind":"create","message":{"created_seq":99,"version":145,"body":"newer older message"}}},
+        {"input":{"type":"history_result","respond_to":"older","messages":[{"created_seq":99,"body":"stale"}],"has_more":false},"observe":{"channels":{"A":{"cursor":100,"records":[{"created_seq":99,"version":145,"body":"newer older message"}]}}}}
+      ]
+    },
+    {
+      "id": "tombstone-never-resurrects-from-ack-history-or-replay",
+      "title": "A body-free tombstone rejects stale ACKs, history and replay after deletion",
+      "covers": ["C1","C2","C5"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[{"created_seq":100}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":100,"as":"subscription"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"subscription","caught_up_seq":100}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"send","body":"original"},"effects":{"required":[{"type":"send","channel":"A","as":"send"}]}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"sender":"me","client_message_id":"send","body":"original"}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"version":150,"deleted":true,"sender":"me","client_message_id":"send"}},"observe":{"channels":{"A":{"cursor":101,"records":[{"created_seq":101,"version":150,"deleted":true,"absent":["body","mentions","excerpt"]}]}}}},
+        {"input":{"type":"ack","respond_to":"send","message":{"created_seq":101,"sender":"me","client_message_id":"send","body":"original"}}},
+        {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","page":"latest","as":"refresh"}]}},
+        {"input":{"type":"history_result","respond_to":"refresh","messages":[{"created_seq":101,"sender":"me","client_message_id":"send","body":"original"}],"has_more":false}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"version":101,"sender":"me","client_message_id":"send","body":"original"}},"observe":{"channels":{"A":{"cursor":101,"pending":[],"records":[{"created_seq":101,"version":150,"deleted":true,"absent":["body","mentions","excerpt"]}]}}}}
+      ]
+    },
+    {
+      "id": "stale-topic-projection-cannot-restore-state",
+      "title": "A stale projection page cannot overwrite a higher Message version",
+      "layer": "controller",
+      "covers": ["C1","C2","P1","P5"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_main_timeline","channel":"A","as":"initial"}]}},
+        {"input":{"type":"main_timeline_result","respond_to":"initial","as_of_seq":100,"items":[{"kind":"message","message":{"created_seq":100}}],"has_more":false}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100}},
+        {"input":{"type":"open_topic","channel":"A","topic":"T"},"effects":{"required":[{"type":"fetch_history","channel":"A","topic":"T","as":"projection"}]}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"topic":"T","version":140,"body":"current"}}},
+        {"input":{"type":"history_result","respond_to":"projection","messages":[{"created_seq":101,"topic":"T"}],"has_more":true},"observe":{"channels":{"A":{"cursor":101,"topics":{"T":{"visible":[101],"records":[{"created_seq":101,"version":140,"deleted":false,"body":"current"}]}}}}}}
+      ]
+    },
+    {
+      "id": "stale-reply-projection-cannot-restore-state",
+      "title": "A stale projection page cannot overwrite a higher Message version",
+      "layer": "controller",
+      "covers": ["C1","C2","P1","P6"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[{"created_seq":100}],"has_more":false}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"created_seq":100}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","as":"projection"}]}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"reply_to":"id100","reply_root_id":"id100","version":140,"body":"current"}}},
+        {"input":{"type":"reply_chain_result","respond_to":"projection","root_id":"id100","messages":[{"created_seq":100},{"created_seq":101,"reply_to":"id100","reply_root_id":"id100"}],"has_more":true},"observe":{"channels":{"A":{"cursor":101,"reply_chain":{"visible":[100,101],"records":[{"created_seq":101,"version":140,"deleted":false,"body":"current"}]}}}}}
+      ]
+    },
+    {
+      "id": "stale-topic-projection-cannot-restore-tombstones",
+      "title": "A stale projection page cannot restore a body after an observed tombstone",
+      "layer": "controller",
+      "covers": ["C1","C2","P1","P5"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_main_timeline","channel":"A","as":"initial"}]}},
+        {"input":{"type":"main_timeline_result","respond_to":"initial","as_of_seq":100,"items":[{"kind":"message","message":{"created_seq":100}}],"has_more":false}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100}},
+        {"input":{"type":"open_topic","channel":"A","topic":"T"},"effects":{"required":[{"type":"fetch_history","channel":"A","topic":"T","as":"projection"}]}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"topic":"T","version":140,"body":"current"}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"topic":"T","version":150,"deleted":true}}},
+        {"input":{"type":"history_result","respond_to":"projection","messages":[{"created_seq":101,"topic":"T"}],"has_more":true},"observe":{"channels":{"A":{"cursor":101,"topics":{"T":{"visible":[101],"records":[{"created_seq":101,"version":150,"deleted":true,"absent":["body","mentions"]}]}}}}}}
+      ]
+    },
+    {
+      "id": "stale-reply-projection-cannot-restore-tombstones",
+      "title": "A stale projection page cannot restore a body after an observed tombstone",
+      "layer": "controller",
+      "covers": ["C1","C2","P1","P6"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[{"created_seq":100}],"has_more":false}},
+        {"input":{"type":"subscribed","channel":"A","caught_up_seq":100}},
+        {"input":{"type":"open_reply_chain","channel":"A","message":{"created_seq":100}},"effects":{"required":[{"type":"fetch_reply_chain","channel":"A","as":"projection"}]}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"reply_to":"id100","reply_root_id":"id100","version":140,"body":"current"}}},
+        {"input":{"type":"message","channel":"A","seq":101,"kind":"create","message":{"created_seq":101,"reply_to":"id100","reply_root_id":"id100","version":150,"deleted":true}}},
+        {"input":{"type":"reply_chain_result","respond_to":"projection","root_id":"id100","messages":[{"created_seq":100},{"created_seq":101,"reply_to":"id100","reply_root_id":"id100"}],"has_more":true},"observe":{"channels":{"A":{"cursor":101,"reply_chain":{"visible":[100,101],"records":[{"created_seq":101,"version":150,"deleted":true,"absent":["body","mentions"]}]}}}}}
+      ]
+    }
+  ]
+}

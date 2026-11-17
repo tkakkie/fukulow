@@ -344,7 +344,7 @@
       void topics.loadMain().catch(console.error)
     }
     for (const topic of tState.topics) {
-      if ((topic.baseline === null || topic.latestMessage.seq < topic.position) && topic.summaryError === null) {
+      if ((topic.baseline === null || topic.latestMessage.created_seq < topic.position) && topic.summaryError === null) {
         void topics.ensureSummary(topic.topicId).catch(console.error)
       }
     }
@@ -373,10 +373,10 @@
     const displayed = isTimelineDisplayed(scrollEl, viewSelected)
     const syncMessages = lines.map((line) =>
       line.kind === 'message'
-        ? { id: line.message.id, seq: line.message.seq, sender: line.message.sender }
+        ? { id: line.message.id, created_seq: line.message.created_seq, sender: line.message.sender }
         : {
             id: `topic:${line.topicId}`,
-            seq: linePosition(line),
+            created_seq: linePosition(line),
             sender: line.latestMessage.sender,
           },
     )
@@ -563,7 +563,7 @@
         bind:this={rowWindow}
         items={lines}
         rowId={(line) => line.kind === 'message' ? line.message.id : `topic:${line.topicId}`}
-        confirmedSeq={(line) => line.kind === 'message' ? line.message.seq : null}
+        confirmedSeq={(line) => line.kind === 'message' ? line.message.created_seq : null}
         pendingItems={mainPending}
         pendingId={(p) => p.clientMessageId}
         pendingStatus={(p) => p.status}
@@ -584,7 +584,7 @@
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(line.message.sender) : undefined}
                 createdAt={line.message.created_at}
-                body={line.message.body}
+                body={line.message.body ?? ''}
                 mentions={line.message.mentions}
                 {resolveMentionName}
                 {selfId}
@@ -605,7 +605,7 @@
                 topicId={line.topicId}
                 name={line.baseline?.summary.name ?? 'トピック'}
                 messageCount={line.messageCount ?? undefined}
-                latestBody={line.latestMessage.body}
+                latestBody={line.latestMessage.body ?? ''}
                 mentions={line.latestMessage.mentions}
                 {resolveMentionName}
                 mentionUnreadCount={uState?.topics[line.topicId]?.mentionUnreadCount ?? 0}

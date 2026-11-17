@@ -223,14 +223,14 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     await first.unmount() // what leaving the Workspace does
     expect(s.closes[0]).not.toHaveBeenCalled()
     expect(net.socket.closed).toBe(false)
-    net.event({ type: 'message', message: record(101) })
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     void a().send('typed while away')
     await settle()
     const requests = net.history.length
 
     const again = await mount(() => ({ timeline: a().timeline, live: a().live }))
     expect(again.last.live).toBe(true)
-    expect(again.last.timeline.messages.map((m) => m.seq)).toEqual([100, 101])
+    expect(again.last.timeline.messages.map((m) => m.created_seq)).toEqual([100, 101])
     expect(again.last.timeline.pending).toMatchObject([{ body: 'typed while away' }])
     expect(net.history).toHaveLength(requests)
     expect(net.sockets).toHaveLength(1)
@@ -248,9 +248,9 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     expect(s.closes[0]).toHaveBeenCalledTimes(1)
     expect(net.socket.closed).toBe(true)
     const runs = view.values.length
-    net.event({ type: 'message', message: record(101) }) // a late event of the ended session
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) }) // a late event of the ended session
     await settle()
-    expect(view.last.messages.map((m) => m.seq)).not.toContain(101)
+    expect(view.last.messages.map((m) => m.created_seq)).not.toContain(101)
     expect(view.values.length).toBe(runs)
     await view.unmount()
   })
@@ -382,7 +382,7 @@ describe('auth adapter: a new session never shows the old one', () => {
     second.subscribed('A', 500)
     // everything the old session still delivers
     first.sends[0].resolve(ok(sentBy('m1', 101, 'm1-c1', 'secret of m1')))
-    first.socket.onEvent({ type: 'message', message: record(101) })
+    first.socket.onEvent({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     first.lists[0].resolve(ok({ channels: [channel('A'), channel('old-only')] }))
     await settle()
     expect(view.last).toMatchObject({ status: 'ready', messages: [record(500)], pending: [] })
@@ -439,7 +439,7 @@ describe('Organization selection fences data within one Account Session', () => 
     second.lists[0].resolve(ok({ channels: [channel('B')] }))
     await settle()
     first.sends[0].resolve(ok(sentBy('m1', 101, 'm1-c1', 'old Organization')))
-    first.socket.onEvent({ type: 'message', message: record(102) })
+    first.socket.onEvent({ type: 'message', kind: 'create', seq: (record(102)).created_seq, message: record(102) })
     first.lists[1].resolve(ok({ channels: [channel('old-only')] }))
     await oldList
     await settle()
@@ -787,7 +787,7 @@ it('a late refusal after an Organization switch restores only its unedited draft
     if (edit === 'typed then cleared' || edit === 'new text') a.setDraft('編集中の下書き')
     if (edit === 'typed then cleared') a.setDraft('')
     if (edit === 'settled') {
-      net.event({ type: 'message', message: sentBy('m1', 101, send.body.client_message_id, send.body.body) })
+      net.event({ type: 'message', kind: 'create', seq: (sentBy('m1', 101, send.body.client_message_id, send.body.body)).created_seq, message: sentBy('m1', 101, send.body.client_message_id, send.body.body) })
       await settle()
       expect(a.timeline.pending).toHaveLength(0)
     }
@@ -995,7 +995,7 @@ it.each(['new topic', 'topic'] as const)(
       const pending = target === 'topic' ? old.topic('T').submit('仕様相談') : old.submit()
       const send = net.sends[0]
       if (end === 'settled') {
-        net.event({ type: 'message', message: { ...sentBy('m1', 101, send.body.client_message_id, send.body.body), topic_id: 'T' } })
+        net.event({ type: 'message', kind: 'create', seq: ({ ...sentBy('m1', 101, send.body.client_message_id, send.body.body), topic_id: 'T' }).created_seq, message: { ...sentBy('m1', 101, send.body.client_message_id, send.body.body), topic_id: 'T' } })
         await settle()
         expect(old.timeline.pending).toEqual([])
       } else if (end === 'Channel access lost') {
@@ -1057,7 +1057,7 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
   const net = await openChannelA(s)
   const original = s.auth.session!
   const topicMessage = { ...record(101), topic_id: 'T' }
-  net.event({ type: 'message', message: topicMessage })
+  net.event({ type: 'message', kind: 'create', seq: (topicMessage).created_seq, message: topicMessage })
   net.topicMessages['A:T'] = ok({ messages: [topicMessage], has_more: false })
   await original.topics('A').loadTopic('T')
   original.sync.channel('A').topic('T').setDraft('Topic draft survives C10')
@@ -1079,7 +1079,7 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
   expect(recovered.topics('A').state.unavailable).toBe(false)
   expect(recovered.topics('A').state.topic('T').messages).toEqual([olderTopicMessage, topicMessage])
   expect(recovered.topics('A').state.topic('T')).toMatchObject({ initialized: true, loading: false, hasMore: false })
-  expect(recovered.topics('A').state.lines.map(l => l.kind === 'message' ? l.message.seq : [l.topicId, l.position])).toEqual([100, ['T', 101]])
+  expect(recovered.topics('A').state.lines.map(l => l.kind === 'message' ? l.message.created_seq : [l.topicId, l.position])).toEqual([100, ['T', 101]])
   expect(recovered.sync.channel('A').topic('T').composer.draft).toBe('Topic draft survives C10')
   recovered.close()
 })

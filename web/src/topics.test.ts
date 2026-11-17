@@ -33,7 +33,7 @@ it('Topic projections refresh same-Message Mention names independently of count 
       }
     }
     expectPreview('Old name')
-    c.handlers[0].onEvent({ type: 'message', message: message('Live rename') })
+    c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (message('Live rename')).created_seq, message: message('Live rename') })
     await flush()
     expectPreview('Live rename')
 
@@ -102,7 +102,7 @@ it('handles a successful active-Topic summary evicted by 400 newer main Messages
     for (let page = 0; page < 7; page++) await c.topics.loadMain('A')
     const before = c.topics.get('A').lines
     expect(before).toHaveLength(400)
-    expect(before[0]).toMatchObject({ message: { seq: 601 } })
+    expect(before[0]).toMatchObject({ message: { created_seq: 601 } })
     c.options.listTopicMessages = async () => ok({ messages: [msg(1, 'T')], has_more: false })
     const getSummary = vi.fn(async () => ok({ as_of_seq: 1000, topic: summary('T', 1, 1) }))
     c.options.getTopicSummary = getSummary
@@ -134,7 +134,7 @@ it('bootstraps from the first timeline W and pages by its boundary despite posti
   expect(c.controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
   expect(c.listMessages).not.toHaveBeenCalled()
   expect(c.sync.get().channels.A.cursor).toBe(10)
-  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.seq : l.position)).toEqual([8, 10])
+  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : l.position)).toEqual([8, 10])
   const older = deferred<Result<TimelinePage>>()
   c.topicsApi.listTimeline.mockReturnValueOnce(older.promise)
   const loading = c.topics.loadMain('A')
@@ -205,7 +205,7 @@ it('bootstrap resets a populated main window and fences its in-flight projection
   older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'message', message: msg(2) }], has_more: false }))
   await loading
   expect(c.topics.get('A').main).toMatchObject({ before: 8, hasMore: true, loading: false })
-  expect(c.topics.get('A').lines.some(l => l.kind === 'message' && l.message.seq === 2)).toBe(false)
+  expect(c.topics.get('A').lines.some(l => l.kind === 'message' && l.message.created_seq === 2)).toBe(false)
   await c.sync.close()
 })
 
@@ -222,8 +222,8 @@ it('initial timeline history below W settles an unknown own send without duplica
   first.resolve(ok({ ...page(), items: [{ kind: 'message', message: own }, ...page().items.slice(1)] }))
   await watching
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 10, pending: [], advancing: [] })
-  expect(c.sync.get().channels.A.messages.map(m => m.seq)).toEqual([10])
-  expect(c.topics.get('A').lines.filter(l => l.kind === 'message' && l.message.seq === 9)).toEqual([{ kind: 'message', message: own }])
+  expect(c.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([10])
+  expect(c.topics.get('A').lines.filter(l => l.kind === 'message' && l.message.created_seq === 9)).toEqual([{ kind: 'message', message: own }])
   await c.sync.close()
 })
 
@@ -234,18 +234,18 @@ it('Topic history settles only matching own sends without supplying cursor or co
   await c.sync.getTimeline('A').send('unknown')
   const pending = c.sync.get().channels.A.pending[0]!
   const own = { ...msg(12, 'T'), sender: 'me', client_message_id: pending.clientMessageId }
-  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [{ ...own, sender: 'other' }], has_more: true }))
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [{ ...own, id: 'other-message', created_seq: 9, version: 9, sender: 'other' }], has_more: true }))
   await c.topics.loadTopic('A', 'T')
   expect(c.sync.get().channels.A.pending).toEqual([pending])
   c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [own], has_more: false }))
   await c.topics.loadTopic('A', 'T')
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 10, pending: [], advancing: [] })
-  expect(c.sync.get().channels.A.messages.map(m => m.seq)).toEqual([10])
+  expect(c.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([10])
   c.event(11)
   expect(c.sync.get().channels.A.cursor).toBe(11)
-  c.handlers[0].onEvent({ type: 'message', message: own })
+  c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (own).created_seq, message: own })
   expect(c.sync.get().channels.A.cursor).toBe(12)
-  expect(c.topics.get('A').topic('T').messages.filter(m => m.seq === 12)).toEqual([own])
+  expect(c.topics.get('A').topic('T').messages.filter(m => m.created_seq === 12)).toEqual([own])
   await c.sync.close()
 })
 
@@ -265,7 +265,7 @@ it('post-clamp initial history settles an invalidated send below W without reviv
   initial.resolve(ok({ as_of_seq: 2, items: [{ kind: 'message', message: own }, { kind: 'message', message: msg(2) }], has_more: false }))
   await flush()
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 2, pending: [], advancing: [] })
-  expect(c.topics.get('A').lines.map(l => l.kind === 'message' && l.message.seq)).toEqual([1, 2])
+  expect(c.topics.get('A').lines.map(l => l.kind === 'message' && l.message.created_seq)).toEqual([1, 2])
   sending.resolve({ ok: false, kind: 'network' }); await send
   expect(c.sync.get().channels.A.pending).toEqual([])
   await c.sync.close()
@@ -277,14 +277,14 @@ it('keeps filtered records out of cursor evidence and fills a real gap only with
   c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(12, 'T')], has_more: false }))
   await c.topics.loadTopic('A', 'T')
   expect(c.sync.get().channels.A.cursor).toBe(10)
-  expect(c.sync.get().channels.A.messages.map(m => m.seq)).toEqual([10])
+  expect(c.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([10])
   expect(c.listMessages).not.toHaveBeenCalled()
   expect(vi.getTimerCount()).toBe(0)
   c.event(13)
   await vi.advanceTimersByTimeAsync(100)
   expect(c.listMessages.mock.calls).toEqual([['A', { after_seq: 10 }]])
   expect(c.sync.get().channels.A.cursor).toBe(13)
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([10, 12])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([10, 12])
   await c.sync.close()
 })
 
@@ -318,7 +318,7 @@ it('pages Topic history and the Topic list by response boundaries while live act
   c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(2, 'T')], has_more: false }))
   await c.topics.loadTopic('A', 'T')
   expect(c.topicsApi.listTopicMessages.mock.calls).toEqual([['A', 'T', {}], ['A', 'T', { before_seq: 5 }]])
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2, 5, 10, 11])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([2, 5, 10, 11])
   c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('T', 10, 3)], has_more: true }))
   await c.topics.loadList('A')
   await c.topics.loadList('A')
@@ -396,9 +396,9 @@ it('C9 and C10 keep loaded Topic projections while fencing in-flight reads', asy
     await c.topics.loadTopic('A', 'T')
 
     // Sync holds only the bootstrap Message at W=3; [1, 2] live in Topic projections.
-    expect(c.sync.get().channels.A.messages.map(m => m.seq)).toEqual([3])
-    expect(c.topics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position))).toEqual([1, 2, 3])
-    expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2])
+    expect(c.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([3])
+    expect(c.topics.get('A').lines.map(l => (l.kind === 'message' ? l.message.created_seq : l.position))).toEqual([1, 2, 3])
+    expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([2])
 
     const inFlightList = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopics>>>()
     c.topicsApi.listTopics.mockReturnValueOnce(inFlightList.promise)
@@ -411,8 +411,8 @@ it('C9 and C10 keep loaded Topic projections while fencing in-flight reads', asy
     await flush()
 
     expect(c.topics.get('A').unavailable).toBe(true)
-    expect(c.topics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position))).toEqual([1, 2, 3])
-    expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2])
+    expect(c.topics.get('A').lines.map(l => (l.kind === 'message' ? l.message.created_seq : l.position))).toEqual([1, 2, 3])
+    expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([2])
 
     inFlightList.resolve(ok({ as_of_seq: 3, topics: [summary('stale', 1, 1)], has_more: false }))
     await loadingList
@@ -633,7 +633,7 @@ it('independent read kinds survive while reselection releases the inactive Topic
   expect(c.topics.get('A').main).toMatchObject({ asOfSeq: 20, before: 2, hasMore: false, loading: false })
   expect(c.topics.get('A').list).toMatchObject({ asOfSeq: 20, before: 2, hasMore: true, loading: false })
   expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 99 })
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([10])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([10])
   expect(c.topics.get('A').topic('T').initialized).toBe(false)
   await c.sync.close()
 })
@@ -704,14 +704,14 @@ it('posting during an older timeline request merges ack, page and echo once with
   c.topicsApi.listTimeline.mockReturnValueOnce(older.promise)
   const loading = c.topics.loadMain('A'); await flush()
   expect(await c.sync.getTimeline('A').send('during paging')).toBe(true)
-  const confirmed = c.sync.get().channels.A.messages.find(m => m.seq === 11)!
+  const confirmed = c.sync.get().channels.A.messages.find(m => m.created_seq === 11)!
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 10, pending: [] })
   older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'message', message: msg(4) }], has_more: false }))
   await loading
   expect(c.sync.get().channels.A.cursor).toBe(10)
-  c.handlers[0].onEvent({ type: 'message', message: confirmed })
+  c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (confirmed).created_seq, message: confirmed })
   expect(c.sync.get().channels.A.cursor).toBe(11)
-  expect(c.topics.get('A').lines.flatMap(l => l.kind === 'message' ? [l.message.seq] : [])).toEqual([4, 8, 11])
+  expect(c.topics.get('A').lines.flatMap(l => l.kind === 'message' ? [l.message.created_seq] : [])).toEqual([4, 8, 11])
   expect(c.topics.get('A').topics).toHaveLength(1)
   await c.sync.close()
 })
@@ -720,7 +720,7 @@ it('session replacement and close clear Topic projections before sync notifies s
   const c = topicClient()
   await c.boot()
   await c.topics.loadTopic('A', 'T')
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([5, 10])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([5, 10])
 
   const lateAuth = deferred<Result<TopicSummaryResponse>>()
   const lateList = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopics>>>()
@@ -772,14 +772,14 @@ it('reconciles Topic snapshots across sync listener ordering and coalesces own-s
   c.sync.subscribe(() => {
     if (!secondaryTopics) return
     seenInEarlySyncListener.push(
-      secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position)),
+      secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.created_seq : l.position)),
     )
   })
   secondaryTopics = createTopics(c.sync, { api: c.topicsApi })
   await c.boot()
   await secondaryTopics.loadMain('A')
   // Prime snapshot cache on secondaryTopics before the next sync event
-  expect(secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.seq : l.position))).toEqual([8, 10])
+  expect(secondaryTopics.get('A').lines.map(l => (l.kind === 'message' ? l.message.created_seq : l.position))).toEqual([8, 10])
   seenInEarlySyncListener.length = 0
 
   c.event(11, 'T')
@@ -1071,7 +1071,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
     list: { asOfSeq: 10, before: 3, hasMore: false, loading: false, error: false },
   })
   expect(beforeLoss.topic('T')).toMatchObject({ initialized: false, loading: false, error: false })
-  expect(beforeLoss.topic('T').messages.map(m => m.seq)).toEqual([10])
+  expect(beforeLoss.topic('T').messages.map(m => m.created_seq)).toEqual([10])
   expect(beforeLoss.topic('U')).toMatchObject({ initialized: true, before: 7, hasMore: true })
   expect(beforeLoss.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
     ['V', 3, 1],
@@ -1119,16 +1119,16 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   expect(onRecovery.lines).toEqual(beforeLoss.lines)
 
   // 5. Deliver replay (including an at-least-once boundary duplicate seq=10) + handoff watermark
-  handlers[0]!.onEvent({ type: 'message', message: msg(10, 'T') })
-  handlers[0]!.onEvent({ type: 'message', message: msg(11, 'T') })
-  handlers[0]!.onEvent({ type: 'message', message: msg(12, 'V') })
-  handlers[0]!.onEvent({ type: 'message', message: msg(13, null) })
+  handlers[0]!.onEvent({ type: 'message', kind: 'create', seq: (msg(10, 'T')).created_seq, message: msg(10, 'T') })
+  handlers[0]!.onEvent({ type: 'message', kind: 'create', seq: (msg(11, 'T')).created_seq, message: msg(11, 'T') })
+  handlers[0]!.onEvent({ type: 'message', kind: 'create', seq: (msg(12, 'V')).created_seq, message: msg(12, 'V') })
+  handlers[0]!.onEvent({ type: 'message', kind: 'create', seq: (msg(13, null)).created_seq, message: msg(13, null) })
   handlers[0]!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 13 })
   await flush()
 
   expect(session.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 13 })
   const afterReplay = session.topics.get('A')
-  expect(afterReplay.topic('T').messages.map(m => m.seq)).toEqual([10, 11])
+  expect(afterReplay.topic('T').messages.map(m => m.created_seq)).toEqual([10, 11])
   expect(afterReplay.topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([
     ['U', 7, 2],
     ['T', 11, 4],
@@ -1136,13 +1136,13 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   ])
   expect(
     afterReplay.lines.map(l =>
-      l.kind === 'message' ? { seq: l.message.seq } : { topic: l.topicId, position: l.position, count: l.messageCount },
+      l.kind === 'message' ? { created_seq: l.message.created_seq } : { topic: l.topicId, position: l.position, count: l.messageCount },
     ),
   ).toEqual([
-    { seq: 8 },
+    { created_seq: 8 },
     { topic: 'T', position: 11, count: 4 },
     { topic: 'V', position: 12, count: 2 },
-    { seq: 13 },
+    { created_seq: 13 },
   ])
 
   // 6. Outgoing paging requests respect retained hasMore, asOfSeq and before cursors
@@ -1153,7 +1153,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(1, 'U')], has_more: false }))
   await session.topics.loadTopic('A', 'U')
   expect(topicsApi.listTopicMessages.mock.calls).toEqual([['A', 'U', { before_seq: 7 }]])
-  expect(session.topics.get('A').topic('U').messages.map(m => m.seq)).toEqual([1, 7])
+  expect(session.topics.get('A').topic('U').messages.map(m => m.created_seq)).toEqual([1, 7])
   expect(session.topics.get('A').topic('U').hasMore).toBe(false)
 
   topicsApi.listTimeline.mockResolvedValueOnce(
@@ -1171,15 +1171,15 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   expect(topicsApi.listTimeline.mock.calls).toEqual([['A', { as_of_seq: 10, before_position: 8 }]])
   expect(
     session.topics.get('A').lines.map(l =>
-      l.kind === 'message' ? { seq: l.message.seq } : { topic: l.topicId, position: l.position, count: l.messageCount },
+      l.kind === 'message' ? { created_seq: l.message.created_seq } : { topic: l.topicId, position: l.position, count: l.messageCount },
     ),
   ).toEqual([
-    { seq: 4 },
+    { created_seq: 4 },
     { topic: 'U', position: 7, count: 2 },
-    { seq: 8 },
+    { created_seq: 8 },
     { topic: 'T', position: 11, count: 4 },
     { topic: 'V', position: 12, count: 2 },
-    { seq: 13 },
+    { created_seq: 13 },
   ])
 
   session.close()
@@ -1209,7 +1209,7 @@ it.each(['list', 'history'] as const)('fences a late Topic %s page when reconnec
   expect(c.sync.get().channels.A.cursor).toBe(2)
   expect(c.topics.get('A').topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([['T', 2, 1]])
   expect(c.topics.get('A').lines).toHaveLength(1)
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([2])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([2])
   await c.sync.close()
 })
 
@@ -1227,8 +1227,8 @@ it('keeps the open Topic cursor and window on reconnect catch-up without clamp',
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 12, state: 'ready' })
   expect(c.topics.get('A').generation).toBe(generation)
   expect(c.topics.get('A').topic('T')).toMatchObject({ before: 5, initialized: true, hasMore: true })
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([5, 10, 11])
-  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.seq : l.position)).toEqual([8, 11, 12])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([5, 10, 11])
+  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : l.position)).toEqual([8, 11, 12])
   expect(c.topics.get('A').topics[0]).toMatchObject({ topicId: 'T', position: 11, messageCount: 4 })
   expect(c.topicsApi.listTimeline).toHaveBeenCalledTimes(1)
   expect(c.listMessages).not.toHaveBeenCalled()
@@ -1259,15 +1259,15 @@ it.each(['list', 'history'] as const)('merges live and own Messages once during 
   const result = await c.sendMessage.mock.results.at(-1)!.value
   if (!result.ok) throw new Error('expected canonical ACK')
   const own = result.data
-  c.handlers.at(-1)!.onEvent({ type: 'message', message: own })
+  c.handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (own).created_seq, message: own })
   c.event(11, 'T')
   list.resolve(ok({ as_of_seq: 11, topics: [summary('U', 3, 1), summary('T', 11, 4)], has_more: true }))
   history.resolve(ok({ messages: [msg(2, 'T')], has_more: false }))
   await loading
-  expect(c.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual(kind === 'list' ? [5, 10, 11, 12] : [2, 5, 10, 11, 12])
+  expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual(kind === 'list' ? [5, 10, 11, 12] : [2, 5, 10, 11, 12])
   expect(c.topics.get('A').topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual(kind === 'list' ? [['U', 3, 1], ['T', 12, 5]] : [['T', 12, 5]])
   if (kind === 'list') expect(c.topics.get('A').list.loading).toBe(false)
-  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.seq : l.position)).toEqual([8, 12])
+  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : l.position)).toEqual([8, 12])
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 12, pending: [] })
   if (kind === 'history') expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', { before_seq: 5 }])
   await c.sync.close()
@@ -1287,12 +1287,12 @@ it('creates a Topic via topic_name from the Topic composer during main paging ex
   const result = await c.sendMessage.mock.results[0]!.value
   if (!result.ok) throw new Error('expected canonical ACK')
   const own = result.data
-  c.handlers[0].onEvent({ type: 'message', message: own })
+  c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (own).created_seq, message: own })
   older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'topic', topic: summary('U', 3, 1) }], has_more: false }))
   await loading
-  c.handlers[0].onEvent({ type: 'message', message: own })
+  c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (own).created_seq, message: own })
   expect(c.topicsApi.listTimeline.mock.calls[1]).toEqual(['A', { as_of_seq: 10, before_position: 8 }])
-  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.seq : [l.topicId, l.position])).toEqual([['U', 3], 8, ['T', 10], ['new', 11]])
+  expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : [l.topicId, l.position])).toEqual([['U', 3], 8, ['T', 10], ['new', 11]])
   expect(c.topics.get('A').topic('new').messages).toEqual([own])
   expect(c.sync.get().channels.A.pending).toEqual([])
   expect(composer.get().draft).toBe('')
@@ -1325,8 +1325,8 @@ it('recovers C9 Topic state by selecting a different Channel and back', async ()
   await session.topics.loadTopic('A', 'T')
   expect(session.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 10 })
   expect(session.topics.get('A').unavailable).toBe(false)
-  expect(session.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.seq : l.position)).toEqual([8, 10])
-  expect(session.topics.get('A').topic('T').messages.map(m => m.seq)).toEqual([5, 10])
+  expect(session.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : l.position)).toEqual([8, 10])
+  expect(session.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([5, 10])
   expect(composer.get().draft).toBe('kept draft')
   session.close(); await c.sync.close()
 })
@@ -1337,6 +1337,6 @@ it('selectMainTimeline emits one line per topic_id at its newest position', () =
     [msg(3), msg(7, 'U'), msg(9, 'T')],
     [{ asOfSeq: 10, summary: summary('T', 9, 3) }, { asOfSeq: 6, summary: summary('U', 4, 1) }],
   )
-  expect(lines.map(l => l.kind === 'message' ? l.message.seq : [l.topicId, l.position, l.messageCount])).toEqual([3, ['U', 7, 2], 11, ['T', 12, 4]])
+  expect(lines.map(l => l.kind === 'message' ? l.message.created_seq : [l.topicId, l.position, l.messageCount])).toEqual([3, ['U', 7, 2], 11, ['T', 12, 4]])
   expect(lines.filter(l => l.kind === 'topic').map(l => l.latestMessage)).toEqual([msg(7, 'U'), msg(12, 'T')])
 })

@@ -50,7 +50,7 @@ async fn send_completes_while_topic_projection_query_is_paused(pool: PgPool) {
     )
     .await
     .expect("send must not wait behind the projection barrier");
-    assert_eq!(message["seq"], 2);
+    assert_eq!(message["created_seq"], 2);
     assert!(!read.is_finished());
     held.commit().await.unwrap();
     let page = read.await.unwrap();

@@ -42,6 +42,6 @@ export function topicClient(activity?: Activity, requestTimeoutMs?: number) {
       await client.sync.start(); handlers[0].onReady(); await client.sync.watch('A')
       handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 }); await flush()
     },
-    event(seq: number, topic: string | null = null) { handlers.at(-1)!.onEvent({ type: 'message', message: msg(seq, topic) }) },
+    event(seq: number, topic: string | null = null) { handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (msg(seq, topic)).created_seq, message: msg(seq, topic) }) },
   }
 }

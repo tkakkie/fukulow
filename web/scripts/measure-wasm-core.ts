@@ -39,7 +39,7 @@ export interface SyncCore {
 }
 type SocketHandlers = {
   onReady(): void
-  onEvent(ev: { type: 'message'; message: Message } | { type: 'subscribed'; channel_id: string; caught_up_seq: number }): void
+  onEvent(ev: Extract<import('../src/api-schema.d.ts').ServerEvent, { type: 'message' | 'subscribed' }>): void
 }
 type SyncInstance = {
   get(): SyncView; start(): Promise<void>; watch(ch: string): Promise<void>; unwatch(ch: string): Promise<void>
@@ -131,7 +131,7 @@ function makeMessage(seq: number, channelUuid: string, opts?: {
   topicId?: string | null; replyTo?: string | null; replyRootId?: string | null
 }): Message {
   return {
-    id: fixtureUuid(`${channelUuid}-msg-${seq}`), channel_id: channelUuid, seq,
+    id: fixtureUuid(`${channelUuid}-msg-${seq}`), channel_id: channelUuid, created_seq: seq, version: seq, deleted: false,
     sender: opts?.sender ?? OTHER_UUID, client_message_id: opts?.clientMessageId ?? fixtureUuid(`${channelUuid}-cid-${seq}`),
     body: opts?.bodyText ?? body155(seq, channelUuid), created_at: '2026-01-01T00:00:00Z',
     topic_id: opts?.topicId ?? null, reply_to: opts?.replyTo ?? null, reply_root_id: opts?.replyRootId ?? null,
@@ -146,7 +146,7 @@ function assertG3Step(view: SyncView, expectedCursors?: ReadonlyMap<string, numb
   for (const [id, ch] of Object.entries(view.channels)) {
     const msgs = ch.messages
     for (let i = 1; i < msgs.length; i++) {
-      if (!(msgs[i - 1].seq < msgs[i].seq)) throw new Error(`G3(a) violation on ${id}: ${msgs[i - 1].seq} >= ${msgs[i].seq}`)
+      if (!(msgs[i - 1].created_seq < msgs[i].created_seq)) throw new Error(`G3(a) violation on ${id}: ${msgs[i - 1].created_seq} >= ${msgs[i].created_seq}`)
     }
     const expCursor = expectedCursors?.get(id)
     if (expCursor !== undefined && ch.cursor !== expCursor) throw new Error(`G3(b) violation on ${id}: cursor=${ch.cursor} !== ${expCursor}`)
@@ -162,7 +162,7 @@ function assertG3CatchUpComplete(view: SyncView, channelId: string, expectedHigh
   if (ch.messages.length !== expectedLen) throw new Error(`G3(c) length=${ch.messages.length} !== ${expectedLen}`)
   const firstSeq = expectedHighWaterSeq - expectedLen + 1
   for (let i = 0; i < expectedLen; i++) {
-    if (ch.messages[i].seq !== firstSeq + i) throw new Error(`G3(c) missing seq at ${i}: ${ch.messages[i].seq} !== ${firstSeq + i}`)
+    if (ch.messages[i].created_seq !== firstSeq + i) throw new Error(`G3(c) missing seq at ${i}: ${ch.messages[i].created_seq} !== ${firstSeq + i}`)
   }
 }
 
@@ -179,7 +179,7 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
     mentions: [], ...m!, channel_id: channel, topic_id: m?.topic ?? null, reply_to: m?.reply_to ?? null, reply_root_id: m?.reply_root_id ?? null,
   })
   const rec = (seq: number, channel = 'A'): Message => ({
-    mentions: [], channel_id: channel, seq, body: `m${seq}`, id: `id${seq}`, sender: 'other',
+    mentions: [], channel_id: channel, created_seq: seq, version: seq, deleted: false, body: `m${seq}`, id: `id${seq}`, sender: 'other',
     client_message_id: `auto-${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null, reply_to: null, reply_root_id: null,
   })
   const observe = (state: State): Observed => ({
@@ -213,7 +213,7 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
           case 'session_start': case 'session_replaced': input = { type: i.type, selfId: 'me' }; break
           case 'connection_ready': input = { type: i.type, connection: state.connection! }; break
           case 'socket_closed': input = { type: i.type, connection: state.connection!, code: i.code as number }; break
-          case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', message: msg() } }; break
+          case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (msg()).created_seq, message: msg() } }; break
           case 'subscribed': input = { type: 'event', connection: state.connection!, subscription: e?.id as number | undefined,
             event: { type: 'subscribed', channel_id: channel, caught_up_seq: i.caught_up_seq as number } }; break
           case 'channel_access_lost': input = { type: 'event', connection: state.connection!, event: { type: 'channel_access_lost', channel_id: channel } }; break
@@ -250,7 +250,7 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
     const connection = d.get().connection!
     d.feed({ type: 'connection_ready', connection })
     const channel = 'A', view = () => d.get().channels[fixtureUuid(channel)]
-    const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', message: rec(seq) } })
+    const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (rec(seq)).created_seq, message: rec(seq) } })
     const page = (request: number, start: number, length: number) =>
       d.feed({ type: 'history_result', request, page: { messages: Array.from({ length }, (_, i) => rec(start + i)), has_more: true } })
     d.feed({ type: 'watch', channel }); page(view().latest!, 1, 200)
@@ -261,11 +261,11 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
     while (view().fill !== undefined) page(view().fill!, view().cursor! + 1, 200)
     for (let seq = view().cursor! + 1, end = seq + 450; seq < end; seq++) event(seq)
     const duplicate = rec(view().cursor!)
-    d.feed({ type: 'event', connection, event: { type: 'message', message: duplicate } })
-    d.feed({ type: 'event', connection, event: { type: 'message', message: duplicate } })
-    d.feed({ type: 'event', connection, event: { type: 'message', message: duplicate }, refreshMentionNames: true })
+    d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
+    d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
+    d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate }, refreshMentionNames: true })
     for (const name of ['Retained', 'Retained', 'Renamed']) {
-      d.feed({ type: 'event', connection, event: { type: 'message', message: { ...duplicate, mentions: [{ member_id: 'target', name }] } } })
+      d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: ({ ...duplicate, mentions: [{ member_id: 'target', name }] }).created_seq, message: { ...duplicate, mentions: [{ member_id: 'target', name }] } } })
     }
     d.feed({ type: 'load_older', channel }); page(view().older!, 1, 200); d.feed({ type: 'refresh', channel })
     d.feed({ type: 'history_result', request: view().latest!, page: { messages: [rec(1901), rec(1900), { ...rec(1901), body: 'canonical' }], has_more: false } })
@@ -312,7 +312,7 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
           ...(random(3) === 0 ? { reply_to: 'parent', replyRootId: 'root' } : random(2) === 0 ? { topic_name: 'Topic' } : {}) },
         { type: 'user_retry', channel: ch, clientMessageId: pending?.clientMessageId ?? 'c1' },
         { type: 'user_discard', channel: ch, clientMessageId: pending?.clientMessageId ?? 'c1' },
-        { type: 'event', connection, event: { type: 'message', message }, ...(random(5) === 0 ? { refreshMentionNames: true } : {}) },
+        { type: 'event', connection, event: { type: 'message', kind: 'create', seq: (message).created_seq, message }, ...(random(5) === 0 ? { refreshMentionNames: true } : {}) },
         { type: 'event', connection, event: { type: 'subscribed', channel_id: ch, caught_up_seq: random(500) }, ...(random(3) === 0 ? { subscription: 99999 } : {}) },
         { type: 'event', connection, event: { type: 'error', channel_id: ch, code: ['channel_not_found', 'subscription_limit', 'unknown'][random(3)] } },
         { type: 'event', connection, event: { type: 'channel_access_lost', channel_id: ch } },
@@ -475,7 +475,7 @@ async function main() {
           const startSeq = (query.after_seq ?? 0) + 1, count = Math.max(0, Math.min(50, highSeq - startSeq + 1))
           const messages = Array.from({ length: count }, (_, i) => {
             const m = makeSynth(startSeq + i, channel)
-            return m.seq === 1 ? m : { ...m, reply_to: ROOT_MSG_UUID, reply_root_id: ROOT_MSG_UUID }
+            return m.created_seq === 1 ? m : { ...m, reply_to: ROOT_MSG_UUID, reply_root_id: ROOT_MSG_UUID }
           })
           return { ok: true, data: { root_id: ROOT_MSG_UUID, has_more: startSeq + count <= highSeq, messages } }
         },
@@ -494,7 +494,7 @@ async function main() {
     for (let s = 0; s < 5; s++) {
       const initOther = fixtureUuid(`mem-init-lru-${s}`)
       await sync.watch(initOther); memSocket!.onEvent({ type: 'subscribed', channel_id: initOther, caught_up_seq: highSeq })
-      for (let k = 1; k <= 50; k++) memSocket!.onEvent({ type: 'message', message: makeSynth(highSeq + k, initOther) })
+      for (let k = 1; k <= 50; k++) memSocket!.onEvent({ type: 'message', kind: 'create', seq: (makeSynth(highSeq + k, initOther)).created_seq, message: makeSynth(highSeq + k, initOther) })
       await sync.unwatch(initOther)
     }
     await sync.watch(chA); memSocket!.onEvent({ type: 'subscribed', channel_id: chA, caught_up_seq: highSeq })
@@ -523,7 +523,7 @@ async function main() {
     for (let cycle = 0; cycle < 10; cycle++) {
       for (let n = 1; n <= 1000; n++) {
         highSeq++; arrivedMessages++
-        memSocket!.onEvent({ type: 'message', message: makeSynth(highSeq, chA, n % 2 === 0 ? TOPIC_T_UUID : TOPIC_U_UUID) })
+        memSocket!.onEvent({ type: 'message', kind: 'create', seq: (makeSynth(highSeq, chA, n % 2 === 0 ? TOPIC_T_UUID : TOPIC_U_UUID)).created_seq, message: makeSynth(highSeq, chA, n % 2 === 0 ? TOPIC_T_UUID : TOPIC_U_UUID) })
         topics.get(chA); replies.get(chA); unread.get(chA); assertG3Step(sync.get())
         if (n === 500) { checkCaps(); sampleMemory(arrivedMessages) }
       }
@@ -535,7 +535,7 @@ async function main() {
       const otherCh = fixtureUuid(`mem-other-${cycle}`)
       await sync.unwatch(chA); await sync.watch(otherCh)
       memSocket!.onEvent({ type: 'subscribed', channel_id: otherCh, caught_up_seq: highSeq })
-      for (let k = 1; k <= 100; k++) memSocket!.onEvent({ type: 'message', message: makeSynth(highSeq + k, otherCh) })
+      for (let k = 1; k <= 100; k++) memSocket!.onEvent({ type: 'message', kind: 'create', seq: (makeSynth(highSeq + k, otherCh)).created_seq, message: makeSynth(highSeq + k, otherCh) })
       await sync.unwatch(otherCh); await sync.watch(chA)
       memSocket!.onEvent({ type: 'subscribed', channel_id: chA, caught_up_seq: highSeq })
       await topics.loadMainLatest(chA); checkCaps(); sampleMemory(arrivedMessages)
@@ -567,10 +567,10 @@ async function main() {
       {
         const { core, connId, c0, cursor: initCursor } = bootstrapGridCore(createSelectedCore, channelsCount, messagesPerChannel)
         let cur = initCursor
-        for (let i = 0; i < warmupSteps; i++) core.step({ type: 'event', connection: connId, event: { type: 'message', message: makeMessage(++cur, c0, { mention: true }) } })
+        for (let i = 0; i < warmupSteps; i++) core.step({ type: 'event', connection: connId, event: { type: 'message', kind: 'create', seq: cur + 1, message: makeMessage(++cur, c0, { mention: true }) } })
         const samples: number[] = []
         for (let i = 0; i < gridSteps; i++) {
-          const input: Input = { type: 'event', connection: connId, event: { type: 'message', message: makeMessage(++cur, c0, { mention: true }) } }
+          const input: Input = { type: 'event', connection: connId, event: { type: 'message', kind: 'create', seq: cur + 1, message: makeMessage(++cur, c0, { mention: true }) } }
           const t0 = performance.now(); core.step(input); samples.push((performance.now() - t0) * 1000)
           assertG3Step(core.get(), new Map([[c0, cur]]))
         }
@@ -580,7 +580,7 @@ async function main() {
       await releaseCores()
       {
         const { core, connId, c0, cursor } = bootstrapGridCore(createSelectedCore, channelsCount, messagesPerChannel)
-        const dupInput: Input = { type: 'event', connection: connId, event: { type: 'message', message: { ...core.get().channels[c0].messages.at(-1)! } } }
+        const dupInput: Input = { type: 'event', connection: connId, event: { type: 'message', kind: 'create', seq: ({ ...core.get().channels[c0].messages.at(-1)! }).created_seq, message: { ...core.get().channels[c0].messages.at(-1)! } } }
         for (let i = 0; i < warmupSteps; i++) if (core.step(dupInput).stateChanged) throw new Error('Duplicate mutated state')
         const samples: number[] = []
         for (let i = 0; i < gridSteps; i++) {
@@ -721,11 +721,15 @@ async function main() {
       const ch = idx % 2 === 0 ? channelIds[0] : channelIds[1 + (idx % 7)], hasTopicOrReply = idx % 10 === 0
       if (idx % 20 === 0) {
         await sync.getTimeline(ch).send(body155((cursors.get(ch) ?? 0) + 1, ch))
-        socketHandlers!.onEvent({ type: 'message', message: lastSentMessage! })
+        socketHandlers!.onEvent({ type: 'message', kind: 'create', seq: (lastSentMessage!).created_seq, message: lastSentMessage! })
       } else {
         const nextSeq = (cursors.get(ch) ?? 0) + 1; cursors.set(ch, nextSeq)
         socketHandlers!.onEvent({
-          type: 'message',
+          type: 'message', kind: 'create', seq: (makeMessage(nextSeq, ch, {
+            topicId: hasTopicOrReply ? TOPIC_T_UUID : null,
+            replyTo: hasTopicOrReply && idx % 20 === 10 ? ROOT_MSG_UUID : null,
+            replyRootId: hasTopicOrReply && idx % 20 === 10 ? ROOT_MSG_UUID : null,
+          })).created_seq,
           message: makeMessage(nextSeq, ch, {
             topicId: hasTopicOrReply ? TOPIC_T_UUID : null,
             replyTo: hasTopicOrReply && idx % 20 === 10 ? ROOT_MSG_UUID : null,
@@ -834,7 +838,7 @@ async function main() {
     core.step({ type: 'history_result', request: latestId, page: { messages: Array.from({ length: 100 }, (_, m) => makeMessage(1 + m, bulkC0)), has_more: false } })
     core.step({ type: 'event', connection: conn1, event: { type: 'subscribed', channel_id: bulkC0, caught_up_seq: baseCursor } })
     if (totalMessages === 1000) {
-      for (let i = 0; i < 405; i++) core.step({ type: 'event', connection: conn1, event: { type: 'message', message: makeMessage(baseCursor + 2 + i * 2, bulkC0) } })
+      for (let i = 0; i < 405; i++) core.step({ type: 'event', connection: conn1, event: { type: 'message', kind: 'create', seq: (makeMessage(baseCursor + 2 + i * 2, bulkC0)).created_seq, message: makeMessage(baseCursor + 2 + i * 2, bulkC0) } })
       if (!core.get().channels[bulkC0].forgottenThrough) throw new Error('Expected forgottenThrough before 1000 catch-up')
     }
     const waitId = (core.step({ type: 'socket_closed', connection: conn1, code: totalMessages === 1000 ? 4008 : 1006 }).effects.find((e) => e.type === 'wait') as { id: number }).id

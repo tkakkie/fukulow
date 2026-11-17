@@ -4,9 +4,9 @@ const tokenPattern = /@\{member:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 export type MentionName = (id: string, fallback: string, mentions: Message['mentions']) => string
 
 /** Never consult display identities until the server's persisted set accepts the token. */
-export function mentionText(body: string, mentions: Message['mentions'], name?: MentionName): string {
-  const accepted = new Map(mentions.map(target => [target.member_id, target.name]))
-  return body.replace(tokenPattern, (token, id: string) => {
+export function mentionText(body: string | null | undefined, mentions: Message['mentions'], name?: MentionName): string {
+  const accepted = new Map((mentions ?? []).map(target => [target.member_id, target.name]))
+  return (body ?? '').replace(tokenPattern, (token, id: string) => {
     const fallback = accepted.get(id)
     return fallback === undefined ? token : `@${name?.(id, fallback, mentions) ?? fallback}`
   })

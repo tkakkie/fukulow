@@ -89,9 +89,9 @@ describe('sync adapter', () => {
     await settle()
     expect(view.last.live).toBe(true)
 
-    net.event({ type: 'message', message: record(101) })
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     await settle()
-    expect(view.last.timeline.messages.map(m => m.seq)).toEqual([100, 101])
+    expect(view.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101])
 
     void a.send('hello')
     await settle()
@@ -99,7 +99,7 @@ describe('sync adapter', () => {
     net.sends[0].resolve(ok(sentBy('me', 102, 'me-c1', 'hello')))
     await settle()
     expect(view.last.timeline).toMatchObject({ pending: [] })
-    expect(view.last.timeline.messages.map(m => m.seq)).toEqual([100, 101, 102])
+    expect(view.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101, 102])
     await view.unmount()
     session.close()
   })
@@ -151,7 +151,7 @@ describe('sync adapter', () => {
     expect(listeners.active).toBe(0)
 
     const runs = first.values.length + second.values.length
-    net.event({ type: 'message', message: record(101) })
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     await settle()
     expect(first.values.length + second.values.length).toBe(runs) // nobody is notified
     expect(net.socket.closed).toBe(false)
@@ -172,7 +172,7 @@ describe('sync adapter', () => {
     await settle()
     await first.unmount()
 
-    net.event({ type: 'message', message: record(101) })
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     void a.send('while away')
     await settle()
     const requests = net.history.length
@@ -180,11 +180,11 @@ describe('sync adapter', () => {
 
     const again = await mount(() => ({ timeline: a.timeline, live: a.live }))
     expect(again.last.live).toBe(true)
-    expect(again.last.timeline.messages.map(m => m.seq)).toEqual([100, 101])
+    expect(again.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101])
     expect(again.last.timeline.pending).toMatchObject([{ body: 'while away' }])
-    net.event({ type: 'message', message: record(102) })
+    net.event({ type: 'message', kind: 'create', seq: (record(102)).created_seq, message: record(102) })
     await settle()
-    expect(again.last.timeline.messages.map(m => m.seq)).toEqual([100, 101, 102]) // and it keeps updating
+    expect(again.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101, 102]) // and it keeps updating
     expect(net.history).toHaveLength(requests)
     expect(net.subscribeCount('A')).toBe(subscribes)
     expect(net.sockets).toHaveLength(1)
@@ -208,7 +208,7 @@ describe('sync adapter', () => {
     void session.sync.replaceSession('other')
     await settle()
     expect(view.last).toMatchObject({ status: 'loading', messages: [], pending: [] })
-    old.onEvent({ type: 'message', message: record(999) })
+    old.onEvent({ type: 'message', kind: 'create', seq: (record(999)).created_seq, message: record(999) })
     old.onReady()
     net.sends[0].resolve(ok(sentBy('me', 101, 'me-c1', 'mine'))) // the old session's late ack
     await settle()
@@ -442,7 +442,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
     expect(await submitPromise).toBe(true)
     await settle()
     expect(timelineView.last.pending).toEqual([])
-    expect(timelineView.last.messages.map(m => m.seq)).toEqual([100, 101])
+    expect(timelineView.last.messages.map(m => m.created_seq)).toEqual([100, 101])
 
     unsubTimeline()
     await timelineView.unmount()

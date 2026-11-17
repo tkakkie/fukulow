@@ -249,7 +249,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
         }
         let positions:i64=sqlx::query_scalar("SELECT (SELECT count(*) FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3)+(SELECT count(*) FROM topic_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3)").bind(org).bind(channel).bind(sender).fetch_one(&pool).await.unwrap();
         assert_eq!(positions, 0);
-        assert_eq!(topic["seq"], 1);
+        assert_eq!(topic["created_seq"], 1);
         sqlx::query(
             "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
         )

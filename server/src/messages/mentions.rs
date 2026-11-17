@@ -53,13 +53,15 @@ pub(super) async fn store(
         .bind(organization).bind(message.channel_id).bind(message.id).bind(targets)
         .execute(&mut *tx).await?;
     let identities = crate::auth::members::display_identities(tx, organization, targets).await?;
-    message.mentions = identities
-        .into_iter()
-        .map(|identity| Mention {
-            member_id: identity.id,
-            name: identity.name,
-        })
-        .collect();
+    message.mentions = Some(
+        identities
+            .into_iter()
+            .map(|identity| Mention {
+                member_id: identity.id,
+                name: identity.name,
+            })
+            .collect(),
+    );
     Ok(())
 }
 
@@ -67,11 +69,14 @@ pub(super) async fn delivery_snapshot(
     pool: &sqlx::PgPool,
     organization: Uuid,
     members: &[(Uuid, i64)],
-    messages: &[Message],
-) -> Result<(Vec<(Uuid, i64, bool)>, Vec<Message>), sqlx::Error> {
+    messages: &[super::ChannelEvent],
+) -> Result<(Vec<(Uuid, i64, bool)>, Vec<super::ChannelEvent>), sqlx::Error> {
     let mut messages = messages.to_vec();
     let channel = messages.first().ok_or(sqlx::Error::RowNotFound)?.channel_id;
-    if messages.iter().all(|m| m.mentions.is_empty()) {
+    if messages
+        .iter()
+        .all(|m| m.mentions.as_ref().is_none_or(Vec::is_empty))
+    {
         return Ok((
             channels::member_access(pool, organization, channel, members).await?,
             messages,
@@ -84,7 +89,7 @@ pub(super) async fn delivery_snapshot(
             let allowed = channels::member_access_in(tx, organization, channel, members).await?;
             let ids: Vec<_> = messages
                 .iter()
-                .flat_map(|m| m.mentions.iter().map(|m| m.member_id))
+                .flat_map(|m| m.mentions.iter().flatten().map(|m| m.member_id))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
@@ -93,7 +98,7 @@ pub(super) async fn delivery_snapshot(
             let names: std::collections::HashMap<_, _> =
                 identities.into_iter().map(|i| (i.id, i.name)).collect();
             for message in &mut messages {
-                for mention in &mut message.mentions {
+                for mention in message.mentions.iter_mut().flatten() {
                     mention.name = names
                         .get(&mention.member_id)
                         .ok_or(sqlx::Error::RowNotFound)?

@@ -4,7 +4,7 @@ fn position(item: &Value) -> i64 {
     if item["kind"] == "topic" {
         item["topic"]["last_seq"].as_i64().unwrap()
     } else {
-        item["message"]["seq"].as_i64().unwrap()
+        item["message"]["created_seq"].as_i64().unwrap()
     }
 }
 
@@ -62,7 +62,7 @@ async fn topic_projection_paging_preserves_w_counts_positions_and_unfiltered_hol
     assert_eq!(baseline["first_seq"], 1);
     assert_eq!(baseline["last_seq"], 4);
     assert_eq!(baseline["message_count"], 2);
-    assert_eq!(baseline["latest_message"]["seq"], 4);
+    assert_eq!(baseline["latest_message"]["created_seq"], 4);
     assert_eq!(
         get(&app, &token, channel, "timeline?as_of_seq=6&limit=2").await,
         first
@@ -96,7 +96,7 @@ async fn topic_projection_paging_preserves_w_counts_positions_and_unfiltered_hol
             .as_array()
             .unwrap()
             .iter()
-            .map(|m| m["seq"].as_i64().unwrap())
+            .map(|m| m["created_seq"].as_i64().unwrap())
             .collect::<Vec<_>>(),
         (1..=10).collect::<Vec<_>>()
     );
@@ -256,7 +256,7 @@ async fn topic_paging_many_moved_topics_has_no_loss_or_duplication(pool: PgPool)
                 );
                 assert_eq!(topic["message_count"], 1);
                 assert_eq!(topic["first_seq"], topic["last_seq"]);
-                assert_eq!(topic["latest_message"]["seq"], topic["last_seq"]);
+                assert_eq!(topic["latest_message"]["created_seq"], topic["last_seq"]);
                 assert!(topic["last_seq"].as_i64().unwrap() <= 40);
             }
             if page["has_more"] == false {

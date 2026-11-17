@@ -18,6 +18,9 @@ export type ChannelState = {
   watched: boolean
   cursor: number | null
   messages: Message[]
+  versions: Record<string, [number, boolean]>
+  versionFloor: number
+  versionEpoch: number
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
   advancing: { start: number; end: number }[]
   heldThrough?: number
@@ -83,11 +86,16 @@ export type Input = (
   | { type: 'timer_elapsed'; id: number }
 ) & { refreshMentionNames?: true }
 
+const withoutDeletedContent = (message: Message): Message => {
+  const { body: _body, mentions: _mentions, ...state } = message
+  return state
+}
+
 export function initialState(selfId = ''): State {
   return { selfId, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
     reconnectAttempt: 0, channels: {}, requests: {}, timers: {} }
 }
-const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [],
+const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [], versions: {}, versionFloor: 0, versionEpoch: 0,
   advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 })
 const sameFields = <T extends object>(a: T, b: T) => {
   const keys = Object.keys(a) as (keyof T)[]
@@ -122,6 +130,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       .sort((a, b) => (b[1].lastUsed ?? 0) - (a[1].lastUsed ?? 0))
     for (const [index, [id, c]] of inactive.entries()) {
       const limit = index < INACTIVE_CHANNEL_LIMIT ? INACTIVE_CHANNEL_MESSAGE_LIMIT : 0
+      capVersions(id, limit)
       if ((c.retainedCount ?? 0) > limit) {
         const trimmed = channel(id)
         trimmed.messages = limit ? c.messages.slice(-limit) : []; trimmed.retainedCount = trimmed.messages.length; trimmed.hasOlder = true
@@ -200,6 +209,18 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     state.requests[n] = { type: 'history', channel: id, page, seq }
     effects.push({ type: 'fetch_history', id: n, channel: id, page, seq })
   }
+  const capVersions = (id: string, limit: number) => {
+    if (Object.keys(state.channels[id].versions).length <= limit) return
+    const c = channel(id)
+    if (Object.keys(c.versions).length > limit) {
+      const entries = Object.entries(c.versions).sort((a, b) => a[1][0] - b[1][0] || a[0].localeCompare(b[0]))
+      const retired = entries.splice(0, entries.length - limit)
+      c.versions = Object.fromEntries(entries)
+      c.versionFloor = Math.max(c.versionFloor, ...retired.map(([, value]) => value[0]))
+      invalidate(id)
+      c.versionEpoch = state.next
+    }
+  }
   const gap = (c: ChannelState) => c.cursor !== null &&
     ((c.heldThrough ?? 0) > c.cursor + 1 || (c.forgottenThrough ?? 0) > c.cursor || (c.subscription?.confirmed && c.subscription.watermark > c.cursor))
   const reconcile = (id: string, immediate = false) => {
@@ -225,46 +246,58 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       c.pending = c.pending.filter(p => !settled.has(p.clientMessageId))
     }
   }
-  const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream') => {
+  const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream' | 'projection', eventSeq?: number) => {
     const c = channel(id)
     const valid = records.filter(m => m.channel_id === id)
-    if (valid.length) observedRecords.set(id, valid)
-    // Sort/deduplicate only the incoming page. Find changes in the existing sorted window without
-    // rebuilding an index or sorting it; allocate one replacement array only when a record changes.
-    const incoming = valid.length < 2 ? valid : [...new Map(valid.map(m => [m.seq, m])).values()].sort((a, b) => a.seq - b.seq)
-    let merged: Message[] | undefined
-    let offset = 0
-    for (const m of incoming) {
-      let lo = 0, hi = c.messages.length
-      while (lo < hi) {
-        const mid = (lo + hi) >>> 1
-        if (c.messages[mid].seq < m.seq) lo = mid + 1
-        else hi = mid
+    if (source === 'projection' && valid.every(m => {
+      const held = c.messages.find(held => held.id === m.id)
+      return !m.deleted && m.version === m.created_seq && (!held || held.version > m.version ||
+        (!input.refreshMentionNames && (held.mentions ?? []).length === (m.mentions ?? []).length &&
+          (held.mentions ?? []).every((mention, i) => mention.member_id === m.mentions![i].member_id && mention.name === m.mentions![i].name)))
+    })) { settle(id, valid); return }
+    const positions = eventSeq === undefined ? valid.map(m => m.created_seq) : [eventSeq]
+    const byId = new Map<string, Message>()
+    for (const record of valid) {
+      const m = record.deleted ? withoutDeletedContent(record) : record
+      const old = byId.get(m.id)
+      if (!old || m.version > old.version) byId.set(m.id, m)
+    }
+    let merged = c.messages
+    const accepted: Message[] = []
+    for (let m of [...byId.values()].sort((a, b) => a.created_seq - b.created_seq)) {
+      const version = c.versions[m.id]
+      if (version ? version[0] > m.version || (version[1] && !m.deleted) :
+        m.version <= c.versionFloor && (source === 'stream' || source === 'ack')) continue
+      if ((m.deleted || m.version > m.created_seq) && (!version || version[0] !== m.version || version[1] !== m.deleted)) c.versions = { ...c.versions, [m.id]: [m.version, m.deleted] }
+      const index = merged.findIndex(held => held.id === m.id)
+      const held = merged[index]
+      if (held) {
+        if (held.version > m.version) continue
+        if (held.version === m.version) m = held.deleted ? held : { ...held, mentions: m.mentions }
+        accepted.push(m)
+        if (!input.refreshMentionNames && sameFields({ ...held, mentions: m.mentions }, m) && (held.mentions ?? []).length === (m.mentions ?? []).length &&
+          (held.mentions ?? []).every((mention, i) => mention.member_id === m.mentions![i].member_id && mention.name === m.mentions![i].name)) continue
+      } else {
+        accepted.push(m)
+        if (source === 'projection') continue
       }
-      const existing = c.messages[lo]
-      if (existing?.seq === m.seq && !input.refreshMentionNames &&
-        existing.mentions.length === m.mentions.length && existing.mentions.every((mention, i) =>
-          mention.member_id === m.mentions[i].member_id && mention.name === m.mentions[i].name) &&
-        sameFields({ ...existing, mentions: m.mentions }, m)) continue
-      if (!merged) merged = c.messages.slice(0, lo)
-      else for (; offset < lo; offset++) merged.push(c.messages[offset])
-      merged.push(m)
-      offset = lo + (existing?.seq === m.seq ? 1 : 0)
+      if (merged === c.messages) merged = c.messages.slice()
+      if (index >= 0) merged[index] = m
+      else { const position = merged.findIndex(held => held.created_seq > m.created_seq); merged.splice(position < 0 ? merged.length : position, 0, m) }
     }
-    if (merged) {
-      for (; offset < c.messages.length; offset++) merged.push(c.messages[offset])
-      c.messages = merged
-    }
-    if (valid.length) c.heldThrough = Math.max(c.heldThrough ?? 0, ...valid.map(m => m.seq))
+    c.messages = merged
+    const observed = source === 'projection' ? accepted.filter(m => m.deleted || m.version > m.created_seq) : accepted
+    if (observed.length) observedRecords.set(id, observed)
+    if (source !== 'projection' && positions.length) c.heldThrough = Math.max(c.heldThrough ?? 0, ...positions)
     if (c.messages.length > MAIN_MESSAGE_LIMIT) {
-      c.messages = source === 'window' && valid.at(-1)!.seq < c.messages.at(-1)!.seq
+      c.messages = source === 'window' && valid.at(-1)!.created_seq < c.messages.at(-1)!.created_seq
         ? c.messages.slice(0, MAIN_MESSAGE_LIMIT) : c.messages.slice(-MAIN_MESSAGE_LIMIT)
       c.hasOlder = true
     }
+    capVersions(id, TOTAL_MESSAGE_LIMIT)
     settle(id, valid)
-    if (source !== 'window') {
-      const ranges = [...c.advancing.map(r => ({ ...r })), ...valid
-        .filter(m => c.cursor === null || m.seq > c.cursor).map(m => ({ start: m.seq, end: m.seq }))]
+    if (source !== 'window' && source !== 'projection') {
+      const ranges = [...c.advancing.map(r => ({ ...r })), ...positions.filter(seq => c.cursor === null || seq > c.cursor).map(seq => ({ start: seq, end: seq }))]
         .sort((a, b) => a.start - b.start)
       const merged: typeof c.advancing = []
       for (const range of ranges) {
@@ -273,7 +306,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         else merged.push(range)
       }
       // Adjacent input alone advances C3. Forgotten disjoint ranges are recovered by unfiltered fill.
-      if (source === 'stream' && c.cursor !== null && valid.some(m => m.seq === c.cursor! + 1)) {
+      if (source === 'stream' && c.cursor !== null && positions.includes(c.cursor + 1)) {
         while (merged[0] && merged[0].start <= c.cursor + 1) c.cursor = Math.max(c.cursor, merged.shift()!.end)
       }
       if (merged.length > MAIN_MESSAGE_LIMIT) c.forgottenThrough = Math.max(c.forgottenThrough ?? 0, merged.at(-1)!.end)
@@ -346,7 +379,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     case 'settle_history':
       // Projection pages settle C5 without entering the sync window or contiguity evidence (P1).
       if (state.channels[input.channel]?.watched && state.channels[input.channel].state !== 'unavailable')
-        settle(input.channel, input.messages)
+        merge(input.channel, input.messages, 'projection')
       break
     case 'connection_ready':
       if (input.connection !== state.connection || state.connected) break
@@ -394,7 +427,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     }
     case 'load_older': {
       const c = channel(input.channel)
-      if (c.state !== 'unavailable' && c.hasOlder && c.messages[0]) history(input.channel, 'before', c.messages[0].seq)
+      if (c.state !== 'unavailable' && c.hasOlder && c.messages[0]) history(input.channel, 'before', c.messages[0].created_seq)
       break
     }
     case 'user_send': {
@@ -424,7 +457,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (!c?.watched || c.state === 'unavailable' || !c.subscription) break
       if (e.type !== 'message' && input.subscription !== undefined && input.subscription !== c.subscription.id) break
       c = channel(id)
-      if (e.type === 'message') { merge(id, [e.message], 'stream'); reconcile(id) }
+      if (e.type === 'message') { merge(id, [e.message], 'stream', e.seq); reconcile(id) }
       else if (e.type === 'channel_access_lost') unavailable(id)
       else if (e.type === 'error') {
         if (e.code === 'channel_not_found' || e.code === 'subscription_limit') unavailable(id)
@@ -470,12 +503,12 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       }
       const before = c.cursor
       const bootstrap = c.cursor === null && r.page === 'latest'
-      if (bootstrap) { c.cursor = input.page.messages.at(-1)?.seq ?? 0; c.streamBase = c.cursor }
+      if (bootstrap) { c.cursor = input.page.messages.at(-1)?.created_seq ?? 0; c.streamBase = c.cursor }
       merge(r.channel, input.page.messages, r.page === 'after' ? 'stream' : 'window')
       // Latest/before has_more is older; after has_more must never overwrite it.
       if (r.page !== 'after') {
         if (r.page === 'before' || bootstrap || !c.messages[0] ||
-          (input.page.messages[0]?.seq ?? Infinity) <= c.messages[0].seq) c.hasOlder = input.page.has_more
+          (input.page.messages[0]?.created_seq ?? Infinity) <= c.messages[0].created_seq) c.hasOlder = input.page.has_more
       }
       if (bootstrap) {
         subscribe(r.channel) // The sent base comes from this page, never buffered ack/echo records.

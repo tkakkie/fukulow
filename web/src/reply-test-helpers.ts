@@ -31,6 +31,6 @@ export function replyClient(requestTimeoutMs = 30_000) {
       await client.sync.start(); handlers[0].onReady(); await client.sync.watch('A')
       handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 1 }); await flush()
     },
-    event(message: Message) { handlers.at(-1)!.onEvent({ type: 'message', message }) },
+    event(message: Message) { handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (message).created_seq, message }) },
   }
 }
