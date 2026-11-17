@@ -861,7 +861,9 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
         for _ in 0..admitted {
             held.push(f.state.pool.acquire().await.unwrap());
         }
-        sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() + interval '2 seconds' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)").bind(f.organization).execute(&pool).await.unwrap();
+        // Keep the normal Session lifetime during setup. Block the fallback so
+        // only the sockets' cached database-expiry timers can close them.
+        let fallback = f.state.session_changes.pause_fallback();
         let mut idle = f.server.connect(&f.token).await;
         subscribe(&mut idle, f.channel, 0).await;
         ready(&mut idle, f.channel, 0).await;
@@ -869,8 +871,18 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
         let gate = pause(f.channel);
         subscribe(&mut replay, f.channel, 0).await;
         entered(&gate).await;
+        fallback.entered().await;
+        let remaining: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 FROM account_sessions WHERE token_hash = $1")
+            .bind(Sha256::digest(f.token.as_bytes()).to_vec())
+            .fetch_one(&pool).await.unwrap();
+        assert!(remaining > 0.0);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs_f64(remaining + 1.0)).await;
+        // Resume before TCP I/O so paused-time auto-advance cannot race it.
+        tokio::time::resume();
         closed(&mut idle, CLOSE_SESSION_ENDED).await;
         closed(&mut replay, CLOSE_SESSION_ENDED).await;
+        fallback.release();
         drop(held);
         f.state.pool.close().await;
     }
