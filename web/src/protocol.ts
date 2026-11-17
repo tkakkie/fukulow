@@ -487,7 +487,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (!c?.watched || c.state === 'unavailable' || !c.subscription) break
       if (e.type !== 'message' && input.subscription !== undefined && input.subscription !== c.subscription.id) break
       c = channel(id)
-      if (e.type === 'message') { merge(id, [e.message], 'stream', e.seq); reconcile(id) }
+      if (e.type === 'message') { if (e.kind === 'create' && e.message.created_seq !== e.seq) break; merge(id, [e.message], 'stream', e.seq); reconcile(id) }
       else if (e.type === 'channel_access_lost') unavailable(id)
       else if (e.type === 'error') {
         if (e.code === 'channel_not_found' || e.code === 'subscription_limit') unavailable(id)
@@ -535,7 +535,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       if (input.type === 'events_result') {
         if (r.page !== 'after') break
         const before = c.cursor
-        for (const event of input.page.events) if (event.type === 'message' && event.message.channel_id === r.channel) merge(r.channel, [event.message], 'events', event.seq)
+        for (const event of input.page.events) if (event.type === 'message' && (event.kind !== 'create' || event.message.created_seq === event.seq) && event.message.channel_id === r.channel) merge(r.channel, [event.message], 'events', event.seq)
         if (c.cursor === before && gap(c)) c.wait = wait('fill_backoff', r.channel, c.fillAttempt++)
         else { c.fillAttempt = 0; reconcile(r.channel, true) }
         break

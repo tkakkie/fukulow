@@ -62,8 +62,9 @@ impl Step<'_> {
                 }
                 let before = c.cursor;
                 for event in result.events {
-                    if let fukulow_api::ServerEvent::Message { seq, message, .. } = event
+                    if let fukulow_api::ServerEvent::Message { seq, kind, message } = event
                         && message.channel_id == id
+                        && Self::envelope_consistent(kind, seq, &message)
                     {
                         self.merge_event(id, vec![message], Source::Events, Some(seq));
                     }

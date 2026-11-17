@@ -50,7 +50,7 @@ function isServerEvent(value: unknown): value is ServerEvent {
     case 'read_position_changed': return typeof value.channel_id === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') && isSequence(value.read_seq, 0) && Object.keys(value).every(k => ['type', 'channel_id', 'topic_id', 'read_seq'].includes(k))
     case 'channel_access_gained': case 'channel_access_revoked': case 'channel_members_changed':
       return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
-    case 'message': return isSequence(value.seq, 1) && value.kind === 'create' && isMessage(value.message)
+    case 'message': return isSequence(value.seq, 1) && value.kind === 'create' && isMessage(value.message) && value.message.created_seq === value.seq
     case 'channel_access_lost': return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
     case 'subscribed': return typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
     case 'error': return typeof value.code === 'string' &&

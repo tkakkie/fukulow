@@ -321,9 +321,11 @@ impl Step<'_> {
         }
         self.channel(id);
         match event {
-            ServerEvent::Message { message, seq, .. } => {
-                self.merge_event(id, vec![message], Source::Stream, Some(seq));
-                self.reconcile(id, false);
+            ServerEvent::Message { message, seq, kind } => {
+                if Self::envelope_consistent(kind, seq, &message) {
+                    self.merge_event(id, vec![message], Source::Stream, Some(seq));
+                    self.reconcile(id, false);
+                }
             }
             ServerEvent::ChannelAccessLost { .. } => self.unavailable(id),
             ServerEvent::Error { code, .. } => {

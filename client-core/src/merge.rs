@@ -53,6 +53,15 @@ impl Step<'_> {
             );
         }
     }
+    /// A Create's envelope position is its creation position; a mismatched Create is
+    /// dropped rather than moving the cursor past a different event.
+    pub(crate) fn envelope_consistent(
+        kind: fukulow_api::ChannelEventKind,
+        seq: i64,
+        message: &Message,
+    ) -> bool {
+        !matches!(kind, fukulow_api::ChannelEventKind::Create) || message.created_seq == seq
+    }
     pub fn merge(&mut self, id: Uuid, records: Vec<Message>, source: Source) {
         self.merge_event(id, records, source, None);
     }
