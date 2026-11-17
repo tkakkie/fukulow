@@ -19,7 +19,7 @@ Channel manager/チャンネル管理者 names the private Channel grant right (
 
 ## MVP
 Sign in, organization, channels, topics, reply chains, DM, unread/mention, basic search.
-Later: attachments, reactions, push notifications, bots/webhooks, multiple organizations UI, OIDC.
+Later: attachments, reactions, push notifications, bots/webhooks, OIDC.
 
 ## Parts
 - [Accounts](spec/accounts.md): Accounts and Memberships; Password and Account Session security; Members, Roles and Invites; Channel membership and Channel managers; Setup.
