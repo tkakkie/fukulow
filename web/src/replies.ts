@@ -31,7 +31,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   const canonical = (channel: string, held: Message | undefined, incoming: Message) =>
     knownMessageState(sync.get().channels[channel], held, incoming)
   const chains = new Map<string, Chain>()
-  const listeners = new Set<() => void>()
+  const listeners = new Set<(channels?: ReadonlySet<string>) => void>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>()
   const inFlight = new WeakMap<Chain, Promise<void>>()
@@ -41,7 +41,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   const notify = (channels?: Set<string>) => {
     if (channels) channels.forEach(id => snapshots.delete(id))
     else snapshots.clear()
-    listeners.forEach(l => l())
+    listeners.forEach(l => l(channels))
   }
   const cancelReads = () => {
     deadlines.forEach((resolve, timer) => { clearTimeout(timer); resolve() })
@@ -110,7 +110,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     const mutationFloor = sync.get().channels[channel]?.mutationSeq ?? 0
     const versionEpoch = sync.get().channels[channel]?.versionEpoch
     const token = Symbol(), session = sessionToken
-    w.read = token; w.loading = true; w.error = false; notify()
+    w.read = token; w.loading = true; w.error = false; notify(new Set([channel]))
     const isCurrent = () => current(channel, w) && w.read === token && sync.get().channels[channel]?.versionEpoch === versionEpoch
     let timer: ReturnType<typeof setTimeout> | undefined
     const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, w.anchor.id, { history_generation: sync.get().historyGeneration, as_of_seq: w.restart ? undefined : w.asOfSeq, after_seq: requestedAfter }))
@@ -169,13 +169,13 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         mergeStream(channel, w)
         if (!w.hasMore) { w.hasNewer = false; w.newerCount = 0 }
       }
-      notify()
+      notify(new Set([channel]))
     })
     try {
       await Promise.race([apply, new Promise<void>(resolve => {
         timer = setTimeout(() => {
           // Expiry ends this read's authority, not the underlying HTTP operation.
-          if (isCurrent()) { w.read = Symbol(); w.loading = false; w.error = true; notify() }
+          if (isCurrent()) { w.read = Symbol(); w.loading = false; w.error = true; notify(new Set([channel])) }
           resolve()
         }, options.requestTimeoutMs ?? 30_000)
         deadlines.set(timer, resolve)
@@ -207,7 +207,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       unavailable: c?.state === 'unavailable' || sync.get().organization === 'unavailable' }
   }
   return {
-    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    subscribe(listener: (channels?: ReadonlySet<string>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     get(channel: string) {
       let value = snapshots.get(channel)
       if (!value) snapshots.set(channel, value = snapshot(channel))
@@ -224,9 +224,10 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         return
       }
       const w = chain(anchor, sync.get().channels[channel]?.cursor ?? 0)
+      const changed = new Set([...chains.keys(), channel])
       for (const old of chains.values()) release(old)
       chains.clear(); snapshots.clear()
-      chains.set(channel, w); mergeStream(channel, w); notify()
+      chains.set(channel, w); mergeStream(channel, w); notify(changed)
       await loadMore(channel)
     },
     loadMore,
@@ -239,7 +240,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         await loadMore(channel)
         if (w.error) break
       }
-      if (current(channel, w) && !w.error) { w.hasNewer = false; w.newerCount = 0; notify() }
+      if (current(channel, w) && !w.error) { w.hasNewer = false; w.newerCount = 0; notify(new Set([channel])) }
     },
     async loadOlder(channel: string) {
       const w = chains.get(channel)
@@ -248,7 +249,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       inFlight.delete(w)
       await loadMore(channel)
     },
-    dismiss(channel: string) { const w = chains.get(channel); if (w) release(w); chains.delete(channel); notify() },
+    dismiss(channel: string) { const w = chains.get(channel); if (w) release(w); chains.delete(channel); notify(new Set([channel])) },
     async send(channel: string, body: string, parentId?: string) {
       const w = chains.get(channel)
       const parent = parentId ?? w?.anchor.id

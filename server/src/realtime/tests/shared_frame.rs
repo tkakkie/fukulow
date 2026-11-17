@@ -214,7 +214,7 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
     .unwrap();
     assert_eq!(enriched.frame.as_bytes(), old.as_bytes());
     for socket in &mut sockets {
-        let tungstenite::Message::Text(raw) = frame(socket).await else {
+        let tungstenite::Message::Text(raw) = delivery_frame(socket).await else {
             panic!("expected live text frame");
         };
         assert_eq!(raw.as_bytes(), old.as_bytes());

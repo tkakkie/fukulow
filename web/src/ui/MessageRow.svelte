@@ -38,7 +38,7 @@
     retryable?: boolean
     targetUnavailable?: boolean
     failedReason?: string
-    replyCount?: number
+    replyCount?: number | null
     focusable?: boolean
     rovingTabindex?: 0 | -1
     rowRef?: HTMLElement | null
@@ -159,7 +159,7 @@
         bind:buttonRef={replyBtnRef}
         onclick={() => onopenreplies(replyBtnRef)}
       >
-        {replyCount > 0 ? `返信 ${replyCount}件›` : '返信'}
+        {replyCount !== null && replyCount > 0 ? `返信 ${replyCount}件›` : '返信'}
       </Button>
     </footer>
   {/if}

@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url'
+import { precompress } from './scripts/precompress.ts'
 import { checkCoreBundle } from './scripts/core-bundle.ts'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { defineConfig } from 'vitest/config'
@@ -17,6 +18,12 @@ export default defineConfig(({ mode }) => {
       ...(test ? [{ find: /^\.\/core-values$/, replacement: fileURLToPath(new URL('./scripts/core-test-values.ts', import.meta.url)) }] : []),
     ] },
     plugins: [
+      { name: 'precompressed-brotli', apply: 'build',
+        async writeBundle(options) {
+          if (!options.dir) throw new Error('Brotli assets require an output directory')
+          await precompress(options.dir)
+        },
+      },
       { name: 'single-sync-implementation', generateBundle(_options, bundle) {
         checkCoreBundle(implementation, Object.values(bundle).flatMap(chunk => chunk.type === 'chunk' ? Object.keys(chunk.modules) : []),
           Object.values(bundle).filter(chunk => chunk.type === 'asset').map(asset => asset.fileName))

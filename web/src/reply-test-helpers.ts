@@ -20,13 +20,14 @@ export function replyClient(requestTimeoutMs = 30_000) {
   const sendMessage = vi.fn(async (channel: string, body: SendMessageRequest): Promise<Result<Message>> =>
     ({ ok: true, data: { ...reply(4, body.reply_to ?? 'id1'), channel_id: channel, sender: 'me', client_message_id: body.client_message_id, body: body.body } }))
   const onSessionEnded = vi.fn()
-  const options: SyncOptions = { selfId: 'me', api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages, sendMessage },
+  const listChannelEvents = vi.fn<NonNullable<SyncOptions['api']>['listChannelEvents']>(async () => ({ ok: false, kind: 'network' }))
+  const options: SyncOptions = { selfId: 'me', api: { listChannelEvents, listMessages, sendMessage },
     newId: () => `send${++id}`, onSessionEnded, requestTimeoutMs,
     connect(h) { handlers.push(h); return { send: m => { controls.push(m) }, close: vi.fn() } },
   }
   const source = createSync(options)
   const client = createReplySync({ ...options, repliesApi: { listReplyChain } }, source)
-  return { ...client, source, listMessages, sendMessage, listReplyChain, handlers, controls, onSessionEnded,
+  return { ...client, source, listMessages, listChannelEvents, sendMessage, listReplyChain, handlers, controls, onSessionEnded,
     async boot() {
       await client.sync.start(); handlers[0].onReady(); await client.sync.watch('A')
       handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 1 }); await flush()

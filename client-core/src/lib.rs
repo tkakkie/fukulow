@@ -1,6 +1,7 @@
 //! Deterministic Message sync policy. The owner supplies all I/O results and timer ticks.
 mod engine;
 mod merge;
+pub mod reply_counts;
 mod responses;
 mod transitions;
 mod types;
