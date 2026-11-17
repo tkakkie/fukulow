@@ -142,23 +142,33 @@ async fn chunked_pass_checks_exact_keys_and_excludes_expired_sessions(pool: PgPo
     );
     sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE token_hash = $1")
         .bind(&key.1).execute(&pool).await.unwrap();
-    let mut keys: Vec<_> = (0..BATCH_SIZE + 1)
-        .map(|_| (Uuid::new_v4(), vec![2; 32]))
+    let mut keys: Vec<_> = (0..BATCH_SIZE)
+        .map(|i| (key.0, i.to_be_bytes().to_vec()))
         .collect();
-    keys[0] = key;
-    // Exercise both chunks, including a cross-pair that must not match the valid row.
-    keys[1] = (
+    // The expired session must be checked in the second chunk of this Organization.
+    keys.push(key);
+    keys.push((
         unregistered.identity.organization.organization_id,
         vec![2; 32],
+    ));
+    let cross_pair = (
+        unregistered.identity.organization.organization_id,
+        foreign_key.1.clone(),
     );
+    keys.push(cross_pair.clone());
+    let mut expected: HashMap<_, _> = keys.iter().cloned().map(|key| (key, 4001)).collect();
+    expected.insert(cross_pair, 4003);
     keys.push(foreign_key.clone());
     let checks: Vec<_> = keys.iter().map(|key| (key.0, key.1.clone(), 0)).collect();
-    let ended = check(&pool, &checks, Instant::now() + CHECK_TIMEOUT)
+    let (counted, transactions) = crate::database::tests::context::counted_pool(&pool).await;
+    let ended = check(&counted, &checks, Instant::now() + CHECK_TIMEOUT)
         .await
         .unwrap();
     assert_eq!(ended.len(), keys.len() - 1);
     assert!(!ended.contains_key(&foreign_key));
-    assert!(ended.values().all(|code| *code == 4001));
+    assert_eq!(ended, expected);
+    assert_eq!(transactions.load(std::sync::atomic::Ordering::SeqCst), 3);
+    counted.close().await;
 }
 
 #[fukulow_test::test]
