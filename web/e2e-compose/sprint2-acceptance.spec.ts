@@ -493,7 +493,8 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
 
     // Peer replies to a descendant (grandchildA1) through the panel Composer; verify it inherits the same Topic and root, and appears live in Owner's panel.
     await revealVirtualRow(peerPanel.locator('.reply-panel__scroll'), 4)
-    await peerPanel.locator(`[data-message-id="${grandchildA1.id}"]`).getByRole('button', { name: '返信', exact: true }).click()
+    // #409: every chain member shows the root's authoritative total (51 seeded Replies + the owner's).
+    await peerPanel.locator(`[data-message-id="${grandchildA1.id}"]`).getByRole('button', { name: '返信 52件›', exact: true }).click()
     const peerReplyBody = `ピア子孫返信-${suffix}`
     const peerPostPromise = peerPage.waitForResponse(
       (res) => new URL(res.url()).pathname.endsWith(`/channels/${channel.id}/messages`) && res.request().method() === 'POST',
