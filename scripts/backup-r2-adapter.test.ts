@@ -111,9 +111,11 @@ test('account analytics sums the whole month across actions without a bucket fil
       { dimensions: { actionType: 'GetObject' }, sum: { requests: 3_500_000 } },
       { dimensions: { actionType: 'DeleteObject' }, sum: { requests: 100 } },
       { dimensions: { actionType: 'GetBucketSippyConfiguration' }, sum: { requests: 2 } },
+      { dimensions: { actionType: 'GetBucketEncryption' }, sum: { requests: 5 } },
+      { dimensions: { actionType: 'DeleteObjects' }, sum: { requests: 3 } },
     ] }] } } }
   } }, account)
-  assert.deepEqual(await client.read(now + day), { classA: 700_006, classB: 7_000_000 })
+  assert.deepEqual(await client.read(now + day), { classA: 700_012, classB: 7_000_010 })
   assert.equal(requests.length, 2)
   assert.ok(requests.every(r => r.variables.account === account && !r.query.includes('bucket')))
   assert.ok(requests.every(r => !r.query.includes('groupBy') && /dimensions \{ actionType \}/.test(r.query)))
