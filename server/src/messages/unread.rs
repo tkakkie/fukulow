@@ -43,10 +43,12 @@ pub struct ReadPosition {
 // The counter and Messages commit atomically, so this snapshot's counts are
 // exactly bounded by its counter, including own and already-read Messages.
 // Materialize the Member's unread Topic candidates once, rather than rescan
-// every Topic under RLS per Channel. The per-Channel range calculation stays below.
+// every Topic under RLS per Channel. Carry the lower bound as a column: PostgreSQL
+// does not recognise COALESCE as leakproof, so it stays out of RLS index quals.
 pub(super) const LIST_COUNTS_SQL: &str = r#"
 WITH unread_topics AS MATERIALIZED (
-    SELECT t.organization_id, t.channel_id, t.id, t.last_seq
+    SELECT t.organization_id, t.channel_id, t.id, t.last_seq,
+        COALESCE(tr.read_seq, p.initial_seq) AS read_seq
     FROM topics t
     JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $2
         AND p.membership_revision = $3 AND p.channel_id = t.channel_id
@@ -77,17 +79,15 @@ CROSS JOIN LATERAL (
     SELECT COALESCE(sum(unread.unread_count), 0)::bigint AS unread_count,
         COALESCE(sum(unread.mention_unread_count), 0)::bigint AS mention_unread_count
     FROM unread_topics t
-    LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = c.channel_id
-        AND tr.member_id = $2 AND tr.topic_id = t.id
     CROSS JOIN LATERAL (
         SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count FROM messages m
         LEFT JOIN message_mentions mm ON mm.organization_id=$1 AND mm.member_id=$2
             AND mm.channel_id=m.channel_id AND mm.message_id=m.id
         WHERE m.organization_id = $1 AND m.channel_id = c.channel_id AND m.topic_id = t.id
-            AND m.seq > COALESCE(tr.read_seq, p.initial_seq) AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
+            AND m.seq > t.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
     ) unread
     WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
-        AND t.last_seq > COALESCE(tr.read_seq, p.initial_seq)
+        AND t.last_seq > t.read_seq
 ) topic
 "#;
 
