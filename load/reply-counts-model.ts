@@ -1,10 +1,16 @@
 import { createHash } from 'node:crypto';
 export const roots = 25_000;
 export const seed = 409;
-export const readers = 4;
-export const intervalMs = 25;
-export const nextDeadline = (due: number, now: number) => Math.max(due + intervalMs, now - intervalMs);
-export const nominalRate = readers * 1000 / intervalMs;
+export const nominalRate = 160;
+export const intervalMs = 1000 / nominalRate;
+// 256 outstanding requests allow 1.6 s of arrivals, far beyond either p95 target,
+// while bounding generator/server resource use when the server cannot keep up.
+export const inFlightCap = 256;
+export const scheduleTime = (start: number, k: number) => start + k * intervalMs;
+export function startLag(scheduled: number, actual: number) {
+  const lagMs = Math.max(0, actual - scheduled);
+  return { lagMs, missed: lagMs > intervalMs };
+}
 export const scenarios = ['normal', 'long10000', 'long100000'] as const;
 export type Scenario = typeof scenarios[number];
 export const target = (s: Scenario) => s === 'normal' ? 50 : 200;
@@ -40,16 +46,20 @@ export function stats(values: number[]) {
   const p = (fraction: number) => sorted[Math.ceil(fraction * sorted.length) - 1];
   return { n: values.length, p50: p(.5), p95: p(.95), p99: p(.99), max: sorted.at(-1)! };
 }
-export type Run = { scenario: Scenario; repeat: number; errors: number; latencies: number[]; firstMs: number; seconds: number };
+export type Run = { scenario: Scenario; repeat: number; errors: number; scheduledLatencies: number[];
+  sendLatencies: number[]; startLags: number[]; missedDeadlines: number; peakInFlight: number;
+  firstMs: number | null; seconds: number };
 export function judgement(s: Scenario, runs: Run[], formal: boolean, complete: boolean) {
   const rows = runs.filter(r => r.scenario === s);
-  if (rows.some(r => r.errors || (r.latencies.length && stats(r.latencies).p95 > target(s)))) return 'FAIL';
-  if (!formal || !complete || rows.length !== 3 || new Set(rows.map(r => r.repeat)).size !== 3 || rows.some(r => r.latencies.length !== 10_000 || !Number.isFinite(r.seconds) || r.seconds <= 0 || r.latencies.length / r.seconds < .95 * nominalRate)) return 'NOT EVALUATED';
+  if (rows.some(r => r.peakInFlight > inFlightCap)) return 'FAIL';
+  if (rows.some(r => r.missedDeadlines > 0)) return 'NOT EVALUATED';
+  if (rows.some(r => r.errors || (r.scheduledLatencies.length && stats(r.scheduledLatencies).p95 > target(s)))) return 'FAIL';
+  if (!formal || !complete || rows.length !== 3 || new Set(rows.map(r => r.repeat)).size !== 3 || rows.some(r => r.scheduledLatencies.length !== 10_000 || !Number.isFinite(r.seconds) || r.seconds <= 0)) return 'NOT EVALUATED';
   return 'PASS';
 }
 export function ranges(runs: Run[]) {
   return Object.fromEntries((['p50', 'p95', 'p99', 'max'] as const).map(key => {
-    const values = runs.filter(r => r.latencies.length).map(r => stats(r.latencies)[key]);
+    const values = runs.filter(r => r.scheduledLatencies.length).map(r => stats(r.scheduledLatencies)[key]);
     return [key, values.length ? [Math.min(...values), Math.max(...values)] : null];
   }));
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { batch, id, sizing, nextDeadline, intervalMs, stats, judgement, ranges, type Run } from './reply-counts-model.ts';
+import { batch, id, sizing, scheduleTime, startLag, intervalMs, inFlightCap, stats, judgement, ranges, type Run } from './reply-counts-model.ts';
 test('nearest rank percentiles, boundaries, invalid and immutable inputs', () => {
   const a = [5, 1, 3, 2, 4];
   assert.deepEqual(stats(a), { n: 5, p50: 3, p95: 5, p99: 5, max: 5 });
@@ -37,43 +37,45 @@ test('fixed seed sizing and 100 distinct mixed anchors with exact root totals', 
     }
   }
 });
-const run = (repeat: number, ms = 50): Run => ({ scenario: 'normal', repeat, errors: 0, latencies: Array(10000).fill(ms), firstMs: 1, seconds: 1 });
+const run = (repeat: number, ms = 50): Run => ({ scenario: 'normal', repeat, errors: 0, scheduledLatencies: Array(10000).fill(ms), sendLatencies: Array(10000).fill(1), startLags: Array(10000).fill(0), missedDeadlines: 0, peakInFlight: 2, firstMs: 1, seconds: 1 });
 test('fixed targets cannot pass pilot, incomplete, missing, errors or target miss', () => {
   const rows = [run(0), run(1), run(2)];
   assert.equal(judgement('normal', rows, true, true), 'PASS');
   assert.equal(judgement('normal', rows, false, true), 'NOT EVALUATED');
-  // First-request/warm-up failures abort before a run is returned; completion stays false.
+  // Setup/interrupt failures leave completion false.
   assert.equal(judgement('normal', rows, true, false), 'NOT EVALUATED');
   assert.equal(judgement('normal', [], true, false), 'NOT EVALUATED');
   assert.equal(judgement('normal', rows.slice(1), true, true), 'NOT EVALUATED');
   assert.equal(judgement('normal', [run(0), run(0), run(2)], true, true), 'NOT EVALUATED');
   assert.equal(judgement('normal', [run(0, 50.001)], true, true), 'FAIL');
   assert.equal(judgement('normal', [{ ...run(0), errors: 1 }], true, true), 'FAIL');
-  assert.equal(judgement('normal', rows.map(r => ({ ...r, seconds: 100 })), true, true), 'NOT EVALUATED');
   assert.equal(judgement('normal', rows.map(r => ({ ...r, seconds: 0 })), true, true), 'NOT EVALUATED');
-  const long = rows.map(r => ({ ...r, scenario: 'long100000' as const, latencies: Array(10000).fill(200) }));
+  const long = rows.map(r => ({ ...r, scenario: 'long100000' as const, scheduledLatencies: Array(10000).fill(200) }));
   assert.equal(judgement('long100000', long, true, true), 'PASS');
-  long[0].latencies.fill(200.01);
+  long[0].scheduledLatencies.fill(200.01);
   assert.equal(judgement('long100000', long, true, true), 'FAIL');
   assert.deepEqual(ranges([run(0, 10), run(1, 20)]).p95, [10, 20]);
 });
 
-test('absolute deadlines absorb timer overshoot without drift and bound catch-up', () => {
-  let due = 0;
-  for (let i = 0; i < 100; i++) {
-    due = nextDeadline(due, due + 7);
-    assert.equal(due, (i + 1) * intervalMs);
-  }
-  for (const lag of [0, 7, 25, 26, 50, 1000]) {
-    const now = due + lag;
-    let next = nextDeadline(due, now);
-    assert.ok(next >= now - intervalMs);
-    // Even with instantaneous catch-up requests, the third deadline is in the future.
-    for (let i = 0; i < 2; i++) next = nextDeadline(next, now);
-    assert.ok(next > now);
-  }
-  const now = due + 1000;
-  assert.equal(nextDeadline(due, now), now - intervalMs);
-  assert.equal(nextDeadline(now - intervalMs, now), now);
-  assert.equal(nextDeadline(now, now), now + intervalMs);
+test('absolute open-loop schedule never depends on response completion', () => {
+  assert.equal(intervalMs, 6.25);
+  for (const k of [0, 1, 2, 9999]) assert.equal(scheduleTime(123, k), 123 + k * 6.25);
+  assert.equal(scheduleTime(123, 9999) - scheduleTime(123, 0), 62493.75);
+});
+test('start lag misses only strictly beyond one interval', () => {
+  assert.deepEqual(startLag(100, 99), { lagMs: 0, missed: false });
+  assert.deepEqual(startLag(100, 100), { lagMs: 0, missed: false });
+  assert.deepEqual(startLag(100, 106.25), { lagMs: 6.25, missed: false });
+  assert.deepEqual(startLag(100, 106.251), { lagMs: 6.251000000000005, missed: true });
+  assert.equal(startLag(100, 1000).missed, true);
+});
+test('missed deadlines invalidate even a low p95; overload and scheduled latency fail', () => {
+  const rows = [run(0), run(1), run(2)];
+  assert.equal(judgement('normal', [{ ...run(0), missedDeadlines: 1 }, ...rows.slice(1)], true, true), 'NOT EVALUATED');
+  assert.equal(judgement('normal', [{ ...run(0, 100), missedDeadlines: 1 }], true, false), 'NOT EVALUATED');
+  assert.equal(judgement('normal', [{ ...run(0), peakInFlight: inFlightCap + 1 }], true, false), 'FAIL');
+  assert.equal(judgement('normal', [{ ...run(0), peakInFlight: inFlightCap + 1, missedDeadlines: 1 }], true, false), 'FAIL');
+  assert.equal(judgement('normal', rows.map(r => ({ ...r, peakInFlight: inFlightCap })), true, true), 'PASS');
+  assert.equal(judgement('normal', [run(0, 50.001)], true, true), 'FAIL');
+  assert.equal(judgement('normal', rows.map(r => ({ ...r, sendLatencies: Array(10000).fill(999) })), true, true), 'PASS');
 });

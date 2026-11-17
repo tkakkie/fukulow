@@ -2,22 +2,25 @@
  * Pilot: node load/reply-counts-run.ts --pilot --out /private/tmp/fk409p-pilot
  * Formal: node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal
  * Builds the current release Dockerfile before any samples; no .env/Compose.
- * Four readers use absolute 25 ms deadlines (nominal 160/s), with bounded catch-up
- * of at most two intervals after a slow response; at most one request in flight
- * per reader (at most 4 concurrent requests). Comparable to #137's 136-227 pages/s;
- * no concurrent writes/subscribers, plain
- * loopback HTTP (no TLS/proxy). Static exact-count acceptance, not server capacity.
- * 3 fresh DBs/scenario; 100 warm-ups then 4x2500 samples/run. Pilot: 1/run,
- * 10 warm-ups then 4x50. First request precedes warm-up/EXPLAIN; DB buffers
+ * Open-loop arrivals at start + k * 6.25 ms (160/s), independent of responses.
+ * A start lag >6.25 ms stops dispatch without catch-up and invalidates the run.
+ * Peak in-flight >256 aborts as FAIL (1.6 s of arrivals bounds overload).
+ * No concurrent writes/subscribers, plain loopback HTTP (no TLS/proxy).
+ * Static exact-count acceptance, not server capacity.
+ * 3 fresh DBs/scenario; 100 sequential warm-ups then 10,000 samples/run. Pilot: 1/run,
+ * 10 warm-ups then 200. First request precedes warm-up/EXPLAIN; DB buffers
  * restarted after VACUUM; host/VM file caches are NOT flushed (not cold disk).
- * Each run retains raw latencies, RLS EXPLAIN custom/generic/auto (8 executions
+ * Primary latency: scheduled start to full body; secondary: actual send to body.
+ * Retains raw latencies, start-lag p99/max, peak in-flight,
+ * RLS EXPLAIN custom/generic/auto (8 executions
  * for auto), settings, host/container snapshots, source/image identity and logs.
  * New output directory must be outside checkout. SIGINT/SIGTERM clean up owned
- * fk409p-* containers/network/volume at safe boundaries; SIGKILL needs operator
+ * fk409p-* containers/network/volume and the run app image at safe boundaries;
+ * SIGKILL needs operator
  * cleanup using names in resources.json. Never removes other stacks.
  * Fixed targets: normal p95<=50ms; both long shapes p95<=200ms; every run must
  * pass. Failures never relax targets. Pilot/missing evidence cannot pass formal.
- * Below 95% of nominal 160/s invalidates an otherwise passing formal cell.
+ * Any missed deadline is NOT EVALUATED; request/validation errors are FAIL.
  * Expected formal wall time: 11-15 min with cached release layers; an uncached
  * Docker build adds its build time. Pilot-derived estimate, not a time budget.
  * Idle-host assessment and maintainer start signal are operator prerequisites
@@ -29,7 +32,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { cpus, totalmem, platform, release, arch } from 'node:os';
-import { batch, sizing, scenarios, stats, ranges, judgement, target, seed, readers, intervalMs, nominalRate, type Run, type Scenario } from './reply-counts-model.ts';
+import { batch, sizing, scenarios, stats, ranges, judgement, target, seed, intervalMs, nominalRate, inFlightCap, type Run, type Scenario } from './reply-counts-model.ts';
 import { measure } from './reply-counts-measure.ts';
 import type { SessionResponse, SetupRequest, SignInRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const args = process.argv.slice(2);
@@ -59,8 +62,8 @@ const runs: Run[] = [], cleanupErrors: string[] = [];
 let complete = false;
 const started = Date.now();
 const owned = { network: `${prefix}-net`, volume: `${prefix}-data`, db: `${prefix}-db`, app: `${prefix}-server`, migrate: `${prefix}-migrate` };
-save('resources.json', owned);
-function cleanup() {
+save('resources.json', { ...owned, appImage });
+function cleanup(removeImage = false) {
   for (const name of [owned.app, owned.migrate, owned.db]) {
     // Inspect only our exact generated names; absent resources need no deletion.
     try { docker('inspect', name); } catch { continue; }
@@ -68,9 +71,24 @@ function cleanup() {
   }
   try { docker('volume', 'inspect', owned.volume); docker('volume', 'rm', owned.volume); } catch { /* checked below */ }
   try { docker('network', 'inspect', owned.network); docker('network', 'rm', owned.network); } catch { /* checked below */ }
+  if (removeImage) {
+    try {
+      if (docker('image', 'ls', '-q', appImage)) docker('image', 'rm', appImage);
+    } catch (e) { cleanupErrors.push('app image cleanup failed: ' + String(e)); }
+    try {
+      if (docker('image', 'ls', '-q', appImage)) cleanupErrors.push('remaining image: ' + appImage);
+    } catch (e) { cleanupErrors.push('app image verification failed: ' + String(e)); }
+  }
   for (const [kind, name] of [['volume', owned.volume], ['network', owned.network]]) {
     try { docker(kind, 'inspect', name); cleanupErrors.push(`remaining ${kind}: ${name}`); } catch { /* absent */ }
   }
+}
+function diagnostics(run: Run) {
+  return {
+    scheduledLatency: run.scheduledLatencies.length ? stats(run.scheduledLatencies) : null,
+    sendLatency: run.sendLatencies.length ? stats(run.sendLatencies) : null,
+    startLag: run.startLags.length ? stats(run.startLags) : null,
+  };
 }
 function sql(text: string, vars: Record<string, string | number> = {}) {
   return command('docker', ['exec', '-i', owned.db, 'psql', '-XqAt', '-v', 'ON_ERROR_STOP=1', '-U', 'fukulow', '-d', 'fukulow', ...Object.entries(vars).flatMap(([k, v]) => ['-v', `${k}=${v}`])], text);
@@ -109,8 +127,8 @@ try {
   save('metadata.json', { pilot, seed, started: new Date().toISOString(), commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--short']),
     host: { cpus: cpus(), memory: totalmem(), platform: platform(), release: release(), arch: arch() }, node: process.version,
     docker: JSON.parse(docker('info', '--format', '{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
-    pgImage, scenarios: Object.fromEntries(scenarios.map(s => [s, { ...sizing(s), targetMs: target(s) }])), readers, intervalMs, nominalRate, samples: pilot ? 200 : 10000, repeats: pilot ? 1 : 3,
-    method: 'Nearest-rank; full fetch wall time through body consumption, validation excluded. Static dataset; no writes/subscribers. No proxy/TLS. First after DB restart, OS caches retained. Four readers use absolute 25 ms deadlines, nominal 160/s; bounded catch-up of at most two intervals after a slow response; at most one request in flight per reader (at most 4 concurrent requests). Formal cells below 152 samples/s cannot pass. Exact results checked every request. Default production role/pool/settings.',
+    pgImage, scenarios: Object.fromEntries(scenarios.map(s => [s, { ...sizing(s), targetMs: target(s) }])), intervalMs, nominalRate, inFlightCap, samples: pilot ? 200 : 10000, repeats: pilot ? 1 : 3,
+    method: 'Nearest-rank; open-loop 160/s at start + k * 6.25 ms, no response waits, shifting or catch-up. Start lag >6.25 ms stops dispatch: NOT EVALUATED. In-flight >256 aborts: FAIL (1.6 s of arrivals bounds overload). Primary scheduled-start to full body; secondary send-to-body; validation excluded. Record lag p99/max and peak in-flight. First request then 100 sequential warm-ups; 10000 samples/repeat. Static dataset; no writes/subscribers/proxy/TLS. First after DB restart, OS caches retained. Exact results checked every request. Default production role/pool/settings.',
     sourceHashes: Object.fromEntries(files.map(p => [p, createHash('sha256').update(readFileSync(p)).digest('hex')])), snapshot: snapshot() });
   writeArtifact('source.patch', command('git', ['diff', 'HEAD']));
   console.log('Building release app before measurement');
@@ -174,8 +192,11 @@ try {
         // Readiness uses /api/v1/health (no reply-count query). Account session remains valid.
         for (let i = 0; i < 120; i++) { check(); try { if ((await fetch(`${base}/api/v1/health`, { signal: AbortSignal.timeout(1000) })).ok) break; } catch {} await sleep(250); }
         const result = await measure(`${base}/api/v1/orgs/${org}/channels/${channel}/reply-counts`, cookie, scenario, repeat, pilot, check);
-        runs.push(result); save(`${name}-samples.json`, result);
-        console.log(JSON.stringify({ name, firstMs: result.firstMs, ...stats(result.latencies), errors: result.errors, seconds: result.seconds, requestsPerSecond: result.latencies.length / result.seconds }));
+        runs.push(result); save(`${name}-samples.json`, { ...result, ...diagnostics(result) });
+        console.log(JSON.stringify({ name, firstMs: result.firstMs, ...diagnostics(result),
+          missedDeadlines: result.missedDeadlines, peakInFlight: result.peakInFlight, errors: result.errors, seconds: result.seconds, requestsPerSecond: result.scheduledLatencies.length / result.seconds }));
+        if (result.peakInFlight > inFlightCap || result.errors) throw new Error('Request failure or in-flight cap exceeded');
+        if (result.missedDeadlines) throw new Error('Generator missed deadline: NOT EVALUATED');
         save(`${name}-plans.json`, explain(scenario, org, channel));
         save(`${name}-end.json`, snapshot());
         writeArtifact(`${name}-app.log`, docker('logs', owned.app));
@@ -189,9 +210,10 @@ try {
   check(); complete = cleanupErrors.length === 0;
 } catch (error) { save('failure.json', { error: String(error), stack: error instanceof Error ? error.stack : undefined, cause: error instanceof Error ? String(error.cause) : undefined }); process.exitCode = 1; }
 finally {
-  cleanup();
+  cleanup(true);
   complete = complete && cleanupErrors.length === 0;
-  save('results.json', { pilot, complete, elapsedSeconds: (Date.now() - started) / 1000, runs, cleanupErrors,
+  save('results.json', { pilot, complete, elapsedSeconds: (Date.now() - started) / 1000,
+    runs: runs.map(run => ({ ...run, ...diagnostics(run) })), cleanupErrors,
     scenarios: Object.fromEntries(scenarios.map(s => [s, { targetMs: target(s), verdict: judgement(s, runs, !pilot, complete), ranges: ranges(runs.filter(r => r.scenario === s)) }])) });
   console.log(`Finished ${pilot ? 'PILOT (not acceptance)' : 'FORMAL'}; ${(Date.now() - started) / 60000} minutes; ${out}`);
 }
