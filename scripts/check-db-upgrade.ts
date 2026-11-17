@@ -67,7 +67,8 @@ const snapshot = () => JSON.parse(sql(`SELECT json_build_object(
   'organizations', (SELECT json_agg(t ORDER BY organization_id) FROM organizations t),
   'accounts', (SELECT json_agg(t ORDER BY id) FROM accounts t),
   'members', (SELECT json_agg(t ORDER BY organization_id, id) FROM users t),
-  'messages', (SELECT json_agg(t ORDER BY organization_id, id) FROM messages t),
+  // #515 slice 2 adds version and send_digest; the upgrade backfills them (checked below).
+  'messages', (SELECT json_agg(to_jsonb(t) - 'version' - 'send_digest' ORDER BY organization_id, id) FROM messages t),
   'sessions', (SELECT json_agg(t ORDER BY token_hash) FROM account_sessions t))`))
 
 async function check() {
@@ -150,6 +151,7 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     }
     dc('exec', '-T', 'app', 'fukulow-server', 'probe')
     assert.deepEqual(snapshot(), before)
+    assert.equal(sql("SELECT count(*) FROM messages WHERE version = seq AND octet_length(send_digest) = 32"), '1')
     await request(url, `/orgs/${organization}/me`, undefined, session.token)
     // An older/newer binary must fail before listening, even with the same row count.
     sql('UPDATE _sqlx_migrations SET version = version + 1 WHERE version = (SELECT max(version) FROM _sqlx_migrations)')

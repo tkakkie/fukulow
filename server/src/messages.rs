@@ -523,8 +523,8 @@ pub(crate) async fn require_visible<'e, E: sqlx::PgExecutor<'e>>(
 }
 
 /// The committed Message for this send key and whether the request matches its
-/// original-send receipt (S5). Topic intent is the ASCII-lowercased name, as
-/// Topics normalize `name_key`; a Reply carries none.
+/// original-send receipt (S5). Topic intent is normalized in SQL exactly as
+/// Topics derive `name_key`; a Reply carries none.
 async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     organization_id: Uuid,
@@ -536,7 +536,7 @@ async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
     sqlx::query(&mentions::page_sql(
         "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, \
-         send_digest = fukulow_send_digest($4, $5, $6, $7) AS same_intent \
+         send_digest = fukulow_send_digest($4, $5, lower($6 COLLATE \"C\"), $7) AS same_intent \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
         "p.seq",
     ))
@@ -545,7 +545,7 @@ async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
     .bind(input.client_message_id)
     .bind(channel_id)
     .bind(&input.body)
-    .bind(input.topic_name.as_ref().map(|name| name.to_ascii_lowercase()))
+    .bind(input.topic_name.as_deref())
     .bind(input.reply_to)
     .try_map(|row| Ok((message_from_row(&row)?, row.try_get("same_intent")?)))
     .fetch_optional(executor)

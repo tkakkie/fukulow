@@ -6,13 +6,13 @@
 -- intents share an encoding. topic_key is the normalized Topic name_key of a
 -- non-Reply send (NULL for the main timeline and for every Reply).
 CREATE FUNCTION fukulow_send_digest(channel_id uuid, body text, topic_key text, reply_to uuid)
-RETURNS bytea LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+RETURNS bytea LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT pg_catalog.sha256(
         pg_catalog.convert_to('fukulow.send.v1', 'UTF8')
         || pg_catalog.uuid_send(channel_id)
-        || CASE WHEN reply_to IS NULL THEN '\x00'::bytea ELSE '\x01'::bytea || pg_catalog.uuid_send(reply_to) END
-        || CASE WHEN topic_key IS NULL THEN '\x00'::bytea
-                ELSE '\x01'::bytea || pg_catalog.int4send(pg_catalog.octet_length(topic_key)) || pg_catalog.convert_to(topic_key, 'UTF8') END
+        || CASE WHEN reply_to IS NULL THEN pg_catalog.decode('00', 'hex') ELSE pg_catalog.decode('01', 'hex') || pg_catalog.uuid_send(reply_to) END
+        || CASE WHEN topic_key IS NULL THEN pg_catalog.decode('00', 'hex')
+                ELSE pg_catalog.decode('01', 'hex') || pg_catalog.int4send(pg_catalog.octet_length(topic_key)) || pg_catalog.convert_to(topic_key, 'UTF8') END
         || pg_catalog.int4send(pg_catalog.octet_length(body)) || pg_catalog.convert_to(body, 'UTF8'))
 $$;
 

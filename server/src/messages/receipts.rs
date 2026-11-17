@@ -1,6 +1,8 @@
 //! Edit/Move/Delete operation receipts (#515 slice 2). The mutation endpoints
 //! (#287, #141) resolve a receipt after reauthorization and before checking
-//! `expected_version`, and record it in the mutation's transaction.
+//! `expected_version`, and record it in the mutation's transaction. Expired
+//! rows are only ignored here; a bounded purge must land with the first writer
+//! so receipts are not kept beyond their approved lifetime.
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
@@ -95,6 +97,8 @@ pub async fn resolve(
 /// the same key is replaced. Returns false when a receipt within the lifetime
 /// already holds the key: a concurrent request committed first, so the caller
 /// rolls back and resolves again.
+/// Requires READ COMMITTED, where the conflict re-check sees the committed
+/// winner; under REPEATABLE READ or SERIALIZABLE the same race fails with 40001.
 pub async fn record(
     tx: &mut PgConnection,
     organization: Uuid,
@@ -105,8 +109,8 @@ pub async fn record(
         "INSERT INTO operation_receipts AS r (organization_id, actor, operation_id, \
          kind, channel_id, target_id, intent_digest, outcome_version, outcome_deleted) \
          VALUES ($1, $2, $3, $5, $6, $7, $8, $9, $10) \
-         ON CONFLICT (organization_id, actor, operation_id) DO UPDATE SET \
-         kind = EXCLUDED.kind, channel_id = EXCLUDED.channel_id, target_id = EXCLUDED.target_id, \
+         ON CONFLICT (organization_id, actor, operation_id) DO UPDATE \
+         SET kind = EXCLUDED.kind, channel_id = EXCLUDED.channel_id, target_id = EXCLUDED.target_id, \
          intent_digest = EXCLUDED.intent_digest, outcome_version = EXCLUDED.outcome_version, \
          outcome_deleted = EXCLUDED.outcome_deleted, created_at = now() \
          WHERE r.created_at <= now() - $4::interval",

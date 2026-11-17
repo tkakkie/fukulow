@@ -418,3 +418,40 @@ async fn operation_receipts_are_invisible_and_unwritable_across_organizations(po
         );
     }
 }
+
+#[fukulow_test::test]
+async fn send_receipt_normalizes_only_ascii_topic_case_like_topics(pool: PgPool) {
+    let (app, org, _, channel, token) = fixture(&pool).await;
+    let key = Uuid::new_v4();
+    let first = sent(
+        &app,
+        &token,
+        channel,
+        json!({"client_message_id":key,"body":"b","topic_name":"Äb"}),
+    )
+    .await;
+    assert_eq!(
+        stored(&pool, org, id(&first, "id")).await.2,
+        send_digest(channel, "b", Some("Äb"), None)
+    );
+    let same = sent(
+        &app,
+        &token,
+        channel,
+        json!({"client_message_id":key,"body":"b","topic_name":"ÄB"}),
+    )
+    .await;
+    assert_eq!(same["id"], first["id"]);
+    // Topics keep non-ASCII case distinct, so the receipt does too.
+    assert_error(
+        send(
+            &app,
+            &token,
+            channel,
+            json!({"client_message_id":key,"body":"b","topic_name":"äb"}),
+        )
+        .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+}
