@@ -2,8 +2,10 @@
  * Pilot: node load/reply-counts-run.ts --pilot --out /private/tmp/fk409p-pilot
  * Formal: node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal
  * Builds the current release Dockerfile before any samples; no .env/Compose.
- * Four response-paced readers as #137, capped at one start/25ms/reader (160/s,
- * comparable to #137's 136-227 pages/s), no concurrent writes/subscribers, plain
+ * Four readers use absolute 25 ms deadlines (nominal 160/s), with bounded catch-up
+ * of at most two intervals after a slow response; at most one request in flight
+ * per reader (at most 4 concurrent requests). Comparable to #137's 136-227 pages/s;
+ * no concurrent writes/subscribers, plain
  * loopback HTTP (no TLS/proxy). Static exact-count acceptance, not server capacity.
  * 3 fresh DBs/scenario; 100 warm-ups then 4x2500 samples/run. Pilot: 1/run,
  * 10 warm-ups then 4x50. First request precedes warm-up/EXPLAIN; DB buffers
@@ -23,7 +25,7 @@
  */
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { cpus, totalmem, platform, release, arch } from 'node:os';
@@ -38,7 +40,10 @@ const root = realpathSync('.'), out = resolve(args[2]);
 if (existsSync(out) || out === root || out.startsWith(root + sep)) throw new Error('Output must be a new external directory');
 mkdirSync(out, { recursive: true });
 if (realpathSync(out).startsWith(root + sep)) throw new Error('Output symlink resolves into repository');
-const save = (file: string, data: unknown) => writeFileSync(resolve(out, file), JSON.stringify(data, null, 2) + '\n');
+const secrets = { ownerPassword: randomBytes(32).toString('hex'), appPassword: randomBytes(32).toString('hex'), setupPassword: randomBytes(32).toString('hex'), setupToken: randomBytes(32).toString('hex') };
+// Redact every artifact, including command failures and container logs, before writing.
+const writeArtifact = (file: string, text: string) => writeFileSync(resolve(out, file), Object.values(secrets).reduce((value, secret) => value.replaceAll(secret, '[REDACTED]'), text));
+const save = (file: string, data: unknown) => writeArtifact(file, JSON.stringify(data, null, 2) + '\n');
 const command = (file: string, args: string[], input?: string) => execFileSync(file, args, { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 const docker = (...a: string[]) => command('docker', a);
 const asyncExec = promisify(execFile);
@@ -79,7 +84,7 @@ function explain(scenario: Scenario, org: string, channel: string) {
   if (!match) throw new Error('Production COUNTS_SQL extraction failed');
   const query = match[1].replace(/\\\r?\n\s*/g, '');
   if (query.includes('\\')) throw new Error('Unsupported Rust SQL escape');
-  writeFileSync(resolve(out, 'counts.sql'), query + '\n');
+  writeArtifact('counts.sql', query + '\n');
   const ids = batch(scenario, 0).map(a => `'${a.message_id}'::uuid`).join(',');
   const call = `reply409('${org}','${channel}',ARRAY[${ids}],${sizing(scenario).messages})`;
   return ['force_custom_plan', 'force_generic_plan', 'auto'].map(mode => {
@@ -105,16 +110,16 @@ try {
     host: { cpus: cpus(), memory: totalmem(), platform: platform(), release: release(), arch: arch() }, node: process.version,
     docker: JSON.parse(docker('info', '--format', '{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
     pgImage, scenarios: Object.fromEntries(scenarios.map(s => [s, { ...sizing(s), targetMs: target(s) }])), readers, intervalMs, nominalRate, samples: pilot ? 200 : 10000, repeats: pilot ? 1 : 3,
-    method: 'Nearest-rank; full fetch wall time through body consumption, validation excluded. Static dataset; no writes/subscribers. No proxy/TLS. First after DB restart, OS caches retained. Four response-paced readers aligned with #137, capped at 160 starts/s; no catch-up bursts. Formal cells below 152 samples/s cannot pass. Exact results checked every request. Default production role/pool/settings.',
+    method: 'Nearest-rank; full fetch wall time through body consumption, validation excluded. Static dataset; no writes/subscribers. No proxy/TLS. First after DB restart, OS caches retained. Four readers use absolute 25 ms deadlines, nominal 160/s; bounded catch-up of at most two intervals after a slow response; at most one request in flight per reader (at most 4 concurrent requests). Formal cells below 152 samples/s cannot pass. Exact results checked every request. Default production role/pool/settings.',
     sourceHashes: Object.fromEntries(files.map(p => [p, createHash('sha256').update(readFileSync(p)).digest('hex')])), snapshot: snapshot() });
-  writeFileSync(resolve(out, 'source.patch'), command('git', ['diff', 'HEAD']));
+  writeArtifact('source.patch', command('git', ['diff', 'HEAD']));
   console.log('Building release app before measurement');
   try {
     const result = await asyncExec('docker', ['build', '--label', `org.opencontainers.image.revision=${command('git', ['rev-parse', 'HEAD'])}`, '-t', appImage, '.'], { maxBuffer: 64 * 1024 * 1024 });
-    writeFileSync(resolve(out, 'build.log'), result.stdout + result.stderr);
+    writeArtifact('build.log', result.stdout + result.stderr);
   } catch (e) {
     const error = e as { stdout?: string; stderr?: string };
-    writeFileSync(resolve(out, 'build.log'), (error.stdout ?? '') + (error.stderr ?? '')); throw new Error('Release build failed; see build.log');
+    writeArtifact('build.log', (error.stdout ?? '') + (error.stderr ?? '')); throw new Error('Release build failed; see build.log');
   }
   save('images.json', { app: docker('image', 'inspect', appImage), pg: docker('image', 'inspect', pgImage) });
   // Interleave shape order across repeats to expose host drift.
@@ -124,16 +129,16 @@ try {
       check(); const name = `${scenario}-${repeat}`; console.log(`Starting ${name}`);
       try {
         docker('network', 'create', owned.network); docker('volume', 'create', owned.volume);
-        docker('run', '-d', '--name', owned.db, '--network', owned.network, '--network-alias', 'db', '--mount', `type=volume,src=${owned.volume},dst=/var/lib/postgresql`, '-e', 'POSTGRES_USER=fukulow', '-e', 'POSTGRES_DB=fukulow', '-e', 'POSTGRES_PASSWORD=fk409p-disposable-owner', pgImage);
+        docker('run', '-d', '--name', owned.db, '--network', owned.network, '--network-alias', 'db', '--mount', `type=volume,src=${owned.volume},dst=/var/lib/postgresql`, '-e', 'POSTGRES_USER=fukulow', '-e', 'POSTGRES_DB=fukulow', '-e', `POSTGRES_PASSWORD=${secrets.ownerPassword}`, pgImage);
         let ready = false;
         for (let i = 0; i < 120; i++) { check(); try { docker('exec', owned.db, 'pg_isready', '-U', 'fukulow'); ready = true; break; } catch { await sleep(250); } }
         if (!ready) throw new Error('DB readiness timeout');
-        const ownerUrl = 'postgres://fukulow:fk409p-disposable-owner@db/fukulow';
+        const ownerUrl = `postgres://fukulow:${secrets.ownerPassword}@db/fukulow`;
         for (const action of [['migrate', 'roles'], ['migrate']]) {
-          const log = docker('run', '--rm', '--name', owned.migrate, '--network', owned.network, '-e', `DATABASE_URL=${ownerUrl}`, '-e', 'POSTGRES_APP_PASSWORD=fk409p-disposable-app', appImage, 'fukulow-server', ...action);
-          writeFileSync(resolve(out, `${name}-${action.join('-')}.log`), log);
+          const log = docker('run', '--rm', '--name', owned.migrate, '--network', owned.network, '-e', `DATABASE_URL=${ownerUrl}`, '-e', `POSTGRES_APP_PASSWORD=${secrets.appPassword}`, appImage, 'fukulow-server', ...action);
+          writeArtifact(`${name}-${action.join('-')}.log`, log);
         }
-        docker('run', '-d', '--name', owned.app, '--network', owned.network, '-p', '127.0.0.1::8080', '-e', 'FUKULOW_ADDR=0.0.0.0:8080', '-e', 'DATABASE_URL=postgres://fukulow_app:fk409p-disposable-app@db/fukulow', '-e', 'FUKULOW_COOKIE_SECURE=false', '-e', 'FUKULOW_SETUP_TOKEN=fk409p-disposable-setup', appImage);
+        docker('run', '-d', '--name', owned.app, '--network', owned.network, '-p', '127.0.0.1::8080', '-e', 'FUKULOW_ADDR=0.0.0.0:8080', '-e', `DATABASE_URL=postgres://fukulow_app:${secrets.appPassword}@db/fukulow`, '-e', 'FUKULOW_COOKIE_SECURE=false', '-e', `FUKULOW_SETUP_TOKEN=${secrets.setupToken}`, appImage);
         const port = docker('port', owned.app, '8080/tcp').split(':').at(-1);
         let base = `http://127.0.0.1:${port}`;
         let appReady = false;
@@ -144,7 +149,7 @@ try {
           if (!response.ok) throw new Error(`Provision HTTP ${response.status} at ${path}`);
           return response;
         };
-        const setup: SetupRequest = { email: 'fk409p@example.invalid', password: 'fk409p-disposable-password', name: 'Measurement Member', organization_name: 'Reply measurement', setup_token: 'fk409p-disposable-setup' };
+        const setup: SetupRequest = { email: 'fk409p@example.invalid', password: secrets.setupPassword, name: 'Measurement Member', organization_name: 'Reply measurement', setup_token: secrets.setupToken };
         await post('/api/v1/setup', setup);
         const credentials: SignInRequest = { email: setup.email, password: setup.password };
         const session = await post('/api/v1/session', credentials);
@@ -173,10 +178,10 @@ try {
         console.log(JSON.stringify({ name, firstMs: result.firstMs, ...stats(result.latencies), errors: result.errors, seconds: result.seconds, requestsPerSecond: result.latencies.length / result.seconds }));
         save(`${name}-plans.json`, explain(scenario, org, channel));
         save(`${name}-end.json`, snapshot());
-        writeFileSync(resolve(out, `${name}-app.log`), docker('logs', owned.app));
-        writeFileSync(resolve(out, `${name}-db.log`), docker('logs', owned.db));
+        writeArtifact(`${name}-app.log`, docker('logs', owned.app));
+        writeArtifact(`${name}-db.log`, docker('logs', owned.db));
       } finally {
-        for (const [kind, container] of [['app', owned.app], ['db', owned.db]]) { try { writeFileSync(resolve(out, name + '-' + kind + '.log'), docker('logs', container)); } catch {} }
+        for (const [kind, container] of [['app', owned.app], ['db', owned.db]]) { try { writeArtifact(name + '-' + kind + '.log', docker('logs', container)); } catch {} }
         cleanup();
       }
     }

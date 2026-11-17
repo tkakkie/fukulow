@@ -3,6 +3,7 @@ export const roots = 25_000;
 export const seed = 409;
 export const readers = 4;
 export const intervalMs = 25;
+export const nextDeadline = (due: number, now: number) => Math.max(due + intervalMs, now - intervalMs);
 export const nominalRate = readers * 1000 / intervalMs;
 export const scenarios = ['normal', 'long10000', 'long100000'] as const;
 export type Scenario = typeof scenarios[number];
@@ -39,10 +40,10 @@ export function stats(values: number[]) {
   const p = (fraction: number) => sorted[Math.ceil(fraction * sorted.length) - 1];
   return { n: values.length, p50: p(.5), p95: p(.95), p99: p(.99), max: sorted.at(-1)! };
 }
-export type Run = { scenario: Scenario; repeat: number; errors: number; warmupErrors: number; latencies: number[]; firstMs: number; seconds: number };
+export type Run = { scenario: Scenario; repeat: number; errors: number; latencies: number[]; firstMs: number; seconds: number };
 export function judgement(s: Scenario, runs: Run[], formal: boolean, complete: boolean) {
   const rows = runs.filter(r => r.scenario === s);
-  if (rows.some(r => r.errors || r.warmupErrors || (r.latencies.length && stats(r.latencies).p95 > target(s)))) return 'FAIL';
+  if (rows.some(r => r.errors || (r.latencies.length && stats(r.latencies).p95 > target(s)))) return 'FAIL';
   if (!formal || !complete || rows.length !== 3 || new Set(rows.map(r => r.repeat)).size !== 3 || rows.some(r => r.latencies.length !== 10_000 || !Number.isFinite(r.seconds) || r.seconds <= 0 || r.latencies.length / r.seconds < .95 * nominalRate)) return 'NOT EVALUATED';
   return 'PASS';
 }

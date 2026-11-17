@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import assert from 'node:assert/strict';
-import { batch, sizing, readers, intervalMs, type Run, type Scenario } from './reply-counts-model.ts';
+import { batch, sizing, readers, nextDeadline, type Run, type Scenario } from './reply-counts-model.ts';
 import type { ReplyCountPage, ReplyCountRequest } from '../web/src/api-schema.d.ts';
 export async function measure(url: string, cookie: string, scenario: Scenario, repeat: number, pilot: boolean, check: () => void): Promise<Run> {
   async function request(sample: number) {
@@ -19,7 +19,7 @@ export async function measure(url: string, cookie: string, scenario: Scenario, r
     assert.deepEqual(page.counts, expected);
     return ms;
   }
-  const run: Run = { scenario, repeat, firstMs: await request(0), errors: 0, warmupErrors: 0, latencies: [], seconds: 0 };
+  const run: Run = { scenario, repeat, firstMs: await request(0), errors: 0, latencies: [], seconds: 0 };
   for (let i = 0; i < (pilot ? 10 : 100); i++) await request(i);
   const start = performance.now();
   const perReader = pilot ? 50 : 2500;
@@ -28,11 +28,11 @@ export async function measure(url: string, cookie: string, scenario: Scenario, r
     for (let i = 0; i < perReader; i++) {
       try { run.latencies.push(await request(reader * perReader + i)); }
       catch { run.errors++; check(); }
-      // Absolute schedule at 160 opens/s, so timer overshoot does not accumulate. A reader
-      // more than one interval behind restarts its schedule: slow responses reduce
-      // throughput and never trigger a catch-up burst.
+      // Absolute 25 ms deadlines avoid timer drift, with bounded catch-up of at most
+      // two intervals after a slow response. Each reader awaits its request, so
+      // at most one is in flight per reader (at most 4 concurrent requests).
       if (i + 1 < perReader) {
-        due = Math.max(due + intervalMs, performance.now() - intervalMs);
+        due = nextDeadline(due, performance.now());
         const remaining = due - performance.now();
         if (remaining > 0) await new Promise(r => setTimeout(r, remaining));
       }
