@@ -1,5 +1,5 @@
 {
-  "sha256": "cbeec7fd08f2ee040cea704bdd57aee4d2e5ea0a4c0b8c8eb7f5b1f40ecb9fc5",
+  "sha256": "2fe5c02389370ca3942005e6ac70e5a0120b14e8fe677c1b6320cdf882e80463",
   "frozen": {
     "version": 2,
     "date": "2026-11-17",
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "fe89e59c1324acf8ebb494271457a45975b81f7900fd37e385b4b865f59aa540"
+        "sha256": "69ecfaa44b82b1bcb16b53c6b1c6556ef0f4f9fe255898225e711aabf508a78b"
       },
       {
         "path": ".node-version",
@@ -20,7 +20,7 @@
       },
       {
         "path": "deploy/db-grants.sql",
-        "sha256": "ceaca5ecd45eef5f9e813cdc42ff42e9c270df56599d008cb2965b40e340aa3c"
+        "sha256": "04ecf89f7bdbb77eeed7c44339437df0f580893ec7790dd4eee44ff6671bdb69"
       },
       {
         "path": "deploy/db-role-settings.sql",
@@ -225,6 +225,10 @@
       {
         "path": "server/migrations/202611170225_public_channel_topic_positions.sql",
         "sha256": "dfd0ee562b17ad14861ab34dfeeaab0d4f6200c8463f5f059cda513ee8dde19d"
+      },
+      {
+        "path": "server/migrations/202611170515_channel_log.sql",
+        "sha256": "3cef8b1ee40dc57952a471e0686354d5957713bd1c0dad2db839ec88fc6898fc"
       }
     ],
     "quality": {
