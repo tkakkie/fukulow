@@ -60,7 +60,7 @@ export function reader() {
     { headers: { Authorization: `Bearer ${tokens[execution.vu.idInTest % tokens.length]}` }, timeout: '10s', redirects: 0 });
   if (k < warmups) return;
   pages.add(1);
-  if (Date.now() - execution.scenario.startTime > (senderSeconds - 5) * 1000) late.add(1);
+  if (Date.now() - execution.scenario.startTime > (senderSeconds - 10) * 1000) late.add(1);
   if (r.status !== 200) { errors.add(1); return; }
   latency.add(r.timings.duration);
   // Exactly `limit` consecutive positions after the cursor, in either wire shape.

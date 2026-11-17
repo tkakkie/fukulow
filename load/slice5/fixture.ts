@@ -55,3 +55,10 @@ export const relationBytesSQL = `SELECT COALESCE(sum(pg_total_relation_size(reli
 export const watchedRelationsSQL = `SELECT COALESCE(json_agg(oid::bigint), '[]') FROM (
   SELECT c.oid FROM pg_class c WHERE c.oid IN (SELECT to_regclass('public.' || t) FROM unnest(ARRAY[${insertAutovacuumOff.map(t => `'${t}'`).join(',')}]) t)
   UNION SELECT c.reltoastrelid FROM pg_class c WHERE c.reltoastrelid <> 0 AND c.oid IN (SELECT to_regclass('public.' || t) FROM unnest(ARRAY[${insertAutovacuumOff.map(t => `'${t}'`).join(',')}]) t)) r`;
+
+// What the server actually applied: the Q2 settings and the watched tables' reloptions (arm-independent shape).
+export const appliedSettingsSQL = `SELECT json_build_object(
+  'settings',(SELECT json_object_agg(name, setting ORDER BY name) FROM pg_settings WHERE name IN ('max_wal_size','checkpoint_timeout','autovacuum','shared_buffers','synchronous_commit','autovacuum_vacuum_insert_threshold')),
+  'messages',(SELECT reloptions FROM pg_class WHERE oid = 'public.messages'::regclass),
+  'messagesToast',(SELECT t.reloptions FROM pg_class c JOIN pg_class t ON t.oid = c.reltoastrelid WHERE c.oid = 'public.messages'::regclass),
+  'channelLogMatches',(SELECT to_regclass('public.channel_log') IS NULL OR (SELECT reloptions FROM pg_class WHERE oid = to_regclass('public.channel_log')) = (SELECT reloptions FROM pg_class WHERE oid = 'public.messages'::regclass)))`;

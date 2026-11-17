@@ -5,7 +5,7 @@ import { partA, partB, partC, scope, thresholds } from './config.ts';
 import { judgePartA, judgePartB, judgePartC, judgePartD, vacuumCost, worst, type Metric, type RunA, type RunB, type RunC, type RunD, type Status, type Verdict } from './judge.ts';
 
 type Night = { metadata: { night: string; smoke: boolean; commits: Record<string, string>; images: Record<string, string>; settingsHash: string; k6Id: string;
-  machine: unknown; docker: unknown; harnessCommit: string; dirty: string; started: string };
+  machine: unknown; docker: unknown; harnessCommit: string; harnessHashes: Record<string, string>; dirty: string; started: string };
   summary: { failed: boolean; interrupted: string; faults: string[]; cleanupErrors: string[]; finished: string };
   results: (RunA | RunB | RunC | RunD)[] };
 export function load(dir: string): Night {
@@ -18,7 +18,7 @@ export function mergeProblems(n1: Night, n2: Night): string[] {
   const p: string[] = [];
   if (n1.metadata.night !== '1' || n2.metadata.night !== '2') p.push('night order');
   if ([n1, n2].some(n => n.metadata.smoke)) p.push('smoke output');
-  for (const k of ['commits', 'images', 'settingsHash', 'k6Id'] as const)
+  for (const k of ['commits', 'images', 'settingsHash', 'k6Id', 'harnessCommit', 'harnessHashes'] as const)
     if (JSON.stringify(n1.metadata[k]) !== JSON.stringify(n2.metadata[k])) p.push(`${k} differ between nights`);
   for (const n of [n1, n2]) {
     if (n.summary.failed || n.summary.interrupted) p.push(`night ${n.metadata.night}: ${n.summary.interrupted || 'runner failed'}`);
@@ -58,12 +58,12 @@ export function render(n1: Night, n2: Night): string {
     '### Metrics', ...list.flatMap(v => v.metrics.map(m => `- ${v.part} ${v.cell}: ${metricLine(m)}`)), '',
     '### Hidden operational cost of the control settings (Q2)',
     'Work the settings moved out of the measured windows, done explicitly before every step and after the last one:',
-    '| Arm | Explicit VACUUM WAL (bytes) | VACUUM time (ms) | Explicit CHECKPOINT time (ms) | CHECKPOINT buffers written |', '|---|---|---|---|---|',
-    ...['B', 'A'].map(arm => `| ${arm} | ${num(sum(arm, r => steps(r, 'vacuumAfter', 'walBytes')), 0)} | ${num(sum(arm, r => steps(r, 'vacuumAfter', 'ms')), 0)} | ${num(sum(arm, r => steps(r, 'checkpointAfter', 'ms')), 0)} | ${num(sum(arm, r => r.steps.reduce((s, x) => s + x.checkpointAfter.buffersWritten, 0)), 0)} |`), '',
+    '| Arm | Explicit VACUUM WAL (bytes) | VACUUM time (ms) | Explicit CHECKPOINTs | CHECKPOINT WAL (bytes) | CHECKPOINT time (ms) | CHECKPOINT buffers written | Checkpoints inside steps |', '|---|---|---|---|---|---|---|---|',
+    ...['B', 'A'].map(arm => `| ${arm} | ${num(sum(arm, r => steps(r, 'vacuumAfter', 'walBytes')), 0)} | ${num(sum(arm, r => steps(r, 'vacuumAfter', 'ms')), 0)} | ${num(sum(arm, r => r.steps.length), 0)} | ${num(sum(arm, r => steps(r, 'checkpointAfter', 'walBytes')), 0)} | ${num(sum(arm, r => steps(r, 'checkpointAfter', 'ms')), 0)} | ${num(sum(arm, r => r.steps.reduce((s, x) => s + x.checkpointAfter.buffersWritten, 0)), 0)} | ${num(sum(arm, r => r.steps.reduce((s, x) => s + x.wal.checkpointsInside, 0)), 0)} |`), '',
     `### Explicit VACUUM comparison (Q3, report-only; above ${thresholds.vacuumDecisionRatio}x needs a maintainer decision)`,
     ...partA.cells.map(c => { const v = vacuumCost(runsA, c.name); return `- ${c.name}: **${v.status}**${'metrics' in v && v.metrics ? ' — ' + v.metrics.map(m => `${m.name} A/B ${num(m.ratio)}`).join(', ') : ''}`; }), '',
     '### Required conditions outside the timed gates',
-    '- Q4: WebSocket correctness and reconnect convergence are required test gates: CI must be green at A (`f7fe08a`) for the realtime and client contract suites. WebSocket replay (R2) performance was not timed here.',
+    '- Q4: WebSocket correctness and reconnect convergence are required test gates, green in CI at A (`f7fe08a`): `replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps`, `overflow_closes_socket_and_reconnect_replays_every_committed_message`, `replay_denies_other_organization_and_private_nonmember_with_positive_controls`, `create_envelope_keeps_log_position_when_replay_hydrates_a_newer_version` (server/src/realtime/tests.rs), plus the client sync contract scenarios (contract/realtime, web protocol tests). WebSocket replay (R2) timing is report-only, in each Part C result file.',
     '- Q6: Unread performance goes to #519 and #431; nonzero-density Mention performance goes to #431. #515 functional, RLS and contract tests are not skipped.',
     '- Q7: WebSocket delivery (Part E) was not run; it is report-only and handed to #431.',
     `- Q8: Part B cells where only A saturated the host (≥${partB.hostSaturationPercent}% VM CPU) are INVESTIGATE: ${list.filter(v => v.status === 'INVESTIGATE').map(v => v.cell).join(', ') || 'none'}.`,

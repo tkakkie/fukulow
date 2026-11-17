@@ -25,7 +25,7 @@ export const partB = { vus: 128, warmupSeconds: 30, seconds: 60,
   cells: ['hot-17', 'many-17', 'hot-16000', 'many-16000'], sendBurst: 1_000_000, sendRefillPerSecond: 1_000_000,
   hostSaturationPercent: 90 } as const;
 export const partC = { readers: 4, warmups: 10, requests: 250, limit: 50, senderRate: 20,
-  cells: ['1M-recent', '1M-deep', '100k-recent', '100k-deep'], recentWindow: 1000 } as const;
+  cells: ['1M-recent', '1M-deep', '100k-recent', '100k-deep'], recentWindow: 1000, wsIterations: 25 } as const;
 export const partD = { target: 'measure_topic_projection_pages', p95LimitMs: 100 } as const;
 
 export const thresholds = {

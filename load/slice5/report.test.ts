@@ -20,11 +20,11 @@ test('channel_log rows only on A, guarded by the table presence', () => {
 
 const night = (n: string, edit: Record<string, unknown> = {}) => ({
   metadata: { night: n, smoke: false, commits: { B: 'b', A: 'a' }, images: { B: 'i', A: 'j' }, settingsHash: 's', k6Id: 'k', machine: {}, docker: {},
-    harnessCommit: 'h', dirty: '', started: 't', ...edit },
+    harnessCommit: 'h', harnessHashes: { 'load/slice5/judge.ts': 'x' }, dirty: '', started: 't', ...edit },
   summary: { failed: false, interrupted: '', faults: [], cleanupErrors: [], finished: 't' }, results: [] });
 test('nights that differ, fail, are smoke or dirty are run-level problems', () => {
   assert.deepEqual(mergeProblems(night('1'), night('2')), []);
-  for (const edit of [{ images: { B: 'x', A: 'j' } }, { settingsHash: 'other' }, { smoke: true }, { dirty: ' M run.ts' }, { k6Id: 'other' }])
+  for (const edit of [{ images: { B: 'x', A: 'j' } }, { settingsHash: 'other' }, { smoke: true }, { dirty: ' M run.ts' }, { k6Id: 'other' }, { harnessCommit: 'h2' }, { harnessHashes: { 'load/slice5/judge.ts': 'y' } }])
     assert.ok(mergeProblems(night('1'), night('2', edit)).length, JSON.stringify(edit));
   const failed = night('2'); failed.summary.interrupted = 'hard timeout';
   assert.ok(mergeProblems(night('1'), failed).length);

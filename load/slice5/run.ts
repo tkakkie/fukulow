@@ -9,10 +9,9 @@ import { arch, cpus, hostname, platform, release, tmpdir, totalmem } from 'node:
 import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
 import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, type Arm } from './config.ts';
-import { autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
+import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
 import { judgePartA, judgePartB, judgePartC, judgePartD, parseTimeline, vacuumCost, type Counts, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
-import { uuid } from '../seed.ts';
 
 const usage = 'node load/slice5/run.ts --work /abs/work (--build | --night 1|2 --out /abs/new/dir) [--smoke] [--parts A,B,C,D]';
 const args = process.argv.slice(2);
@@ -71,10 +70,15 @@ mkdirSync(`${output}/runs`, { recursive: true });
 const config = nights[night!];
 const parts = (flag('--parts')?.split(',') ?? config.parts) as string[];
 if (!smoke && (flag('--parts') || parts.join() !== config.parts.join())) throw new Error('A formal night runs exactly its pre-registered parts');
+function smokeRates() {
+  const v = flag('--smoke-rates');
+  if (v && !smoke) throw new Error('--smoke-rates is smoke-only');
+  return v ? v.split(',').map(Number) : [50];
+}
 const scratch = mkdtempSync(`${tmpdir()}/slice5-`);
 const project = `slice5-${Date.now()}-${randomUUID().slice(0, 8)}`;
 const deadline = setTimeout(() => stop('hard timeout'), config.hardTimeoutMinutes * 60_000);
-const tiny = { rates: [50], seconds: 10, perChannel: 25, replay: [20_000, 10_000], requests: 20, warmups: 2, warmupB: 5, secondsB: 10, vusB: 16, topics: '500' };
+const tiny = { rates: smokeRates(), seconds: 10, perChannel: 25, replay: [20_000, 10_000], requests: 20, warmups: 2, warmupB: 5, secondsB: 10, vusB: 16, topics: '500' };
 const plan = {
   rates: smoke ? tiny.rates : [...partA.rates], seconds: smoke ? tiny.seconds : partA.seconds,
   perChannel: smoke ? tiny.perChannel : fixture.perChannel, rounds: smoke ? [rounds[0]] : rounds,
@@ -97,6 +101,7 @@ async function withStack<T>(arm: Arm, id: string, limiter: { burst: number; refi
   const stack = await startStack({ arm, id, project, source: source(arm), image: images[arm]!, privateDir, ...limiter });
   try {
     const seeded = await seed(stack);
+    stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements;');
     save(`${dir}/stack.json`, { arm, commit: full[arm], appImage: docker('inspect', '--format', '{{.Image}}', stack.app), dbImage: docker('inspect', '--format', '{{.Image}}', stack.db),
       composeSha256: sha(`${source(arm)}/load/compose.yml`), deploySha256: Object.fromEntries(['init-db-roles.sh', 'db-roles.sql', 'db-role-settings.sql', 'db-grants.sql'].map(f => [f, sha(`${source(arm)}/deploy/${f}`)])),
       dbSettings: stack.sql("SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN ('max_wal_size','checkpoint_timeout','autovacuum','shared_buffers','max_connections','synchronous_commit')"),
@@ -111,10 +116,13 @@ async function withStack<T>(arm: Arm, id: string, limiter: { burst: number; refi
 // Deterministic settled fixture; the checksum is taken before any API send.
 function prefill(stack: Stack, arm: Arm, seeded: Seeded, counts: number[]) {
   const t0 = performance.now();
+  // Reloptions first, so insert-triggered autovacuum never starts on the prefill itself.
+  stack.sql(autovacuumSQL);
   stack.sql(prefillSQL(seeded.organization, seeded.channels, counts));
   stack.sql(channelLogSQL(arm, seeded.organization, seeded.channels.filter((_, i) => counts[i] > 0)));
-  stack.sql(autovacuumSQL);
-  return { checksum: stack.sql(checksumSQL), prefillMs: performance.now() - t0 };
+  // Applied (not intended) settings join the run identity: a setting missing in one arm makes the cell INVALID.
+  const applied = stack.sql(appliedSettingsSQL);
+  return { checksum: stack.sql(checksumSQL), prefillMs: performance.now() - t0, settings: createHash('sha256').update(settingsHash + applied).digest('hex'), applied };
 }
 function settle(stack: Stack) { const cost = timed(stack, settleSQL); return { ...cost, watched: JSON.parse(stack.sql(watchedRelationsSQL)) as number[] }; }
 const generatorName = () => `${project}-k6-${randomUUID().slice(0, 8)}`;
@@ -132,11 +140,11 @@ const counts = (row: Record<string, number | null> | undefined): Counts => ({ at
 async function partARun(arm: Arm, round: number, cell: typeof partA.cells[number]): Promise<RunA> {
   const id = `A-${cell.name}-${round}-${arm}`;
   return withStack(arm, id, { burst: partA.sendBurst, refill: partA.sendRefillPerSecond }, async (stack, seeded, dir, privateDir) => {
-    const { checksum, prefillMs } = prefill(stack, arm, seeded, seeded.channels.map(() => plan.perChannel));
+    const { checksum, prefillMs, settings, applied } = prefill(stack, arm, seeded, seeded.channels.map(() => plan.perChannel));
     const body = bodies[cell.body];
     const retry = [];
     for (let i = 0; i < partA.retryTargets; i++) {
-      const target = { member: i, channel: seeded.channels[0], client_message_id: uuid(), body };
+      const target = { member: i, channel: seeded.channels[0], client_message_id: randomUUID(), body };
       await send(stack, seeded, i, target.channel, target); retry.push(target);
     }
     save(`${privateDir}/data.json`, { organization: seeded.organization, otherOrganization: seeded.otherOrganization, reader: seeded.reader,
@@ -174,10 +182,10 @@ async function partARun(arm: Arm, round: number, cell: typeof partA.cells[number
       const vacuum = timed(stack, 'VACUUM (ANALYZE);'), checkpoint = timed(stack, 'CHECKPOINT;');
       steps.at(-1)!.vacuumAfter = vacuum; steps.at(-1)!.checkpointAfter = checkpoint;
     } finally { await samples.stop(); }
-    const result: RunA = { part: 'A', cell: cell.name, round, arm, commit: full[arm], image: images[arm]!, settingsHash, fixtureChecksum: checksum,
+    const result: RunA = { part: 'A', cell: cell.name, round, arm, commit: full[arm], image: images[arm]!, settingsHash: settings, fixtureChecksum: checksum,
       complete: steps.length === plan.rates.length, smoke, steps,
       storage: { bytes: Number(stack.sql(relationBytesSQL)) - storage0, accepted: steps.reduce((s, x) => s + x.send.accepted, 0) } };
-    save(`${dir}/result.json`, { ...result, prefillMs, settle: settled, maintenance });
+    save(`${dir}/result.json`, { ...result, prefillMs, appliedSettings: applied, settle: settled, maintenance });
     return result;
   });
 }
@@ -185,7 +193,7 @@ async function partARun(arm: Arm, round: number, cell: typeof partA.cells[number
 async function partBRun(arm: Arm, round: number, cellName: string): Promise<RunB> {
   const cell = partA.cells.find(c => c.name === cellName)!, id = `B-${cellName}-${round}-${arm}`;
   return withStack(arm, id, { burst: partB.sendBurst, refill: partB.sendRefillPerSecond }, async (stack, seeded, dir, privateDir) => {
-    const { checksum } = prefill(stack, arm, seeded, seeded.channels.map(() => plan.perChannel));
+    const { checksum, settings } = prefill(stack, arm, seeded, seeded.channels.map(() => plan.perChannel));
     save(`${privateDir}/data.json`, { organization: seeded.organization, otherOrganization: seeded.otherOrganization, reader: seeded.reader,
       channels: cell.channels === 1 ? [seeded.channels[0]] : seeded.channels, body: bodies[cell.body], retry: [] });
     save(`${privateDir}/tokens.json`, seeded.tokens);
@@ -194,15 +202,15 @@ async function partBRun(arm: Arm, round: number, cellName: string): Promise<RunB
     const samples = sampler(stack, () => gen);
     gen = generatorName();
     const r = await generator(stack, privateDir, 'load/slice5/send-k6.ts', { SLICE5_MODE: 'closed', SLICE5_VUS: String(plan.vusB), SLICE5_WARMUP: String(plan.warmupB),
-      SLICE5_SECONDS: String(plan.secondsB), SLICE5_CHANNELS: String(cell.channels), SLICE5_DRAIN: '11' }, (plan.warmupB + plan.secondsB + 120) * 1000, gen);
-    gen = undefined; await samples.stop();
+      SLICE5_SECONDS: String(plan.secondsB), SLICE5_CHANNELS: String(cell.channels), SLICE5_DRAIN: '11' }, (plan.warmupB + plan.secondsB + 120) * 1000, gen).finally(() => samples.stop());
+    gen = undefined;
     writeFileSync(`${dir}/k6.log`, r.log);
     if (r.code !== 0 || !r.result || !Number.isFinite(r.start)) throw new Error('generator failed');
     const window = samples.window(r.start + plan.warmupB * 1000, r.start + (plan.warmupB + plan.secondsB) * 1000);
     const lane = r.result.send as Record<string, Record<string, number>>;
     // A missing window is missing evidence, never zero errors.
     const nonSuccess = Object.values(lane).reduce((s, w) => w.attempted >= 0 && w.accepted >= 0 ? s + (w.attempted - w.accepted) : NaN, 0);
-    const result: RunB = { part: 'B', cell: cellName, round, arm, commit: full[arm], image: images[arm]!, settingsHash, fixtureChecksum: checksum, complete: true, smoke,
+    const result: RunB = { part: 'B', cell: cellName, round, arm, commit: full[arm], image: images[arm]!, settingsHash: settings, fixtureChecksum: checksum, complete: true, smoke,
       acceptedPerSecond: lane.measured.accepted / plan.secondsB, measured: counts(lane.measured), nonSuccess,
       hostCpuMeanPercent: window.cpu.vmMean, evidence: window.evidence };
     save(`${dir}/result.json`, { ...result, cpu: window.cpu, windows: lane, reader: r.result.reader });
@@ -214,7 +222,7 @@ async function partCRun(arm: Arm, round: number): Promise<RunC[]> {
   const id = `C-${round}-${arm}`;
   return withStack(arm, id, { burst: partA.sendBurst, refill: partA.sendRefillPerSecond }, async (stack, seeded, dir, privateDir) => {
     const sizes = seeded.channels.map((_, i) => plan.replaySizes[i] ?? 0);
-    const { checksum } = prefill(stack, arm, seeded, sizes);
+    const { checksum, settings } = prefill(stack, arm, seeded, sizes);
     settle(stack);
     save(`${privateDir}/tokens.json`, seeded.tokens);
     let generation: string | null = null;
@@ -235,16 +243,21 @@ async function partCRun(arm: Arm, round: number): Promise<RunC[]> {
       gen = generatorName();
       const r = await generator(stack, privateDir, 'load/slice5/replay-k6.ts', { SLICE5_ARM: arm, SLICE5_DEPTH: depth, SLICE5_READERS: String(partC.readers),
         SLICE5_WARMUPS: String(plan.warmups), SLICE5_REQUESTS: String(plan.requests), SLICE5_LIMIT: String(partC.limit), SLICE5_RECENT_WINDOW: String(partC.recentWindow),
-        SLICE5_SENDER_RATE: String(partC.senderRate), SLICE5_SENDER_SECONDS: String(plan.senderSeconds) }, (plan.senderSeconds + 120) * 1000, gen);
-      gen = undefined; await samples.stop();
+        SLICE5_SENDER_RATE: String(partC.senderRate), SLICE5_SENDER_SECONDS: String(plan.senderSeconds) }, (plan.senderSeconds + 120) * 1000, gen).finally(() => samples.stop());
+      gen = undefined;
       writeFileSync(`${dir}/k6-${cellName}.log`, r.log);
       if (r.code !== 0 || !r.result || !Number.isFinite(r.start)) throw new Error(`generator failed for ${cellName}`);
       const window = samples.window(r.start, r.start + plan.senderSeconds * 1000);
       const res = r.result;
-      const run: RunC = { part: 'C', cell: cellName, round, arm, commit: full[arm], image: images[arm]!, settingsHash, fixtureChecksum: checksum, complete: true, smoke,
+      const run: RunC = { part: 'C', cell: cellName, round, arm, commit: full[arm], image: images[arm]!, settingsHash: settings, fixtureChecksum: checksum, complete: true, smoke,
         p95: res.p95, requests: res.pages, invalidPages: res.invalidPages + (res.outsideSender > 0 ? res.outsideSender : 0), readerErrors: res.readerErrors,
         sender: counts(res.sender), senderRate: partC.senderRate, senderSeconds: plan.senderSeconds, evidence: window.evidence };
-      save(`${dir}/result-${cellName}.json`, { ...run, p50: res.p50, max: res.max, other: res.other, cpu: window.cpu, outsideSender: res.outsideSender });
+      // R2 (Q4, report-only): WebSocket replay of a 50-position gap, after and never alongside the judged R1.
+      const ws = await generator(stack, privateDir, 'load/slice5/replay-ws-k6.ts', { SLICE5_ARM: arm, SLICE5_LIMIT: String(partC.limit),
+        SLICE5_READERS: String(partC.readers), SLICE5_WS_ITERATIONS: String(smoke ? 3 : partC.wsIterations) }, 240_000, generatorName());
+      writeFileSync(`${dir}/k6-r2-${cellName}.log`, ws.log);
+      save(`${dir}/result-${cellName}.json`, { ...run, p50: res.p50, max: res.max, other: res.other, cpu: window.cpu, outsideSender: res.outsideSender,
+        r2: ws.code === 0 && ws.result ? { status: 'REPORT ONLY', ...ws.result } : { status: 'NOT EVALUATED', reason: 'R2 generator failed' } });
       out.push(run);
     }
     return out;
@@ -258,12 +271,16 @@ async function partDRun(arm: Arm, round: number): Promise<RunD> {
   const name = `${project}-d-${round}-${arm}`.toLowerCase(), password = randomUUID();
   docker('run', '-d', '--rm', '--name', name, '-p', '127.0.0.1::5432', '-e', `POSTGRES_PASSWORD=${password}`, '--tmpfs', '/var/lib/postgresql', pg, ...dbCommand().slice(1));
   try {
-    for (let i = 0; i < 60 && docker('exec', name, 'sh', '-c', 'pg_isready -U postgres >/dev/null 2>&1 && echo ok || echo no') !== 'ok'; i++) await sleep(1000);
+    // TCP readiness twice in a row: the image's init-phase server answers on the socket only.
+    let ready = 0;
+    for (let i = 0; i < 90 && ready < 2; i++) { ready = docker('exec', name, 'sh', '-c', 'pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && echo ok || echo no') === 'ok' ? ready + 1 : 0; await sleep(1000); }
+    if (ready < 2) throw new Error('PostgreSQL not ready');
     const port = docker('port', name, '5432/tcp').split(':').at(-1);
     const r = await run('cargo', ['test', '--locked', '--release', '-p', 'fukulow-server', '--lib', partD.target, '--', '--ignored', '--nocapture'], { cwd: source(arm),
       env: { ...process.env, DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${port}/postgres`, ...(smoke ? { MEASURE_TOPICS: tiny.topics } : {}) }, timeoutMs: 30 * 60_000 });
     writeFileSync(`${dir}/cargo.log`, (r.stdout + r.stderr).replaceAll(password, '<redacted>'));
     const rows = parseTimeline(r.stderr + r.stdout);
+    if (r.code !== 0 && !rows.length) throw new Error('Part D test failed before reporting');
     // A missed gate panics after reporting: that is a FAIL from the rows, not an INVALID run.
     const result: RunD = { part: 'D', round, arm, commit: full[arm], complete: rows.length === 4, smoke, rows };
     save(`${dir}/result.json`, { ...result, exitCode: r.code });
@@ -276,7 +293,9 @@ const rerunUsed = new Set<string>();
 async function attempt<T>(part: string, id: string, f: () => Promise<T>): Promise<T | undefined> {
   for (;;) {
     try { check(); return await f(); } catch (error) {
-      const reason = error instanceof Error ? error.message.slice(0, 200) : 'unknown';
+      // UUIDs (passwords, tokens) and hex secrets never reach artifacts.
+      const reason = (error instanceof Error ? error.message.split('\n')[0].slice(0, 200) : 'unknown')
+        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>').replace(/[0-9a-f]{32,}/gi, '<hex>');
       faults.push(`${id}: ${reason}`); console.error(`slice5: ${id} failed (${reason})`);
       if (interrupted || rerunUsed.has(part)) return undefined;
       rerunUsed.add(part); faults.push(`${id}: rerun (the part's single infrastructure rerun)`);
@@ -293,11 +312,11 @@ try {
     images[arm] = docker('image', 'inspect', '--format', '{{.Id}}', tag(arm));
   }
   docker('pull', k6);
-  const harness = ['config.ts', 'judge.ts', 'fixture.ts', 'stack.ts', 'send-k6.ts', 'replay-k6.ts', 'run.ts', 'report.ts'].map(f => `load/slice5/${f}`);
+  const harness = ['config.ts', 'judge.ts', 'fixture.ts', 'stack.ts', 'send-k6.ts', 'replay-k6.ts', 'replay-ws-k6.ts', 'run.ts', 'report.ts'].map(f => `load/slice5/${f}`);
   save(`${output}/metadata.json`, { scope, night, smoke, parts, commits: full, images, k6, k6Id: docker('image', 'inspect', '--format', '{{.Id}}', k6), plan, settingsHash,
     thresholds, dbCommand: dbCommand(), node: process.version, machine: { platform: platform(), arch: arch(), release: release(), hostname: hostname(), cpus: cpus().length, memory: totalmem() },
     docker: JSON.parse(docker('info', '--format', '{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
-    harnessCommit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
+    harnessCommit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain', '--untracked-files=no']) + command('git', ['status', '--porcelain', '--', 'load']),
     harnessHashes: Object.fromEntries(harness.filter(existsSync).map(p => [p, sha(p)])), started: new Date().toISOString() });
   for (const part of parts) {
     for (const [i, pair] of plan.rounds.entries()) for (const arm of pair) {
@@ -324,5 +343,6 @@ try {
   ].filter(v => parts.includes((v as { part?: string }).part ?? 'A'));
   save(`${output}/summary.json`, { scope, night, smoke, failed, interrupted, faults, cleanupErrors, verdicts, finished: new Date().toISOString() });
   console.log(`slice5: artifacts ${output}`);
-  process.exitCode = failed || interrupted || cleanupErrors.length ? 1 : 0;
+  // Exit explicitly: a leaked timer must never hold the overnight waiter.
+  process.exit(failed || interrupted || cleanupErrors.length ? 1 : 0);
 }

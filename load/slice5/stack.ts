@@ -84,15 +84,19 @@ export async function send(stack: Stack, seeded: Seeded, member: number, channel
 }
 
 // Cluster-wide counters bracketing a window; watched relations are the Message tables and their TOAST.
-export type Snapshot = { lsn: string; checkpoints: number; buffersWritten: number; statsReset: string; walReset: string;
+export type Snapshot = { lsn: string; wal: { records: number; fpi: number; bytes: number }; relationBytes: number; allAutovacuum: number; checkpoints: number; buffersWritten: number; statsReset: string; walReset: string;
   relations: { relid: number; name: string; autovacuum: number; autoanalyze: number }[]; workers: number };
 export function snapshot(stack: Stack, watched: number[]): Snapshot {
   return JSON.parse(stack.sql(`SELECT json_build_object('lsn',pg_current_wal_lsn(),
+    'wal',(SELECT json_build_object('records',wal_records,'fpi',wal_fpi,'bytes',wal_bytes) FROM pg_stat_wal),
+    'relationBytes',(SELECT COALESCE(sum(pg_total_relation_size(relid)),0)::bigint FROM pg_stat_user_tables),
+    'allAutovacuum',(SELECT COALESCE(sum(autovacuum_count+autoanalyze_count),0)::bigint FROM pg_stat_all_tables),
     'checkpoints',(SELECT num_timed+num_requested FROM pg_stat_checkpointer),'buffersWritten',(SELECT buffers_written FROM pg_stat_checkpointer),
     'statsReset',(SELECT stats_reset FROM pg_stat_checkpointer)::text,'walReset',(SELECT stats_reset FROM pg_stat_wal)::text,
     'relations',(SELECT COALESCE(json_agg(json_build_object('relid',relid::bigint,'name',schemaname||'.'||relname,'autovacuum',autovacuum_count,'autoanalyze',autoanalyze_count)),'[]')
       FROM pg_stat_all_tables WHERE relid = ANY(ARRAY[${watched.join(',') || 'NULL'}]::oid[])),
-    'workers',(SELECT count(*) FROM pg_stat_progress_vacuum WHERE relid = ANY(ARRAY[${watched.join(',') || 'NULL'}]::oid[])))`));
+    'workers',(SELECT count(*) FROM pg_stat_progress_vacuum WHERE relid = ANY(ARRAY[${watched.join(',') || 'NULL'}]::oid[]))
+      + (SELECT count(*) FROM pg_stat_progress_analyze WHERE relid = ANY(ARRAY[${watched.join(',') || 'NULL'}]::oid[])))`));
 }
 export function walWindow(stack: Stack, before: Snapshot, after: Snapshot) {
   const lsnBytes = Number(stack.sql(`SELECT pg_wal_lsn_diff('${after.lsn}','${before.lsn}')`));
@@ -100,6 +104,9 @@ export function walWindow(stack: Stack, before: Snapshot, after: Snapshot) {
     return !b || r.autovacuum !== b.autovacuum || r.autoanalyze !== b.autoanalyze; }).map(r => r.name);
   if (before.workers || after.workers) autovacuumInside.push('vacuum in progress at a boundary');
   return { lsnBytes, checkpointsInside: after.checkpoints - before.checkpoints, autovacuumInside,
+    // Report-only diagnostics (pre-registered per-step captures).
+    pgStatWal: { records: after.wal.records - before.wal.records, fpi: after.wal.fpi - before.wal.fpi, bytes: after.wal.bytes - before.wal.bytes },
+    relationBytesDelta: after.relationBytes - before.relationBytes, autovacuumAllTables: after.allAutovacuum - before.allAutovacuum,
     statsReset: before.statsReset !== after.statsReset || before.walReset !== after.walReset || after.relations.length !== before.relations.length };
 }
 // Timed explicit maintenance with its own WAL (Q2/Q3 hidden-cost evidence; never in the send gate).
