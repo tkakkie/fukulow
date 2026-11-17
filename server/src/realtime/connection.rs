@@ -223,6 +223,13 @@ impl Connection<'_> {
             return Ok(());
         };
         let organization = self.auth.identity.organization.organization_id;
+        #[cfg(test)]
+        self.state.message_delivery.record_watermark_caller(
+            &self.state.pool,
+            organization,
+            channel,
+            "initial",
+        );
         let through = self
             .state
             .message_delivery
@@ -383,6 +390,13 @@ impl Connection<'_> {
                 #[cfg(test)]
                 super::tests::access_loss::pause(channel_id, "subscribed_seq", 0).await;
                 if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
+                    #[cfg(test)]
+                    self.state.message_delivery.record_watermark_caller(
+                        &self.state.pool,
+                        self.auth.identity.organization.organization_id,
+                        channel_id,
+                        "confirmation",
+                    );
                     let latest = self
                         .state
                         .message_delivery

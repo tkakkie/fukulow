@@ -340,26 +340,22 @@ async fn simultaneous_admitted_subscriptions_receive_canonical_live_messages(poo
             assert_eq!(event(socket).await["message"], canonical[channel]);
         }
     };
-    // Keep Tokio time fixed, including the helpers' 5 s reads, the watermark's
-    // 10 s work deadline (which includes admission), pool/session/write timers
-    // and heartbeat. Staying runnable prevents auto-advance during TCP/DB I/O.
-    // This single wall-clock bound only detects hangs, not subscription latency.
-    let watchdog = std::time::Instant::now();
-    let mut test = std::pin::pin!(test);
-    std::future::poll_fn(|cx| {
-        assert!(
-            watchdog.elapsed() < Duration::from_secs(300),
-            "test stalled"
-        );
-        match std::future::Future::poll(test.as_mut(), cx) {
-            std::task::Poll::Ready(()) => std::task::Poll::Ready(()),
-            std::task::Poll::Pending => {
-                cx.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-        }
-    })
-    .await;
+    // Holding only admission expiry is insufficient: the 10 s watermark work
+    // deadline includes the queue, so a correct slow queue could still get 1011.
+    // Freeze notification, helper read, work, pool/session/write and heartbeat
+    // timers: this checks delivery after admission, not wall-clock capacity.
+    // Tokio's clock.rs documents that spawn_blocking inhibits auto-advance;
+    // the runtime can park during TCP/DB I/O without a self-waking busy loop.
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let watchdog = tokio::task::spawn_blocking(move || {
+        let _ = stopped.recv_timeout(Duration::from_secs(300));
+    });
+    tokio::select! {
+        () = test => {},
+        _ = watchdog => panic!("test stalled"),
+    }
+    // This sender also drops on panic, releasing the blocking thread immediately.
+    drop(stop);
     tokio::time::resume();
 }
 
@@ -373,6 +369,11 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
     let f = fixture(&app_pool).await;
     let other_channel = channel(&pool, f.organization, f.member, false).await;
     for (confirmation, global) in [(false, false), (false, true), (true, false), (true, true)] {
+        // One fixture-scoped ordered record connects the caller entries to the
+        // exact admission stage; no other connection subscribes during this case.
+        f.state
+            .message_delivery
+            .take_watermark_events(&f.state.pool);
         let target = channel(&pool, f.organization, f.member, false).await;
         let mut socket = f.server.connect(&f.token).await;
         let gate = confirmation.then(|| pause(target));
@@ -404,6 +405,26 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
             subscribe(&mut socket, target, 0).await;
         }
         closed(&mut socket, 1011).await;
+        let mut expected = vec![(f.organization, target, "initial")];
+        if confirmation {
+            expected.push((f.organization, target, "confirmation"));
+        }
+        expected.push((
+            f.organization,
+            target,
+            if global {
+                "global_rejection"
+            } else {
+                "channel_rejection"
+            },
+        ));
+        assert_eq!(
+            f.state
+                .message_delivery
+                .take_watermark_events(&f.state.pool),
+            expected,
+            "confirmation={confirmation}, global={global}",
+        );
         drop(held);
 
         let mut accepted = f.server.connect(&f.token).await;

@@ -21,6 +21,8 @@ pub(super) struct Admission {
     queued: Mutex<Queued>,
     #[cfg(test)]
     hold_watermark_timeouts: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    watermark_events: Mutex<Vec<(Uuid, Uuid, &'static str)>>,
 }
 
 #[derive(Default)]
@@ -76,6 +78,24 @@ pub(super) struct Permit {
 
 impl Admission {
     #[cfg(test)]
+    pub(super) fn record_watermark_event(
+        &self,
+        organization: Uuid,
+        channel: Uuid,
+        event: &'static str,
+    ) {
+        self.watermark_events
+            .lock()
+            .unwrap()
+            .push((organization, channel, event));
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_watermark_events(&self) -> Vec<(Uuid, Uuid, &'static str)> {
+        std::mem::take(&mut *self.watermark_events.lock().unwrap())
+    }
+
+    #[cfg(test)]
     pub(super) fn hold_watermark_timeouts(&self) {
         self.hold_watermark_timeouts
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -104,6 +124,8 @@ impl Admission {
             queued: Default::default(),
             #[cfg(test)]
             hold_watermark_timeouts: Default::default(),
+            #[cfg(test)]
+            watermark_events: Default::default(),
         })
     }
 
@@ -191,14 +213,24 @@ impl Admission {
         } else {
             Rejection::WatermarkChannel
         };
-        permit.channel = Some(acquire(&semaphore, deadline, channel_rejection).await?);
+        let channel_permit = acquire(&semaphore, deadline, channel_rejection).await;
+        #[cfg(test)]
+        if !send && channel_permit.is_err() {
+            self.record_watermark_event(organization, channel, "channel_rejection");
+        }
+        permit.channel = Some(channel_permit?);
         let global = if send { &self.send } else { &self.watermark };
         let global_rejection = if send {
             Rejection::SendGlobal
         } else {
             Rejection::WatermarkGlobal
         };
-        permit.global = Some(acquire(global, deadline, global_rejection).await?);
+        let global_permit = acquire(global, deadline, global_rejection).await;
+        #[cfg(test)]
+        if !send && global_permit.is_err() {
+            self.record_watermark_event(organization, channel, "global_rejection");
+        }
+        permit.global = Some(global_permit?);
         Ok(permit)
     }
 }

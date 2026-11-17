@@ -370,6 +370,26 @@ impl Delivery {
     }
 
     #[cfg(test)]
+    pub(crate) fn record_watermark_caller(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        channel: Uuid,
+        caller: &'static str,
+    ) {
+        self.admission(pool)
+            .record_watermark_event(organization, channel, caller);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_watermark_events(
+        &self,
+        pool: &sqlx::PgPool,
+    ) -> Vec<(Uuid, Uuid, &'static str)> {
+        self.admission(pool).take_watermark_events()
+    }
+
+    #[cfg(test)]
     pub(crate) fn hold_watermark_admission_timeouts(&self, pool: &sqlx::PgPool) {
         self.admission(pool).hold_watermark_timeouts();
     }
