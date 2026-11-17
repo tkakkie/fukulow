@@ -22,7 +22,7 @@ test('another high advisory fails, including a different package with the same i
   for (const other of [advisory('other'), advisory('picomatch', 'GHSA-aaaa-bbbb-cccc')]) {
     const result = check(report([advisory(), other]))
     assert.equal(result.ok, false)
-    assert.match(result.errors.join('\n'), /Unexcepted high advisory/)
+    assert.match(result.errors.join('\n'), /high advisory without an exception/)
   }
 })
 
@@ -72,7 +72,7 @@ test('malformed JSON and missing or malformed vulnerabilities fail closed', () =
     assert.throws(() => parseAudit(json), /no parsable JSON/)
   }
   for (const audit of [null, {}, { vulnerabilities: null }, { vulnerabilities: [] },
-    { vulnerabilities: {}, error: { code: 'EAUDIT' } },
+    { vulnerabilities: {}, error: { code: 'EAUDIT' } }, { vulnerabilities: {}, error: null },
     { vulnerabilities: { other: {} } }, report([null]), report([{ name: 'other' }])]) {
     const result = evaluate([report(), audit], exceptions, today)
     assert.equal(result.ok, false)
@@ -86,7 +86,7 @@ test('high advisories without a GitHub GHSA URL fail', () => {
     'https://github.com/advisories/' + id + '/unrelated']) {
     const result = check(report([advisory(), { ...advisory(), url }]))
     assert.equal(result.ok, false)
-    assert.match(result.errors.join('\n'), /Unexcepted high advisory.*no GHSA URL/)
+    assert.match(result.errors.join('\n'), /high advisory without an exception.*no GHSA URL/)
   }
 })
 

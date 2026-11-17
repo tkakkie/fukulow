@@ -36,7 +36,7 @@ export function evaluate(audits: readonly unknown[], allowed: readonly Exception
     }
   }
   for (const audit of audits) {
-    if (!object(audit) || !object(audit.vulnerabilities) || audit.error) {
+    if (!object(audit) || !object(audit.vulnerabilities) || 'error' in audit) {
       errors.push('Invalid npm audit report: expected vulnerabilities and no audit error')
       continue
     }
@@ -60,7 +60,7 @@ export function evaluate(audits: readonly unknown[], allowed: readonly Exception
           + (exception ? ` — covered by ${exception.issue}, expires ${exception.expires}: ${exception.reason}` : ''))
         if (exception) matched.add(exception)
         if ((advisory.severity === 'high' || advisory.severity === 'critical') && !exception) {
-          errors.push(`Unexcepted ${advisory.severity} advisory: ${advisory.name} ${id ?? '(no GHSA URL)'}`)
+          errors.push(`${advisory.severity} advisory without an exception: ${advisory.name} ${id ?? '(no GHSA URL)'}`)
         }
       }
     }
