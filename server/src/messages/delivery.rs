@@ -369,6 +369,24 @@ impl Delivery {
             .get_or_init(|| Admission::new(pool.options().get_max_connections()))
     }
 
+    #[cfg(test)]
+    pub(crate) fn hold_watermark_admission_timeouts(&self, pool: &sqlx::PgPool) {
+        self.admission(pool).hold_watermark_timeouts();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_watermark_permit(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        channel: Uuid,
+    ) -> impl Drop {
+        self.admission(pool)
+            .acquire(organization, channel, false)
+            .await
+            .unwrap()
+    }
+
     pub(crate) async fn latest_seq(
         &self,
         pool: &sqlx::PgPool,

@@ -19,6 +19,8 @@ pub(super) struct Admission {
     watermark: Arc<Semaphore>,
     channels: Mutex<HashMap<ChannelKey, Arc<Slots>>>,
     queued: Mutex<Queued>,
+    #[cfg(test)]
+    hold_watermark_timeouts: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -74,6 +76,12 @@ pub(super) struct Permit {
 
 impl Admission {
     #[cfg(test)]
+    pub(super) fn hold_watermark_timeouts(&self) {
+        self.hold_watermark_timeouts
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
     pub(super) fn available_permits(&self) -> usize {
         self.send.available_permits() + self.watermark.available_permits()
     }
@@ -94,6 +102,8 @@ impl Admission {
             watermark: Arc::new(Semaphore::new(budget / 2)),
             channels: Default::default(),
             queued: Default::default(),
+            #[cfg(test)]
+            hold_watermark_timeouts: Default::default(),
         })
     }
 
@@ -156,6 +166,18 @@ impl Admission {
             channel: None,
             global: None,
         };
+        // Contract tests retain both FIFO limits without measuring runner speed.
+        // This switch belongs to one Admission, shared only by its Delivery clones.
+        #[cfg(test)]
+        if !send
+            && self
+                .hold_watermark_timeouts
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            permit.channel = Some(semaphore.acquire_owned().await.unwrap());
+            permit.global = Some(self.watermark.clone().acquire_owned().await.unwrap());
+            return Ok(permit);
+        }
         // Send waiters hold no connection, so absorb ordinary hot-Channel bursts
         // for as long as the pool's former acquire budget allowed.
         let wait = if send {
@@ -227,6 +249,56 @@ mod tests {
         assert_eq!(queued.total, 0);
         assert!(queued.channels.is_empty());
         assert!(admission.channels.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_watermark_timeouts_preserve_caps_and_permit_handoffs() {
+        let admission = Admission::new(20);
+        admission.hold_watermark_timeouts();
+        let organization = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(
+                admission
+                    .acquire(organization, channel, false)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let waiting = admission.acquire(organization, channel, false);
+        tokio::pin!(waiting);
+        // Advance virtual time past the real deadline while all Channel slots
+        // stay held. Releasing a slot, rather than runner speed, admits the next.
+        assert!(
+            tokio::time::timeout(ADMISSION_WAIT * 2, &mut waiting)
+                .await
+                .is_err()
+        );
+        assert_eq!(admission.watermark.available_permits(), 4);
+        drop(held.pop());
+        held.push(waiting.await.unwrap());
+        for _ in 0..4 {
+            held.push(
+                admission
+                    .acquire(organization, Uuid::new_v4(), false)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let waiting = admission.acquire(organization, Uuid::new_v4(), false);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(ADMISSION_WAIT * 2, &mut waiting)
+                .await
+                .is_err()
+        );
+        assert_eq!(admission.watermark.available_permits(), 0);
+        drop(held.pop());
+        drop(waiting.await.unwrap());
+        drop(held);
+        assert_queue_empty(&admission);
+        assert_eq!(admission.available_permits(), 16);
     }
 
     #[test]
