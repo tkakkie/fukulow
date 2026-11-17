@@ -463,14 +463,18 @@ async fn ready(State(readiness): State<Readiness>) -> Response {
         .into_response()
 }
 
-async fn static_handler(uri: Uri) -> Response {
+async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
     // Undefined API endpoints are never the SPA.
-    if path == "api" || path.starts_with("api/") || path.starts_with(".vite/") {
+    if path == "api"
+        || path.starts_with("api/")
+        || path.starts_with(".vite/")
+        || path.ends_with(".br")
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     if let Some(file) = Assets::get(path) {
-        return serve_asset(path, file);
+        return serve_asset(path, file, &headers);
     }
     // A path whose last segment has an extension is an asset request: missing means 404,
     // not index.html. Anything else is a client-side route of the SPA.
@@ -479,12 +483,17 @@ async fn static_handler(uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     match Assets::get("index.html") {
-        Some(file) => serve_asset("index.html", file),
+        Some(file) => serve_asset("index.html", file, &headers),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn serve_asset(name: &str, file: rust_embed::EmbeddedFile) -> Response {
+fn serve_asset(name: &str, file: rust_embed::EmbeddedFile, headers: &HeaderMap) -> Response {
+    let compressed = accepts_brotli(headers)
+        .then(|| Assets::get(&format!("{name}.br")))
+        .flatten();
+    let encoded = compressed.is_some();
+    let file = compressed.unwrap_or(file);
     let guessed = mime_guess::from_path(name).first_or_octet_stream();
     let mime = if name.ends_with(".wasm") {
         "application/wasm"
@@ -496,11 +505,55 @@ fn serve_asset(name: &str, file: rust_embed::EmbeddedFile) -> Response {
     } else {
         "no-cache"
     };
-    (
-        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache)],
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, cache),
+            (header::VARY, "Accept-Encoding"),
+        ],
         file.data,
     )
-        .into_response()
+        .into_response();
+    if encoded {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+    }
+    response
+}
+
+fn accepts_brotli(headers: &HeaderMap) -> bool {
+    let mut explicit = None;
+    let mut wildcard = None;
+    for value in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else { continue };
+        for coding in value.split(',') {
+            let mut parts = coding.split(';').map(str::trim);
+            let name = parts.next().unwrap_or("");
+            let quality = match parts.next() {
+                None => true,
+                Some(parameter) => parameter.split_once('=').is_some_and(|(key, value)| {
+                    let value = value.trim();
+                    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+                    key.trim().eq_ignore_ascii_case("q")
+                        && fraction.len() <= 3
+                        && fraction.bytes().all(|b| b.is_ascii_digit())
+                        && match whole {
+                            "0" => fraction.bytes().any(|b| b != b'0'),
+                            "1" => fraction.bytes().all(|b| b == b'0'),
+                            _ => false,
+                        }
+                }),
+            } && parts.next().is_none();
+            if name.eq_ignore_ascii_case("br") {
+                // A refusal wins over duplicate entries and wildcard acceptance.
+                explicit = Some(explicit.unwrap_or(true) && quality);
+            } else if name == "*" {
+                wildcard = Some(wildcard.unwrap_or(true) && quality);
+            }
+        }
+    }
+    explicit.or(wildcard).unwrap_or(false)
 }
 
 fn is_hashed_asset(name: &str) -> bool {
@@ -515,9 +568,17 @@ mod tests {
     use tower::ServiceExt;
 
     async fn get(path: &str) -> Response {
+        get_encoded(path, None).await
+    }
+
+    async fn get_encoded(path: &str, encoding: Option<&str>) -> Response {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@localhost/unused")
             .unwrap();
+        let mut request = Request::get(path);
+        if let Some(encoding) = encoding {
+            request = request.header(header::ACCEPT_ENCODING, encoding);
+        }
         app(AppState {
             pool,
             cookie_secure: true,
@@ -530,7 +591,7 @@ mod tests {
             ws_allowed_origins: Default::default(),
             socket_gate: Default::default(),
         })
-        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap()
     }
@@ -564,7 +625,7 @@ mod tests {
     #[tokio::test]
     async fn existing_assets_are_served_with_their_type() {
         let mut checked = 0;
-        for name in Assets::iter().filter(|n| n.starts_with("assets/")) {
+        for name in Assets::iter().filter(|n| n.starts_with("assets/") && !n.ends_with(".br")) {
             let res = get(&format!("/{name}")).await;
             assert_eq!(res.status(), StatusCode::OK, "{name}");
             assert!(!content_type(&res).starts_with("text/html"), "{name}");
@@ -574,6 +635,90 @@ mod tests {
             checked > 0,
             "web/dist has no assets; build the web app first"
         );
+    }
+
+    #[tokio::test]
+    async fn all_public_assets_negotiate_brotli_without_changing_mime_or_cache() {
+        let mut checked = 0;
+        for name in Assets::iter().filter(|n| !n.starts_with('.') && !n.ends_with(".br")) {
+            let raw = Assets::get(&name).unwrap().data;
+            let compressed = Assets::get(&format!("{name}.br"))
+                .expect("build Brotli assets first")
+                .data;
+            let identity = get(&format!("/{name}")).await;
+            let mime = content_type(&identity);
+            let cache = identity.headers()[header::CACHE_CONTROL].clone();
+            for (encoding, br) in [
+                (None, false),
+                (Some(""), false),
+                (Some("gzip, zstd"), false),
+                (Some("br"), true),
+                (Some("gzip, br;q=0.5"), true),
+                (Some("br;q=0, gzip"), false),
+                (Some("*;q=1, br;q=0"), false),
+                (Some("*;q=0.5"), true),
+                (Some("*;q=0"), false),
+                (Some("BR;Q=1.000"), true),
+                (Some("br;q=0.001"), true),
+                (Some("br;q=0.000"), false),
+                (Some("br;q=1.001"), false),
+                (Some("br;q=invalid"), false),
+                (Some("br, br;q=0"), false),
+                (Some("*;q=0, *;q=0.5"), false),
+            ] {
+                let response = get_encoded(&format!("/{name}"), encoding).await;
+                assert_eq!(response.status(), StatusCode::OK, "{name} {encoding:?}");
+                assert_eq!(content_type(&response), mime);
+                assert_eq!(response.headers()[header::CACHE_CONTROL], cache);
+                assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(header::CONTENT_ENCODING)
+                        .map(|v| v.to_str().unwrap()),
+                    br.then_some("br")
+                );
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    body.as_ref(),
+                    if br {
+                        compressed.as_ref()
+                    } else {
+                        raw.as_ref()
+                    }
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 0);
+        let root = get_encoded("/channels/general", Some("br")).await;
+        assert_eq!(root.headers()[header::CONTENT_ENCODING], "br");
+        assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
+        for path in [
+            "/.vite/manifest.json.br",
+            "/index.html.br",
+            "/assets/missing.wasm",
+        ] {
+            assert_eq!(
+                get_encoded(path, Some("br")).await.status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+    }
+
+    #[test]
+    fn brotli_negotiation_reads_repeated_header_fields() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        headers.append(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("br;q=0.5"),
+        );
+        assert!(accepts_brotli(&headers));
+        headers.append(header::ACCEPT_ENCODING, HeaderValue::from_static("br;q=0"));
+        assert!(!accepts_brotli(&headers));
     }
 
     #[tokio::test]
