@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { hash } from './manifest.ts';
-import { judge, summarize } from './summarize.ts';
+import { criteria, judge, summarize } from './summarize.ts';
 import { denialCases, probe } from './definer.ts';
 
 for (const mode of ['success','smoke-success','smoke-refused','smoke-mixed','tampered','missing-status','failed-cleanup','invalid-status','wrong-status-hash','missing-completed','missing-finished','wrong-completion-hash']) {
@@ -76,6 +76,11 @@ test('judgement: 500 ms p95 in every round, index use, completeness and denials;
   assert.equal(by(judge(runs(10),queries,undefined,ids),'trgm').status,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),undefined,definer,ids),'trgm').status,'NOT EVALUATED');
   assert.equal(by(judge(runs(10).filter(r=>r.round!==3),queries,definer,ids),'trgm').latency,'NOT EVALUATED');
+  // Every query in every round needs exactly the frozen 100 samples; a short (or padded) sample is not evidence.
+  const sampled = (n: unknown) => runs(10).map(r=>r.engine==='trgm'&&r.round===3?{...r,latencies:r.latencies.map((l,i)=>i===0?{...l,n:n as number}:l)}:r);
+  for (const n of [99,1,0,101,'100',undefined]) assert.equal(by(judge(sampled(n),queries,definer,ids),'trgm').latency,'NOT EVALUATED',String(n));
+  assert.equal(by(judge(sampled(99),queries,definer,ids),'bigm').latency,'PASS');
+  assert.equal(by(judge(sampled(100),queries,definer,ids),'trgm').latency,'PASS');
   // An explicitly listed rare query without a "rare" name is still gated.
   assert.equal(by(judge(runs(10,plans(['ja2-rare','ja3-rare'])),queries,definer,ids),'trgm').index,'FAIL');
   // A query list that is not the frozen manifest's, in full and in order, is not evidence.
@@ -114,4 +119,10 @@ test('judgement: 500 ms p95 in every round, index use, completeness and denials;
   // Denials need the current case list on every engine, the baseline included.
   assert.equal(by(judge(runs(10),queries,{...definer,cases:['a','b'],results:definer.results.map(r=>({...r,cases:4}))},ids),'trgm').denials,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries,{...definer,results:definer.results.filter(r=>r.engine!=='none')},ids),'trgm').denials,'NOT EVALUATED');
+});
+
+test('required samples per query and round equal the frozen manifest performance shape', () => {
+  const frozen = JSON.parse(readFileSync(new URL('./manifest-v2.json', import.meta.url), 'utf8')).frozen.performance;
+  assert.equal(frozen.clients*frozen.transactions, criteria.samplesPerQueryRound);
+  assert.equal(frozen.rounds, 3);
 });

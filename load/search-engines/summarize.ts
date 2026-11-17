@@ -15,7 +15,9 @@ type Status = 'PASS'|'FAIL'|'NOT EVALUATED';
 // Criteria fixed before the 1M re-measurement (#153, maintainer 2026-11-17); never changed after results.
 // Developer-Mac evidence (maintainer 2026-11-15), not a formal #431 budget; P2 production adoption stays held (#314).
 export const criteria = {p95LimitMs:500,
-  latency:'every query, every round: pgbench p95 at 5 clients <= 500 ms',
+  // Frozen performance shape: 5 clients x 20 transactions per query per round. Fewer (or more) is not evidence.
+  samplesPerQueryRound:100,
+  latency:'every query, every round: exactly 100 pgbench samples (5 clients x 20) and p95 <= 500 ms',
   index:'round 1 function-body plans: no Seq Scan on messages for any query; search_body used for every rare query at or above the engine minimum length',
   completeness:'round 1 completeness report equal to the reference scan (6 actors, owner index, direct access path, page order)',
   denials:'every definer denial case with its positive control passed, unforced and forced, on every engine',
@@ -58,7 +60,7 @@ export function judge(runs: JudgedRun[], rawQueries: unknown, definer: unknown, 
     const latencyOf = (r: JudgedRun, id: string) => objects<Latency>(r.latencies).find(l=>l.query===id);
     const lat = group.flatMap(r=>ids.map(id=>latencyOf(r,id)?.p95));
     const latency: Status = !ids.length || group.length!==3 || new Set(group.map(r=>r.round)).size!==3 || group.some(r=>!(r.round>=1 && r.round<=3)) ||
-      group.some(r=>ids.some(id=>!(Number(latencyOf(r,id)?.n) > 0))) || lat.some(p=>typeof p!=='number' || !Number.isFinite(p)) ? 'NOT EVALUATED'
+      group.some(r=>ids.some(id=>latencyOf(r,id)?.n!==criteria.samplesPerQueryRound)) || lat.some(p=>typeof p!=='number' || !Number.isFinite(p)) ? 'NOT EVALUATED'
       : lat.every(p=>p!<=criteria.p95LimitMs) ? 'PASS' : 'FAIL';
     const slow = group.flatMap(r=>objects<Latency>(r.latencies).filter(l=>typeof l.p95==='number' && l.p95>criteria.p95LimitMs)
       .map(l=>`round ${r.round} ${l.query} ${l.p95.toFixed(1)} ms`));
