@@ -24,7 +24,9 @@ mod delivery;
 pub mod dms;
 mod failure;
 mod limiter;
-mod log;
+pub(crate) mod log;
+pub(crate) use log::ChannelEvent;
+pub use log::list_channel_events;
 mod mentions;
 pub mod receipts;
 pub use fukulow_api::{ListMessagesQuery, Mention, Message, MessagePage, SendMessageRequest};
@@ -58,18 +60,22 @@ fn message_from_row(row: &sqlx::postgres::PgRow) -> Result<Message, sqlx::Error>
     Ok(Message {
         id: row.try_get("id")?,
         channel_id: row.try_get("channel_id")?,
-        seq: row.try_get("seq")?,
+        created_seq: row.try_get("seq")?,
+        version: row.try_get("version")?,
+        deleted: false,
         client_message_id: row.try_get("client_message_id")?,
         sender: row.try_get("sender")?,
-        body: row.try_get("body")?,
+        body: Some(row.try_get("body")?),
         created_at: row.try_get("created_at")?,
         topic_id: row.try_get("topic_id")?,
         reply_to: row.try_get("reply_to")?,
         reply_root_id: row.try_get("reply_root_id")?,
-        mentions: serde_json::from_str(&mentions).map_err(|error| sqlx::Error::ColumnDecode {
-            index: "mentions".into(),
-            source: Box::new(error),
-        })?,
+        mentions: Some(serde_json::from_str(&mentions).map_err(|error| {
+            sqlx::Error::ColumnDecode {
+                index: "mentions".into(),
+                source: Box::new(error),
+            }
+        })?),
     })
 }
 
@@ -114,12 +120,12 @@ pub async fn list_messages(
         tests::membership::pause_history(channel_id).await;
         let ascending = query.after_seq.is_some();
         let sql = if ascending {
-            "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+            "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 \
              ORDER BY seq ASC LIMIT $4"
         } else {
-            "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+            "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 \
                AND seq <= $3 ORDER BY seq DESC LIMIT $4"
@@ -535,7 +541,7 @@ async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
 ) -> Result<Option<(Message, bool)>, sqlx::Error> {
     use sqlx::Row;
     sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+        "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, \
          send_digest = fukulow_send_digest($4, $5, lower($6 COLLATE \"C\"), $7) AS same_intent \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
@@ -560,7 +566,7 @@ async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     client_message_id: Uuid,
 ) -> Result<Option<Message>, sqlx::Error> {
     sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+        "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
         "p.seq",
@@ -703,7 +709,7 @@ async fn persist_admitted(
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
-         RETURNING id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+         RETURNING id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions",
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
         .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).try_map(|row| message_from_row(&row))
@@ -714,7 +720,8 @@ async fn persist_admitted(
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
         // connected subscribers silently missing a possibly committed message.
-        let mut notification = delivery.notification(organization_id, channel_id, message.seq);
+        let mut notification =
+            delivery.notification(organization_id, channel_id, message.created_seq);
         if let Err(error) = commit::finish(tx, input.client_message_id).await {
             if commit::definitely_rolled_back(&error) {
                 notification.complete();
@@ -726,7 +733,7 @@ async fn persist_admitted(
             organization_id,
             channel_id,
             sender,
-            message.seq,
+            message.created_seq,
         );
         notification.spawn(pool.clone(), message.clone());
         return Ok(message);

@@ -31,7 +31,7 @@ export function unreadClient(sendMessage?: TimelineApi['sendMessage']) {
       const items = history.filter(m => m.topic_id === null).map(message => ({ kind: 'message' as const, message: { ...message, channel_id: channel } }))
       return ok({ as_of_seq: 3, has_more: false, items: [...items,
         ...[...summaries.values()].map(topic => ({ kind: 'topic' as const, topic: { ...topic, latest_message: { ...topic.latest_message, channel_id: channel } } }))].sort((a, b) =>
-        (a.kind === 'message' ? a.message.seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.seq : b.topic.last_seq)) })
+        (a.kind === 'message' ? a.message.created_seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.created_seq : b.topic.last_seq)) })
     }),
     listTopics: vi.fn<TopicsApi['listTopics']>(async () => ok({ as_of_seq: 3, has_more: false, topics: [...summaries.values()] })),
     getTopicSummary: unreadApi.getTopicSummary,
@@ -40,13 +40,13 @@ export function unreadClient(sendMessage?: TimelineApi['sendMessage']) {
   const onSessionEnded = vi.fn()
   const c = createUnreadSync({ selfId: 'me', organizationId: 'org', unreadApi, topicsApi, requestTimeoutMs: 1000, onSessionEnded,
     random: () => 0.5,
-    api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
+    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
     connect(h) { handlers.push(h); return { send() {}, close() {} } },
   })
   return { ...c, history, rows, summaries, unreadApi, topicsApi, handlers, onSessionEnded,
     async boot() { await c.sync.start(); handlers[0].onReady(); await c.sync.watch('A'); await flush()
       handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 3 }); await flush() },
-    event(m: Message) { handlers.at(-1)!.onEvent({ type: 'message', message: m }) },
+    event(m: Message) { handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (m).created_seq, message: m }) },
     async enter(topicId: string | null = null) { if (topicId) await c.topics.loadTopic('A', topicId)
       c.unread.visibility(true); const id = await c.unread.enter({ channel: 'A', topicId }); await flush(); return id! },
     async present(seqs: number[], topicId: string | null = null) { const id = await this.enter(topicId); c.unread.presented(id, seqs); await flush(); return id },

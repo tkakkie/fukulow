@@ -42,7 +42,7 @@
             "respond_to": "A_f",
             "messages": [
               {
-                "seq": 2
+                "created_seq": 2
               }
             ],
             "has_more": true
@@ -88,7 +88,7 @@
             "respond_to": "B_f",
             "messages": [
               {
-                "seq": 2
+                "created_seq": 2
               }
             ],
             "has_more": true
@@ -202,7 +202,7 @@
             "respond_to": "older",
             "messages": [
               {
-                "seq": 1
+                "created_seq": 1
               }
             ],
             "has_more": false
@@ -223,7 +223,7 @@
             "type": "ack",
             "respond_to": "send",
             "message": {
-              "seq": 3,
+              "created_seq": 3,
               "client_message_id": "pending",
               "sender": "me"
             }
@@ -261,9 +261,7 @@
         {
           "input": {
             "type": "message",
-            "channel": "B",
-            "message": {
-              "seq": 3
+            "channel": "B","seq":3,"kind":"create","message":{"created_seq":3
             }
           },
           "observe": {
@@ -337,7 +335,7 @@
             "respond_to": "A_f",
             "messages": [
               {
-                "seq": 2
+                "created_seq": 2
               }
             ],
             "has_more": true
@@ -383,7 +381,7 @@
             "respond_to": "B_f",
             "messages": [
               {
-                "seq": 2
+                "created_seq": 2
               }
             ],
             "has_more": true

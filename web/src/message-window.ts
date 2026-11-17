@@ -2,7 +2,7 @@ import type { Message } from './api'
 
 export function trimMessages<K>(records: Map<K, Message>, limit: number, edge: 'older' | 'newer' = 'newer') {
   if (records.size <= limit) return false
-  const sorted = [...records].sort((a, b) => a[1].seq - b[1].seq)
+  const sorted = [...records].sort((a, b) => a[1].created_seq - b[1].created_seq)
   const removed = edge === 'older' ? sorted.slice(limit) : sorted.slice(0, -limit)
   for (const [key] of removed) records.delete(key)
   return true
@@ -41,10 +41,10 @@ export function countSequencesAfter(ranges: SequenceRange[], seq: number) {
 }
 export function rememberTopicMessages(evidence: TopicEvidence, messages: Iterable<Message>) {
   for (const m of messages) {
-    if (!m.topic_id || m.seq <= evidence.floor) continue
+    if (!m.topic_id || m.created_seq <= evidence.floor) continue
     let seqs = evidence.sequences.get(m.topic_id)
     if (!seqs) evidence.sequences.set(m.topic_id, seqs = [])
-    rememberSequence(seqs, m.seq)
+    rememberSequence(seqs, m.created_seq)
   }
 }
 

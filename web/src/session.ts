@@ -65,6 +65,7 @@ export function createSession(options: SessionOptions) {
     createChannel: body => api.createChannel(organizationId, body),
   }
   const timeline = options.sync?.api ?? {
+    listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
     listMessages: (channel, query) => api.listMessages(organizationId, channel, query),
     sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
   } satisfies NonNullable<SyncOptions['api']>
@@ -73,7 +74,8 @@ export function createSession(options: SessionOptions) {
   const unreadSource = options.unreadApi ?? unreadApi(organizationId)
   const topicComposition = createTopicSync({ ...options.sync, activity, selfId: options.selfId, organizationId,
     isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
-    api: { listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
+    api: { listChannelEvents: (channel, query) => observe(timeline.listChannelEvents(channel, query)),
+      listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: async (channel, body) => {
         const result = await observe(timeline.sendMessage(channel, body))
         if (!closed && !unavailable) dms?.peerRefusal(channel, result)

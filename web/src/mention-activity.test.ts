@@ -19,7 +19,7 @@ function client() {
       listTopicMessages: async () => ok({ messages: [], has_more: false }),
     },
     sync: { random: () => 0.5, connect(h) { socket = h; return { send() {}, close() {} } },
-      api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
     },
   })
   return { session, listChannels, get socket() { return socket },

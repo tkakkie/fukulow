@@ -21,7 +21,7 @@ it('429 retries the full request after each header delay without an early send',
       .mockResolvedValueOnce(new Response('{"error":"send_rate_limited"}', { status: 429, headers: { 'Retry-After': '2' } }))
       .mockResolvedValueOnce(new Response('{"error":"send_rate_limited"}', { status: 429, headers: { 'Retry-After': '4' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify(message), { status: 201 }))
-    const client = controllerClient({ newId: () => 'c1', api: {
+    const client = controllerClient({ newId: () => 'c1', api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
       listMessages: (channel, query) => api.listMessages('o', channel, query, fetcher),
       sendMessage: (channel, body) => api.sendMessage('o', channel, body, fetcher),
     } })
@@ -79,7 +79,7 @@ it('controller cancels throttled retry on settlement, discard, denial, lifecycle
     const wait = effects.find(e => e.type === 'wait')!
     const own = { ...record(99), sender: 'me', client_message_id: 'c1' }
     const t = client.sync.getTimeline('A')
-    if (end === 'echo') await client.feed({ type: 'message', channel: 'A', message: own })
+    if (end === 'echo') await client.feed({ type: 'message', kind: 'create', seq: (own).created_seq, channel: 'A', message: own })
     else if (end === 'projection') await client.sync.settleHistory('A', [own])
     else if (end === 'latest' || end === 'older' || end === 'history 403' || end === 'history 404') {
       const history = (await client.feed({ type: end === 'older' ? 'load_older' : 'refresh', channel: 'A' }))

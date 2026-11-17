@@ -220,7 +220,7 @@ test('Channel access loss: removing a Guest explicit grant on a public Channel (
     expect(
       controlWsObs.receivedEvents.some((e) => e.type === 'message' && e.channel_id === targetPublic.id),
     ).toBe(false)
-    await expect(guestPage.locator('#main-content').getByText(postAfterRevokeWhileOpen.body)).toHaveCount(0)
+    await expect(guestPage.locator('#main-content').getByText(postAfterRevokeWhileOpen.body!)).toHaveCount(0)
 
     // Switch guestPage to controlPublic on the same socket, await Owner's targetPublic frame, then drain guestPage's socket with a control Message.
     await guestPage.locator('#channel-content .channel-list button').filter({ hasText: controlPublic.name }).click()

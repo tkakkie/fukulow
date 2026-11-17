@@ -37,7 +37,7 @@ page AS MATERIALIZED (
     ORDER BY last_seq DESC LIMIT $7
 )
 SELECT access.visible, w.as_of_seq, p.first_seq, p.last_seq,
-    p.message_count, p.read_seq, p.unread_count, mc.mention_unread_count, t.name, m.id, m.channel_id, m.seq, m.client_message_id,
+    p.message_count, p.read_seq, p.unread_count, mc.mention_unread_count, t.name, m.id, m.channel_id, m.seq, m.version, m.client_message_id,
     m.sender, m.body, m.topic_id, m.reply_to_id AS reply_to, m.reply_root_id,
     to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
 FROM access CROSS JOIN w LEFT JOIN page p ON true

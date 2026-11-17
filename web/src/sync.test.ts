@@ -103,7 +103,7 @@ it('injected reconnect randomness never changes deterministic fill backoff', asy
   const random = vi.fn(() => 0.125)
   const client = controllerClient({ random })
   await ready(client)
-  const grace = (await client.feed({ type: 'message', channel: 'A', message: record(102) })).find(e => e.type === 'wait')!
+  const grace = (await client.feed({ type: 'message', kind: 'create', seq: (record(102)).created_seq, channel: 'A', message: record(102) })).find(e => e.type === 'wait')!
   const fill = (await client.feed({ type: 'timer_elapsed', respond_to: grace })).find(e => e.type === 'fetch_history')!
   const wait = (await client.feed({ type: 'history_failed', respond_to: fill, status: 'network' })).find(e => e.type === 'wait')!
   expect(wait).toMatchObject({ purpose: 'fill_backoff', ms: 500 })
@@ -119,7 +119,7 @@ it('controller keeps admission 503 retryable and retries manually with the same 
       status: 503, headers: { 'Retry-After': '3' },
     }))
     .mockResolvedValueOnce(new Response(JSON.stringify(message), { status: 201 }))
-  const client = controllerClient({ api: {
+  const client = controllerClient({ api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
     listMessages: (channel, query) => api.listMessages('o', channel, query, fetchMock),
     sendMessage: (channel, body) => api.sendMessage('o', channel, body, fetchMock),
   } })
@@ -161,8 +161,8 @@ it('controller resumes from the pre-ack cursor after a lost echo and replay conv
   expect(await client.feed({ type: 'connection_ready' })).toContainEqual(
     expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }),
   )
-  await client.feed({ type: 'message', channel: 'A', message })
-  await client.feed({ type: 'message', channel: 'A', message })
+  await client.feed({ type: 'message', kind: 'create', seq: (message).created_seq, channel: 'A', message })
+  await client.feed({ type: 'message', kind: 'create', seq: (message).created_seq, channel: 'A', message })
   await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 101 })
   expect(client.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, pending: [] })
   expect(timeline.get()).toMatchObject({ status: 'ready', messages: [record(100), message], pending: [] })
@@ -179,8 +179,8 @@ it('controller ignores malformed wire events and processes later valid events on
   await client.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: true })
   const snapshot = client.sync.get()
   for (const event of [
-    { type: 'message' }, { type: 'message', message: null }, { type: 'message', message: {} },
-    { type: 'message', message: { ...record(101), seq: '101' } },
+    { type: 'message' }, { type: 'message', kind: 'create', seq: 101, message: null }, { type: 'message', kind: 'create', seq: 101, message: {} },
+    { type: 'message', kind: 'create', seq: ({ ...record(101), created_seq: '101' }).created_seq, message: { ...record(101), created_seq: '101' } },
     { type: 'subscribed', channel_id: 'A' },
     { type: 'subscribed', channel_id: 'A', caught_up_seq: '100' },
     { type: 'error', channel_id: 'A' },
@@ -192,7 +192,7 @@ it('controller ignores malformed wire events and processes later valid events on
   }
   expect(socket.close).not.toHaveBeenCalled()
   socket.onmessage?.({ data: JSON.stringify({ type: 'subscribed', channel_id: 'A', caught_up_seq: 100 }) })
-  socket.onmessage?.({ data: JSON.stringify({ type: 'message', message: record(101) }) })
+  socket.onmessage?.({ data: JSON.stringify({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) }) })
   await flush()
   expect(client.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, messages: [record(100), record(101)] })
   expect(client.sync.get().connected).toBe(true)
@@ -209,7 +209,7 @@ it('controller rejects saved callbacks from closed connections and cancelled rec
   await client.feed({ type: 'timer_elapsed', respond_to: wait })
   await client.feed({ type: 'connection_ready' })
   const snapshot = client.sync.get()
-  old.onReady(); old.onClose(4001); old.onEvent({ type: 'message', message: record(999) })
+  old.onReady(); old.onClose(4001); old.onEvent({ type: 'message', kind: 'create', seq: (record(999)).created_seq, message: record(999) })
   await client.feed({ type: 'timer_elapsed', respond_to: wait })
   expect(client.sync.get()).toEqual(snapshot)
   expect(client.sockets).toHaveLength(2)
@@ -223,13 +223,13 @@ it('controller fences prior Organization/session HTTP, socket and timer work inc
   await ready(client)
   const old = client.sockets[0]
   const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })).find(e => e.type === 'send')!
-  const grace = (await client.feed({ type: 'message', channel: 'A', message: record(103) })).find(e => e.type === 'wait')!
+  const grace = (await client.feed({ type: 'message', kind: 'create', seq: (record(103)).created_seq, channel: 'A', message: record(103) })).find(e => e.type === 'wait')!
   const history = (await client.feed({ type: 'refresh', channel: 'A' })).find(e => e.type === 'fetch_history')!
   await client.sync.replaceSession('new-member')
   await flush()
   expect(send.completed).toBe(false)
   expect(history.completed).toBe(false)
-  old.onClose(4001); old.onReady(); old.onEvent({ type: 'message', message: record(999) })
+  old.onClose(4001); old.onReady(); old.onEvent({ type: 'message', kind: 'create', seq: (record(999)).created_seq, message: record(999) })
   await client.feed({ type: 'send_failed', respond_to: send, status: 401 })
   await client.feed({ type: 'history_result', respond_to: history, messages: [record(999)], has_more: false })
   expect(send.completed).toBe(true)
@@ -255,7 +255,7 @@ it('request timeout becomes unknown and same-key retry settles; late completion 
   await client.feed({ type: 'send_failed', respond_to: first, status: 413 })
   expect(first.completed).toBe(true)
   expect(client.sync.get().channels.A.pending).toEqual([])
-  expect(client.sync.get().channels.A.messages.at(-1)?.seq).toBe(101)
+  expect(client.sync.get().channels.A.messages.at(-1)?.created_seq).toBe(101)
   await client.sync.close()
   expect(vi.getTimerCount()).toBe(0)
 })
@@ -279,13 +279,13 @@ it.each([400, 403, 404, 409, 413, 415, 402, 408, 422, 499, 500])(
 it('scheduled grace and fill backoff execute with fake time, without overlap or tight retries', async () => {
   const client = controllerClient({ graceMs: 40, delay: n => 80 * (n + 1) })
   await ready(client)
-  await client.feed({ type: 'message', channel: 'A', message: record(103) })
+  await client.feed({ type: 'message', kind: 'create', seq: (record(103)).created_seq, channel: 'A', message: record(103) })
   const fills = () => client.allEffects.filter(e => e.type === 'fetch_history' && e.page === 'after')
   await vi.advanceTimersByTimeAsync(39)
   expect(fills()).toHaveLength(0)
   await vi.advanceTimersByTimeAsync(1)
   expect(fills()).toHaveLength(1)
-  await client.feed({ type: 'message', channel: 'A', message: record(104) })
+  await client.feed({ type: 'message', kind: 'create', seq: (record(104)).created_seq, channel: 'A', message: record(104) })
   await client.feed({ type: 'history_failed', respond_to: fills()[0], status: 'network' })
   await vi.advanceTimersByTimeAsync(79)
   expect(fills()).toHaveLength(1)
@@ -300,7 +300,7 @@ it('scheduled grace and fill backoff execute with fake time, without overlap or 
 it('history timeout backs off, and shutdown cancels every protocol and request timer', async () => {
   const client = controllerClient({ requestTimeoutMs: 1000 })
   await ready(client)
-  const grace = (await client.feed({ type: 'message', channel: 'A', message: record(103) })).find(e => e.type === 'wait')!
+  const grace = (await client.feed({ type: 'message', kind: 'create', seq: (record(103)).created_seq, channel: 'A', message: record(103) })).find(e => e.type === 'wait')!
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
   await vi.advanceTimersByTimeAsync(1000)
   expect(client.allEffects.some(e => e.type === 'wait' && e.purpose === 'fill_backoff')).toBe(true)
@@ -475,7 +475,7 @@ it('controller clamp preserves refusals and same-key retries while fencing old s
   await client.feed({ type: 'history_result', respond_to: latest, messages: [record(60)], has_more: true })
   expect(client.sync.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
     .toEqual([['failed', 'failed'], ['unknown', 'failed'], ['old', 'unknown']])
-  expect(client.sync.get().channels.A.messages.map(m => m.seq)).toEqual([60, 61])
+  expect(client.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([60, 61])
   await client.sync.close()
 })
 
@@ -538,7 +538,7 @@ it('controller notifies only changed Channels and preserves unrelated timeline s
   a.subscribe(changed)
   b.subscribe(unrelated)
   const before = client.sync.get(), snapshot = b.get()
-  await client.feed({ type: 'message', channel: 'A', message: record(101) })
+  await client.feed({ type: 'message', kind: 'create', seq: (record(101)).created_seq, channel: 'A', message: record(101) })
   expect(client.sync.get().channels.B).toBe(before.channels.B)
   expect(b.get()).toBe(snapshot)
   expect(b.get().messages).toBe(snapshot.messages)
@@ -547,7 +547,7 @@ it('controller notifies only changed Channels and preserves unrelated timeline s
   expect(changed).toHaveBeenCalledTimes(1)
   expect(unrelated).not.toHaveBeenCalled()
   const after = client.sync.get(), aSnapshot = a.get()
-  await client.feed({ type: 'message', channel: 'A', message: { ...record(101) } })
+  await client.feed({ type: 'message', kind: 'create', seq: ({ ...record(101) }).created_seq, channel: 'A', message: { ...record(101) } })
   await client.feed({ type: 'watch', channel: 'A' })
   await client.feed({ type: 'user_retry', channel: 'A', client_message_id: 'absent' })
   await client.feed({ type: 'user_discard', channel: 'A', client_message_id: 'absent' })
@@ -569,21 +569,21 @@ it('controller incremental history merge preserves canonical records and pending
   await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'keep', body: 'keep' })
   const keep = client.sync.get().channels.A.pending[1]
   const older = (await client.feed({ type: 'load_older', channel: 'A' })).find(e => e.type === 'fetch_history')!
-  const canonical = { ...record(99), sender: 'me', client_message_id: 'match', body: 'canonical' }
+  const canonical = { ...record(99), version: 200, sender: 'me', client_message_id: 'match', body: 'canonical' }
   await client.feed({ type: 'history_result', respond_to: older, messages: [record(99), record(97), canonical, record(98)], has_more: false })
   expect(client.sync.get().channels.A.messages).toEqual([record(97), record(98), canonical, record(100)])
   expect(client.sync.get().channels.A.pending).toEqual([keep])
   expect(client.sync.get().channels.A.pending[0]).toBe(keep)
   expect(client.sync.get().channels.A.cursor).toBe(100)
-  await client.feed({ type: 'message', channel: 'A', message: record(103) })
+  await client.feed({ type: 'message', kind: 'create', seq: (record(103)).created_seq, channel: 'A', message: record(103) })
   const grace = client.allEffects.at(-1)!
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
   const fill = client.allEffects.at(-1)!
-  await client.feed({ type: 'message', channel: 'A', message: record(101) })
+  await client.feed({ type: 'message', kind: 'create', seq: (record(101)).created_seq, channel: 'A', message: record(101) })
   await client.feed({ type: 'history_result', respond_to: fill,
     messages: [record(103), record(102), record(101), record(103)], has_more: false })
   expect(client.sync.get().channels.A.cursor).toBe(103)
-  expect(client.sync.get().channels.A.messages.map(m => m.seq)).toEqual([97, 98, 99, 100, 101, 102, 103])
+  expect(client.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([97, 98, 99, 100, 101, 102, 103])
   expect(client.sync.get().channels.A.pending[0]).toBe(keep)
   await client.sync.close()
 })
@@ -657,14 +657,14 @@ it('controller skips unchanged Channels during olderError bookkeeping and keeps 
   }
 
   trackChannels()
-  await client.feed({ type: 'message', channel: 'A', message: record(101) })
+  await client.feed({ type: 'message', kind: 'create', seq: (record(101)).created_seq, channel: 'A', message: record(101) })
   trackChannels()
   const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'hi' }))
     .find(e => e.type === 'send')!
   trackChannels()
   await client.feed({ type: 'ack', respond_to: send, message: { ...record(102), sender: 'me', client_message_id: 'c1', body: 'hi' } })
   trackChannels()
-  const grace = (await client.feed({ type: 'message', channel: 'A', message: record(104) })).find(e => e.type === 'wait')!
+  const grace = (await client.feed({ type: 'message', kind: 'create', seq: (record(104)).created_seq, channel: 'A', message: record(104) })).find(e => e.type === 'wait')!
   trackChannels()
   await client.feed({ type: 'timer_elapsed', respond_to: grace })
 
@@ -799,7 +799,7 @@ it('ignores access loss after unwatch without reconnecting', async () => {
       expect(socket.closed).toBe(false)
       await vi.advanceTimersByTimeAsync(60_000)
       expect(client.sockets).toHaveLength(1)
-      await client.feed({ type: 'message', channel: 'B', message: record(2, 'B') })
+      await client.feed({ type: 'message', kind: 'create', seq: (record(2, 'B')).created_seq, channel: 'B', message: record(2, 'B') })
       expect(client.sync.get().channels.B).toMatchObject({ state: 'ready', cursor: 2 })
     } finally {
       await client.sync.close()

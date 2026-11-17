@@ -64,7 +64,7 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
         canonical
     );
     delivery.flush().await;
-    assert_eq!(queue.events.try_recv().unwrap().seq, 1);
+    assert_eq!(queue.events.try_recv().unwrap().created_seq, 1);
     assert!(queue.events.try_recv().is_err());
     // Deferred failure runs at COMMIT, after the summary was updated.
     sqlx::query("CREATE FUNCTION reject_topic_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
@@ -98,13 +98,13 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
         .unwrap();
     for (index, input) in retries.into_iter().enumerate() {
         let canonical = sent(&app, &token, channel, input.clone()).await;
-        assert_eq!(canonical["seq"], index as i64 + 2);
+        assert_eq!(canonical["created_seq"], index as i64 + 2);
         assert_eq!(sent(&app, &token, channel, input).await, canonical);
     }
     assert_eq!(counts(&pool, org, channel).await, (2, 3, 3));
     delivery.flush().await;
     for seq in 2..=3 {
-        assert_eq!(queue.events.try_recv().unwrap().seq, seq);
+        assert_eq!(queue.events.try_recv().unwrap().created_seq, seq);
     }
     assert!(queue.events.try_recv().is_err());
 }
@@ -391,6 +391,6 @@ async fn topic_migration_preserves_existing_messages_as_null(pool: PgPool) {
         topic_input(Uuid::new_v4(), "After migration"),
     )
     .await;
-    assert_eq!(new["seq"], 2);
+    assert_eq!(new["created_seq"], 2);
     assert!(new["topic_id"].is_string());
 }

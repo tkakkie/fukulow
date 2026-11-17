@@ -21,16 +21,16 @@
         {"do":"post","as":"alice","channel":"general","topic_name":"T1"},
         {"do":"subscribe","socket":"s","channel":"general","after_seq":0},
         {"do":"expect","socket":"s","events":[{"type":"message","channel":"general","seqs":[{"from":1,"to":10}]},{"type":"subscribed","channel":"general","caught_up_seq":10}]},
-        {"do":"main_timeline","as":"alice","channel":"general","query":{"limit":3},"expect":{"status":200,"as_of_seq":10,"items":[{"kind":"message","message":{"seq":8}},{"kind":"topic","topic":{"name":"T4","last_seq":9,"message_count":1}},{"kind":"topic","topic":{"name":"T1","last_seq":10,"message_count":3}}],"has_more":true}},
+        {"do":"main_timeline","as":"alice","channel":"general","query":{"limit":3},"expect":{"status":200,"as_of_seq":10,"items":[{"kind":"message","message":{"created_seq":8}},{"kind":"topic","topic":{"name":"T4","last_seq":9,"message_count":1}},{"kind":"topic","topic":{"name":"T1","last_seq":10,"message_count":3}}],"has_more":true}},
         {"do":"post","as":"alice","channel":"general","topic_name":"T2"},
         {"do":"post","as":"alice","channel":"general","topic_name":"T5"},
         {"do":"post","as":"alice","channel":"general","topic_name":"T3"},
         {"do":"post","as":"alice","channel":"general","topic_name":"T4"},
         {"do":"post","as":"alice","channel":"general"},
         {"do":"expect","socket":"s","events":[{"type":"message","channel":"general","seqs":[{"from":11,"to":15}]}]},
-        {"do":"main_timeline","as":"alice","channel":"general","query":{"as_of_seq":10,"before_position":8,"limit":3},"expect":{"status":200,"as_of_seq":10,"items":[{"kind":"message","message":{"seq":4}},{"kind":"topic","topic":{"name":"T3","last_seq":5,"message_count":1}},{"kind":"topic","topic":{"name":"T2","last_seq":7,"message_count":2}}],"has_more":true}},
-        {"do":"main_timeline","as":"alice","channel":"general","query":{"as_of_seq":10,"before_position":4,"limit":3},"expect":{"status":200,"as_of_seq":10,"items":[{"kind":"message","message":{"seq":1}}],"has_more":false}},
-        {"do":"main_timeline","as":"alice","channel":"general","query":{"limit":3},"expect":{"status":200,"as_of_seq":15,"items":[{"kind":"topic","topic":{"name":"T3","last_seq":13,"message_count":2}},{"kind":"topic","topic":{"name":"T4","last_seq":14,"message_count":2}},{"kind":"message","message":{"seq":15}}],"has_more":true}}
+        {"do":"main_timeline","as":"alice","channel":"general","query":{"as_of_seq":10,"before_position":8,"limit":3},"expect":{"status":200,"as_of_seq":10,"items":[{"kind":"message","message":{"created_seq":4}},{"kind":"topic","topic":{"name":"T3","last_seq":5,"message_count":1}},{"kind":"topic","topic":{"name":"T2","last_seq":7,"message_count":2}}],"has_more":true}},
+        {"do":"main_timeline","as":"alice","channel":"general","query":{"as_of_seq":10,"before_position":4,"limit":3},"expect":{"status":200,"as_of_seq":10,"items":[{"kind":"message","message":{"created_seq":1}}],"has_more":false}},
+        {"do":"main_timeline","as":"alice","channel":"general","query":{"limit":3},"expect":{"status":200,"as_of_seq":15,"items":[{"kind":"topic","topic":{"name":"T3","last_seq":13,"message_count":2}},{"kind":"topic","topic":{"name":"T4","last_seq":14,"message_count":2}},{"kind":"message","message":{"created_seq":15}}],"has_more":true}}
       ]
     }
   ]

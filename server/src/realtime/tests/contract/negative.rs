@@ -485,7 +485,7 @@ async fn timeline_contract_rejects_incorrect_pages(pool: PgPool) {
             }
             _ => {
                 spec.expect.items[1] = TimelineItem::Message {
-                    message: TimelineMessage { seq: 9 },
+                    message: TimelineMessage { created_seq: 9 },
                 }
             }
         }

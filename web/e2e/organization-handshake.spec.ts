@@ -42,7 +42,7 @@ async function fixture(
     const retainedMessage = {
       id: '00000000-0000-0000-0000-000000000004',
       channel_id: channel,
-      seq: 1,
+      created_seq: 1, version: 1, deleted: false,
       sender: member,
       client_message_id: '00000000-0000-0000-0000-000000000005',
       mentions: [],

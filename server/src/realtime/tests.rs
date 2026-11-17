@@ -590,7 +590,7 @@ async fn live_delivery_denies_other_organization_and_private_nonmember_with_posi
     let secret = post(&f, private).await;
     assert_eq!(
         event(&mut authorized).await,
-        json!({"type":"message","message":secret})
+        json!({"type":"message","seq":secret["created_seq"],"kind":"create","message":secret})
     );
     let public = post(&f, f.channel).await;
     assert_eq!(event(&mut nonmember).await["message"], public);
@@ -676,7 +676,7 @@ async fn replay_missing_message_state_closes_without_hiding_log_position(pool: P
     closed(&mut socket, 1011).await;
     let mut recovered = f.server.connect(&f.token).await;
     subscribe(&mut recovered, f.channel, 1).await;
-    assert_eq!(event(&mut recovered).await["message"]["seq"], 2);
+    assert_eq!(event(&mut recovered).await["message"]["created_seq"], 2);
     ready(&mut recovered, f.channel, 2).await;
 }
 
@@ -705,12 +705,12 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
         let value = event(&mut socket).await;
         assert_eq!(value["type"], "message");
         assert_eq!(value["message"]["channel_id"], json!(f.channel));
-        assert_eq!(value["message"]["seq"], seq);
+        assert_eq!(value["message"]["created_seq"], seq);
     }
     ready(&mut socket, f.channel, 125).await;
     subscribe(&mut socket, second, 4).await;
     for seq in 5..=9 {
-        assert_eq!(event(&mut socket).await["message"]["seq"], seq);
+        assert_eq!(event(&mut socket).await["message"]["created_seq"], seq);
     }
     ready(&mut socket, second, 9).await;
     drop(socket);
@@ -721,7 +721,7 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
         subscribe(&mut reconnect, channel, last).await;
         let replay = event(&mut reconnect).await;
         assert_eq!(replay["message"]["channel_id"], json!(channel));
-        assert_eq!(replay["message"]["seq"], next);
+        assert_eq!(replay["message"]["created_seq"], next);
         ready(&mut reconnect, channel, next).await;
     }
     silent(&mut reconnect).await;
@@ -782,7 +782,7 @@ async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(po
     let mut reconnect = f.server.connect(&f.token).await;
     subscribe(&mut reconnect, f.channel, 0).await;
     for seq in 1..=258 {
-        assert_eq!(event(&mut reconnect).await["message"]["seq"], seq);
+        assert_eq!(event(&mut reconnect).await["message"]["created_seq"], seq);
     }
     ready(&mut reconnect, f.channel, 258).await;
 }
@@ -981,7 +981,7 @@ async fn concurrent_message_delivery_is_in_channel_sequence_order(pool: PgPool) 
         });
     }
     for seq in 1..=32 {
-        assert_eq!(event(&mut socket).await["message"]["seq"], seq);
+        assert_eq!(event(&mut socket).await["message"]["created_seq"], seq);
     }
     while let Some(result) = tasks.join_next().await {
         result.unwrap();
@@ -1108,11 +1108,11 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
         .unwrap()
         .forget();
     let second = post(&f, f.channel).await;
-    assert_eq!(second["seq"], 2);
+    assert_eq!(second["created_seq"], 2);
     // seq 2 publishes first; fan-out recovers the prefix once for all subscribers.
     for socket in &mut sockets {
         let one = event(socket).await;
-        assert_eq!(one["message"]["seq"], 1);
+        assert_eq!(one["message"]["created_seq"], 1);
         assert_eq!(one["message"]["client_message_id"], json!(key));
         assert_eq!(event(socket).await["message"], second);
     }
@@ -1207,3 +1207,46 @@ mod round_trips;
 mod shared_frame;
 
 mod activity;
+
+#[fukulow_test::test]
+async fn create_envelope_keeps_log_position_when_replay_hydrates_a_newer_version(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let mut live = f.server.connect(&f.token).await;
+    subscribe(&mut live, f.channel, 0).await;
+    ready(&mut live, f.channel, 0).await;
+    let original = post(&f, f.channel).await;
+    let received = event(&mut live).await;
+    assert_eq!(
+        received,
+        json!({"type":"message","seq":1,"kind":"create","message":original})
+    );
+    assert_eq!(original["created_seq"], 1);
+    assert_eq!(original["version"], 1);
+    assert_eq!(original["deleted"], false);
+    assert!(original.get("seq").is_none());
+    live.close(None).await.unwrap();
+    // Stand in for a future mutation; this test exercises hydration, not a mutation writer.
+    sqlx::query("UPDATE messages SET version=7, body='current state' WHERE organization_id=$1 AND channel_id=$2")
+        .bind(f.organization).bind(f.channel).execute(&pool).await.unwrap();
+    let mut replay = f.server.connect(&f.token).await;
+    subscribe(&mut replay, f.channel, 0).await;
+    let hydrated = event(&mut replay).await;
+    assert_eq!(hydrated["seq"], 1);
+    assert_eq!(hydrated["kind"], "create");
+    assert_eq!(hydrated["message"]["created_seq"], 1);
+    assert_eq!(hydrated["message"]["version"], 7);
+    assert_eq!(hydrated["message"]["body"], "current state");
+    ready(&mut replay, f.channel, 1).await;
+    let response = request(
+        &f.app,
+        "GET",
+        &format!("/api/v1/channels/{}/messages", f.channel),
+        &f.token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+    assert_eq!(history["messages"][0], hydrated["message"]);
+}

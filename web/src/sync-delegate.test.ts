@@ -71,7 +71,7 @@ it('delegate stays loading without a bootstrap base even with an acknowledgement
   await client.feed({ type: 'ack', respond_to: send, message: { ...record(1), sender: 'me', client_message_id: 'c1' } })
   expect(t.get().status).toBe('loading')
   await client.feed({ type: 'history_result', respond_to: history, messages: [], has_more: false })
-  expect(t.get()).toMatchObject({ status: 'ready', messages: [{ seq: 1 }], pending: [] })
+  expect(t.get()).toMatchObject({ status: 'ready', messages: [{ created_seq: 1 }], pending: [] })
   await client.sync.close()
 })
 

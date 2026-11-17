@@ -96,19 +96,19 @@ export function fakeNetwork() {
           mention_unread_count: 0,
           id: m.topic_id,
           name: prev?.name ?? m.topic_id,
-          first_seq: prev?.first_seq ?? m.seq,
-          last_seq: m.seq,
+          first_seq: prev?.first_seq ?? m.created_seq,
+          last_seq: m.created_seq,
           message_count: (prev?.message_count ?? 0) + 1,
           latest_message: m,
-          read_seq: m.seq,
+          read_seq: m.created_seq,
           unread_count: 0,
         })
       }
     }
     for (const topic of byTopic.values()) items.push({ kind: 'topic', topic })
-    items.sort((a, b) => (a.kind === 'message' ? a.message.seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.seq : b.topic.last_seq))
+    items.sort((a, b) => (a.kind === 'message' ? a.message.created_seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.created_seq : b.topic.last_seq))
     return {
-      as_of_seq: Math.max(channelId ? (caughtUp[channelId] ?? 0) : 0, page.messages.at(-1)?.seq ?? 0),
+      as_of_seq: Math.max(channelId ? (caughtUp[channelId] ?? 0) : 0, page.messages.at(-1)?.created_seq ?? 0),
       has_more: page.has_more,
       items,
     }
@@ -119,7 +119,7 @@ export function fakeNetwork() {
     const maxSeq = Math.max(
       caughtUp[id] ?? 0,
       tl?.ok ? tl.data.as_of_seq : 0,
-      page?.ok ? (page.data.messages.at(-1)?.seq ?? 0) : 0,
+      page?.ok ? (page.data.messages.at(-1)?.created_seq ?? 0) : 0,
     )
     return {
       mention_unread_count: 0, main_mention_unread_count: 0,
@@ -215,7 +215,7 @@ export function fakeNetwork() {
         for (const m of all) {
           if (m.id === root.id || m.reply_root_id === root.id || (m.reply_to !== null && chainIds.has(m.reply_to))) {
             chainIds.add(m.id)
-            if (query?.after_seq === undefined || m.seq > query.after_seq) messages.push(m)
+            if (query?.after_seq === undefined || m.created_seq > query.after_seq) messages.push(m)
           }
         }
         return { ok: true, data: { root_id: root.id, messages, has_more: false } }
@@ -272,6 +272,11 @@ export function fakeNetwork() {
     sync: {
       newId: () => `${selfId}-c${++ids}`,
       api: {
+        async listChannelEvents(channel, query) {
+          history.push({ channel, query })
+          const page = pages[channel]
+          return !page || page.ok ? { ok: true, data: { events: (page?.data.messages ?? []).map(message => ({ type: 'message', seq: message.created_seq, kind: 'create', message })), has_more: page?.data.has_more ?? false } } : page
+        },
         async listMessages(channel, query) {
           history.push({ channel, query })
           return pages[channel] ?? { ok: true, data: { messages: [], has_more: false } }

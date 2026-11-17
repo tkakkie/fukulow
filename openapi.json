@@ -794,6 +794,145 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/channels/{id}/events": {
+      "get": {
+        "tags": [
+          "crate::messages::log"
+        ],
+        "summary": "Read event positions for C3 gap recovery. Auth extraction and query validation\nprecede Channel visibility, exactly as on the history GET.",
+        "operationId": "list_channel_events",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "description": "Exclusive event position; 0 starts at the beginning.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, default 50, maximum 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ascending Channel event envelopes after the exclusive event cursor, with current-state replay hydration and directional has_more",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Committed watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/channels/{id}/members": {
       "get": {
         "tags": [
@@ -1384,7 +1523,7 @@
           {
             "name": "after_seq",
             "in": "query",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -1395,7 +1534,7 @@
           {
             "name": "before_seq",
             "in": "query",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -2581,7 +2720,7 @@
           {
             "name": "after_seq",
             "in": "query",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -2592,7 +2731,7 @@
           {
             "name": "before_seq",
             "in": "query",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -5334,6 +5473,34 @@
           }
         }
       },
+      "ChannelEventKind": {
+        "type": "string",
+        "enum": [
+          "create",
+          "edit",
+          "move",
+          "delete"
+        ]
+      },
+      "ChannelEventPage": {
+        "type": "object",
+        "description": "Bounded ascending Channel log page, with the same envelopes as WebSocket replay.",
+        "required": [
+          "events",
+          "has_more"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServerEvent"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
       "ChannelList": {
         "type": "object",
         "required": [
@@ -5766,7 +5933,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "minimum": 0
           },
           "before_seq": {
@@ -5775,7 +5942,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "minimum": 1
           },
           "limit": {
@@ -5908,15 +6075,15 @@
         "required": [
           "id",
           "channel_id",
-          "seq",
+          "created_seq",
+          "version",
+          "deleted",
           "client_message_id",
           "sender",
-          "body",
           "created_at",
           "topic_id",
           "reply_to",
-          "reply_root_id",
-          "mentions"
+          "reply_root_id"
         ],
         "properties": {
           "body": {
@@ -5933,6 +6100,15 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "created_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Immutable creation position in the Channel log.",
+            "minimum": 1
+          },
+          "deleted": {
+            "type": "boolean"
           },
           "id": {
             "type": "string",
@@ -5966,18 +6142,18 @@
             "format": "uuid",
             "description": "Member id of the sender."
           },
-          "seq": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Per-channel sequence, starting at 1.",
-            "minimum": 1
-          },
           "topic_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last Channel event position affecting this state.",
+            "minimum": 1
           }
         }
       },
@@ -5985,12 +6161,22 @@
         "type": "object",
         "description": "Live and replayed messages have exactly the same canonical shape.",
         "required": [
+          "seq",
+          "kind",
           "message",
           "type"
         ],
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ChannelEventKind"
+          },
           "message": {
             "$ref": "#/components/schemas/Message"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
           },
           "type": {
             "type": "string",
@@ -6009,14 +6195,14 @@
         "properties": {
           "has_more": {
             "type": "boolean",
-            "description": "More messages exist in the queried direction (older for latest/before_seq,\nnewer for after_seq). Continue after_seq with the last seq or before_seq\nwith the first seq; continue the latest page toward older messages with before_seq."
+            "description": "More messages exist in the queried direction (older for latest/before_seq,\nnewer for after_seq). Continue after_seq with the last created_seq or before_seq\nwith the first created_seq; continue the latest page toward older messages with before_seq."
           },
           "messages": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Message"
             },
-            "description": "Always ascending seq (newest last), including latest and before_seq pages."
+            "description": "Always ascending created_seq (newest last), including latest and before_seq pages."
           }
         }
       },
@@ -6401,7 +6587,7 @@
             "$ref": "#/components/schemas/ErrorEvent"
           }
         ],
-        "description": "Server -> client events. Clients dedupe messages by (channel_id, seq).",
+        "description": "Server -> client events. Event positions and Message state versions are independent.",
         "discriminator": {
           "propertyName": "type",
           "mapping": {
@@ -6518,7 +6704,7 @@
           "after_seq": {
             "type": "integer",
             "format": "int64",
-            "description": "Replay committed messages with seq > after_seq; 0 starts at the beginning.",
+            "description": "Replay committed Channel events with seq > after_seq; 0 starts at the beginning.",
             "minimum": 0
           },
           "channel_id": {

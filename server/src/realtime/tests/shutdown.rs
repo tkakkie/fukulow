@@ -233,7 +233,7 @@ async fn signal_child() {
     } else {
         persistence.release.add_permits(1);
         let second = pending.await.unwrap();
-        assert_eq!(second["seq"], 2);
+        assert_eq!(second["created_seq"], 2);
         tokio::time::timeout(
             Duration::from_secs(5),
             drain_polls.wait_for(|polls| *polls > 0),
@@ -375,7 +375,7 @@ async fn send_load_child(pool: PgPool, sends: usize) {
         let message = result.unwrap();
         let position = (
             message["channel_id"].as_str().unwrap().to_owned(),
-            message["seq"].as_i64().unwrap(),
+            message["created_seq"].as_i64().unwrap(),
         );
         assert!(committed.insert(position, message).is_none());
     }

@@ -12,8 +12,8 @@ async function longChain() {
   const c = replyClient()
   c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
     const after = query?.after_seq ?? 0
-    const messages = records.filter(m => m.seq > after).slice(0, 50)
-    return ok({ root_id: 'id1', messages, has_more: messages.at(-1)!.seq < 10_001 })
+    const messages = records.filter(m => m.created_seq > after).slice(0, 50)
+    return ok({ root_id: 'id1', messages, has_more: messages.at(-1)!.created_seq < 10_001 })
   })
   await c.boot()
   return c
@@ -55,7 +55,7 @@ it('uncached and fresh descendant anchors take one contextual read in a 10000-Re
     await c.replies.open('A', reply(9000))
     expect(c.listReplyChain).toHaveBeenCalledExactlyOnceWith('A', 'id9000', { after_seq: 8975 })
     expect(c.replies.get('A')).toMatchObject({ anchor: reply(9000), hasOlder: true, hasMore: true })
-    expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(8976, 50))
+    expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(8976, 50))
     expect(c.sync.get().channels.A).toBe(before)
     await c.sync.close()
   }
@@ -88,7 +88,7 @@ it('cached navigation preserves an in-flight page and its continuation', async (
   expect(c.replies.get('A')).toMatchObject({ loading: true, anchor: reply(20) })
   held.resolve(ok({ root_id: 'id1', messages: records.slice(50, 100), has_more: true }))
   await loading
-  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(1, 100))
+  expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(1, 100))
   await c.replies.loadMore('A')
   expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id20', { after_seq: 100 })
   await c.sync.close()
@@ -139,14 +139,14 @@ it('older and newer pages remain contiguous and bounded after a far jump despite
     await c.replies.loadMore('A')
     expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id9000', { after_seq: after })
     const count = Math.min(100 + page * 50, 200)
-    expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(after + 51 - count, count))
+    expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(after + 51 - count, count))
   }
   await c.replies.loadOlder('A')
   expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id9000', { after_seq: 0 })
-  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(1, 50))
+  expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(1, 50))
   expect(c.replies.get('A').hasOlder).toBe(false)
   for (let page = 1; page < 4; page++) await c.replies.loadMore('A')
-  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(1, 200))
+  expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(1, 200))
   await c.sync.close()
 })
 

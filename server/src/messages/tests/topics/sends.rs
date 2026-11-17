@@ -163,13 +163,13 @@ async fn topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once
             .iter()
             .all(|m| m == &duplicate_messages[0])
     );
-    assert_eq!(duplicate_messages[0]["seq"], 17);
+    assert_eq!(duplicate_messages[0]["created_seq"], 17);
     let lost = Uuid::new_v4();
     let response = send(&app, &token, channel, topic_input(lost, "release")).await;
     assert_eq!(response.status(), StatusCode::CREATED);
     drop(response); // The client never obtained the Topic UUID or ACK.
     let recovered = sent(&app, &token, channel, topic_input(lost, "RELEASE")).await;
-    assert_eq!(recovered["seq"], 18);
+    assert_eq!(recovered["created_seq"], 18);
     assert_eq!(recovered["topic_id"], topic);
     assert_eq!(
         get(
@@ -186,7 +186,7 @@ async fn topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once
     assert_eq!(counts, (1, 18, 18));
     delivery.flush().await;
     for seq in 1..=18 {
-        assert_eq!(queue.events.try_recv().unwrap().seq, seq);
+        assert_eq!(queue.events.try_recv().unwrap().created_seq, seq);
     }
     assert!(queue.events.try_recv().is_err(), "retries never publish");
 }
@@ -251,7 +251,7 @@ async fn topic_retry_identity_rejects_added_removed_changed_and_cross_channel_in
     )
     .await;
     assert!(null["topic_id"].is_null());
-    assert_eq!(null["seq"], 3);
+    assert_eq!(null["created_seq"], 3);
 }
 
 #[fukulow_test::test]
@@ -298,13 +298,13 @@ async fn topic_first_creation_duplicates_lost_ack_and_cross_channel_race_leave_n
             first = Some(m);
         }
     }
-    assert_eq!(first.unwrap()["seq"], 1);
+    assert_eq!(first.unwrap()["created_seq"], 1);
     let lost = Uuid::new_v4();
     let response = send(&app, &token, channel, topic_input(lost, "Lost creation")).await;
     assert_eq!(response.status(), StatusCode::CREATED);
     drop(response);
     let recovered = sent(&app, &token, channel, topic_input(lost, "LOST CREATION")).await;
-    assert_eq!(recovered["seq"], 2);
+    assert_eq!(recovered["created_seq"], 2);
     let race = Uuid::new_v4();
     let (left, right) = tokio::join!(
         send(&app, &token, channel, topic_input(race, "Raced creation")),

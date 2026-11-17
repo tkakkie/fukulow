@@ -98,7 +98,7 @@ it.each(['regrant', 'Session', 'Organization'])('Mention late REST and frames ca
   } else if (boundary === 'Session') await c.sync.replaceSession('new-reader')
   else await c.sync.unavailable()
   late.resolve(ok({ channels: [row({ as_of_seq: 100, mention_unread_count: 99, main_mention_unread_count: 99 })] })); await pending
-  c.handlers[0].onEvent({ type: 'message', message: mentioned(101) }); await flush()
+  c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (mentioned(101)).created_seq, message: mentioned(101) }); await flush()
   expect(c.unread.get('A').mentionUnreadCount).toBe(boundary === 'regrant' ? 0 : null)
   await c.sync.close()
 })
@@ -157,7 +157,7 @@ it('Mention own ACK echo and history settlement never increment counts or move r
   c.rows[0] = row({ main_mention_unread_count: 1, mention_unread_count: 1 })
   await c.boot()
   const composer = c.sync.getTimeline('A')
-  composer.setDraft(ack.body); await composer.submit(); await flush()
+  composer.setDraft(ack.body!); await composer.submit(); await flush()
   c.event(ack); await c.sync.settleHistory('A', [ack]); c.event(ack); await flush()
   expect(c.sync.get().channels.A.pending).toHaveLength(0)
   expect(c.unread.get('A')).toMatchObject({ mentionUnreadCount: 1, main: { position: 0, mentionUnreadCount: 1 } })
@@ -175,5 +175,33 @@ it('Mention access generation rejects a previous generation REST response while 
   expect(c.unread.get('A').mentionUnreadCount).toBe(0)
   late.resolve(ok({ channels: [row({ as_of_seq: 20, mention_unread_count: 20, main_mention_unread_count: 20 })] })); await pending
   expect(c.unread.get('A')).toMatchObject({ asOfSeq: 9, mentionUnreadCount: 0 })
+  await c.sync.close()
+})
+
+
+it('Unread replaces Mention evidence by version for edits and tombstones of the same Message', async () => {
+  const c = client(); await c.boot()
+  c.event(mentioned(4)); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(2)
+  c.event({ ...mentioned(4), version: 5, mentions: [] }); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(1)
+  c.event(mentioned(4)); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(1)
+  c.event({ ...mentioned(4), version: 6 }); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(2)
+  c.event({ ...mentioned(4), version: 7, deleted: true }); await flush()
+  expect(c.unread.get('A').main).toMatchObject({ unreadCount: 1, mentionUnreadCount: 1 })
+  await c.sync.close()
+})
+
+it('a plain create below a retired mutation version floor still enters Unread', async () => {
+  const c = client(); await c.boot()
+  await c.sync.settleHistory('A', Array.from({ length: 1501 }, (_, i) => ({ ...msg(100 + i), version: 10_000 + i })))
+  expect(c.sync.get().channels.A.retiredVersions).toContainEqual({ start: 100, end: 100 })
+  c.rows[0] = row({ as_of_seq: 1600, read_seq: 1600, main_unread_count: 0, unread_count: 0, main_mention_unread_count: 0, mention_unread_count: 0 })
+  await c.unread.refresh()
+  c.event(mentioned(1700)); await flush()
+  expect(c.sync.get().channels.A.messages).toContainEqual(mentioned(1700))
+  expect(c.unread.get('A').main).toMatchObject({ unreadCount: 1, mentionUnreadCount: 1 })
   await c.sync.close()
 })

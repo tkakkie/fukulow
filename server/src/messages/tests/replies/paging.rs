@@ -39,7 +39,7 @@ async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concu
                 assert!(!rows.is_empty());
                 seen.extend(rows.clone());
                 assert_eq!(p["has_more"], seen.len() < tree.len());
-                after = rows.last().unwrap()["seq"].as_i64().unwrap();
+                after = rows.last().unwrap()["created_seq"].as_i64().unwrap();
                 if !p["has_more"].as_bool().unwrap() {
                     break;
                 }
@@ -54,7 +54,7 @@ async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concu
     // A new descendant in an unloaded branch arrives while the projection is paged.
     tree.push(sent(&app, &token, channel, reply_input(Uuid::new_v4(), &tree[5])).await);
     while seen.len() < tree.len() {
-        let after = seen.last().unwrap()["seq"].as_i64().unwrap();
+        let after = seen.last().unwrap()["created_seq"].as_i64().unwrap();
         let p = page(
             &app,
             &token,
@@ -67,7 +67,7 @@ async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concu
         assert_eq!(p["has_more"], seen.len() < tree.len());
     }
     assert_eq!(seen, tree);
-    let after = tree.last().unwrap()["seq"].as_i64().unwrap();
+    let after = tree.last().unwrap()["created_seq"].as_i64().unwrap();
     for boundary in [after, i64::MAX] {
         assert_eq!(
             page(

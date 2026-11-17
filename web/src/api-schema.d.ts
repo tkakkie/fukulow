@@ -111,6 +111,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/channels/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read event positions for C3 gap recovery. Auth extraction and query validation
+         *     precede Channel visibility, exactly as on the history GET.
+         */
+        get: operations["list_channel_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/channels/{id}/members": {
         parameters: {
             query?: never;
@@ -694,6 +714,13 @@ export interface components {
             can_manage_managers: components["schemas"]["Capability"];
             can_remove_members: components["schemas"]["Capability"];
         };
+        /** @enum {string} */
+        ChannelEventKind: "create" | "edit" | "move" | "delete";
+        /** @description Bounded ascending Channel log page, with the same envelopes as WebSocket replay. */
+        ChannelEventPage: {
+            events: components["schemas"]["ServerEvent"][];
+            has_more: boolean;
+        };
         ChannelList: {
             channels: components["schemas"]["UnreadChannel"][];
         };
@@ -830,12 +857,12 @@ export interface components {
         ListMessagesQuery: {
             /**
              * Format: int64
-             * @description Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
+             * @description Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
              */
             after_seq?: number | null;
             /**
              * Format: int64
-             * @description Return seq < before_seq. Cannot combine with after_seq.
+             * @description Return created_seq < before_seq. Cannot combine with after_seq.
              */
             before_seq?: number | null;
             /**
@@ -889,17 +916,23 @@ export interface components {
             name: string;
         };
         Message: {
-            body: string;
+            body?: string;
             /** Format: uuid */
             channel_id: string;
             /** Format: uuid */
             client_message_id: string;
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: int64
+             * @description Immutable creation position in the Channel log.
+             */
+            created_seq: number;
+            deleted: boolean;
             /** Format: uuid */
             id: string;
             /** @description Persisted accepted ids, sorted by UUID, with current retained display names. */
-            mentions: components["schemas"]["Mention"][];
+            mentions?: components["schemas"]["Mention"][];
             /**
              * Format: uuid
              * @description Stable root even when the parent is outside the loaded window; null for a non-Reply.
@@ -915,17 +948,20 @@ export interface components {
              * @description Member id of the sender.
              */
             sender: string;
-            /**
-             * Format: int64
-             * @description Per-channel sequence, starting at 1.
-             */
-            seq: number;
             /** Format: uuid */
             topic_id: string | null;
+            /**
+             * Format: int64
+             * @description Last Channel event position affecting this state.
+             */
+            version: number;
         };
         /** @description Live and replayed messages have exactly the same canonical shape. */
         MessageEvent: {
+            kind: components["schemas"]["ChannelEventKind"];
             message: components["schemas"]["Message"];
+            /** Format: int64 */
+            seq: number;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -935,11 +971,11 @@ export interface components {
         MessagePage: {
             /**
              * @description More messages exist in the queried direction (older for latest/before_seq,
-             *     newer for after_seq). Continue after_seq with the last seq or before_seq
-             *     with the first seq; continue the latest page toward older messages with before_seq.
+             *     newer for after_seq). Continue after_seq with the last created_seq or before_seq
+             *     with the first created_seq; continue the latest page toward older messages with before_seq.
              */
             has_more: boolean;
-            /** @description Always ascending seq (newest last), including latest and before_seq pages. */
+            /** @description Always ascending created_seq (newest last), including latest and before_seq pages. */
             messages: components["schemas"]["Message"][];
         };
         NativeSessionResponse: {
@@ -1070,7 +1106,7 @@ export interface components {
              */
             topic_name?: string | null;
         };
-        /** @description Server -> client events. Clients dedupe messages by (channel_id, seq). */
+        /** @description Server -> client events. Event positions and Message state versions are independent. */
         ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
         SessionResponse: {
             /** Format: int32 */
@@ -1103,7 +1139,7 @@ export interface components {
         Subscribe: {
             /**
              * Format: int64
-             * @description Replay committed messages with seq > after_seq; 0 starts at the beginning.
+             * @description Replay committed Channel events with seq > after_seq; 0 starts at the beginning.
              */
             after_seq: number;
             /** Format: uuid */
@@ -1257,6 +1293,8 @@ export type ChannelAccessLost = components['schemas']['ChannelAccessLost'];
 export type ChannelAccessRevoked = components['schemas']['ChannelAccessRevoked'];
 export type ChannelActivity = components['schemas']['ChannelActivity'];
 export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
+export type ChannelEventKind = components['schemas']['ChannelEventKind'];
+export type ChannelEventPage = components['schemas']['ChannelEventPage'];
 export type ChannelList = components['schemas']['ChannelList'];
 export type ChannelListChanged = components['schemas']['ChannelListChanged'];
 export type ChannelMember = components['schemas']['ChannelMember'];
@@ -1884,6 +1922,83 @@ export interface operations {
             };
         };
     };
+    list_channel_events: {
+        parameters: {
+            query: {
+                /** @description Exclusive event position; 0 starts at the beginning. */
+                after_seq: number;
+                /** @description Page size, default 50, maximum 200. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ascending Channel event envelopes after the exclusive event cursor, with current-state replay hydration and directional has_more */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelEventPage"];
+                };
+            };
+            /** @description Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Committed watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list: {
         parameters: {
             query?: never;
@@ -2260,9 +2375,9 @@ export interface operations {
     list_messages: {
         parameters: {
             query?: {
-                /** @description Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
+                /** @description Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
                 after_seq?: number;
-                /** @description Return seq < before_seq. Cannot combine with after_seq. */
+                /** @description Return created_seq < before_seq. Cannot combine with after_seq. */
                 before_seq?: number;
                 /** @description Page size, default 50, maximum 200. */
                 limit?: number;
@@ -2956,9 +3071,9 @@ export interface operations {
     topic_history: {
         parameters: {
             query?: {
-                /** @description Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
+                /** @description Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
                 after_seq?: number;
-                /** @description Return seq < before_seq. Cannot combine with after_seq. */
+                /** @description Return created_seq < before_seq. Cannot combine with after_seq. */
                 before_seq?: number;
                 /** @description Page size, default 50, maximum 200. */
                 limit?: number;

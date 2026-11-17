@@ -441,7 +441,7 @@ async fn unread_guest_grant_and_promotion_wait_for_committed_baseline_and_hold_i
             assert!(!sending.is_finished());
             tx.commit().await.unwrap();
             let baseline = if commit_send { 2 } else { 1 };
-            assert_eq!(sending.await.unwrap()["seq"], baseline + 1);
+            assert_eq!(sending.await.unwrap()["created_seq"], baseline + 1);
             assert_eq!(
                 position(&pool, org, channel, guest).await,
                 Some((baseline, baseline))

@@ -32,7 +32,7 @@ for (const visible of [2, 258]) test(`two Members update unwatched badges live w
   await expect(row.locator('.ui-badge--unread')).toHaveCount(0)
   received.length = 0
   const message = await sendFixtureMessage(owner.request, org, unwatched.id, { body: `Body stays off the unwatched socket ${suffix}` })
-  await expect.poll(() => received.some(e => e.type === 'channel_activity' && e.channel_id === unwatched.id && e.seq >= message.seq)).toBe(true)
+  await expect.poll(() => received.some(e => e.type === 'channel_activity' && e.channel_id === unwatched.id && e.seq >= message.created_seq)).toBe(true)
   await expect(row.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
   expect(received.some(e => e.type === 'message' && e.message.channel_id === unwatched.id)).toBe(false)
   const notices = received.filter(e => e.type === 'channel_activity' && e.channel_id === unwatched.id)

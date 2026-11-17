@@ -370,7 +370,7 @@ async fn message_at_body_limit_preserves_whitespace_and_idempotent_retries(pool:
     assert_eq!(text.chars().count(), 4000);
     let first = sent(&app, &token, channel_id, input(key, &text)).await;
     assert_eq!(first["body"], text);
-    assert_eq!(first["seq"], 1);
+    assert_eq!(first["created_seq"], 1);
     assert_eq!(
         sent(&app, &token, channel_id, input(key, &text)).await,
         first
@@ -399,7 +399,7 @@ async fn message_at_body_limit_preserves_whitespace_and_idempotent_retries(pool:
     .unwrap();
     assert_eq!(seq, 1);
     assert_eq!(
-        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["seq"],
+        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["created_seq"],
         2
     );
 }
@@ -503,8 +503,8 @@ async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
         sent(&app, &second_token, channel_id, input(client_id, "second")).await,
         b
     );
-    assert_eq!(a["seq"], 1);
-    assert_eq!(b["seq"], 1);
+    assert_eq!(a["created_seq"], 1);
+    assert_eq!(b["created_seq"], 1);
     assert_eq!(
         list(&app, &first_token, channel_id, "?after_seq=0").await["messages"],
         json!([a])
@@ -561,11 +561,11 @@ async fn committed_send_retry_returns_canonical_message_without_sequence_allocat
     assert_eq!(retry["client_message_id"], json!(key));
     assert_eq!(retry["sender"], json!(sender));
     assert_eq!(retry["channel_id"], json!(channel_id));
-    assert_eq!(retry["seq"], 1);
+    assert_eq!(retry["created_seq"], 1);
     assert!(retry["topic_id"].is_null());
     assert!(retry["created_at"].as_str().unwrap().ends_with('Z'));
     let next = sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await;
-    assert_eq!(next["seq"], 2);
+    assert_eq!(next["created_seq"], 2);
     assert_eq!(
         list(&app, &token, channel_id, "").await["messages"],
         json!([retry, next])
@@ -597,12 +597,12 @@ async fn reused_client_id_conflicts_on_different_body_or_channel(pool: PgPool) {
             other_channel,
             input(Uuid::new_v4(), "other channel")
         )
-        .await["seq"],
+        .await["created_seq"],
         1
     );
     let other = member(&pool, organization_id, Uuid::new_v4()).await;
     assert_eq!(
-        sent(&app, &other, channel_id, input(key, "independent sender")).await["seq"],
+        sent(&app, &other, channel_id, input(key, "independent sender")).await["created_seq"],
         2
     );
 }
@@ -660,7 +660,7 @@ async fn concurrent_duplicate_sends_create_one_message_and_consume_one_sequence(
         1
     );
     assert_eq!(
-        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["seq"],
+        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["created_seq"],
         2
     );
 }
@@ -691,7 +691,7 @@ async fn concurrent_cross_channel_duplicate_conflicts_without_sequence_gap(pool:
             .unwrap()
             .len();
         assert_eq!(
-            sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["seq"],
+            sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["created_seq"],
             count + 1
         );
     }
@@ -712,7 +712,7 @@ async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: Pg
     for response in concurrent_sends(&app, &token, &vec![channel_id; count], false).await {
         assert_eq!(response.status(), StatusCode::CREATED);
         let message = body(response).await;
-        seqs.push(message["seq"].as_i64().unwrap());
+        seqs.push(message["created_seq"].as_i64().unwrap());
         assert!(keys.insert(message["client_message_id"].as_str().unwrap().to_owned()));
     }
     seqs.sort_unstable();
@@ -732,7 +732,7 @@ async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: Pg
             .as_array()
             .unwrap()
             .iter()
-            .map(|m| m["seq"].as_i64().unwrap())
+            .map(|m| m["created_seq"].as_i64().unwrap())
             .collect::<Vec<_>>(),
         seqs
     );
@@ -766,12 +766,12 @@ async fn failed_send_after_sequence_allocation_leaves_no_gap(pool: PgPool) {
             .bind(organization_id).bind(channel_id).fetch_all(&pool).await.unwrap();
         assert_eq!(logged, (1..expected).collect::<Vec<_>>());
         assert_eq!(
-            sent(&app, &token, channel_id, input(Uuid::new_v4(), "success")).await["seq"],
+            sent(&app, &token, channel_id, input(Uuid::new_v4(), "success")).await["created_seq"],
             expected
         );
     }
     assert_eq!(
-        sent(&app, &token, channel_id, input(key, "retry after rollback")).await["seq"],
+        sent(&app, &token, channel_id, input(key, "retry after rollback")).await["created_seq"],
         3
     );
 }
@@ -806,7 +806,7 @@ async fn message_pages_are_bounded_exclusive_ascending_and_directional(pool: PgP
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|m| m["seq"].as_i64().unwrap())
+                .map(|m| m["created_seq"].as_i64().unwrap())
                 .collect::<Vec<_>>(),
             expected,
             "{query}"

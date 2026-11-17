@@ -239,7 +239,7 @@ async fn mention_reciprocal_reversed_targets_and_database_duplicates_do_not_dead
         sent(&app2, &author, channel, input(key, &text))
     );
     assert_eq!(a, b);
-    assert_eq!(a["seq"], 3);
+    assert_eq!(a["created_seq"], 3);
     assert_eq!(mention_rows(&pool, org).await, 7);
 }
 

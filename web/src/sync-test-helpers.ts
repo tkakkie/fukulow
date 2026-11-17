@@ -39,6 +39,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
     // As in production (session.ts): a pre-connect close asks REST; the fixture answers with membership_check_result.
     checkMembership: () => request({ type: 'membership_check' }),
     api: {
+      listChannelEvents(channel, query) { return request({ type: 'fetch_history', channel, page: 'after', seq: query.after_seq }) },
       listMessages(channel, query) {
         return request({ type: 'fetch_history', channel,
           page: query?.after_seq !== undefined ? 'after' : query?.before_seq !== undefined ? 'before' : 'latest',
@@ -95,14 +96,14 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         if (replies) {
           const chain = replies.get(channel)
           c.reply_chain = { root_id: chain.rootId, topic: chain.topicId ?? undefined,
-            visible: chain.messages.map(m => m.seq), has_more: chain.hasMore, error: chain.error }
+            messages: chain.messages, visible: chain.messages.map(m => m.created_seq), has_more: chain.hasMore, error: chain.error }
         }
         const projection = topics.get(channel)
-        c.main_timeline = projection.lines.map(l => l.kind === 'message' ? { seq: l.message.seq }
+        c.main_timeline = projection.lines.map(l => l.kind === 'message' ? { created_seq: l.message.created_seq }
           : { topic: l.topicId, position: l.position, message_count: l.messageCount })
         const ids = new Set(sync.get().channels[channel].messages.flatMap(m => m.topic_id ? [m.topic_id] : []))
         for (const effect of allEffects) if (effect.channel === channel && typeof effect.topic === 'string') ids.add(effect.topic)
-        c.topics = Object.fromEntries([...ids].map(id => [id, { visible: projection.topic(id).messages.map(m => m.seq) }]))
+        c.topics = Object.fromEntries([...ids].map(id => [id, { messages: projection.topic(id).messages, visible: projection.topic(id).messages.map(m => m.created_seq) }]))
       }
       for (const id of unreadIds) {
         const u = unread!.get(id)
@@ -133,12 +134,15 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         case 'session_replaced': void client.sync.replaceSession('me'); break
         case 'connection_ready': socket.onReady(); break
         case 'socket_closed': socket.onClose(i.code as number); break
-        case 'message': socket.onEvent({ type: 'message', message: message(i.message, channel) }); break
+        case 'message': socket.onEvent({ type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : message(i.message, channel).created_seq, message: message(i.message, channel) }); break
         case 'subscribed': (e?.socket as RealtimeHandlers ?? socket).onEvent({ type: 'subscribed', channel_id: channel,
           caught_up_seq: i.caught_up_seq as number }); break
         case 'channel_access_lost': socket.onEvent({ type: 'channel_access_lost', channel_id: channel }); break
         case 'error_event': socket.onEvent({ type: 'error', channel_id: channel, code: i.code as string }); break
-        case 'history_result': resolve({ ok: true, data: { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
+        case 'events_result': resolve({ ok: true, data: { events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more } }); break
+        case 'history_result': resolve({ ok: true, data: e?.page === 'after'
+          ? { events: i.messages!.map(m => ({ type: 'message', seq: m.created_seq, kind: 'create', message: message(m, channel) })), has_more: i.has_more }
+          : { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
         case 'ack': resolve({ ok: true, data: message(i.message, channel) }); break
         case 'membership_check_result': resolve(i.status === 200 ? { ok: true, data: {} } : typeof i.status === 'number'
           ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }) }

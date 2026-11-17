@@ -120,7 +120,7 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
     .await
     .unwrap();
     publication_entered(&gate).await;
-    assert_eq!(first["seq"], 1);
+    assert_eq!(first["created_seq"], 1);
     let history = messages::replay_page(&pool, f.organization, f.channel, 0, 1)
         .await
         .unwrap();
@@ -143,7 +143,7 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
         });
     }
     for seq in 1..=17 {
-        assert_eq!(event(&mut socket).await["message"]["seq"], seq);
+        assert_eq!(event(&mut socket).await["message"]["created_seq"], seq);
     }
     while let Some(result) = sends.join_next().await {
         assert_eq!(result.unwrap().status(), StatusCode::CREATED);
@@ -216,7 +216,7 @@ async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturat
     let mut recovered = f.server.connect(&f.token).await;
     subscribe(&mut recovered, f.channel, 0).await;
     for seq in 1..=41 {
-        assert_eq!(event(&mut recovered).await["message"]["seq"], seq);
+        assert_eq!(event(&mut recovered).await["message"]["created_seq"], seq);
     }
     ready(&mut recovered, f.channel, 41).await;
     let next = post(&f, f.channel).await;
@@ -337,7 +337,7 @@ async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lo
     // Release even on a regression so the assertion cannot deadlock the runtime.
     release_tx.send(()).unwrap();
     held.await.unwrap();
-    assert_eq!(response.unwrap()["seq"], 41);
+    assert_eq!(response.unwrap()["created_seq"], 41);
     // This is a deadlock guard, not a real-database latency requirement.
     eprintln!("saturated HTTP with 512 subscribers and recipients locked: {elapsed:?}");
     for queue in &queues {
@@ -441,7 +441,7 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
     let mut replayed = f.server.connect(&f.token).await;
     subscribe(&mut replayed, f.channel, 0).await;
     for seq in 1..=through {
-        assert_eq!(event(&mut replayed).await["message"]["seq"], seq);
+        assert_eq!(event(&mut replayed).await["message"]["created_seq"], seq);
     }
     ready(&mut replayed, f.channel, through).await;
 
@@ -456,7 +456,7 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
     subscribe(&mut mid_replay, f.channel, 0).await;
     entered(&replay).await;
     let published = post(&f, f.channel).await;
-    assert_eq!(published["seq"], through + 1);
+    assert_eq!(published["created_seq"], through + 1);
     // Overflow has priority over failure: these real closes prove no 4008 was set.
     closed(&mut replayed, 1011).await;
     closed(&mut mid_replay, 1011).await;
@@ -465,14 +465,14 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
     let mut recovered = f.server.connect(&f.token).await;
     subscribe(&mut recovered, f.channel, 0).await;
     for seq in 1..=through + 1 {
-        assert_eq!(event(&mut recovered).await["message"]["seq"], seq);
+        assert_eq!(event(&mut recovered).await["message"]["created_seq"], seq);
     }
     ready(&mut recovered, f.channel, through + 1).await;
     late.release.add_permits(1);
     f.state.message_delivery.flush().await;
     // A late old notification is suppressed, and the advanced cursor permits live delivery.
     let next = post(&f, f.channel).await;
-    assert_eq!(next["seq"], through + 2);
+    assert_eq!(next["created_seq"], through + 2);
     assert_eq!(event(&mut recovered).await["message"], next);
     f.state.message_delivery.flush().await;
     silent(&mut recovered).await;

@@ -101,6 +101,11 @@ pub struct ChannelView {
     pub watched: bool,
     pub cursor: Option<i64>,
     pub messages: Rc<Vec<Rc<Message>>>,
+    pub versions: Rc<std::collections::BTreeMap<Uuid, (i64, bool, i64)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired_through: Option<i64>,
+    pub retired_versions: Rc<Vec<Range>>,
+    pub version_epoch: Token,
     pub advancing: Rc<Vec<Range>>,
     pub pending: Rc<Vec<Pending>>,
     pub has_older: bool,
@@ -134,6 +139,10 @@ impl Default for ChannelView {
             watched: false,
             cursor: None,
             messages: Rc::default(),
+            versions: Rc::default(),
+            retired_through: None,
+            retired_versions: Rc::default(),
+            version_epoch: 0,
             advancing: Rc::default(),
             pending: Rc::default(),
             has_older: false,
@@ -158,6 +167,10 @@ impl ChannelView {
             && self.watched == other.watched
             && self.cursor == other.cursor
             && Rc::ptr_eq(&self.messages, &other.messages)
+            && Rc::ptr_eq(&self.versions, &other.versions)
+            && Rc::ptr_eq(&self.retired_versions, &other.retired_versions)
+            && self.retired_through == other.retired_through
+            && self.version_epoch == other.version_epoch
             && Rc::ptr_eq(&self.pending, &other.pending)
             && Rc::ptr_eq(&self.advancing, &other.advancing)
             && match (&self.subscription, &other.subscription) {
@@ -282,6 +295,10 @@ pub enum Input {
         channel: Uuid,
         #[serde(rename = "clientMessageId")]
         client_message_id: Uuid,
+    },
+    EventsResult {
+        request: Token,
+        page: fukulow_api::ChannelEventPage,
     },
     HistoryResult {
         request: Token,

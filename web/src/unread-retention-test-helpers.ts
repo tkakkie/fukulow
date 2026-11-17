@@ -37,13 +37,13 @@ export function retentionClient() {
   function capture(run: () => void) {
     const set = Map.prototype.set
     Map.prototype.set = function(key, value) {
-      if (typeof key === 'number' && value?.channel_id === 'A' && value.seq === key) records = this
+      if (typeof key === 'number' && value?.channel_id === 'A' && value.created_seq === key) records = this
       return set.call(this, key, value)
     }
     try { run() } finally { Map.prototype.set = set }
   }
   function feed(messages: Message[]) {
-    through = Math.max(through, ...messages.map(m => m.seq))
+    through = Math.max(through, ...messages.map(m => m.created_seq))
     state = { ...state, channels: { A: { ...state.channels.A, messages, cursor: through } } }
     capture(() => listeners.forEach(l => l()))
   }
@@ -62,7 +62,7 @@ export function retentionClient() {
     async boot(messages: Message[] = [msg(1)]) {
       for (const id of ['T', 'U']) baselines.set(id, { asOfSeq: 0, summary: summary(id, 0, 0, 0) })
       state = { ...state, running: true, connected: true, channels: { A: { state: 'ready', watched: true, cursor: 0,
-        messages: [], advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 } } }
+        messages: [], versions: {}, retiredVersions: [], versionEpoch: 0, advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 } } }
       capture(() => listeners.forEach(l => l())); await flush()
       feed(messages); await flush()
     },

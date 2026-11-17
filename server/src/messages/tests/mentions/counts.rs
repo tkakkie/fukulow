@@ -35,7 +35,7 @@ async fn mention_counts_dedup_own_independent_positions_marks_and_no_backfill(po
     )
     .await;
     let t = topic["topic_id"].as_str().unwrap();
-    let w = topic["seq"].as_i64().unwrap();
+    let w = topic["created_seq"].as_i64().unwrap();
     sent(
         &app,
         &author,
@@ -262,6 +262,8 @@ async fn mention_access_loss_removes_counts_and_regrant_never_resurrects_them(po
             .await
             .unwrap()[0]
             .mentions
+            .as_ref()
+            .unwrap()
             .len(),
         1
     );

@@ -8,7 +8,7 @@ import { initialState, step, type Input, type State, type SyncView } from './pro
 export const scenarios: ClientScenario[] = readdirSync(join(defaultDir, 'client')).filter(n => n.endsWith('.json')).sort()
   .flatMap(n => (JSON.parse(readFileSync(join(defaultDir, 'client', n), 'utf8')) as { scenarios: ClientScenario[] }).scenarios)
 export const message = (m: ResolvedInput['message'], channel: string): Message => ({ mentions: [], ...m!, channel_id: channel, topic_id: m?.topic ?? null, reply_to: m?.reply_to ?? null, reply_root_id: m?.reply_root_id ?? null })
-export const record = (seq: number, channel = 'A'): Message => ({ mentions: [], channel_id: channel, seq, body: `m${seq}`, id: `id${seq}`,
+export const record = (seq: number, channel = 'A'): Message => ({ mentions: [], channel_id: channel, created_seq: seq, version: seq, deleted: false, body: `m${seq}`, id: `id${seq}`,
   sender: 'other', client_message_id: `auto-${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null, reply_to: null, reply_root_id: null })
 export function observe(state: SyncView): Observed {
   return { session: state.session, organization: state.organization, channels: Object.fromEntries(Object.entries(state.channels).map(([id, c]) => [id, {
@@ -32,12 +32,14 @@ export function protocolClient(onInput?: (input: Input) => void) {
         case 'session_start': case 'session_replaced': input = { type: i.type, selfId: 'me' }; break
         case 'connection_ready': input = { type: i.type, connection: state.connection! }; break
         case 'socket_closed': input = { type: i.type, connection: state.connection!, code: i.code as number }; break
-        case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', message: msg() } }; break
+        case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : msg().created_seq, message: msg() } }; break
         case 'subscribed': input = { type: 'event', connection: state.connection!, subscription: e?.id as number | undefined,
           event: { type: 'subscribed', channel_id: channel, caught_up_seq: i.caught_up_seq as number } }; break
         case 'channel_access_lost': input = { type: 'event', connection: state.connection!, event: { type: 'channel_access_lost', channel_id: channel } }; break
         case 'error_event': input = { type: 'event', connection: state.connection!, event: { type: 'error', channel_id: channel,
           code: i.code as string } }; break
+        case 'events_result': input = { type: 'events_result', request: e!.id as number,
+          page: { events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more as boolean } }; break
         case 'history_result': input = { type: i.type, request: e!.id as number,
           page: { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more as boolean } }; break
         case 'send_failed': input = { type: i.type, request: e!.id as number,

@@ -206,6 +206,10 @@ pub fn app(state: AppState) -> Router {
                 .patch(channels::members::change_manager),
         )
         .route(
+            "/api/v1/orgs/{org}/channels/{id}/events",
+            get(messages::list_channel_events),
+        )
+        .route(
             "/api/v1/orgs/{org}/channels/{id}/messages",
             get(messages::list_messages)
                 .post(messages::send_message)

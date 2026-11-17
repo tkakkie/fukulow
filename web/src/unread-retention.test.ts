@@ -52,7 +52,7 @@ it('retains only Message identity and sequence metadata without holding display 
   await c.boot([source])
   expect(c.records.size).toBeGreaterThan(0)
   const retained = c.records.get(1)!
-  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'id', 'mentions', 'sender', 'seq', 'topic_id'])
+  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'created_seq', 'deleted', 'id', 'mentions', 'sender', 'topic_id', 'version'])
   expect(source.body).toBeDefined()
   expect(retained).not.toBe(source)
   c.close()
@@ -104,7 +104,7 @@ it('preserves firstUnread and needsOlder throughout a visit even after its basel
   const id = await c.enter(); await c.present(id, [1])
   c.feed([]); await c.baseline(10, 10, 0, 0)
   expect(c.records.has(1)).toBe(true)
-  expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { seq: 1 }, needsOlder: false })
+  expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { created_seq: 1 }, needsOlder: false })
   c.unread.leave(id); expect(c.records.size).toBe(0)
   c.close()
 })
@@ -332,12 +332,12 @@ it.each([1, 73, 272])('matches an unpruned controller after every seeded event (
     if (seq % 11 === 0) await run(async (c, i) => { ids[i] = await c.enter(topic) })
     if (seq % 11 === 1 && ids.length) {
       const scope = clients[0].unread.get('A').entry!.scope.topicId
-      const rows = history.filter(m => m.topic_id === scope).map(m => m.seq)
+      const rows = history.filter(m => m.topic_id === scope).map(m => m.created_seq)
       await run((c, i) => c.present(ids[i], rows))
       for (const mark of clients[0].marks) positions.set(mark.scope.topicId, Math.max(positions.get(mark.scope.topicId)!, mark.read_seq))
     }
     if (seq % 13 === 0) {
-      const count = (t: string | null) => history.filter(m => m.topic_id === t && m.sender !== 'me' && m.seq > positions.get(t)!).length
+      const count = (t: string | null) => history.filter(m => m.topic_id === t && m.sender !== 'me' && m.created_seq > positions.get(t)!).length
       if (seq % 26 === 0) {
         await run(c => c.unread.leave()); ids.length = 0
         positions.set('T', seq)

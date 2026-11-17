@@ -568,7 +568,7 @@
         bind:this={rowWindow}
         items={view.messages}
         rowId={(m) => m.id}
-        confirmedSeq={(m) => m.seq}
+        confirmedSeq={(m) => m.created_seq}
         pendingItems={pending}
         pendingId={(p) => p.clientMessageId}
         pendingStatus={(p) => p.status}
@@ -589,7 +589,7 @@
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
-                body={m.body}
+                body={m.body ?? ''}
                 mentions={m.mentions}
                 {resolveMentionName}
                 {selfId}

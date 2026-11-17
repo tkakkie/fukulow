@@ -54,9 +54,9 @@ async fn measure_reply_chain_pages(pool: PgPool) {
                         samples.push(start.elapsed().as_secs_f64() * 1000.0);
                         assert_eq!(p["root_id"], root.to_string());
                         assert_eq!(p["messages"].as_array().unwrap().len(), 200);
-                        assert_eq!(p["messages"][0]["seq"], after + 1);
+                        assert_eq!(p["messages"][0]["created_seq"], after + 1);
                         assert_eq!(
-                            p["messages"][199]["seq"],
+                            p["messages"][199]["created_seq"],
                             offset + (relative_after + 199) * 11 + 1
                         );
                         assert_eq!(p["has_more"], relative_after != 9801);

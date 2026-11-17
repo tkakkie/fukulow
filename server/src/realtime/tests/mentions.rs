@@ -96,7 +96,7 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
         let mut control = f.server.connect(&f.token).await;
         subscribe(&mut control, c, 0).await;
         if phase == "frame" {
-            assert_eq!(event(&mut socket).await["message"]["seq"], 1);
+            assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
         }
         assert_eq!(
             request(
@@ -115,7 +115,7 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
         silent(&mut socket).await;
         for seq in 1..=3 {
             let m = event(&mut control).await;
-            assert_eq!(m["message"]["seq"], seq);
+            assert_eq!(m["message"]["created_seq"], seq);
             assert_eq!(
                 m["message"]["mentions"],
                 json!([{"member_id":reader,"name":"Member"}])

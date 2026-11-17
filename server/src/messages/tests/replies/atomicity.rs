@@ -56,7 +56,7 @@ async fn reply_admission_and_commit_rollback_preserve_seq_topic_count_and_public
         .await
         .unwrap();
     let canonical = sent(&app, &token, channel, intent.clone()).await;
-    assert_eq!(canonical["seq"], 2);
+    assert_eq!(canonical["created_seq"], 2);
     assert_eq!(sent(&app, &token, channel, intent).await, canonical);
     assert_eq!(counts(&pool, org, channel).await, (2, 2, 2));
     delivery.flush().await;
@@ -95,7 +95,7 @@ async fn reply_parent_commit_and_rollback_races_require_a_committed_parent(pool:
         if commit_parent {
             tx.commit().await.unwrap();
             let reply = sent(&app, &token, channel, intent.clone()).await;
-            assert_eq!(reply["seq"], 2);
+            assert_eq!(reply["created_seq"], 2);
             assert_eq!(reply["reply_root_id"], parent_id.to_string());
             assert_eq!(sent(&app, &token, channel, intent).await, reply);
         } else {
@@ -113,7 +113,7 @@ async fn reply_parent_commit_and_rollback_races_require_a_committed_parent(pool:
                 input(Uuid::new_v4(), "After rollback"),
             )
             .await;
-            assert_eq!(next["seq"], 1);
+            assert_eq!(next["created_seq"], 1);
         }
     }
 }
@@ -163,7 +163,7 @@ async fn reply_chain_ambiguous_commit_waits_and_same_key_recovers_without_later_
             if committed { (2, 2, 2) } else { (1, 1, 1) }
         );
         let recovered = sent(&app, &token, channel, intent.clone()).await;
-        assert_eq!(recovered["seq"], 2);
+        assert_eq!(recovered["created_seq"], 2);
         if committed {
             assert_eq!(p["messages"][1], recovered);
         }

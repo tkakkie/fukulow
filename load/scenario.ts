@@ -178,9 +178,9 @@ export default async function (data: Setup): Promise<void> {
           // Reconnect replay events may precede the subscribed acknowledgement; the default scenario stays strict.
           if (!reconnect && !subscribed) throw new Error('Unexpected Channel');
           if (message.channel_id !== channelId) throw new Error('Unexpected Channel');
-          if (message.seq <= lastSeq) return; // Contract permits duplicate events.
-          if (message.seq !== lastSeq + 1) throw new Error('Sequence gap');
-          lastSeq = message.seq;
+          if (event.seq <= lastSeq) return; // Contract permits duplicate events.
+          if (event.seq !== lastSeq + 1) throw new Error('Sequence gap');
+          lastSeq = event.seq;
           deliveryLatency.add(deliveries.receive(message.client_message_id, Date.now()), tags);
           delivered.add(1, tags);
         } else {
@@ -247,7 +247,7 @@ export default async function (data: Setup): Promise<void> {
       requireStatus(response, 201, 'send_message');
       const message = response.json() as Message;
       if (!check(message, { 'canonical send': (m) => m.channel_id === channelId &&
-        m.client_message_id === body.client_message_id && m.body === body.body && m.seq > 0 })) {
+        m.client_message_id === body.client_message_id && m.body === body.body && m.created_seq > 0 })) {
         throw new Error('Unexpected send response');
       }
       acceptedResponseTime.add(Date.now() - started);

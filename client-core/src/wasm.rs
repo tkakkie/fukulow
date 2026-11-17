@@ -165,7 +165,7 @@ mod tests {
         step(json!({"type":"connection_ready", "connection":1}))?;
         step(json!({"type":"watch", "channel":id}))?;
         let message = |seq| {
-            json!({"id":Uuid::from_u128(seq), "channel_id":id, "seq":seq,
+            json!({"id":Uuid::from_u128(seq), "channel_id":id, "created_seq":seq,"version":seq,"deleted":false,
             "sender":id,"client_message_id":Uuid::from_u128(seq), "body":"one body",
             "created_at":"2026-01-01T00:00:00Z", "topic_id":null, "reply_to":null, "reply_root_id":null, "mentions":[]})
         };
@@ -188,7 +188,7 @@ mod tests {
                 .is_none()
         );
         let appended = step(
-            json!({"type":"event", "connection":1, "event":{"type":"message", "message":message(2)}}),
+            json!({"type":"event", "connection":1, "event":{"type":"message", "seq":2, "kind":"create", "message":message(2)}}),
         )?;
         assert_eq!(appended["channels"][id.to_string()]["messages"][0], 0);
         assert_eq!(appended["bodies"], json!(["one body"]));

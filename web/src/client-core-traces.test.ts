@@ -14,7 +14,8 @@ function recorder(id: string) {
   const tokens = new Set<number>()
   const trace: Trace = { id, steps: 0 }
   function feed(raw: Input) {
-    const input = normalizeInput(raw)
+    let input = normalizeInput(raw)
+    if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
     const result = step(state, input)
     const { channels, requests, timers, ...session } = result.state
     const actual = wasm.step(input)
@@ -73,7 +74,7 @@ function generated(seed: number): Trace {
         ...(random(3) === 0 ? { reply_to: 'parent', replyRootId: 'root' } : random(2) === 0 ? { topic_name: 'Topic' } : {}) },
       { type: 'user_retry', channel, clientMessageId: pending?.clientMessageId ?? 'c1' },
       { type: 'user_discard', channel, clientMessageId: pending?.clientMessageId ?? 'c1' },
-      { type: 'event', connection, event: { type: 'message', message }, ...(random(5) === 0 ? { refreshMentionNames: true } : {}) },
+      { type: 'event', connection, event: { type: 'message', kind: 'create', seq: (message).created_seq, message }, ...(random(5) === 0 ? { refreshMentionNames: true } : {}) },
       { type: 'event', connection, event: { type: 'subscribed', channel_id: channel, caught_up_seq: random(500) },
         ...(random(3) === 0 ? { subscription: 99999 } : {}) },
       { type: 'event', connection, event: { type: 'error', channel_id: channel, code: ['channel_not_found','subscription_limit','unknown'][random(3)] } },
@@ -111,7 +112,7 @@ function retentionAndIdentity(): Trace {
   d.feed({ type: 'connection_ready', connection })
   const channel = 'A'
   const view = () => d.get().channels[fixtureUuid(channel)]
-  const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', message: record(seq) } })
+  const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   const page = (request: number, start: number, length: number) => d.feed({ type: 'history_result', request,
     page: { messages: Array.from({ length }, (_,i) => record(start + i)), has_more: true } })
   d.feed({ type: 'watch', channel })
@@ -125,15 +126,15 @@ function retentionAndIdentity(): Trace {
   while (view().fill !== undefined) page(view().fill!, view().cursor! + 1, 200)
   for (let seq = view().cursor! + 1, end = seq + 450; seq < end; seq++) event(seq)
   const duplicate = record(view().cursor!)
-  d.feed({ type: 'event', connection, event: { type: 'message', message: duplicate } })
+  d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
   const unchanged = d.get()
-  d.feed({ type: 'event', connection, event: { type: 'message', message: duplicate } })
+  d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
   expect(d.get()).toBe(unchanged)
-  d.feed({ type: 'event', connection, event: { type: 'message', message: duplicate }, refreshMentionNames: true })
+  d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate }, refreshMentionNames: true })
   expect(d.get()).not.toBe(unchanged)
   const mentions = [{ member_id: 'target', name: 'Retained' }]
   for (const name of ['Retained','Retained','Renamed']) d.feed({ type: 'event', connection,
-    event: { type: 'message', message: { ...duplicate, mentions: [{ ...mentions[0], name }] } } })
+    event: { type: 'message', kind: 'create', seq: ({ ...duplicate, mentions: [{ ...mentions[0], name }] }).created_seq, message: { ...duplicate, mentions: [{ ...mentions[0], name }] } } })
   d.feed({ type: 'load_older', channel })
   page(view().older!, 1, 200)
   d.feed({ type: 'refresh', channel })

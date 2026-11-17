@@ -240,7 +240,7 @@ pub(super) enum TimelineItem {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TimelineMessage {
-    pub seq: i64,
+    pub created_seq: i64,
 }
 
 #[derive(Debug, Deserialize)]

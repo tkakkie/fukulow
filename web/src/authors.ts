@@ -65,7 +65,7 @@ export function createAuthors(
     get: () => identities,
     mentionName(id: string, fallback: string, mentions: Message['mentions']) {
       const identity = identities.get(id)
-      return identity && identityOrder(identity) >= identityOrder(mentions) ? identity.name : fallback
+      return identity && identityOrder(identity) >= identityOrder(mentions ?? {}) ? identity.name : fallback
     },
     // An unattempted id is pending even before watch() queues its first request.
     isPending: (id: string) => !closed && !unavailable && !identities.has(id) && (!attempted.has(id) || pending.has(id)),

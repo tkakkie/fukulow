@@ -50,7 +50,7 @@ describe('message body validation', () => {
         channel_id: 'A',
         sender: 'me',
         client_message_id: req.client_message_id,
-        seq: 1,
+        created_seq: 1, version: 1, deleted: false,
         body: req.body,
         created_at: '2026-01-01T00:00:00Z',
       },
@@ -59,7 +59,7 @@ describe('message body validation', () => {
       selfId: 'me',
       newId: () => 'c1',
       connect: () => ({ send() {}, close() {} }),
-      api: { listMessages: vi.fn(), sendMessage },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn(), sendMessage },
     })
     await sync.start()
     const a = sync.getTimeline('A')
@@ -179,7 +179,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
       drafts,
       newId: () => `cid-${++idSeq}`,
       connect: () => ({ send() {}, close() {} }),
-      api: { listMessages: vi.fn(), sendMessage },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn(), sendMessage },
     })
     await sync.start()
     const a = sync.getTimeline('A')
@@ -229,7 +229,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
         channel_id: 'A',
         sender: 'me',
         client_message_id: 'cid-2',
-        seq: 2,
+        created_seq: 2, version: 2, deleted: false,
         body: 'トピック別下書き',
         topic_id: 'topic-1',
         reply_to: null,

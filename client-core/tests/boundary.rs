@@ -56,3 +56,61 @@ fn accessors_and_shared_handles_support_incremental_controller_caches() -> Resul
     assert!(duplicate.changed_channels.is_empty());
     Ok(())
 }
+
+#[test]
+fn event_page_records_replace_each_identity_in_native_output() -> Result<(), Box<dyn Error>> {
+    let channel = Uuid::from_u128(1);
+    let self_id = Uuid::from_u128(2);
+    let mut core = Core::new(self_id);
+    let mut feed = |value| core.step(serde_json::from_value::<StepInput>(value).unwrap());
+    let message = |seq, version| {
+        json!({"id":Uuid::from_u128(seq), "channel_id":channel,
+        "created_seq":seq, "version":version, "deleted":false, "client_message_id":Uuid::from_u128(seq + 1000),
+        "sender":Uuid::from_u128(3), "body":"body", "created_at":"2026-01-01T00:00:00Z", "topic_id":null, "reply_to":null,"reply_root_id":null,"mentions":[]})
+    };
+    feed(json!({"type":"session_start","selfId":self_id}));
+    feed(json!({"type":"connection_ready","connection":1}));
+    let watched = feed(json!({"type":"watch","channel":channel}));
+    let history = watched
+        .effects
+        .iter()
+        .find_map(|e| {
+            if let fukulow_client_core::Effect::FetchHistory { id, .. } = e {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .ok_or("missing history")?;
+    feed(
+        json!({"type":"history_result","request":history,"page":{"messages":[message(100,100)],"has_more":false}}),
+    );
+    let subscribed = feed(
+        json!({"type":"event","connection":1,"event":{"type":"subscribed","channel_id":channel,"caught_up_seq":102}}),
+    );
+    let fill = subscribed
+        .effects
+        .iter()
+        .find_map(|e| {
+            if let fukulow_client_core::Effect::FetchHistory { id, .. } = e {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .ok_or("missing fill")?;
+    let result = feed(
+        json!({"type":"events_result","request":fill,"page":{"events":[
+        {"type":"message","seq":101,"kind":"edit","message":message(1,101)},
+        {"type":"message","seq":102,"kind":"edit","message":message(1,102)}],"has_more":false}}),
+    );
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].0, channel);
+    assert_eq!(result.records[0].1.len(), 1);
+    assert_eq!(result.records[0].1[0].version, 102);
+    assert_eq!(
+        core.channel(channel).ok_or("missing Channel")?.cursor,
+        Some(102)
+    );
+    Ok(())
+}

@@ -178,7 +178,7 @@ it('access gain during an empty Channel bootstrap subscribes from zero with only
     await c.topics.loadMain('A')
     c.event(1)
     expect(c.sync.get().channels.A.cursor).toBe(1)
-    expect(c.topics.get('A').lines).toMatchObject([{ kind: 'message', message: { seq: 1 } }])
+    expect(c.topics.get('A').lines).toMatchObject([{ kind: 'message', message: { created_seq: 1 } }])
     expect(c.topicsApi.listTimeline).toHaveBeenCalledOnce()
     expect(c.listMessages).not.toHaveBeenCalled()
   } finally { activity.close(); await c.sync.close() }
@@ -491,7 +491,7 @@ it('initial summary reads and periodic and notice refetches share one bounded ta
   let socket!: import('./realtime').RealtimeHandlers
   const activity = createActivity({ watched: () => true, random: () => 0 })
   const c = createTopicSync({ selfId: 'me', activity, connect(h) { socket = h; return { send() {}, close() {} } },
-    api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
+    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
     topicsApi: { getTopicSummary,
       listTimeline: async () => ok({ as_of_seq: 1, has_more: false, items: [{ kind: 'topic', topic: summary('T', 1) }] }),
       listTopics: async () => ok({ as_of_seq: 1, has_more: false, topics: [summary('T', 1, 1, 0)] }),
@@ -537,7 +537,7 @@ it('Session routing never borrows a fresh Topic position to cover the Channel ag
       listTopicMessages: async () => ok({ messages: [], has_more: false }),
     },
     sync: { connect(h) { socket = h; return { send() {}, close() {} } },
-      api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
     },
   })
   socket.onReady(); await flush()

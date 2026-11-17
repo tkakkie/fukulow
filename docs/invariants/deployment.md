@@ -4,6 +4,7 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 | Rule | Test |
 |---|---|
+| Message wire state has created_seq, version and deleted, with no seq alias; tombstones omit body, excerpts and Mentions | `server/tests/api_contract.rs::message_state_wire_has_creation_version_and_body_free_tombstones` |
 | Emitted wasm and glue are manifest-listed immutable assets; wasm uses application/wasm; unlisted hashed-looking names are never immutable | `server/src/lib.rs::wasm_and_glue_are_manifest_assets_with_immutable_cache_and_wasm_mime` |
 | Deployment/load app and migrate have read-only roots, drop ALL capabilities, forbid new privileges and have no writable mounts or tmpfs | `scripts/compose-security.test.ts::deployment and load app and migrate enforce container restrictions with removal and weakening denials` |
 | Both proxies enforce empty Permissions-Policy feature allowlists and COOP same-origin on success/errors; nginx locations cannot discard headers | `scripts/compose-security.test.ts::both proxies enforce browser headers with removal weakening and inheritance denials` |

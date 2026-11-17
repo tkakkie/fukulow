@@ -24,7 +24,7 @@ async fn reply_counts_bound_anchors_and_descendants_by_watermark_before_data_sna
         .unwrap()
         .forget();
     let late = sent(&app, &token, channel, reply_input(Uuid::new_v4(), &child)).await;
-    assert_eq!(late["seq"], 3);
+    assert_eq!(late["created_seq"], 3);
     sqlx::query("INSERT INTO messages (organization_id,channel_id,id,seq,sender,client_message_id,body,reply_to_id,reply_root_id) VALUES ($1,$2,$3,4,$4,gen_random_uuid(),'Future Reply',$5,$6)")
         .bind(org).bind(channel).bind(future).bind(sender).bind(id(&child)).bind(id(&root)).execute(&pool).await.unwrap();
     sqlx::query(

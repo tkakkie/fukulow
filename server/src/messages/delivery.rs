@@ -100,30 +100,44 @@ impl Sender {
 #[derive(serde::Serialize)]
 #[serde(transparent)]
 pub(crate) struct LiveMessage {
-    message: Message,
+    event: super::ChannelEvent,
     #[serde(skip)]
     pub frame: Utf8Bytes,
 }
 
 impl std::ops::Deref for LiveMessage {
-    type Target = Message;
+    type Target = super::ChannelEvent;
 
-    fn deref(&self) -> &Message {
-        &self.message
+    fn deref(&self) -> &super::ChannelEvent {
+        &self.event
     }
 }
 
 impl LiveMessage {
+    #[cfg(test)]
     pub(crate) fn new(message: Message) -> Result<Self, serde_json::Error> {
+        Self::from_event(super::ChannelEvent::create(message))
+    }
+
+    pub(crate) fn from_event(event: super::ChannelEvent) -> Result<Self, serde_json::Error> {
         // Messages cannot depend on realtime. Keep this borrowed wire envelope
         // byte-compatible with ServerEvent::Message (guarded by the raw-frame test).
         #[derive(serde::Serialize)]
         #[serde(tag = "type", rename_all = "snake_case")]
         enum Event<'a> {
-            Message { message: &'a Message },
+            Message {
+                seq: i64,
+                kind: fukulow_api::ChannelEventKind,
+                message: &'a Message,
+            },
         }
-        let frame = serde_json::to_string(&Event::Message { message: &message })?.into();
-        Ok(Self { message, frame })
+        let frame = serde_json::to_string(&Event::Message {
+            seq: event.seq,
+            kind: event.kind,
+            message: &event.message,
+        })?
+        .into();
+        Ok(Self { event, frame })
     }
 }
 
@@ -552,30 +566,36 @@ impl Delivery {
                 );
                 sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into())
             })?;
-        let after = cursor
-            .get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(message.seq) - 1);
-        if message.seq <= *after {
+        let after = cursor.get_or_insert_with(|| {
+            channel
+                .first_seq
+                .get()
+                .copied()
+                .unwrap_or(message.created_seq)
+                - 1
+        });
+        if message.created_seq <= *after {
             return Ok(());
         }
         // REPLAY_PAGE_SIZE (50) is the effective bound today; the queue-capacity cap only
         // matters if the page size is ever raised above LIVE_QUEUE_CAPACITY.
-        let gap = message.seq - *after - 1;
+        let gap = message.created_seq - *after - 1;
         if gap > super::REPLAY_PAGE_SIZE || gap > LIVE_QUEUE_CAPACITY as i64 {
             // Latch before skipping: current subscribers reconnect; later subscribers
             // register before taking their committed replay watermark.
             self.failures.signal((organization, message.channel_id));
-            *after = message.seq;
+            *after = message.created_seq;
             return Ok(());
         }
         // Recover a committed gap once per Channel, never once per subscriber.
         // Each bounded page rechecks current Member revisions and private grants.
-        while *after < message.seq - 1 {
+        while *after < message.created_seq - 1 {
             let page = super::replay_page(
                 pool,
                 organization,
                 message.channel_id,
                 *after,
-                message.seq - 1,
+                message.created_seq - 1,
             )
             .await?;
             if page.is_empty() {
@@ -583,14 +603,19 @@ impl Delivery {
             }
             let last = page
                 .last()
-                .map(|message| message.seq)
+                .map(|event| event.seq)
                 .ok_or(sqlx::Error::RowNotFound)?;
             self.fan_out(pool, organization, channel, &page).await;
             *after = last;
         }
-        self.fan_out(pool, organization, channel, std::slice::from_ref(message))
-            .await;
-        *after = message.seq;
+        self.fan_out(
+            pool,
+            organization,
+            channel,
+            &[super::ChannelEvent::create(message.clone())],
+        )
+        .await;
+        *after = message.created_seq;
         Ok(())
     }
 
@@ -599,7 +624,7 @@ impl Delivery {
         pool: &sqlx::PgPool,
         organization: Uuid,
         channel: &ChannelFanout,
-        messages: &[Message],
+        messages: &[super::ChannelEvent],
     ) {
         // Only this Channel's lock covers the O(subscribers) snapshot.
         let recipients: Vec<_> = channel
@@ -653,7 +678,7 @@ impl Delivery {
             #[cfg(test)]
             self.message_serializations
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let Ok(message) = LiveMessage::new(message) else {
+            let Ok(message) = LiveMessage::from_event(message) else {
                 self.failures.signal(key);
                 return;
             };
@@ -742,15 +767,17 @@ mod tests {
         Message {
             id: Uuid::new_v4(),
             channel_id: channel,
-            seq: 1,
+            created_seq: 1,
+            version: 1,
+            deleted: false,
             client_message_id: Uuid::new_v4(),
             sender: Uuid::new_v4(),
-            body: "committed".into(),
+            body: Some("committed".into()),
             created_at: "now".into(),
             topic_id: None,
             reply_to: None,
             reply_root_id: None,
-            mentions: Vec::new(),
+            mentions: Some(Vec::new()),
         }
     }
 
@@ -1223,15 +1250,17 @@ mod tests {
             Message {
                 id: Uuid::new_v4(),
                 channel_id: channel,
-                seq: 1,
+                created_seq: 1,
+                version: 1,
+                deleted: false,
                 client_message_id: key,
                 sender: Uuid::new_v4(),
-                body: "committed".into(),
+                body: Some("committed".into()),
                 created_at: "now".into(),
                 topic_id: None,
                 reply_to: None,
                 reply_root_id: None,
-                mentions: Vec::new(),
+                mentions: Some(Vec::new()),
             },
         );
         gate.entered.acquire().await.unwrap().forget();
@@ -1288,15 +1317,17 @@ mod tests {
             Message {
                 id: Uuid::new_v4(),
                 channel_id: channel,
-                seq: 1,
+                created_seq: 1,
+                version: 1,
+                deleted: false,
                 client_message_id: Uuid::new_v4(),
                 sender: Uuid::new_v4(),
-                body: "committed".into(),
+                body: Some("committed".into()),
                 created_at: "now".into(),
                 topic_id: None,
                 reply_to: None,
                 reply_root_id: None,
-                mentions: Vec::new(),
+                mentions: Some(Vec::new()),
             },
         );
         // The current-thread runtime cannot poll the spawned future until we yield.

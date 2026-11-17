@@ -23,7 +23,7 @@ impl Runner {
             )
             .await;
             let items = spec.expect.items.iter().map(|item| match item {
-                TimelineItem::Message { message } => json!({"kind":"message","message":self.records[&(channel, message.seq)]}),
+                TimelineItem::Message { message } => json!({"kind":"message","message":self.records[&(channel, message.created_seq)]}),
                 TimelineItem::Topic { topic } => {
                     let id = &self.topics[&(channel, topic.name.clone())];
                     let first_seq = self.records.iter().filter(|((id_channel, seq), record)| {

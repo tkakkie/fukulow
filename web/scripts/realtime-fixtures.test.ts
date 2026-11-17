@@ -145,7 +145,7 @@ describe('realtime fixtures: validation', () => {
   })
 
   it('only treats an any_of label as bound when every alternative binds it to the same effect type', () => {
-    const respond = (f: any) => (f.client.scenarios[0].steps[1].input = { type: 'ack', respond_to: 'x', message: { seq: 1 } })
+    const respond = (f: any) => (f.client.scenarios[0].steps[1].input = { type: 'ack', respond_to: 'x', message: { created_seq: 1 } })
     const withAnyOf = (alternatives: unknown[]) => (f: any) => {
       f.client.scenarios[0].steps[0].effects.required = [{ any_of: alternatives }]
       respond(f)
@@ -161,7 +161,7 @@ describe('realtime fixtures: validation', () => {
 
   it('rejects times inside any_of and a range for the singular message', () => {
     expect(problemsOf((f) => (f.client.scenarios[0].steps[0].effects.required = [{ any_of: [{ type: 'send', times: 1 }, { type: 'wait' }] }]))).toContain('times is not allowed inside any_of')
-    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'message', channel: 'A', message: { from: 1, to: 2 } }))).toContain('a single message cannot be a range')
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'message', seq: 1, kind: 'create', channel: 'A', message: { from: 1, to: 2 } }))).toContain('a single message cannot be a range')
   })
 
   it('compares replay gate channels independent of JSON property order', () => {
@@ -180,15 +180,15 @@ describe('realtime fixtures: validation', () => {
 
   it('rejects dangling references in client scenarios', () => {
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input.respond_to = 'nope'))).toContain('not bound by an earlier step')
-    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'ack', respond_to: 'f0', message: { seq: 1 } }))).toContain('answers a send effect')
-    expect(problemsOf((f) => f.client.scenarios[0].steps[1].input.messages.push({ seq: 2, from: 2, to: 3 }))).toContain('seq cannot be combined')
+    expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'ack', respond_to: 'f0', message: { created_seq: 1 } }))).toContain('answers a send effect')
+    expect(problemsOf((f) => f.client.scenarios[0].steps[1].input.messages.push({ created_seq: 2, from: 2, to: 3 }))).toContain('seq cannot be combined')
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].observe.channels.A.visible = [3, 2]))).toContain('strictly ascending')
     expect(problemsOf((f) => (f.client.scenarios[0].never = [{ type: 'send', as: 'x' }]))).toContain('cannot bind a label')
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input = { type: 'membership_check_result', respond_to: 'f0', status: 200 }))).toContain('answers a membership_check effect')
   })
 
   it('validates proposed scenarios and allows planned vocabulary only in them; runners partition them out', () => {
-    const topicPage = (f: any) => (f.client.scenarios[0].steps[1].input.messages = [{ seq: 1, topic: 'T' }, { from: 2, to: 3 }])
+    const topicPage = (f: any) => (f.client.scenarios[0].steps[1].input.messages = [{ created_seq: 1, topic: 'T' }, { from: 2, to: 3 }])
     const propose = (f: any) => (f.client.scenarios[0].proposed = { owner: ['#138'] })
     expect(problemsOf(topicPage)).toContain('input.messages[0].topic is planned vocabulary; mark the scenario proposed')
     expect(problemsOf((f) => f.delivery.scenarios[0].steps.push({ do: 'main_timeline', as: 'alice', channel: 'general', query: { as_of_seq: 0 }, expect: { status: 200, as_of_seq: 0, items: [], has_more: false } }))).toBe('')
@@ -203,8 +203,8 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => (propose(f), (f.client.scenarios[0].proposed.owner = ['137'])))).toContain('does not match')
     expect(problemsOf((f) => (propose(f), (f.client.scenarios[0].steps[1].input.respond_to = 'nope')))).toContain('not bound by an earlier step')
     const lines = (mainTimeline: unknown) => (f: any) => (propose(f), (f.client.scenarios[0].steps[1].observe.channels.A.main_timeline = mainTimeline))
-    expect(problemsOf(lines([{ seq: 1 }, { topic: 'T', position: 3, message_count: 2 }]))).toBe('')
-    expect(problemsOf(lines([{ seq: 3 }, { topic: 'T', position: 2, message_count: 2 }]))).toContain('strictly ascending')
+    expect(problemsOf(lines([{ created_seq: 1 }, { topic: 'T', position: 3, message_count: 2 }]))).toBe('')
+    expect(problemsOf(lines([{ created_seq: 3 }, { topic: 'T', position: 2, message_count: 2 }]))).toContain('strictly ascending')
     expect(problemsOf(lines([{ topic: 'T', position: 2, message_count: 1 }, { topic: 'T', position: 3, message_count: 2 }]))).toContain('more than once')
     const all = [{ id: 'a' }, { id: 'b', proposed: { owner: ['#137'] } }]
     expect(partitionScenarios(all)).toEqual({ running: [all[0]], proposed: [all[1]] })
@@ -216,7 +216,7 @@ describe('realtime fixtures: validation', () => {
       const step = {
         do: 'main_timeline', as: 'alice', channel: 'general', query: { as_of_seq: 10, before_position: 8 },
         expect: { status: 200, as_of_seq: 10, items: [
-          { kind: 'message', message: { seq: 4 } },
+          { kind: 'message', message: { created_seq: 4 } },
           { kind: 'topic', topic: { name: 'T', last_seq: 7, message_count: 2 } },
         ], has_more: true },
       }
@@ -238,7 +238,7 @@ describe('realtime fixtures: validation', () => {
     const topic = (f: any) => {
       f.client.scenarios[0].layer = 'controller'
       f.client.scenarios[0].covers = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7']
-      f.client.scenarios[0].steps[1].input.messages = [{ seq: 1, topic: 'T' }]
+      f.client.scenarios[0].steps[1].input.messages = [{ created_seq: 1, topic: 'T' }]
     }
     expect(problemsOf(topic)).toBe('')
     expect(problemsOf(f => { topic(f); delete f.client.scenarios[0].layer })).toContain('planned vocabulary')
@@ -355,7 +355,7 @@ function pilotStandIn(bug: 'fills-at-once' | 'cursor-jumps-on-ack' | 'stale-time
         case 'watch':
           return [{ type: 'fetch_history', channel: 'A', page: 'latest', request: ++requests }]
         case 'history_result':
-          for (const m of input.messages ?? []) held.set(m.seq, m)
+          for (const m of input.messages ?? []) held.set(m.created_seq, m)
           cursor = Math.max(...held.keys())
           return [{ type: 'subscribe', channel: 'A', after_seq: cursor }]
         case 'user_send':
@@ -364,13 +364,13 @@ function pilotStandIn(bug: 'fills-at-once' | 'cursor-jumps-on-ack' | 'stale-time
         case 'ack': {
           const m = input.message as Message
           pending = []
-          held.set(m.seq, m)
-          if (bug === 'cursor-jumps-on-ack') cursor = m.seq
+          held.set(m.created_seq, m)
+          if (bug === 'cursor-jumps-on-ack') cursor = m.created_seq
           if (bug === 'fills-at-once') return fill()
-          return cursor !== null && m.seq > cursor + 1 ? [{ type: 'wait', purpose: 'reorder_grace', channel: 'A' }] : []
+          return cursor !== null && m.created_seq > cursor + 1 ? [{ type: 'wait', purpose: 'reorder_grace', channel: 'A' }] : []
         }
         case 'message':
-          held.set((input.message as Message).seq, input.message as Message)
+          held.set((input.message as Message).created_seq, input.message as Message)
           advance()
           return []
         case 'timer_elapsed': {
@@ -382,7 +382,7 @@ function pilotStandIn(bug: 'fills-at-once' | 'cursor-jumps-on-ack' | 'stale-time
       }
     },
     observe() {
-      return { channels: { A: { state: 'ready', cursor, messages: [...held.values()].sort((a, b) => a.seq - b.seq), pending } } }
+      return { channels: { A: { state: 'ready', cursor, messages: [...held.values()].sort((a, b) => a.created_seq - b.created_seq), pending } } }
     },
   }
 }
@@ -424,7 +424,7 @@ function unreadReference(bug?: UnreadBug): ClientUnderTest {
       switch (input.type) {
         case 'session_start': return effect('connect')
         case 'watch': return effect('fetch_history', { channel, page: 'latest' })
-        case 'history_result': return effect('subscribe', { channel, after_seq: Math.max(0, ...input.messages!.map(m => m.seq)) })
+        case 'history_result': return effect('subscribe', { channel, after_seq: Math.max(0, ...input.messages!.map(m => m.created_seq)) })
         case 'load_unread': return effect('fetch_unread', { channel })
         case 'socket_closed': return effect('wait', { purpose: 'reconnect_backoff' })
         case 'timer_elapsed': return effect('connect')
@@ -435,7 +435,7 @@ function unreadReference(bug?: UnreadBug): ClientUnderTest {
           const message = input.message!
           if (bug === 'drop-early' && !state.baseline) return []
           const seen = bug === 'global-dedup' ? [...channels.values()].flatMap(c => c.events) : state.events
-          if (bug === 'no-dedup' || !seen.some(m => m.seq === message.seq)) state.events.push(message)
+          if (bug === 'no-dedup' || !seen.some(m => m.created_seq === message.created_seq)) state.events.push(message)
           return []
         }
         case 'unread_result': {
@@ -455,8 +455,8 @@ function unreadReference(bug?: UnreadBug): ClientUnderTest {
     },
     observe() {
       return { channels: Object.fromEntries([...channels].map(([id, { baseline, events }]) => {
-        const suffix = baseline ? events.filter(m => (bug === 'accept-covered' || m.seq > baseline.as_of_seq)
-          && m.seq > baseline.read_seq && (bug === 'count-own' || m.sender !== 'me')) : []
+        const suffix = baseline ? events.filter(m => (bug === 'accept-covered' || m.created_seq > baseline.as_of_seq)
+          && m.created_seq > baseline.read_seq && (bug === 'count-own' || m.sender !== 'me')) : []
         return [id, { cursor: null, messages: [], pending: [], ...(baseline ? { unread: {
           ...baseline,
           main_unread_count: baseline.main_unread_count + suffix.filter(m => !m.topic).length,
@@ -526,7 +526,7 @@ describe('realtime fixtures: runner semantics', () => {
   })
 
   it('does not truncate a range given as the singular message', () => {
-    const steps = [{ input: { type: 'message', channel: 'A', message: { from: 1, to: 3 } } }]
+    const steps = [{ input: { type: 'message', seq: 1, kind: 'create', channel: 'A', message: { from: 1, to: 3 } } }]
     let fed = false
     expect(runClientScenario(scenario(steps), scripted(() => ((fed = true), []))).join()).toContain('not a range')
     expect(fed).toBe(false)
@@ -586,10 +586,10 @@ it('validates Reply response binding and rejects unordered or duplicate chain ob
     const s = f.client.scenarios[0]
     s.layer = 'controller'; s.covers = ['P1', 'P6', 'P7']
     s.steps = [
-      { input: { type: 'open_reply_chain', channel: 'A', message: { seq: 1 } },
+      { input: { type: 'open_reply_chain', channel: 'A', message: { created_seq: 1 } },
         effects: { required: [{ type: 'fetch_reply_chain', channel: 'A', anchor: 'id1', after_seq: 0, as: 'r0' }] } },
       { input: { type: 'reply_chain_result', respond_to: 'r0', root_id: 'id1', has_more: false,
-        messages: [{ seq: 1 }, { seq: 3, reply_to: 'id1', reply_root_id: 'id1' }] },
+        messages: [{ created_seq: 1 }, { created_seq: 3, reply_to: 'id1', reply_root_id: 'id1' }] },
         observe: { channels: { A: { reply_chain: { root_id: 'id1', visible: [1, 3], has_more: false } } } } },
     ]
     return s

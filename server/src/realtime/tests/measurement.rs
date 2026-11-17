@@ -167,7 +167,7 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     let mut first = f.server.connect(&f.token).await;
     subscribe(&mut first, f.channel, 0).await;
     for seq in 1..=accepted {
-        assert_eq!(event(&mut first).await["message"]["seq"], seq);
+        assert_eq!(event(&mut first).await["message"]["created_seq"], seq);
     }
     ready(&mut first, f.channel, accepted as i64).await;
     watch_close(&mut clients, first);
@@ -190,7 +190,7 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
         let mut socket = f.server.connect(&f.token).await;
         subscribe(&mut socket, f.channel, 0).await;
         for seq in 1..=accepted {
-            assert_eq!(event(&mut socket).await["message"]["seq"], seq);
+            assert_eq!(event(&mut socket).await["message"]["created_seq"], seq);
         }
         ready(&mut socket, f.channel, accepted as i64).await;
         watch_close(&mut clients, socket);
@@ -198,7 +198,7 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     let first_replay_ms = replay_start.elapsed().as_secs_f64() * 1000.0;
     let second = std::time::Instant::now();
     let next = post(&f, f.channel).await;
-    assert_eq!(next["seq"], accepted + 1);
+    assert_eq!(next["created_seq"], accepted + 1);
     all_closed(&mut clients).await;
     let second_close_ms = second.elapsed().as_secs_f64() * 1000.0;
     let replay_start = std::time::Instant::now();
@@ -213,7 +213,7 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     subscribe(&mut recovered_hot, f.channel, accepted as i64 + 1).await;
     ready(&mut recovered_hot, f.channel, accepted as i64 + 1).await;
     let final_hot = post(&f, f.channel).await;
-    assert_eq!(final_hot["seq"], accepted + 2);
+    assert_eq!(final_hot["created_seq"], accepted + 2);
     assert_eq!(event(&mut recovered_hot).await["message"], final_hot);
     // The original cold socket stays live through both hot reconnect cycles.
     let next_cold = post(&f, cold).await;
@@ -304,7 +304,7 @@ async fn organization_reservation_probe(
                 .to_owned();
             let cursor = cursors.entry(channel).or_insert(0);
             *cursor += 1;
-            assert_eq!(message["message"]["seq"], *cursor);
+            assert_eq!(message["message"]["created_seq"], *cursor);
         }
         assert_eq!(cursors.len(), 16);
         assert!(cursors.values().all(|&seq| seq == 20));

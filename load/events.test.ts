@@ -15,8 +15,8 @@ test('Message load accepts the automatic ready frame and notices without countin
   ];
   for (const notice of notices) assert.equal(isActivityNotice(notice), true, notice.type);
   for (const event of [
-    { type: 'message', message: { id: 'm', channel_id: 'c', client_message_id: 'key', sender: 'member',
-      body: 'Load test message', seq: 1, created_at: '2026-11-14T00:00:00Z',
+    { type: 'message', seq: 1, kind: 'create', message: { id: 'm', channel_id: 'c', client_message_id: 'key', sender: 'member',
+      body: 'Load test message', created_seq: 1, version: 1, deleted: false, created_at: '2026-11-14T00:00:00Z',
       topic_id: null, reply_to: null, reply_root_id: null, mentions: [] } },
     { type: 'subscribed', channel_id: 'c', caught_up_seq: 0 },
     { type: 'channel_access_lost', channel_id: 'c' },

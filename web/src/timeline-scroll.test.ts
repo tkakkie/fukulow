@@ -9,7 +9,7 @@ import {
   stepTimelineScroll,
 } from './timeline-scroll'
 
-const msg = (seq: number, sender = 'other') => ({ id: `m-${seq}`, seq, sender })
+const msg = (seq: number, sender = 'other') => ({ id: `m-${seq}`, created_seq: seq, sender })
 
 describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.md §8)', () => {
   it('treats scroll positions within 64px of the bottom as pinned', () => {
@@ -282,7 +282,7 @@ describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.m
       type: 'sync',
       channelId: 'c1',
       status: 'ready',
-      messages: [{ id: 'topic:t1:2', seq: 2, sender: 'other' }, msg(3), msg(5)],
+      messages: [{ id: 'topic:t1:2', created_seq: 2, sender: 'other' }, msg(3), msg(5)],
       pendingIds: [],
       selfId: 'me',
     }).state
@@ -297,7 +297,7 @@ describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.m
       type: 'sync',
       channelId: 'c1',
       status: 'ready',
-      messages: [msg(3), msg(5), { id: 'topic:t1:6', seq: 6, sender: 'other' }],
+      messages: [msg(3), msg(5), { id: 'topic:t1:6', created_seq: 6, sender: 'other' }],
       pendingIds: [],
       selfId: 'me',
     })

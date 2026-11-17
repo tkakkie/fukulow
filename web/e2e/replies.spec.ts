@@ -27,7 +27,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
   await page.setViewportSize({ width: 1440, height: 900 })
   const root = await sendApiMessage(page.request, { body: '長い返信の起点' })
   const messages: Message[] = [root, ...Array.from({ length: 10_000 }, (_, i) => ({
-    ...root, id: crypto.randomUUID(), seq: i + 2, client_message_id: crypto.randomUUID(),
+    ...root, id: crypto.randomUUID(), created_seq: i + 2, version: i + 2, deleted: false, client_message_id: crypto.randomUUID(),
     reply_to: root.id, reply_root_id: root.id,
     body: `返信 ${i + 2}${i % 7 === 0 ? '\n高さの異なる本文'.repeat(4) : ''}`,
   }))]
@@ -53,9 +53,9 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
     const url = new URL(route.request().url())
     const after = Number(url.searchParams.get('after_seq') ?? 0)
     reads.push({ anchor: url.pathname.split('/').at(-2)!, after })
-    const pageMessages = messages.filter(m => m.seq > after).slice(0, Number(url.searchParams.get('limit') ?? 50))
+    const pageMessages = messages.filter(m => m.created_seq > after).slice(0, Number(url.searchParams.get('limit') ?? 50))
     const data: components['schemas']['ReplyChainPage'] = {
-      root_id: root.id, messages: pageMessages, has_more: pageMessages.at(-1)!.seq < 10_001,
+      root_id: root.id, messages: pageMessages, has_more: pageMessages.at(-1)!.created_seq < 10_001,
     }
     if (after === 150 && heldRead) await heldRead
     return route.fulfill({ json: data })

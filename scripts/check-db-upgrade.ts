@@ -163,8 +163,11 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.equal(mismatch.stdout, '')
     sql('UPDATE _sqlx_migrations SET version = version - 1 WHERE version = (SELECT max(version) FROM _sqlx_migrations)')
     const history = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
-    // A Message sent by the older image gains the default empty accepted Mention set (#152).
-    assert.deepEqual(history.messages, [{ mentions: [], ...message }])
+    // A Message sent by the older image gains the default empty accepted Mention set (#152)
+    // and is served in the #515 wire shape: seq becomes created_seq, version starts at it.
+    const { seq, ...unchanged } = message
+    const upgraded = { mentions: [], ...unchanged, created_seq: seq, version: seq, deleted: false }
+    assert.deepEqual(history.messages, [upgraded])
     await request(url, '/session', owner)
     dc('restart', 'app')
     url = await health(current)
@@ -173,7 +176,7 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     const upgradedMessage = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`,
       { body: 'Sent after read-only upgrade and restart', client_message_id: randomUUID() }, session.token, 201)
     const upgradedHistory = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
-    assert.deepEqual(upgradedHistory.messages, [{ mentions: [], ...message }, upgradedMessage])
+    assert.deepEqual(upgradedHistory.messages, [upgraded, upgradedMessage])
     assert.equal(run(['diff', dc('ps', '-q', 'app')]), '')
     for (const statement of [
       'ALTER TABLE users DISABLE TRIGGER protect_member_identity',

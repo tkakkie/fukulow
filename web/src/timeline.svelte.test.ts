@@ -2044,7 +2044,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       topic_name: 'リリース計画',
     })
     net.sends[0].resolve(ok(createdTopicMsg))
-    net.event({ type: 'message', message: createdTopicMsg })
+    net.event({ type: 'message', kind: 'create', seq: (createdTopicMsg).created_seq, message: createdTopicMsg })
     await settle()
     await settle()
     flushSync()
@@ -2056,7 +2056,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // 3. Live message in t-1 moves its summary line to the tail (after t-2) WITHOUT triggering a live status announcement
     announcements.length = 0
     const liveTopicMsg = { ...record(5, 'c1'), id: 'm-5', sender: 'other', body: '仕様の追記です', topic_id: 't-1' }
-    net.event({ type: 'message', message: liveTopicMsg })
+    net.event({ type: 'message', kind: 'create', seq: (liveTopicMsg).created_seq, message: liveTopicMsg })
     await settle()
     flushSync()
     const afterMoveItems = queryAll(host, '#main-content .timeline-list__item')
@@ -2150,7 +2150,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       topic_id: 't-1',
     }
     net.sends.at(-1)!.resolve(ok(sentInTopic))
-    net.event({ type: 'message', message: sentInTopic })
+    net.event({ type: 'message', kind: 'create', seq: (sentInTopic).created_seq, message: sentInTopic })
     await settle()
     flushSync()
     expect(queryAll(host, '#main-content .topic-view__item')).toHaveLength(3)
@@ -2158,7 +2158,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // Live arrival in open Topic view IS announced
     announcements.length = 0
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(7, 'c1'), id: 'm-7', sender: 'other', body: 'トピックへの新着通知', topic_id: 't-1' }).created_seq,
       message: { ...record(7, 'c1'), id: 'm-7', sender: 'other', body: 'トピックへの新着通知', topic_id: 't-1' },
     })
     await settle()
@@ -2363,15 +2363,15 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       announcements.length = 0
       // Known authors keep the normal 2 s window; own sends remain silent even
       // when the Member list does not include self.
-      net.event({ type: 'message', message: { ...record(2, 'c1'), sender: 'known', body: '既知の新着' } })
-      net.event({ type: 'message', message: { ...record(3, 'c1'), sender: 'me', body: '自分の送信' } })
+      net.event({ type: 'message', kind: 'create', seq: ({ ...record(2, 'c1'), sender: 'known', body: '既知の新着' }).created_seq, message: { ...record(2, 'c1'), sender: 'known', body: '既知の新着' } })
+      net.event({ type: 'message', kind: 'create', seq: ({ ...record(3, 'c1'), sender: 'me', body: '自分の送信' }).created_seq, message: { ...record(3, 'c1'), sender: 'me', body: '自分の送信' } })
       await settle()
       await vi.advanceTimersByTimeAsync(2_000)
       expect(announcements).toEqual(['既知の著者: 既知の新着'])
       // Self is absent from this Member list and author cache; the Organization identity still names it.
       expect(host.querySelector('[data-message-id="id3"] .ui-message-row__sender')?.textContent).toBe('自分')
       announcements.length = 0
-      net.event({ type: 'message', message: { ...record(4, 'c1'), sender: 'unknown', body: '新着本文' } })
+      net.event({ type: 'message', kind: 'create', seq: ({ ...record(4, 'c1'), sender: 'unknown', body: '新着本文' }).created_seq, message: { ...record(4, 'c1'), sender: 'unknown', body: '新着本文' } })
       await settle()
       expect(lookup).toHaveBeenCalledWith('org-1', { ids: ['unknown'] })
       await vi.advanceTimersByTimeAsync(5_000)
@@ -3154,7 +3154,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // First live arrival in t-slow must be announced, NOT eaten as the initial baseline!
     announcements.length = 0
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '遅延後の最初の新着', topic_id: 't-slow' }).created_seq,
       message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '遅延後の最初の新着', topic_id: 't-slow' },
     })
     await settle()
@@ -3270,7 +3270,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // Live arrival for unknown Topic t-retry triggers summary read from both Timeline and TopicList (deduped to 1 call)
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '本文', topic_id: 't-retry' }).created_seq,
       message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '本文', topic_id: 't-retry' },
     })
     await settle()
@@ -3399,11 +3399,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // 1. Live messages arrive for retryable-failing Topic t-503 and non-retryable 400 Topic t-400
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一時障害本文', topic_id: 't-503' }).created_seq,
       message: { ...record(2, 'c1'), id: 'm-2', sender: 'other', body: '一時障害本文', topic_id: 't-503' },
     })
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-400' }).created_seq,
       message: { ...record(3, 'c1'), id: 'm-3', sender: 'other', body: '非再試行本文', topic_id: 't-400' },
     })
     await settle()
@@ -3427,7 +3427,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // Later traffic leaves the permanent refusal stopped while transient failures keep retrying.
     const beforeLater = retryableCalls
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(4, 'c1'), id: 'm-4', sender: 'other', body: '後続メッセージ', topic_id: null }).created_seq,
       message: { ...record(4, 'c1'), id: 'm-4', sender: 'other', body: '後続メッセージ', topic_id: null },
     })
     await settle()
@@ -3876,7 +3876,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       topic_id: 't-kbd',
     }
     net.sends[0].resolve(ok(sentInTopic))
-    net.event({ type: 'message', message: sentInTopic })
+    net.event({ type: 'message', kind: 'create', seq: (sentInTopic).created_seq, message: sentInTopic })
     await settle()
     flushSync()
 
@@ -4493,7 +4493,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // 2. Live update: a new reply arriving on the stream appears in the panel immediately
     const liveReply = { ...record(4, 'c1'), reply_to: m1.id, reply_root_id: m1.id, body: 'ライブ到着の返信' }
-    net.event({ type: 'message', message: liveReply })
+    net.event({ type: 'message', kind: 'create', seq: (liveReply).created_seq, message: liveReply })
     await settle()
     flushSync()
     expect(panel.textContent).toContain('ライブ到着の返信')
@@ -4533,7 +4533,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       reply_root_id: m1.id,
     }
     net.sends[0].resolve(ok(sentMsg))
-    net.event({ type: 'message', message: sentMsg })
+    net.event({ type: 'message', kind: 'create', seq: (sentMsg).created_seq, message: sentMsg })
     await settle()
     flushSync()
 
@@ -5280,7 +5280,9 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(rawSession.replies.get('c1').anchor?.id).toBe(r1.id)
     expect(net.replyHistory).toHaveLength(reads)
     // Rendering and live eviction of that anchor's body must not reopen the chain.
-    for (let seq = 4; seq <= 254; seq++) net.event({ type: 'message', message: {
+    for (let seq = 4; seq <= 254; seq++) net.event({ type: 'message', kind: 'create', seq: ({
+      ...record(seq, 'c1'), sender: 'other', reply_to: mRoot.id, reply_root_id: mRoot.id,
+    }).created_seq, message: {
       ...record(seq, 'c1'), sender: 'other', reply_to: mRoot.id, reply_root_id: mRoot.id,
     } })
     await settle(); flushSync()
@@ -5395,7 +5397,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // 1. Pinned live arrival scrolls to the new scrollHeight
     scrollEl.scrollHeight = 1300
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(3, 'c1'), sender: 'other', reply_to: m1.id, reply_root_id: m1.id, body: 'ピン留め中のライブ返信' }).created_seq,
       message: { ...record(3, 'c1'), sender: 'other', reply_to: m1.id, reply_root_id: m1.id, body: 'ピン留め中のライブ返信' },
     })
     await settle()
@@ -5410,7 +5412,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     scrollEl.scrollHeight = 1400
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(4, 'c1'), sender: 'other', reply_to: m1.id, reply_root_id: m1.id, body: '未ピン中のライブ返信' }).created_seq,
       message: { ...record(4, 'c1'), sender: 'other', reply_to: m1.id, reply_root_id: m1.id, body: '未ピン中のライブ返信' },
     })
     await settle()
@@ -5669,7 +5671,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     // Deliver a live message in t3 while its summary recovery fails -> t3 has unreadCount === null
     net.event({
-      type: 'message',
+      type: 'message', kind: 'create', seq: ({ ...record(7, 'c1'), topic_id: 't3', sender: 'other', body: 't3の新着メッセージ' }).created_seq,
       message: { ...record(7, 'c1'), topic_id: 't3', sender: 'other', body: 't3の新着メッセージ' },
     })
     await settle()
@@ -6777,7 +6779,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicLists.c1 = ok({ as_of_seq: 13, has_more: false, topics: [t1Summary] })
     net.topicSummaries['c1:t1'] = ok({ as_of_seq: 13, topic: t1Summary })
     scrollEl.scrollHeight = 350
-    net.event({ type: 'message', message: m7 })
+    net.event({ type: 'message', kind: 'create', seq: (m7).created_seq, message: m7 })
     await settle()
     flushSync()
 
@@ -6828,7 +6830,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     net.topicLists.c1 = ok({ as_of_seq: 14, has_more: false, topics: [t1Summary] })
     net.topicSummaries['c1:t1'] = ok({ as_of_seq: 14, topic: t1Summary })
     topicScrollEl.scrollHeight = 300
-    net.event({ type: 'message', message: t1m7 })
+    net.event({ type: 'message', kind: 'create', seq: (t1m7).created_seq, message: t1m7 })
     await settle()
     flushSync()
 
@@ -6967,7 +6969,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const c2ReadsBefore = c2UnreadReads
     // Live message on c1 changes c1's Unread -> must NOT re-read c2's Unread in Workspace/ChannelList.
-    net.event({ type: 'message', message: { ...record(2, 'c1'), sender: 'other', body: 'c1新着' } })
+    net.event({ type: 'message', kind: 'create', seq: ({ ...record(2, 'c1'), sender: 'other', body: 'c1新着' }).created_seq, message: { ...record(2, 'c1'), sender: 'other', body: 'c1新着' } })
     await settle()
     flushSync()
     expect(c2UnreadReads).toBe(c2ReadsBefore)

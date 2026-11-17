@@ -89,7 +89,7 @@
 <article
   bind:this={rowRef}
   class="ui-message-row"
-  class:ui-message-row--mentioned={mentioned || (!pendingStatus && mentions.some(target => target.member_id === selfId))}
+  class:ui-message-row--mentioned={mentioned || (!pendingStatus && (mentions ?? []).some(target => target.member_id === selfId))}
   class:ui-message-row--sending={pendingStatus === 'sending'}
   class:ui-message-row--failed={pendingStatus === 'failed'}
   tabindex="-1"

@@ -315,6 +315,13 @@ impl<'a> Step<'a> {
             if self
                 .core
                 .channel(id)
+                .is_some_and(|c| c.versions.len() > limit)
+            {
+                self.cap_versions(id, limit);
+            }
+            if self
+                .core
+                .channel(id)
                 .is_some_and(|c| c.retained_count.unwrap_or(0) > limit)
             {
                 self.trim(id, limit);

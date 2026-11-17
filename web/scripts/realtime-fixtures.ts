@@ -11,7 +11,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import type { UnreadChannel } from '../src/api-schema.d.ts'
+import type { Message as WireMessage, UnreadChannel } from '../src/api-schema.d.ts'
 
 export const defaultDir = resolve(import.meta.dirname, '../../contract/realtime')
 
@@ -147,7 +147,7 @@ function plannedTerm(value: Json, path: string, delivery = false, controller = f
 function checkLines(list: Json, where: string, errors: string[]) {
   if (!Array.isArray(list)) return
   const lines = list as Record<string, Json>[]
-  const at = lines.map((l) => (l.seq ?? l.position) as number)
+  const at = lines.map((l) => (l.created_seq ?? l.position) as number)
   if (!at.every((n, i) => i === 0 || n > at[i - 1])) errors.push(`${where}: line positions must be strictly ascending`)
   const topics = lines.flatMap((l) => (typeof l.topic === 'string' ? [l.topic] : []))
   if (new Set(topics).size !== topics.length) errors.push(`${where}: a Topic appears more than once`)
@@ -157,7 +157,7 @@ function checkLines(list: Json, where: string, errors: string[]) {
 function checkItems(list: Json, where: string, errors: string[]) {
   if (!Array.isArray(list)) return
   checkLines(list.map((item) => item.kind === 'message'
-    ? { seq: item.message.seq }
+    ? { created_seq: item.message.created_seq }
     : { topic: item.topic.name, position: item.topic.last_seq }), where, errors)
 }
 
@@ -167,11 +167,11 @@ function checkSeqList(list: Json, where: string, errors: string[]) {
 }
 
 function checkMessageSpec(m: Record<string, Json>, where: string, errors: string[], singular = false) {
-  const single = 'seq' in m
+  const single = 'created_seq' in m
   const range = 'from' in m && 'to' in m
-  if (single === range) errors.push(`${where}: give seq, or from and to`)
-  if (single && ('from' in m || 'to' in m)) errors.push(`${where}: seq cannot be combined with from/to`)
-  if (singular && range) errors.push(`${where}: a single message cannot be a range (use seq, or messages for a range)`)
+  if (single === range) errors.push(`${where}: give created_seq, or from and to`)
+  if (single && ('from' in m || 'to' in m)) errors.push(`${where}: created_seq cannot be combined with from/to`)
+  if (singular && range) errors.push(`${where}: a single message cannot be a range (use created_seq, or messages for a range)`)
   if (range && (m.to as number) < (m.from as number)) errors.push(`${where}: from must be <= to`)
 }
 
@@ -324,6 +324,7 @@ const respondsTo: Record<string, string> = {
   ack: 'send',
   send_failed: 'send',
   history_result: 'fetch_history',
+  events_result: 'fetch_history',
   history_failed: 'fetch_history',
   subscribed: 'subscribe',
   timer_elapsed: 'wait',
@@ -356,7 +357,7 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
     checkItems(input.items, `${at}.input.items`, errors)
     if (Array.isArray(input.messages)) {
       (input.messages as Record<string, Json>[]).forEach((m, j) => checkMessageSpec(m, `${at}.input.messages[${j}]`, errors))
-      const flat = (input.messages as Record<string, Json>[]).flatMap((m) => ('seq' in m ? [m.seq as number] : 'to' in m ? [m.from as number, m.to as number] : []))
+      const flat = (input.messages as Record<string, Json>[]).flatMap((m) => ('created_seq' in m ? [m.created_seq as number] : 'to' in m ? [m.from as number, m.to as number] : []))
       if (!flat.every((n, j) => j === 0 || n > flat[j - 1])) errors.push(`${at}.input.messages: seqs must be ascending`)
     }
     const effects = (step.effects ?? {}) as Record<string, Json[]>
@@ -386,8 +387,8 @@ function checkClient(s: Record<string, Json>, where: string, errors: string[]) {
       for (const [topic, view] of Object.entries((observed.topics ?? {}) as Record<string, Record<string, Json>>)) {
         checkSeqList(view.visible, `${at}.observe.channels.${name}.topics.${topic}.visible`, errors)
       }
-      for (const r of (observed.records ?? []) as { seq: number }[]) {
-        if (observed.visible !== undefined && !expandSeqs(observed.visible as SeqItem[])?.includes(r.seq)) errors.push(`${at}.observe.channels.${name}.records: seq ${r.seq} is not in visible`)
+      for (const r of (observed.records ?? []) as { created_seq: number }[]) {
+        if (observed.visible !== undefined && !expandSeqs(observed.visible as SeqItem[])?.includes(r.created_seq)) errors.push(`${at}.observe.channels.${name}.records: seq ${r.created_seq} is not in visible`)
       }
     }
   })
@@ -457,7 +458,7 @@ export function checkFixtures(dir: string = defaultDir): Problems {
 // Client scenario runner
 
 export type Effect = { type: string; [field: string]: unknown }
-export type Message = { seq: number; id: string; sender: string; client_message_id: string; body: string; created_at: string; topic?: string; reply_to?: string | null; reply_root_id?: string | null }
+export type Message = Omit<WireMessage, 'channel_id' | 'topic_id' | 'reply_to' | 'reply_root_id'> & { topic?: string; reply_to?: WireMessage['reply_to']; reply_root_id?: WireMessage['reply_root_id'] }
 /** The fixture input with respond_to replaced by the effect (as the client emitted it) it answers, and messages expanded. */
 export type ResolvedInput = { type: string; respond_to?: Effect; message?: Message; messages?: Message[]; [field: string]: unknown }
 export type ObservedChannel = {
@@ -466,9 +467,9 @@ export type ObservedChannel = {
   cursor: number | null
   messages: Message[]
   pending: { client_message_id: string; state: string }[]
-  main_timeline?: ({ seq: number } | { topic: string; position: number; message_count: number | null })[]
-  topics?: Record<string, { visible: number[] }>
-  reply_chain?: { root_id: string | null; topic?: string; visible: number[]; has_more: boolean; error?: boolean }
+  main_timeline?: ({ created_seq: number } | { topic: string; position: number; message_count: number | null })[]
+  topics?: Record<string, { visible: number[]; messages?: Message[] }>
+  reply_chain?: { root_id: string | null; topic?: string; visible: number[]; has_more: boolean; error?: boolean; messages?: Message[] }
 }
 export type Observed = { session?: string; organization?: string; channels: Record<string, ObservedChannel> }
 /** What a client must provide to run fixtures. */
@@ -490,16 +491,16 @@ export function partitionScenarios<T extends { proposed?: Proposed }>(all: T[]):
 }
 
 export function expandMessage(spec: Record<string, Json>, channel?: string): Message[] {
-  const seqs = 'seq' in spec ? [spec.seq as number] : Array.from({ length: (spec.to as number) - (spec.from as number) + 1 }, (_, i) => (spec.from as number) + i)
+  const seqs = 'created_seq' in spec ? [spec.created_seq as number] : Array.from({ length: (spec.to as number) - (spec.from as number) + 1 }, (_, i) => (spec.from as number) + i)
   return seqs.map((seq) => ({
-    seq,
+    created_seq: seq, version: (spec.version as number | undefined) ?? seq, deleted: spec.deleted === true,
     ...(typeof spec.topic === 'string' ? { topic: spec.topic } : {}),
     ...(typeof spec.reply_to === 'string' ? { reply_to: spec.reply_to } : {}),
     ...(typeof spec.reply_root_id === 'string' ? { reply_root_id: spec.reply_root_id } : {}),
     id: (spec.id as string | undefined) ?? `id${seq}`,
     sender: (spec.sender as string | undefined) ?? 'other',
     client_message_id: (spec.client_message_id as string | undefined) ?? `auto-${channel ?? 'x'}-${seq}`,
-    body: (spec.body as string | undefined) ?? `m${seq}`,
+    ...(spec.deleted ? {} : { body: (spec.body as string | undefined) ?? `m${seq}` }),
     created_at: (spec.created_at as string | undefined) ?? `2026-01-01T00:00:${String(seq % 60).padStart(2, '0')}Z`,
   }))
 }
@@ -561,6 +562,9 @@ function* scenarioInputs(scenario: ClientScenario): Generator<ResolvedInput, str
     if (Array.isArray(step.input.messages)) {
       input.messages = (step.input.messages as Record<string, Json>[]).flatMap((m) => expandMessage(m, channelOf(input.respond_to)))
     }
+    if (Array.isArray(step.input.events)) {
+      input.events = step.input.events.map((event: { seq: number; kind: string; message: Record<string, Json> }) => ({ ...event, message: expandMessage(event.message, channelOf(input.respond_to))[0] }))
+    }
     if (input.type === 'connection_ready') [connectPending, socketOpen] = [false, true]
     if (input.type === 'socket_closed') socketOpen = false
     const { effects: emitted, observation } = yield input
@@ -621,20 +625,23 @@ function checkObservation(expected: NonNullable<ClientStep['observe']>, actual: 
     if (want.cursor !== undefined && got.cursor !== want.cursor) failures.push(`${where} cursor is ${String(got.cursor)}, expected ${String(want.cursor)}`)
     if (want.visible !== undefined) {
       const wanted = expandSeqs(want.visible as SeqItem[]) ?? []
-      const seen = got.messages.map((m) => m.seq)
+      const seen = got.messages.map((m) => m.created_seq)
       if (JSON.stringify(seen) !== JSON.stringify(wanted)) failures.push(`${where} visible is ${JSON.stringify(seen)}, expected ${JSON.stringify(wanted)}`)
     }
     if (want.main_timeline !== undefined && !isDeepStrictEqual(got.main_timeline, want.main_timeline)) {
       failures.push(`${where} main_timeline is ${JSON.stringify(got.main_timeline)}, expected ${JSON.stringify(want.main_timeline)}`)
     }
-    for (const [topic, view] of Object.entries((want.topics ?? {}) as Record<string, { visible: SeqItem[] }>)) {
+    for (const [topic, view] of Object.entries((want.topics ?? {}) as Record<string, { visible: SeqItem[]; records?: Record<string, Json>[] }>)) {
       const visible = got.topics?.[topic]?.visible
+      checkRecords(view.records, got.topics?.[topic]?.messages ?? [], `${where} Topic ${topic}`, failures)
       const wanted = expandSeqs(view.visible)
       if (JSON.stringify(visible) !== JSON.stringify(wanted)) failures.push(`${where} Topic ${topic} visible is ${JSON.stringify(visible)}, expected ${JSON.stringify(wanted)}`)
     }
     if (isObject(want.reply_chain)) {
       const chain = got.reply_chain
+      checkRecords(want.reply_chain.records as Record<string, Json>[] | undefined, chain?.messages ?? [], `${where} Reply chain`, failures)
       for (const [key, value] of Object.entries(want.reply_chain)) {
+        if (key === 'records') continue
         const wanted = key === 'visible' ? expandSeqs(value as SeqItem[]) : value
         if (!isDeepStrictEqual(chain?.[key as keyof NonNullable<typeof chain>], wanted)) failures.push(`${where} reply_chain ${key} is ${JSON.stringify(chain)}, expected ${JSON.stringify(wanted)}`)
       }
@@ -645,17 +652,22 @@ function checkObservation(expected: NonNullable<ClientStep['observe']>, actual: 
       const wanted = (want.pending as { client_message_id: string; state: string }[]).map(key).sort()
       if (JSON.stringify(seen) !== JSON.stringify(wanted)) failures.push(`${where} pending is ${JSON.stringify(seen)}, expected ${JSON.stringify(wanted)}`)
     }
-    for (const check of (want.records ?? []) as Record<string, Json>[]) {
-      const message = got.messages.find((m) => m.seq === check.seq)
+    checkRecords(want.records as Record<string, Json>[] | undefined, got.messages, where, failures)
+  }
+}
+
+function checkRecords(checks: Record<string, Json>[] | undefined, messages: Message[], where: string, failures: string[]) {
+    for (const check of checks ?? []) {
+      const message = messages.find((m) => m.created_seq === check.created_seq)
       if (!message) {
-        failures.push(`${where} holds no Message ${String(check.seq)}`)
+        failures.push(`${where} holds no Message ${String(check.created_seq)}`)
         continue
       }
       for (const [k, v] of Object.entries(check)) {
-        if (k !== 'seq' && (message as Record<string, unknown>)[k] !== v) failures.push(`${where} Message ${String(check.seq)} ${k} is ${String((message as Record<string, unknown>)[k])}, expected ${String(v)}`)
+        if (k === 'absent') { for (const field of v as string[]) if (field in message) failures.push(`${where} Message ${check.created_seq} unexpectedly holds ${field}`); continue }
+        if (k !== 'created_seq' && (message as Record<string, unknown>)[k] !== v) failures.push(`${where} Message ${String(check.created_seq)} ${k} is ${String((message as Record<string, unknown>)[k])}, expected ${String(v)}`)
       }
     }
-  }
 }
 
 /** Loads one client scenario of the committed fixtures by id (for client runners). */

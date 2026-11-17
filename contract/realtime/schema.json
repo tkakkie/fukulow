@@ -59,7 +59,7 @@
             "type": "object", "required": ["kind", "message"],
             "properties": {
               "kind": { "const": "message" },
-              "message": { "type": "object", "required": ["seq"], "properties": { "seq": { "$ref": "#/$defs/Seq" } }, "additionalProperties": false }
+              "message": { "type": "object", "required": ["created_seq"], "properties": { "created_seq": { "$ref": "#/$defs/Seq" } }, "additionalProperties": false }
             },
             "additionalProperties": false
           },
@@ -81,7 +81,7 @@
     "TopicLine": {
       "$comment": "Planned (P2, P4). One line of the main timeline: a Message without Topic at its seq, or a Topic's summary line at its position with its message_count (null = no baseline yet, P4).",
       "oneOf": [
-        { "type": "object", "required": ["seq"], "properties": { "seq": { "$ref": "#/$defs/Seq" } }, "additionalProperties": false },
+        { "type": "object", "required": ["created_seq"], "properties": { "created_seq": { "$ref": "#/$defs/Seq" } }, "additionalProperties": false },
         {
           "type": "object",
           "required": ["topic", "position", "message_count"],
@@ -649,20 +649,48 @@
       "additionalProperties": false
     },
     "MessageSpec": {
-      "$comment": "A confirmed Message as the server record. Give seq, or from+to for consecutive Messages (each gets its own seq). Defaults: sender 'other', body 'm<seq>', id 'id<seq>', created_at fixed per seq, client_message_id absent (a distinct one per Message, never equal to any fixture label), no Topic. topic (Planned, P1): the Message's fixture-local Topic. Semantic: seq XOR (from and to).",
+      "$comment": "A confirmed Message as the server record. Give created_seq, or from+to for consecutive Messages (each gets its own created_seq). Defaults: sender 'other', body 'm<seq>', id 'id<seq>', created_at fixed per created_seq, client_message_id absent (a distinct one per Message, never equal to any fixture label), no Topic. version defaults to created_seq; deleted defaults to false and omits body when true. topic (Planned, P1): the Message's fixture-local Topic. Semantic: created_seq XOR (from and to).",
       "type": "object",
       "properties": {
-        "seq": { "$ref": "#/$defs/Seq" },
-        "from": { "$ref": "#/$defs/Seq" },
-        "to": { "$ref": "#/$defs/Seq" },
-        "sender": { "$ref": "#/$defs/Label" },
-        "client_message_id": { "$ref": "#/$defs/Label" },
-        "body": { "type": "string" },
-        "id": { "$ref": "#/$defs/Label" },
-        "created_at": { "type": "string" },
-        "reply_to": { "$ref": "#/$defs/Label" },
-        "reply_root_id": { "$ref": "#/$defs/Label" },
-        "topic": { "$ref": "#/$defs/Label" }
+        "from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "to": {
+          "$ref": "#/$defs/Seq"
+        },
+        "sender": {
+          "$ref": "#/$defs/Label"
+        },
+        "client_message_id": {
+          "$ref": "#/$defs/Label"
+        },
+        "body": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/Label"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "reply_to": {
+          "$ref": "#/$defs/Label"
+        },
+        "reply_root_id": {
+          "$ref": "#/$defs/Label"
+        },
+        "topic": {
+          "$ref": "#/$defs/Label"
+        },
+        "created_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "version": {
+          "$ref": "#/$defs/Seq"
+        },
+        "deleted": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": false
     },
@@ -720,8 +748,8 @@
         {
           "$comment": "A message event arrived (live, replayed or echo).",
           "type": "object",
-          "required": ["type", "channel", "message"],
-          "properties": { "type": { "const": "message" }, "channel": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
+          "required": ["type", "channel", "seq", "kind", "message"],
+          "properties": { "type": { "const": "message" }, "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "move", "delete"] }, "channel": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
           "additionalProperties": false
         },
         {
@@ -742,6 +770,17 @@
             "has_more": { "type": "boolean" }
           },
           "additionalProperties": false
+        },
+        {
+          "$comment": "A Channel event page from /events; positions, never creation ordering, prove C3 coverage.",
+          "type": "object", "required": ["type", "respond_to", "events", "has_more"],
+          "properties": {
+            "type": { "const": "events_result" }, "respond_to": { "$ref": "#/$defs/Label" },
+            "events": { "type": "array", "items": {
+              "type": "object", "required": ["seq", "kind", "message"],
+              "properties": { "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "move", "delete"] }, "message": { "$ref": "#/$defs/MessageSpec" } }, "additionalProperties": false
+            } }, "has_more": { "type": "boolean" }
+          }, "additionalProperties": false
         },
         {
           "$comment": "A history request failed.",
@@ -856,13 +895,13 @@
           "$comment": "Planned (P2, P4, P5). Every main-timeline line the client holds, in order: one per held Message without Topic (from any page or the stream), one per Topic known from a summary or a Message, at its merged position with its merged count (P4).",
           "$ref": "#/$defs/TopicLines"
         },
-        "reply_chain": { "$comment": "Controller-only P6: open chain root, inherited Topic, ascending visible seqs, server page continuation flag and retryable read error.", "type":"object","properties":{"root_id":{"$ref":"#/$defs/Label"},"topic":{"$ref":"#/$defs/Label"},"visible":{"$ref":"#/$defs/SeqList"},"has_more":{"type":"boolean"},"error":{"type":"boolean"}},"additionalProperties":false},
+        "reply_chain": { "$comment": "Controller-only P6: open chain root, inherited Topic, ascending visible seqs, server page continuation flag and retryable read error.", "type":"object","properties":{"root_id":{"$ref":"#/$defs/Label"},"topic":{"$ref":"#/$defs/Label"},"visible":{"$ref":"#/$defs/SeqList"},"has_more":{"type":"boolean"},"error":{"type":"boolean"},"records":{"type":"array","items":{"$ref":"#/$defs/RecordCheck"}}},"additionalProperties":false},
         "topics": {
           "$comment": "Planned (P1). Per Topic label: visible = the Topic's Messages the Topic view holds, ascending.",
           "type": "object",
           "additionalProperties": {
             "type": "object",
-            "properties": { "visible": { "$ref": "#/$defs/SeqList" } },
+            "properties": { "visible": { "$ref": "#/$defs/SeqList" }, "records": { "type":"array", "items": { "$ref":"#/$defs/RecordCheck" } } },
             "additionalProperties": false
           }
         }
@@ -871,14 +910,44 @@
     },
     "RecordCheck": {
       "type": "object",
-      "required": ["seq"],
+      "required": [
+        "created_seq"
+      ],
       "properties": {
-        "seq": { "$ref": "#/$defs/Seq" },
-        "id": { "$ref": "#/$defs/Label" },
-        "body": { "type": "string" },
-        "sender": { "$ref": "#/$defs/Label" },
-        "client_message_id": { "$ref": "#/$defs/Label" },
-        "created_at": { "type": "string" }
+        "id": {
+          "$ref": "#/$defs/Label"
+        },
+        "body": {
+          "type": "string"
+        },
+        "sender": {
+          "$ref": "#/$defs/Label"
+        },
+        "client_message_id": {
+          "$ref": "#/$defs/Label"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "created_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "version": {
+          "$ref": "#/$defs/Seq"
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "absent": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "body",
+              "mentions",
+              "excerpt"
+            ]
+          }
+        }
       },
       "additionalProperties": false
     }

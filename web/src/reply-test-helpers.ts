@@ -20,7 +20,7 @@ export function replyClient(requestTimeoutMs = 30_000) {
   const sendMessage = vi.fn(async (channel: string, body: SendMessageRequest): Promise<Result<Message>> =>
     ({ ok: true, data: { ...reply(4, body.reply_to ?? 'id1'), channel_id: channel, sender: 'me', client_message_id: body.client_message_id, body: body.body } }))
   const onSessionEnded = vi.fn()
-  const options: SyncOptions = { selfId: 'me', api: { listMessages, sendMessage },
+  const options: SyncOptions = { selfId: 'me', api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages, sendMessage },
     newId: () => `send${++id}`, onSessionEnded, requestTimeoutMs,
     connect(h) { handlers.push(h); return { send: m => { controls.push(m) }, close: vi.fn() } },
   }
@@ -31,6 +31,6 @@ export function replyClient(requestTimeoutMs = 30_000) {
       await client.sync.start(); handlers[0].onReady(); await client.sync.watch('A')
       handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 1 }); await flush()
     },
-    event(message: Message) { handlers.at(-1)!.onEvent({ type: 'message', message }) },
+    event(message: Message) { handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (message).created_seq, message }) },
   }
 }

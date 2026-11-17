@@ -31,7 +31,7 @@ pub(super) async fn parent(
 ) -> Result<Option<Message>, MessageError> {
     let Some(id) = id else { return Ok(None) };
     sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
+        "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, \
          reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id=$1 AND channel_id=$2 AND id=$3",
@@ -50,12 +50,12 @@ pub(super) async fn parent(
 // Separate index branches avoid scanning unrelated Channel Messages or traversing
 // ancestors. Each branch yields at most limit+1 rows, including the null-root row.
 pub(super) const PAGE_SQL: &str = "SELECT * FROM (\
-    (SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
+    (SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, \
       reply_to_id AS reply_to, reply_root_id, \
       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
      FROM messages WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq>$4 AND seq<=$6) \
     UNION ALL \
-    (SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, \
+    (SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, \
       reply_to_id AS reply_to, reply_root_id, \
       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
      FROM messages WHERE organization_id=$1 AND channel_id=$2 AND reply_root_id=$3 \
