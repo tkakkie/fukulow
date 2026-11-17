@@ -236,7 +236,7 @@ async fn schema_guard_rejects_missing_and_nullable_organization_id(pool: PgPool)
 /// with exactly the reviewed policies (no broad or extra permissive policy).
 async fn check_row_level_security(pool: &PgPool) -> Result<(), String> {
     let violations: Vec<(String, String, String)> = sqlx::query_as(
-        "WITH guarded AS (
+        "WITH tables AS (
              SELECT c.oid, n.nspname::text AS schema, c.relname::text AS name, c.relrowsecurity
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE c.relkind IN ('r', 'p')
@@ -246,6 +246,10 @@ async fn check_row_level_security(pool: &PgPool) -> Result<(), String> {
                    'accounts', -- Global authentication identities.
                    'account_sessions' -- Global credentials for one Account.
                ))
+         ), guarded AS (
+             -- #515: append-only tables get exactly a SELECT and an INSERT policy, so
+             -- UPDATE/DELETE match no rows even before the grants step runs.
+             SELECT t.*, (t.schema = 'public' AND t.name IN ('channel_log')) AS append_only FROM tables t
          ), policies AS (
              SELECT schemaname::text AS schema, tablename::text AS name, policyname::text AS policy,
                     cmd, permissive, roles, qual, with_check
@@ -254,15 +258,27 @@ async fn check_row_level_security(pool: &PgPool) -> Result<(), String> {
          SELECT schema, name, 'row level security disabled' FROM guarded WHERE NOT relrowsecurity
          UNION ALL
          SELECT g.schema, g.name, 'missing org_isolation' FROM guarded g
-         WHERE NOT EXISTS (
+         WHERE NOT g.append_only AND NOT EXISTS (
              SELECT 1 FROM policies p
              WHERE p.schema = g.schema AND p.name = g.name AND p.policy = 'org_isolation'
                AND p.cmd = 'ALL' AND p.permissive = 'PERMISSIVE' AND p.roles = '{public}'
                AND p.qual = '(organization_id = fukulow_current_org())'
                AND p.with_check = '(organization_id = fukulow_current_org())')
          UNION ALL
+         SELECT g.schema, g.name, 'missing ' || r.policy FROM guarded g
+         CROSS JOIN (VALUES ('org_read', 'SELECT', '(organization_id = fukulow_current_org())', NULL),
+                            ('org_append', 'INSERT', NULL, '(organization_id = fukulow_current_org())'))
+             AS r(policy, cmd, qual, with_check)
+         WHERE g.append_only AND NOT EXISTS (
+             SELECT 1 FROM policies p
+             WHERE p.schema = g.schema AND p.name = g.name AND p.policy = r.policy AND p.cmd = r.cmd
+               AND p.permissive = 'PERMISSIVE' AND p.roles = '{public}'
+               AND p.qual IS NOT DISTINCT FROM r.qual AND p.with_check IS NOT DISTINCT FROM r.with_check)
+         UNION ALL
          SELECT p.schema, p.name, 'unexpected policy ' || p.policy FROM policies p
-         WHERE p.policy <> 'org_isolation'
+         LEFT JOIN guarded g ON g.schema = p.schema AND g.name = p.name
+         WHERE NOT (CASE WHEN COALESCE(g.append_only, false) THEN p.policy IN ('org_read', 'org_append')
+                         ELSE p.policy = 'org_isolation' END)
            AND NOT (p.schema = 'public' AND p.policy = 'account_read' AND p.cmd = 'SELECT'
                     AND p.with_check IS NULL AND p.roles = '{public}' AND p.permissive = 'PERMISSIVE'
                     AND (p.name, regexp_replace(p.qual, '\\s+', ' ', 'g')) IN (
@@ -303,7 +319,12 @@ async fn schema_guard_rejects_tables_without_reviewed_row_level_security(pool: P
          CREATE POLICY account_read ON users FOR SELECT USING (account_id IS NOT NULL);
          CREATE SCHEMA other;
          CREATE TABLE other.accounts (organization_id uuid NOT NULL);
-         ALTER TABLE invites DISABLE ROW LEVEL SECURITY;",
+         ALTER TABLE invites DISABLE ROW LEVEL SECURITY;
+         CREATE POLICY org_isolation ON channel_log FOR ALL
+             USING (organization_id = fukulow_current_org())
+             WITH CHECK (organization_id = fukulow_current_org());
+         DROP POLICY org_append ON channel_log;
+         CREATE POLICY org_append ON channel_log FOR INSERT WITH CHECK (true);",
     )
     .execute(&pool)
     .await
@@ -313,6 +334,8 @@ async fn schema_guard_rejects_tables_without_reviewed_row_level_security(pool: P
         "row level security violations: [\
          (\"other\", \"accounts\", \"missing org_isolation\"), \
          (\"other\", \"accounts\", \"row level security disabled\"), \
+         (\"public\", \"channel_log\", \"missing org_append\"), \
+         (\"public\", \"channel_log\", \"unexpected policy org_isolation\"), \
          (\"public\", \"channels\", \"unexpected policy broad\"), \
          (\"public\", \"invites\", \"row level security disabled\"), \
          (\"public\", \"messages\", \"unexpected policy account_read\"), \
@@ -327,7 +350,10 @@ async fn schema_guard_rejects_tables_without_reviewed_row_level_security(pool: P
          DROP POLICY broad ON channels; DROP POLICY account_read ON messages;
          DROP POLICY account_read ON users;
          CREATE POLICY account_read ON users FOR SELECT USING (account_id = fukulow_current_account());
-         ALTER TABLE invites ENABLE ROW LEVEL SECURITY;",
+         ALTER TABLE invites ENABLE ROW LEVEL SECURITY;
+         DROP POLICY org_isolation ON channel_log; DROP POLICY org_append ON channel_log;
+         CREATE POLICY org_append ON channel_log FOR INSERT
+             WITH CHECK (organization_id = fukulow_current_org());",
     )
     .execute(&pool)
     .await
