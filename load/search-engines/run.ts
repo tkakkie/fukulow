@@ -7,9 +7,10 @@ import { existsSync, mkdirSync, realpathSync, readFileSync, readdirSync, writeFi
 import { arch, cpus, totalmem } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmark, CommandTimeoutError, command, docker, save, sql } from './bench.ts';
+import { benchmark, CommandTimeoutError, command, docker, save, sql, sqlWithNotices } from './bench.ts';
 import { channel, copySql, finishSql, fixtureSql, generate, literal, member, org } from './seed.ts';
-import { begin, normalizedQuery, pattern, queries, search, visibility, writeSql } from './queries.ts';
+import { begin, normalizedQuery, pattern, queries, search, searchCall, visibility, writeSql } from './queries.ts';
+import { definerDenials, verifyDefiner } from './definer.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 process.chdir(root);
@@ -48,7 +49,7 @@ function create(db: string) {
   for (const migration of migrations) owner(db,`BEGIN;\n${readFileSync(`server/migrations/${migration}`,'utf8')}\nCOMMIT;`);
   verifySession(text=>owner(db,text));
   verifySession(text=>app(db,text),'app');
-  owner(db,file('schema.sql')); owner(db,grants); owner(db,fixtureSql());
+  owner(db,file('schema.sql')); owner(db,grants); owner(db,file('definer.sql')); owner(db,fixtureSql());
 }
 function seedDb(db: string, rows: number) {
   const meta = generate(`${out}/messages.tsv`,rows); save(`${out}/${db}-seed.json`,meta);
@@ -85,6 +86,31 @@ function checkRls(db: string) {
   return {facts,access,cross};
 }
 
+// The function body's executed plan: auto_explain logs every statement of the
+// exact app call (SET LOCAL ROLE fukulow_app in an owner session, since LOAD
+// needs a superuser) as NOTICEs, with the app run's planner settings. The run
+// fails unless exactly one nested body plan with these exact parameters and the
+// outer Function Scan were logged.
+function bodyPlan(db: string, query: string, actor = 2, settings = '', page = true) {
+  const log = sqlWithNotices(container,db,`LOAD 'auto_explain';
+SET auto_explain.log_min_duration=0; SET auto_explain.log_nested_statements=on; SET auto_explain.log_analyze=on;
+SET auto_explain.log_buffers=on; SET auto_explain.log_settings=on; SET auto_explain.log_level=notice; SET client_min_messages=notice;
+${begin()}SET LOCAL ROLE fukulow_app;
+${settings}${searchCall(query,actor,page)};
+COMMIT;`);
+  const plans = log.split(/^NOTICE: {2}duration: /m).slice(1);
+  const parameters = `Query Parameters: $1 = '${member(1,actor)}', $2 = ${literal(query)}, $3 = '${page ? 't' : 'f'}'\n`;
+  const bodies = plans.filter(p=>p.includes(parameters));
+  const outer = plans.filter(p=>p.includes(`Query Text: ${searchCall(query,actor,page).split('\n')[0]}`) && /Function Scan on fukulow_search_messages\b/.test(p));
+  if (bodies.length!==1 || outer.length!==1 || !/\bCTE visible\b/.test(bodies[0]!) || !/plan_cache_mode = 'force_custom_plan'/.test(bodies[0]!))
+    throw new Error(`Function body plan not logged: ${query}`);
+  const body = bodies[0]!;
+  // Folded: the LIKE pattern is a literal in the body plan, not a replace() expression of $2.
+  return {log,searchIndex:/ on search_body\b/.test(body),folded:/~~ '%[^']*%'::text/.test(body) && !/\breplace\(/.test(body),
+    seqScanMessages:/Seq Scan on messages\b/.test(body)};
+}
+// pg_get_functiondef hash of the first install; every later database must match.
+let definition = '';
 const normalized: {id:string,raw:string,value:string}[] = [];
 function ids(db: string, query: string, role = 'fukulow_app', sequential = false) {
   const settings = sequential ? 'SET LOCAL enable_indexscan=off; SET LOCAL enable_bitmapscan=off; SET LOCAL enable_indexonlyscan=off;' : '';
@@ -96,7 +122,7 @@ function completeness(db: string, dest: string) {
   for (const q of normalized) {
     for (const actor of [1,2,3,4,5,6]) {
       const ref = ids(db,search(q.value,actor,false,true),'fukulow_app',true);
-      const actual = ids(db,search(q.value,actor,false));
+      const actual = ids(db,searchCall(q.value,actor,false));
       if (actual !== ref) throw new Error(`Completeness mismatch: app ${q.id} actor ${actor}`);
       report.push({query:q.id,actor,rows:actual ? actual.split('\n').length:0,sha256:digest(actual),equal:true});
     }
@@ -112,7 +138,7 @@ function completeness(db: string, dest: string) {
     if (direct!==directRef) throw new Error(`Extension access-path mismatch ${q.id}: ${direct} != ${directRef}`);
     report.push({query:q.id,actor:'owner-direct-index',digest:direct,equal:true});
     // Page order and deterministic tie-breaker must match the reference too.
-    if (ids(db,search(q.value)) !== ids(db,search(q.value,2,true,true),'fukulow_app',true)) throw new Error(`Page mismatch ${q.id}`);
+    if (ids(db,searchCall(q.value)) !== ids(db,search(q.value,2,true,true),'fukulow_app',true)) throw new Error(`Page mismatch ${q.id}`);
   }
   save(dest,report);
   return {cases:report.length,equal:true};
@@ -130,10 +156,10 @@ async function restoreDrill() {
     const start = performance.now();
     docker('exec',container,'pg_restore','-U','fukulow','-d','restored','--exit-on-error','--no-owner','--no-acl','/tmp/drill.dump');
     const restoreMs = performance.now()-start;
-    owner('restored',grants);
+    owner('restored',grants); owner('restored',file('definer.sql'));
     const after = owner('restored',"SELECT count(*),md5(string_agg(id::text||body,'|' ORDER BY id)) FROM messages;");
     if (before!==after) throw new Error('Dump/restore data mismatch');
-    report.push({engine,before,after,restoreMs,rls:checkRls('restored'),completeness:completeness('restored',`${out}/${engine}-restore-completeness.json`),
+    report.push({engine,before,after,restoreMs,definer:verifyDefiner(text=>owner('restored',text),definition),rls:checkRls('restored'),completeness:completeness('restored',`${out}/${engine}-restore-completeness.json`),
       extensions:owner('restored','SELECT extname,extversion FROM pg_extension ORDER BY 1;')});
     owner('postgres','DROP DATABASE restored WITH (FORCE); DROP DATABASE drill WITH (FORCE);');
     note(`dump/restore ${engine} verified`);
@@ -180,12 +206,15 @@ async function restoreDrill() {
     processStart:command('ps',['-axo','comm,%cpu']),dockerStart:docker('ps','--format','{{.Image}}'),count,transactions};
   save(`${out}/metadata.json`,metadata);
   create('base');
+  definition = verifyDefiner(text=>owner('base',text)).definition;
   for (const [id,raw] of queries) normalized.push({id,raw,value:owner('base',`SELECT ${normalizedQuery(raw)};`)});
   if (normalized.find(q=>q.id==='nfc')?.value!==normalized.find(q=>q.id==='nfd')?.value
     || normalized.find(q=>q.id==='trim')?.value!=='開発'
     || normalized.find(q=>q.id==='bom')?.value!=='\ufeff開発\ufeff') throw new Error('Normalization/trim mismatch');
   save(`${out}/queries.json`,normalized.map(q=>({...q,scalars:[...q.value].length})));
   await restoreDrill();
+  save(`${out}/definer.json`,definerDenials({owner,app,create,index:(db: string,engine: string)=>index(db,engine as Engine),drop:(db: string)=>owner('postgres',`DROP DATABASE ${db} WITH (FORCE);`),
+    plan:(db: string,query: string,actor: number,settings: string)=>bodyPlan(db,query,actor,settings)},engines,definition));
   save(`${out}/dataset.json`,seedDb('base',count)); note(`seeded ${count} Messages`);
   save(`${out}/rls.json`,checkRls('base'));
   for (let round=0;round<conditions.rounds;round++) {
@@ -194,6 +223,7 @@ async function restoreDrill() {
       const dest = `${out}/round${round+1}-${engine}`; mkdirSync(dest);
       owner('postgres','CREATE DATABASE measured TEMPLATE base;');
       const build = index('measured',engine);
+      const definer = verifyDefiner(text=>owner('measured',text),definition);
       docker('restart',container);
       // A successful SELECT establishes readiness after each restart.
       for (let attempt=0;attempt<60;attempt++) {
@@ -204,23 +234,35 @@ async function restoreDrill() {
       verifySession(text=>owner('measured',text));
       verifySession(text=>app('measured',text),'app');
       note(`round ${round+1} ${engine}, index ${Math.round(build.buildMs)} ms`);
-      const row: Record<string,unknown> = {manifestHash:manifest.sha256,runKind:kind,image:imageRecord,round:round+1,engine,...build};
+      const row: Record<string,unknown> = {manifestHash:manifest.sha256,runKind:kind,image:imageRecord,round:round+1,engine,...build,definer};
       if (engine!=='none') {
         // Exactly one complete sweep of all queries before latency sampling.
-        for (const q of normalized) app('measured',begin()+search(q.value)+'; COMMIT;');
+        for (const q of normalized) app('measured',begin()+searchCall(q.value)+'; COMMIT;');
         const latencies = [];
         for (const q of normalized) {
-          const measured = await benchmark(container,'measured',begin()+search(q.value)+';\nCOMMIT;',`${dest}/${q.id}`,transactions,conditions.clients);
+          const measured = await benchmark(container,'measured',begin()+searchCall(q.value)+';\nCOMMIT;',`${dest}/${q.id}`,transactions,conditions.clients);
           latencies.push({query:q.id,...measured});
           note(`round ${round+1} ${engine} ${q.id} p95=${measured.p95.toFixed(3)} ms`);
         }
         row.latencies=latencies;
         if (round===0) {
+          const plans = [];
           for (const q of normalized) {
-            writeFileSync(`${dest}/${q.id}-app-plan.txt`,app('measured',begin()+`EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)}; COMMIT;`));
-            writeFileSync(`${dest}/${q.id}-owner-plan.txt`,owner('measured',`SET enable_seqscan=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)};`));
+            writeFileSync(`${dest}/${q.id}-app-plan.txt`,app('measured',begin()+`EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${searchCall(q.value)}; COMMIT;`));
+            const {log,...facts} = bodyPlan('measured',q.value);
+            writeFileSync(`${dest}/${q.id}-body-plan.txt`,log);
+            // Direct query as owner with the app run's planner settings, and the
+            // v1 form (enable_seqscan=off) so v1's owner counts stay comparable.
+            writeFileSync(`${dest}/${q.id}-owner-plan.txt`,owner('measured',`EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)};`));
+            const forced = owner('measured',`SET enable_seqscan=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)};`);
+            writeFileSync(`${dest}/${q.id}-owner-v1-seqscan-off-plan.txt`,forced);
+            plans.push({query:q.id,...facts,ownerV1SearchIndex:/ on search_body\b/.test(forced)});
             writeFileSync(`${dest}/${q.id}-direct-plan.txt`,owner('measured',`SET enable_seqscan=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) SELECT id FROM messages WHERE normalized_body LIKE ${literal(pattern(q.value))} ESCAPE E'\\\\';`));
           }
+          row.plans=plans;
+          row.bodySearchIndexQueries=plans.filter(p=>p.searchIndex).length;
+          row.ownerV1SearchIndexQueries=plans.filter(p=>p.ownerV1SearchIndex).length;
+          note(`round 1 ${engine}: body uses search_body in ${row.bodySearchIndexQueries}/${plans.length} queries`);
           row.completeness=completeness('measured',`${dest}/completeness.json`);
         }
       }

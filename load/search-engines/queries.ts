@@ -42,6 +42,13 @@ export function search(normalized: string, actor = 2, page = true, reference = f
     ${page ? 'ORDER BY m.created_at DESC,m.id DESC LIMIT 20' : 'ORDER BY m.id'}`;
 }
 
+// P2 (manifest v2): the app role calls the SECURITY DEFINER function in definer.sql.
+export const definerFunction = 'public.fukulow_search_messages';
+export function searchCall(normalized: string, actor = 2, page = true, o = 1): string {
+  return `SELECT id${page ? ',created_at,body' : ''} FROM ${definerFunction}('${member(o,actor)}',${literal(normalized)},${page})
+    ORDER BY ${page ? 'created_at DESC,id DESC' : 'id'}`;
+}
+
 export const writeSql = `BEGIN;
 ${context()}
 WITH s AS (UPDATE channel_message_sequences SET seq=seq+1 WHERE organization_id='${org(1)}'
