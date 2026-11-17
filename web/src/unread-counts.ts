@@ -4,7 +4,7 @@ export type UnreadScope = { channel: string; topicId: string | null }
 export type ScopeBaseline = { asOfSeq: number; readSeq: number; count: number; mentionCount: number }
 /** Coverage proves every matching projection row in (after, through] is loaded. */
 export type Coverage = { after: number; through: number }
-export type UnreadRecord = Pick<Message, 'id' | 'created_seq' | 'channel_id' | 'topic_id' | 'sender'> & { mentions?: readonly Pick<NonNullable<Message['mentions']>[number], 'member_id'>[] | null }
+export type UnreadRecord = Pick<Message, 'id' | 'created_seq' | 'channel_id' | 'topic_id' | 'sender'> & Partial<Pick<Message, 'version' | 'deleted'>> & { mentions?: readonly Pick<NonNullable<Message['mentions']>[number], 'member_id'>[] | null }
 export const inScope = (m: Pick<Message, 'channel_id' | 'topic_id'>, scope: UnreadScope) => m.channel_id === scope.channel && m.topic_id === scope.topicId
 export type AggregateBaseline = Pick<UnreadChannel, 'id' | 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count' | 'main_mention_unread_count' | 'mention_unread_count'>
 export const mainBaseline = (c: AggregateBaseline): ScopeBaseline => ({ asOfSeq: c.as_of_seq, readSeq: c.read_seq, count: c.main_unread_count, mentionCount: c.main_mention_unread_count })
@@ -27,7 +27,7 @@ export function scopeCount(b: ScopeBaseline, position: number, records: Iterable
   let count = mention ? b.mentionCount : b.count
   const seen = new Set<number>()
   for (const m of records) {
-    if (!inScope(m, scope) || m.sender === self || (mention && !(m.mentions ?? []).some(target => target.member_id === self)) || seen.has(m.created_seq)) continue
+    if (m.deleted || !inScope(m, scope) || m.sender === self || (mention && !(m.mentions ?? []).some(target => target.member_id === self)) || seen.has(m.created_seq)) continue
     seen.add(m.created_seq)
     if (m.created_seq > b.readSeq && m.created_seq <= Math.min(position, b.asOfSeq)) count--
     if (m.created_seq > Math.max(position, b.asOfSeq)) count++
@@ -51,7 +51,7 @@ export function sequenceToSubmit(position: number, records: Iterable<UnreadRecor
   const through = coveredThrough(position, coverage)
   let result = position
   for (const m of [...records].filter(m => inScope(m, scope) && m.created_seq > position && m.created_seq <= through).sort((a, b) => a.created_seq - b.created_seq)) {
-    if (m.sender === self) continue
+    if (m.deleted || m.sender === self) continue
     if (!presented.has(m.created_seq)) break
     result = m.created_seq
   }

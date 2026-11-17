@@ -134,6 +134,27 @@ pub(crate) async fn authorized_replay_page(
     after: i64,
     through: i64,
 ) -> Result<Vec<ChannelEvent>, MessageError> {
+    authorized_page(
+        pool,
+        organization,
+        member,
+        channel,
+        after,
+        through,
+        REPLAY_PAGE_SIZE,
+    )
+    .await
+}
+
+async fn authorized_page(
+    pool: &PgPool,
+    organization: Uuid,
+    member: (Uuid, i64),
+    channel: Uuid,
+    after: i64,
+    through: i64,
+    limit: i64,
+) -> Result<Vec<ChannelEvent>, MessageError> {
     let sql = format!(
         "WITH access AS MATERIALIZED (SELECT ({}) AS visible) \
          SELECT access.visible,m.* FROM access LEFT JOIN LATERAL ({}) m ON true ORDER BY m.event_seq",
@@ -153,7 +174,7 @@ pub(crate) async fn authorized_replay_page(
                 .bind(channel)
                 .bind(after)
                 .bind(through)
-                .bind(REPLAY_PAGE_SIZE)
+                .bind(limit)
                 .fetch_all(tx)
                 .await
         },
@@ -169,4 +190,57 @@ pub(crate) async fn authorized_replay_page(
         Some(true) => {}
     }
     Ok(hydrate(rows, after)?)
+}
+
+/// Read event positions for C3 gap recovery. Auth extraction and query validation
+/// precede Channel visibility, exactly as on the history GET.
+#[utoipa::path(get, path = "/api/v1/orgs/{org}/channels/{id}/events",
+    params(("org" = Uuid, Path), ("id" = Uuid, Path), fukulow_api::ListChannelEventsQuery),
+    security(("cookie" = []), ("bearer" = [])),
+    responses((status = 200, description = "Ascending Channel event envelopes after the exclusive event cursor, with current-state replay hydration and directional has_more", body = fukulow_api::ChannelEventPage),
+        (status = 400, description = "Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200", body = crate::auth::ErrorBody),
+        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = crate::auth::ErrorBody),
+        (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence", body = crate::auth::ErrorBody),
+        (status = 500, description = "Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged", body = crate::auth::ErrorBody)))]
+pub async fn list_channel_events(
+    axum::extract::State(state): axum::extract::State<crate::AppState>,
+    auth: crate::auth::Auth,
+    path: Result<axum::extract::Path<(Uuid, Uuid)>, axum::extract::rejection::PathRejection>,
+    query: Result<
+        axum::extract::Query<fukulow_api::ListChannelEventsQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Result<axum::response::Response, MessageError> {
+    use axum::response::IntoResponse;
+    let axum::extract::Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
+    let axum::extract::Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
+    let limit = query.limit.unwrap_or(50);
+    if query.after_seq < 0 || !(1..=200).contains(&limit) {
+        return Err(MessageError::InvalidInput);
+    }
+    let mut events = authorized_page(
+        &state.pool,
+        auth.identity.organization.organization_id,
+        (auth.identity.member.id, auth.membership_revision),
+        channel,
+        query.after_seq,
+        i64::MAX,
+        i64::from(limit) + 1,
+    )
+    .await?;
+    let has_more = events.len() > usize::from(limit);
+    events.truncate(usize::from(limit));
+    let events = events
+        .into_iter()
+        .map(|event| fukulow_api::ServerEvent::Message {
+            seq: event.seq,
+            kind: event.kind,
+            message: event.message,
+        })
+        .collect();
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::Json(fukulow_api::ChannelEventPage { events, has_more }),
+    )
+        .into_response())
 }

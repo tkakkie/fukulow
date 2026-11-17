@@ -21,7 +21,7 @@ it('429 retries the full request after each header delay without an early send',
       .mockResolvedValueOnce(new Response('{"error":"send_rate_limited"}', { status: 429, headers: { 'Retry-After': '2' } }))
       .mockResolvedValueOnce(new Response('{"error":"send_rate_limited"}', { status: 429, headers: { 'Retry-After': '4' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify(message), { status: 201 }))
-    const client = controllerClient({ newId: () => 'c1', api: {
+    const client = controllerClient({ newId: () => 'c1', api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
       listMessages: (channel, query) => api.listMessages('o', channel, query, fetcher),
       sendMessage: (channel, body) => api.sendMessage('o', channel, body, fetcher),
     } })

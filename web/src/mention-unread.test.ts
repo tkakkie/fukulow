@@ -177,3 +177,31 @@ it('Mention access generation rejects a previous generation REST response while 
   expect(c.unread.get('A')).toMatchObject({ asOfSeq: 9, mentionUnreadCount: 0 })
   await c.sync.close()
 })
+
+
+it('Unread replaces Mention evidence by version for edits and tombstones of the same Message', async () => {
+  const c = client(); await c.boot()
+  c.event(mentioned(4)); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(2)
+  c.event({ ...mentioned(4), version: 5, mentions: [] }); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(1)
+  c.event(mentioned(4)); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(1)
+  c.event({ ...mentioned(4), version: 6 }); await flush()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBe(2)
+  c.event({ ...mentioned(4), version: 7, deleted: true }); await flush()
+  expect(c.unread.get('A').main).toMatchObject({ unreadCount: 1, mentionUnreadCount: 1 })
+  await c.sync.close()
+})
+
+it('a plain create below a retired mutation version floor still enters Unread', async () => {
+  const c = client(); await c.boot()
+  await c.sync.settleHistory('A', Array.from({ length: 1501 }, (_, i) => ({ ...msg(100 + i), version: 10_000 + i })))
+  expect(c.sync.get().channels.A.versionFloor).toBeGreaterThan(4)
+  c.rows[0] = row({ as_of_seq: 1600, read_seq: 1600, main_unread_count: 0, unread_count: 0, main_mention_unread_count: 0, mention_unread_count: 0 })
+  await c.unread.refresh()
+  c.event(mentioned(1700)); await flush()
+  expect(c.sync.get().channels.A.messages).toContainEqual(mentioned(1700))
+  expect(c.unread.get('A').main).toMatchObject({ unreadCount: 1, mentionUnreadCount: 1 })
+  await c.sync.close()
+})

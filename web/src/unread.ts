@@ -112,10 +112,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   function collectRecord(c: Channel, m: Message): boolean {
     if (m.sender === sync.get().selfId) return false
     const old = c.records.get(m.created_seq)
-    if (!needed(c, m) || (old?.id === m.id && old.sender === m.sender && old.topic_id === m.topic_id)) return false
-    const { id, created_seq, channel_id, topic_id, sender } = m
+    if (!needed(c, m) || (old?.id === m.id && ((old.version ?? 0) >= m.version || (old.deleted && !m.deleted)))) return false
+    const { id, created_seq, channel_id, topic_id, sender, version, deleted } = m
     const mentions = (m.mentions ?? []).some(target => target.member_id === sync.get().selfId) ? [{ member_id: sync.get().selfId }] : []
-    c.records.set(m.created_seq, { id, created_seq, channel_id, topic_id, sender, mentions })
+    c.records.set(m.created_seq, { id, created_seq, channel_id, topic_id, sender, version, deleted, mentions })
     return true
   }
   const active = () => !closed && sync.get().running && sync.get().organization === 'available'

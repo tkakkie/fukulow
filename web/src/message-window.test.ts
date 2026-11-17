@@ -34,7 +34,7 @@ it('bounds sync bodies during an unresolved gap and keeps evicted continuation e
   expect(state.channels.A.messages[0].created_seq).toBe(801)
   const fill = feed({ type: 'timer_elapsed', id: state.channels.A.wait! }).find(e => e.type === 'fetch_history')!
   expect(fill).toMatchObject({ page: 'after', seq: 1 })
-  feed({ type: 'history_result', request: fill.id, page: { messages: [record(2)], has_more: false } })
+  feed({ type: 'events_result', request: fill.id, page: { events: [{ type: 'message', kind: 'create', seq: 2, message: record(2) }], has_more: false } })
   expect(state.channels.A.cursor).toBe(1200)
   for (const seq of [3, 1000, 1200]) feed({ type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   expect(new Set(state.channels.A.messages.map(m => m.created_seq)).size).toBe(state.channels.A.messages.length)
@@ -275,5 +275,55 @@ it('Reply history failure keeps its bounded window and a superseded restart cann
   held.resolve({ ok: false, kind: 'http', status: 403, error: 'denied' }); await first
   expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(Array.from({ length: 50 }, (_, n) => n + 1))
   expect(c.sync.get().channels.A.state).toBe('ready')
+  await c.sync.close()
+})
+
+
+it('an unpinned main window updates retained identities without inserting out-of-window mutations', async () => {
+  const c = windowClient(400)
+  await c.boot()
+  for (let i = 0; i < 7; i++) await c.topics.loadMain('A')
+  c.topics.setMainPinned('A', false)
+  c.event(record(401)); await flush()
+  const retained = record(100)
+  c.event({ ...retained, version: 402, deleted: true }); await flush()
+  const line = c.topics.get('A').lines.find(l => l.kind === 'message' && l.message.id === retained.id)
+  expect(line?.kind === 'message' && line.message).toMatchObject({ version: 402, deleted: true })
+  if (line?.kind === 'message') expect(line.message).not.toHaveProperty('body')
+  c.event({ ...record(999), version: 1000, body: 'outside' }); await flush()
+  expect(c.topics.get('A').lines.some(l => l.kind === 'message' && l.message.id === 'id999')).toBe(false)
+  await c.close()
+})
+
+it('a Topic latest read started after retirement cannot resurrect a subsequently retired tombstone', async () => {
+  const c = topicClient()
+  await c.boot(); await c.topics.loadTopic('A', 'T')
+  const retire = async (start: number) => c.sync.settleHistory('A', Array.from({ length: 1501 }, (_, i) => ({
+    ...msg(start + i, 'T'), version: 10_000 + start + i,
+  })))
+  await retire(100)
+  const old = deferred<Result<MessagePage>>()
+  c.topicsApi.listTopicMessages.mockReturnValueOnce(old.promise)
+  const loading = c.topics.loadTopicLatest('A', 'T'); await flush()
+  const epoch = c.sync.get().channels.A.versionEpoch
+  await c.sync.settleHistory('A', [{ ...msg(5, 'T'), version: 20_000, deleted: true }])
+  await retire(20_001)
+  for (let n = 11; n < 462; n++) c.event(n, 'T')
+  expect(c.sync.get().channels.A.versions.id5).toBeUndefined()
+  expect(c.sync.get().channels.A.messages.some(m => m.id === 'id5')).toBe(false)
+  old.resolve(ok({ messages: [msg(5, 'T')], has_more: false })); await loading; await flush()
+  expect(c.topics.get('A').topic('T').messages.some(m => m.id === 'id5' && !m.deleted)).toBe(false)
+  expect(c.sync.get().channels.A.versionEpoch).toBeGreaterThan(epoch)
+  await c.sync.close()
+})
+
+it('a following main window does not insert mutation identities outside its loaded window', async () => {
+  const c = topicClient(); await c.boot()
+  for (const seq of [3, 20]) {
+    await c.sync.settleHistory('A', [{ ...msg(seq), version: 100 + seq, body: 'outside' }])
+    expect(c.topics.get('A').lines.some(l => l.kind === 'message' && l.message.id === `id${seq}`)).toBe(false)
+  }
+  await c.sync.settleHistory('A', [{ ...msg(8), version: 200, body: 'updated retained' }])
+  expect(c.topics.get('A').lines.find(l => l.kind === 'message' && l.message.id === 'id8')).toMatchObject({ message: { version: 200, body: 'updated retained' } })
   await c.sync.close()
 })

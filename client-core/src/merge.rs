@@ -7,6 +7,7 @@ pub(crate) enum Source {
     Window,
     Ack,
     Stream,
+    Events,
     Projection,
 }
 fn same_message(a: &Message, b: &Message) -> bool {
@@ -91,10 +92,11 @@ impl Step<'_> {
             self.settle(id, &valid);
             return;
         }
-        let positions: Vec<_> = event_seq.map_or_else(
-            || valid.iter().map(|m| m.created_seq).collect(),
-            |seq| vec![seq],
-        );
+        let positions: Vec<_> = if source == Source::Ack {
+            valid.iter().map(|m| m.created_seq).collect()
+        } else {
+            event_seq.into_iter().collect()
+        };
         let mut accepted = Vec::new();
         let mut incoming: BTreeMap<Uuid, Message> = BTreeMap::new();
         for m in &valid {
@@ -111,20 +113,23 @@ impl Step<'_> {
         let c = self.channel(id);
         let mut messages = None;
         for mut m in incoming {
-            if let Some((version, deleted)) = c.versions.get(&m.id) {
+            if let Some((version, deleted, _)) = c.versions.get(&m.id) {
                 if *version > m.version || (*deleted && !m.deleted) {
                     continue;
                 }
-            } else if m.version <= c.version_floor
+            } else if c
+                .retired_versions
+                .iter()
+                .any(|r| r.start <= m.created_seq && m.created_seq <= r.end)
                 && (source == Source::Stream || source == Source::Ack)
             {
                 continue;
             }
             // Creation-only state needs no retained floor once its body is evicted.
             if (m.deleted || m.version > m.created_seq)
-                && c.versions.get(&m.id) != Some(&(m.version, m.deleted))
+                && c.versions.get(&m.id) != Some(&(m.version, m.deleted, m.created_seq))
             {
-                Rc::make_mut(&mut c.versions).insert(m.id, (m.version, m.deleted));
+                Rc::make_mut(&mut c.versions).insert(m.id, (m.version, m.deleted, m.created_seq));
             }
             let position = c
                 .messages
@@ -166,6 +171,7 @@ impl Step<'_> {
         }
         if source != Source::Projection
             && let Some(max) = positions.iter().copied().max()
+            && (c.held_through.is_some() || c.cursor.is_none_or(|cursor| max > cursor))
         {
             c.held_through = Some(c.held_through.unwrap_or(0).max(max));
         }
@@ -189,7 +195,22 @@ impl Step<'_> {
             accepted.retain(|m| m.deleted || m.version > m.created_seq);
         }
         if !accepted.is_empty() {
-            self.out.records.push((id, accepted));
+            if let Some((_, records)) = self
+                .out
+                .records
+                .iter_mut()
+                .find(|(channel, _)| *channel == id)
+            {
+                for message in accepted {
+                    if let Some(held) = records.iter_mut().find(|held| held.id == message.id) {
+                        *held = message;
+                    } else {
+                        records.push(message);
+                    }
+                }
+            } else {
+                self.out.records.push((id, accepted));
+            }
         }
         if source == Source::Window || source == Source::Projection {
             return;
@@ -217,7 +238,7 @@ impl Step<'_> {
                 merged.push(range);
             }
         }
-        if source == Source::Stream
+        if (source == Source::Stream || source == Source::Events)
             && let Some(mut cursor) = c.cursor
             && positions.contains(&(cursor + 1))
         {
@@ -246,22 +267,45 @@ impl Step<'_> {
     }
     pub(crate) fn cap_versions(&mut self, id: Uuid, limit: usize) {
         let c = self.channel(id);
-        let mut retired = false;
+        let mut retired = Vec::new();
         while c.versions.len() > limit {
             let oldest = c
                 .versions
                 .iter()
-                .min_by_key(|(id, (version, _))| (*version, **id))
+                .min_by_key(|(id, (version, _, _))| (*version, **id))
                 .map(|(id, value)| (*id, *value));
-            if let Some((key, (version, _))) = oldest {
+            if let Some((key, (version, _, created_seq))) = oldest {
                 Rc::make_mut(&mut c.versions).remove(&key);
                 c.version_floor = c.version_floor.max(version);
-                retired = true;
+                retired.push(Range {
+                    start: created_seq,
+                    end: created_seq,
+                });
             }
         }
-        if retired {
+        if !retired.is_empty() {
+            let ranges = Rc::make_mut(&mut c.retired_versions);
+            ranges.extend(retired);
+            ranges.sort_by_key(|r| r.start);
+            let mut merged: Vec<Range> = Vec::new();
+            for range in ranges.drain(..) {
+                if let Some(last) = merged.last_mut()
+                    && range.start <= last.end + 1
+                {
+                    last.end = last.end.max(range.end);
+                } else {
+                    merged.push(range);
+                }
+            }
+            // Widen the oldest fence at the range cap; only a fresh authorized
+            // snapshot may admit an identity in a conservatively covered hole.
+            while merged.len() > MAIN_MESSAGE_LIMIT {
+                let first = merged.remove(0);
+                merged[0].start = first.start;
+            }
+            *ranges = merged;
             self.invalidate(id, false);
-            let epoch = self.core.session.next;
+            let epoch = self.token();
             self.channel(id).version_epoch = epoch;
         }
     }

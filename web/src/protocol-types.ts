@@ -18,7 +18,8 @@ export type ChannelState = {
   watched: boolean
   cursor: number | null
   messages: Message[]
-  versions: Record<string, [number, boolean]>
+  versions: Record<string, [number, boolean, number]>
+  retiredVersions: { start: number; end: number }[]
   versionFloor: number
   versionEpoch: number
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
@@ -78,6 +79,7 @@ export type Input = (
   | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }
   | (SendTarget & { replyRootId?: string; type: 'user_send'; channel: string; clientMessageId: string; body: string })
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
+  | { type: 'events_result'; request: number; page: components['schemas']['ChannelEventPage'] }
   | { type: 'history_result'; request: number; page: MessagePage }
   | { type: 'history_failed'; request: number; status: Failure }
   | { type: 'settle_history'; channel: string; messages: Message[] }

@@ -39,6 +39,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
     // As in production (session.ts): a pre-connect close asks REST; the fixture answers with membership_check_result.
     checkMembership: () => request({ type: 'membership_check' }),
     api: {
+      listChannelEvents(channel, query) { return request({ type: 'fetch_history', channel, page: 'after', seq: query.after_seq }) },
       listMessages(channel, query) {
         return request({ type: 'fetch_history', channel,
           page: query?.after_seq !== undefined ? 'after' : query?.before_seq !== undefined ? 'before' : 'latest',
@@ -133,12 +134,15 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         case 'session_replaced': void client.sync.replaceSession('me'); break
         case 'connection_ready': socket.onReady(); break
         case 'socket_closed': socket.onClose(i.code as number); break
-        case 'message': socket.onEvent({ type: 'message', kind: 'create', seq: typeof i.seq === 'number' ? i.seq : message(i.message, channel).created_seq, message: message(i.message, channel) }); break
+        case 'message': socket.onEvent({ type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : message(i.message, channel).created_seq, message: message(i.message, channel) }); break
         case 'subscribed': (e?.socket as RealtimeHandlers ?? socket).onEvent({ type: 'subscribed', channel_id: channel,
           caught_up_seq: i.caught_up_seq as number }); break
         case 'channel_access_lost': socket.onEvent({ type: 'channel_access_lost', channel_id: channel }); break
         case 'error_event': socket.onEvent({ type: 'error', channel_id: channel, code: i.code as string }); break
-        case 'history_result': resolve({ ok: true, data: { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
+        case 'events_result': resolve({ ok: true, data: { events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more } }); break
+        case 'history_result': resolve({ ok: true, data: e?.page === 'after'
+          ? { events: i.messages!.map(m => ({ type: 'message', seq: m.created_seq, kind: 'create', message: message(m, channel) })), has_more: i.has_more }
+          : { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
         case 'ack': resolve({ ok: true, data: message(i.message, channel) }); break
         case 'membership_check_result': resolve(i.status === 200 ? { ok: true, data: {} } : typeof i.status === 'number'
           ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }) }

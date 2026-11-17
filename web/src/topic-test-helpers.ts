@@ -1,6 +1,6 @@
 import { vi } from 'vitest'
 import type { Activity } from './activity'
-import type { Message, Result, SendMessageRequest, TimelinePage, TopicSummary, TopicSummaryResponse } from './api'
+import type { Message, Result, SendMessageRequest, TimelinePage, TopicSummary, TopicSummaryResponse, ListChannelEventsQuery } from './api'
 import type { RealtimeHandlers } from './realtime'
 import { createTopicSync } from './topic-sync'
 import { record } from './protocol-test-helpers'
@@ -33,11 +33,15 @@ export function topicClient(activity?: Activity, requestTimeoutMs?: number) {
     getTopicSummary: vi.fn(async (): Promise<Result<TopicSummaryResponse>> => ok({ as_of_seq: 12, topic: summary('T', 12, 4) })),
     listTopicMessages: vi.fn(async () => ok({ messages: [msg(5, 'T'), msg(10, 'T')], has_more: true })),
   }
+  const listChannelEvents = vi.fn(async (_channel: string, _query: ListChannelEventsQuery) => {
+    const result = await listMessages()
+    return result.ok ? ok({ events: result.data.messages.map(message => ({ type: 'message' as const, seq: message.created_seq, kind: 'create' as const, message })), has_more: result.data.has_more }) : result
+  })
   const onSessionEnded = vi.fn()
-  const client = createTopicSync({ selfId: 'me', activity, requestTimeoutMs, api: { listMessages, sendMessage }, topicsApi, onSessionEnded,
+  const client = createTopicSync({ selfId: 'me', activity, requestTimeoutMs, api: { listMessages, sendMessage, listChannelEvents }, topicsApi, onSessionEnded,
     connect(h) { handlers.push(h); return { send: m => { controls.push(m) }, close: vi.fn() } },
   })
-  return { ...client, topicsApi, listMessages, sendMessage, handlers, controls, onSessionEnded,
+  return { ...client, topicsApi, listMessages, listChannelEvents, sendMessage, handlers, controls, onSessionEnded,
     async boot() {
       await client.sync.start(); handlers[0].onReady(); await client.sync.watch('A')
       handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 }); await flush()

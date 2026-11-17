@@ -272,6 +272,11 @@ export function fakeNetwork() {
     sync: {
       newId: () => `${selfId}-c${++ids}`,
       api: {
+        async listChannelEvents(channel, query) {
+          history.push({ channel, query })
+          const page = pages[channel]
+          return !page || page.ok ? { ok: true, data: { events: (page?.data.messages ?? []).map(message => ({ type: 'message', seq: message.created_seq, kind: 'create', message })), has_more: page?.data.has_more ?? false } } : page
+        },
         async listMessages(channel, query) {
           history.push({ channel, query })
           return pages[channel] ?? { ok: true, data: { messages: [], has_more: false } }

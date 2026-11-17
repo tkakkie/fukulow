@@ -89,6 +89,24 @@ pub struct MessagePage {
     pub has_more: bool,
 }
 
+/// Bounded ascending Channel log page, with the same envelopes as WebSocket replay.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ChannelEventPage {
+    pub events: Vec<ServerEvent>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct ListChannelEventsQuery {
+    /// Exclusive event position; 0 starts at the beginning.
+    #[param(minimum = 0)]
+    pub after_seq: i64,
+    /// Page size, default 50, maximum 200.
+    #[param(minimum = 1, maximum = 200, default = 50)]
+    pub limit: Option<u16>,
+}
+
 /// Queue overflow: reconnect and subscribe from the last seq per channel; never drop silently.
 pub const CLOSE_QUEUE_OVERFLOW: u16 = 4008;
 /// Session expired or signed out: stop protected delivery and go to Sign in.

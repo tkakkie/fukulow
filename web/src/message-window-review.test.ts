@@ -127,13 +127,13 @@ it('caps disjoint cursor evidence and refetches its forgotten final sequence wit
   while (state.channels.A.cursor! < 2000) {
     const request = effects.find(e => e.type === 'fetch_history')!
     const after = state.channels.A.cursor!, end = Math.min(2000, after + 200)
-    effects = feed({ type: 'history_result', request: request.id, page: {
-      messages: Array.from({ length: end - after }, (_, i) => record(after + i + 1)), has_more: true } })
+    effects = feed({ type: 'events_result', request: request.id, page: {
+      events: Array.from({ length: end - after }, (_, i) => ({ type: 'message', seq: after + i + 1, kind: 'create', message: record(after + i + 1) })), has_more: true } })
   }
   expect(state.channels.A.cursor).toBe(2000)
   const final = effects.find(e => e.type === 'fetch_history')!
   expect(final).toMatchObject({ seq: 2000, page: 'after' })
-  feed({ type: 'history_result', request: final.id, page: { messages: [record(2001)], has_more: false } })
+  feed({ type: 'events_result', request: final.id, page: { events: [{ type: 'message', seq: 2001, kind: 'create', message: record(2001) }], has_more: false } })
   expect(state.channels.A).toMatchObject({ cursor: 2001, advancing: [], wait: undefined })
 })
 

@@ -37,6 +37,7 @@ it('keeps duplicate Mention arrays stable and accepts a refreshed display name',
 function boot() {
   let state = initialState('me')
   const feed = (input: Input) => {
+    if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
     const out = step(state, input)
     state = out.state
     return out.effects
@@ -713,4 +714,66 @@ it('bounds mutation version evidence, fences retired reads and keeps tombstones 
   expect(d.get().channels.A.messages.find(m => m.id === 'id1')).toBe(tombstone)
   d.feed({ type: 'unwatch', channel: 'A' })
   expect(Object.keys(d.get().channels.A.versions)).toHaveLength(50)
+})
+
+
+it('retirement fences only covered identities and admits a never-mutated create below the retired version floor', () => {
+  const d = boot()
+  for (let start = 1; start <= 1501; start += 200) d.feed({ type: 'settle_history', channel: 'A',
+    messages: Array.from({ length: Math.min(200, 1502 - start) }, (_, i) => ({ ...record(1000 + start + i), version: 10_000 + start + i })) })
+  expect(d.get().channels.A.versionFloor).toBeGreaterThan(101)
+  const result = step(d.get(), { type: 'event', connection: d.connection,
+    event: { type: 'message', seq: 101, kind: 'create', message: record(101) } })
+  expect(result.state.channels.A.messages).toContainEqual(record(101))
+  expect(result.records.get('A')).toContainEqual(record(101))
+  expect(result.state.channels.A.cursor).toBe(101)
+})
+
+it('each evidence retirement increments its fence even when no request or timer token was allocated', () => {
+  const d = boot()
+  const retire = (start: number) => d.feed({ type: 'settle_history', channel: 'A', messages:
+    Array.from({ length: 1501 }, (_, i) => ({ ...record(start + i), version: 10_000 + start + i })) })
+  retire(1)
+  const first = d.get().channels.A.versionEpoch
+  retire(1502)
+  const c = d.get().channels.A
+  expect(c.versionEpoch).toBeGreaterThan(first)
+  expect(c.retiredVersions.length).toBeLessThanOrEqual(400)
+})
+
+it('event pages emit one final accepted state per Message identity', () => {
+  const d = boot()
+  d.event(103)
+  const request = id(d.feed({ type: 'timer_elapsed', id: d.get().channels.A.wait! }), 'fetch_history')
+  const result = step(d.get(), { type: 'events_result', request, page: { has_more: false, events: [
+    { type: 'message', seq: 101, kind: 'edit', message: { ...record(1), version: 101, body: 'edited' } },
+    { type: 'message', seq: 102, kind: 'delete', message: { ...record(1), version: 102, deleted: true } },
+  ] } })
+  expect(result.state.channels.A.cursor).toBe(103)
+  expect(result.records.get('A')).toHaveLength(1)
+  expect(result.records.get('A')![0]).toMatchObject({ id: 'id1', version: 102, deleted: true })
+  expect(result.records.get('A')![0]).not.toHaveProperty('body')
+})
+
+it('creation-ordered after history never proves event contiguity', () => {
+  const d = boot()
+  d.event(102)
+  const request = id(d.feed({ type: 'timer_elapsed', id: d.get().channels.A.wait! }), 'fetch_history')
+  const result = step(d.get(), { type: 'history_result', request, page: { messages: [record(101), record(102)], has_more: false } })
+  expect(result.state.channels.A.cursor).toBe(100)
+  expect(result.state.channels.A.messages).toContainEqual(record(101))
+})
+
+it('retired identity fences coalesce before conservative widening and remain bounded', () => {
+  const d = boot()
+  const retire = [...Array.from({ length: 401 }, (_, i) => 2 * i + 1), 4]
+  const retained = Array.from({ length: 1500 }, (_, i) => 1000 + i)
+  d.feed({ type: 'settle_history', channel: 'A', messages: [...retire, ...retained].map((seq, i) => ({ ...record(seq), version: 10_000 + i })) })
+  expect(d.get().channels.A.retiredVersions).toHaveLength(400)
+  expect(d.get().channels.A.retiredVersions.slice(0, 2)).toEqual([{ start: 1, end: 1 }, { start: 3, end: 5 }])
+  d.feed({ type: 'settle_history', channel: 'A', messages: Array.from({ length: 402 }, (_, i) => ({ ...record(3000 + 2 * i), version: 20_000 + i })) })
+  expect(d.get().channels.A.retiredVersions.length).toBeLessThanOrEqual(400)
+  const fresh = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
+  d.feed({ type: 'history_result', request: fresh, page: { messages: [record(2)], has_more: false } })
+  expect(d.get().channels.A.messages).toContainEqual(record(2))
 })

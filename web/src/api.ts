@@ -85,6 +85,10 @@ export type Channel = components['schemas']['Channel']
 export type ChannelVisibility = components['schemas']['ChannelVisibility']
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest']
 export type Message = components['schemas']['Message']
+export type ChannelEventPage = components['schemas']['ChannelEventPage']
+export type ListChannelEventsQuery = NonNullable<import('./api-schema').operations['list_channel_events']['parameters']['query']>
+export const listChannelEvents = (organizationId: string, channelId: string, query: ListChannelEventsQuery, f: typeof fetch = fetch) =>
+  call<ChannelEventPage>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/events?${new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]))}`, { cache: 'no-store' }, true)
 export type MessagePage = components['schemas']['MessagePage']
 export type SendMessageRequest = components['schemas']['SendMessageRequest']
 export type ListMessagesQuery = NonNullable<

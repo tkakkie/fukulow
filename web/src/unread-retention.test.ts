@@ -52,7 +52,7 @@ it('retains only Message identity and sequence metadata without holding display 
   await c.boot([source])
   expect(c.records.size).toBeGreaterThan(0)
   const retained = c.records.get(1)!
-  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'created_seq', 'id', 'mentions', 'sender', 'topic_id'])
+  expect(Object.keys(retained).sort()).toEqual(['channel_id', 'created_seq', 'deleted', 'id', 'mentions', 'sender', 'topic_id', 'version'])
   expect(source.body).toBeDefined()
   expect(retained).not.toBe(source)
   c.close()

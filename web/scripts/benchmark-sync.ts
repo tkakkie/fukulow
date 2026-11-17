@@ -15,7 +15,7 @@ for (const channels of [1, 16, 64]) {
     const base = { ...initialState('me'), running: true, connected: true, connection: 1, next: 10 }
     for (let n = 0; n < channels; n++) {
       const channel = `C${n}`
-      const c: ChannelState = { state: 'ready', watched: true, cursor: messages, versions: {}, versionFloor: 0, versionEpoch: 0, hasOlder: false,
+      const c: ChannelState = { state: 'ready', watched: true, cursor: messages, versions: {}, retiredVersions: [], versionFloor: 0, versionEpoch: 0, hasOlder: false,
         historyError: false, fillAttempt: 0, advancing: [],
         messages: Array.from({ length: messages }, (_, i) => record(i + 1, channel)),
         pending: [{ clientMessageId: 'pending', body: 'pending', state: 'unknown', request: 0 }],

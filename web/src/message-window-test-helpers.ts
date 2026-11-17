@@ -30,7 +30,7 @@ export function windowClient(size = 1000, activity?: Activity) {
     },
   }
   const { sync, topics } = createTopicSync({ selfId: 'me', activity, topicsApi: options,
-    api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
+    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
     connect(h) { socket = h; return { send() {}, close() {} } },
   })
   const replies = createReplies(sync, { api: { async listReplyChain(_channel, _anchor, query = {}) {

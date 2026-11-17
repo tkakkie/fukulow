@@ -122,3 +122,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [messages](messages.md): `channel_log_reconciles_current_body_and_fails_closed_on_missing_state`
 
 - [replies](replies.md): `reply_counts_deny_other_organization`, `reply_counts_deny_private_nonmember`, `reply_counts_deny_guest_without_public_grant`, `reply_counts_deny_dm_nonparticipant`, `reply_counts_bound_anchors_and_descendants_by_watermark_before_data_snapshot`, `reply_counts_reauthorize_member_revision_and_grant_after_barrier_wait`, `reply_counts_wait_out_ambiguous_commit_and_preserve_rollback_baseline`
+
+- [messages](messages.md): `channel_event_pages_are_bounded_exclusive_and_hydrate_current_state`

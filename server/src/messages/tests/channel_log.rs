@@ -244,3 +244,172 @@ async fn channel_log_migration_backfills_existing_messages_and_scopes_foreign_ke
         );
     }
 }
+
+async fn event_response(app: &Router, token: &str, channel: Uuid, query: &str) -> Response {
+    request(
+        app,
+        "GET",
+        &format!("/api/v1/channels/{channel}/events{query}"),
+        token,
+        Value::Null,
+    )
+    .await
+}
+
+#[fukulow_test::test]
+async fn channel_event_pages_are_bounded_exclusive_and_hydrate_current_state(pool: PgPool) {
+    let (app, org, sender, channel, token) = fixture(&pool).await;
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,version,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,n,$3,gen_random_uuid(),'original' FROM generate_series(1,205) n")
+        .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
+    seed_channel_log(&pool).await;
+    sqlx::query("UPDATE messages SET version=205,body='current' WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
+        .bind(org).bind(channel).execute(&pool).await.unwrap();
+    for (query, expected, more) in [
+        ("?after_seq=0", (1..=50).collect::<Vec<_>>(), true),
+        ("?after_seq=0&limit=200", (1..=200).collect(), true),
+        ("?after_seq=200&limit=5", (201..=205).collect(), false),
+        ("?after_seq=201&limit=2", vec![202, 203], true),
+        ("?after_seq=205", vec![], false),
+        ("?after_seq=9223372036854775807", vec![], false),
+    ] {
+        let response = event_response(&app, &token, channel, query).await;
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let page = body(response).await;
+        let events = page["events"].as_array().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e["seq"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(page["has_more"], more);
+        assert!(
+            events
+                .iter()
+                .all(|e| e["type"] == "message" && e["kind"] == "create")
+        );
+        if let Some(event) = events.iter().find(|e| e["seq"] == 2) {
+            assert_eq!(event["message"]["created_seq"], 2);
+            assert_eq!(event["message"]["version"], 205);
+            assert_eq!(event["message"]["body"], "current");
+        }
+    }
+    // Orphan state cannot turn a missing event into a creation-ordered gap fill.
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,version,sender,client_message_id,body) VALUES ($1,gen_random_uuid(),$2,206,206,$3,gen_random_uuid(),'not logged')")
+        .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
+    let page = body(event_response(&app, &token, channel, "?after_seq=205").await).await;
+    assert_eq!(page, json!({"events":[],"has_more":false}));
+    // Validate every limited position before acknowledging any part of its page.
+    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
+        .bind(org)
+        .bind(channel)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_error(
+        event_response(&app, &token, channel, "?after_seq=0").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .await;
+}
+
+#[fukulow_test::test]
+async fn channel_event_pages_deny_private_nonmembers_and_foreign_organizations_with_controls(
+    pool: PgPool,
+) {
+    let (app, org, sender, public, token) = fixture(&pool).await;
+    let private = Uuid::new_v4();
+    channel(&pool, org, private, sender, true).await;
+    sent(&app, &token, private, input(Uuid::new_v4(), "private")).await;
+    sent(&app, &token, public, input(Uuid::new_v4(), "public")).await;
+    let outsider = member(&pool, org, Uuid::new_v4()).await;
+    let other_org = organization(&pool).await;
+    let other_id = Uuid::new_v4();
+    let other = member(&pool, other_org, other_id).await;
+    // Reuse the same Channel id in a different Organization to test SQL scoping.
+    channel(&pool, other_org, public, other_id, false).await;
+    sent(&app, &other, public, input(Uuid::new_v4(), "foreign")).await;
+    for (credential, target, expected) in [
+        (&token, private, Some("private")),
+        (&outsider, private, None),
+        (&outsider, public, Some("public")),
+        (&other, private, None),
+        (&other, public, Some("foreign")),
+        (&token, public, Some("public")),
+    ] {
+        let response = event_response(&app, credential, target, "?after_seq=0").await;
+        if let Some(text) = expected {
+            assert_eq!(response.status(), StatusCode::OK);
+            let page = body(response).await;
+            assert_eq!(page["events"].as_array().unwrap().len(), 1);
+            assert_eq!(page["events"][0]["message"]["body"], text);
+        } else {
+            assert_error(response, StatusCode::NOT_FOUND).await;
+        }
+    }
+    // Query validation precedes Channel disclosure; authentication precedes both.
+    for query in [
+        "",
+        "?after_seq=-1",
+        "?after_seq=x",
+        "?after_seq=0&limit=0",
+        "?after_seq=0&limit=201",
+    ] {
+        for target in [private, Uuid::new_v4()] {
+            assert_error(
+                event_response(&app, &outsider, target, query).await,
+                StatusCode::BAD_REQUEST,
+            )
+            .await;
+            assert_error(
+                event_response(&app, &format!("{org}.invalid"), target, query).await,
+                StatusCode::UNAUTHORIZED,
+            )
+            .await;
+        }
+    }
+    let response = request(
+        &app,
+        "GET",
+        &format!("/api/v1/orgs/{org}/channels/{private}/events?after_seq=0"),
+        &other,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body(response).await["error"], "organization_unavailable");
+}
+
+#[fukulow_test::test]
+async fn channel_event_pages_fail_closed_on_missing_log_positions(pool: PgPool) {
+    let (app, org, sender, channel, token) = fixture(&pool).await;
+    for _ in 0..3 {
+        sent(&app, &token, channel, input(Uuid::new_v4(), "original")).await;
+    }
+    // The owner-only fault injection bypasses append-only triggers for corrupt-log probes.
+    sqlx::query("ALTER TABLE channel_log DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM channel_log WHERE organization_id=$1 AND channel_id=$2 AND event_seq=2",
+    )
+    .bind(org)
+    .bind(channel)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_error(
+        event_response(&app, &token, channel, "?after_seq=0").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .await;
+    let pool = crate::test_app_pool(pool).await;
+    assert!(
+        authorized_replay_page(&pool, org, (sender, 0), channel, 0, 3)
+            .await
+            .is_err()
+    );
+}

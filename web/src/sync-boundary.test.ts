@@ -7,7 +7,7 @@ it('notifies each input before its ordered effects and preserves repeated-stop g
   const sync = createSync({ selfId: 'me', connect: () => {
     log.push('connect')
     return { send: () => {}, close: () => { log.push('close') } }
-  }, api: {
+  }, api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
     listMessages: async () => { log.push('history'); return { ok: true, data: { messages: [], has_more: false } } },
     sendMessage: async () => ({ ok: false, kind: 'network' }),
   } })

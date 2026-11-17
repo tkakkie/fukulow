@@ -163,8 +163,10 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.equal(mismatch.stdout, '')
     sql('UPDATE _sqlx_migrations SET version = version - 1 WHERE version = (SELECT max(version) FROM _sqlx_migrations)')
     const history = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
-    // A Message sent by the older image gains the default empty accepted Mention set (#152).
-    assert.deepEqual(history.messages, [{ mentions: [], ...message }])
+    // A Message sent by the older image gains the default empty accepted Mention set (#152)
+    // and is served in the #515 wire shape: seq becomes created_seq, version starts at it.
+    const { seq, ...unchanged } = message
+    assert.deepEqual(history.messages, [{ mentions: [], ...unchanged, created_seq: seq, version: seq, deleted: false }])
     await request(url, '/session', owner)
     dc('restart', 'app')
     url = await health(current)

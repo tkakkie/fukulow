@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 39 operations document shutdown, including Reply counts, author lookup, Account security and Invite management.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 276;
+// All 40 operations document shutdown, including Reply counts, author lookup, Account security and Invite management.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 282;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -226,7 +226,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 39);
+        assert_eq!(operations, 40);
     }
 }
 
@@ -265,7 +265,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 39);
+    assert_eq!(requests.len(), 40);
     requests.extend(
         [
             "/",

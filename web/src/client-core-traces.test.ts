@@ -14,7 +14,8 @@ function recorder(id: string) {
   const tokens = new Set<number>()
   const trace: Trace = { id, steps: 0 }
   function feed(raw: Input) {
-    const input = normalizeInput(raw)
+    let input = normalizeInput(raw)
+    if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
     const result = step(state, input)
     const { channels, requests, timers, ...session } = result.state
     const actual = wasm.step(input)

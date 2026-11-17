@@ -50,6 +50,8 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 
 | Exact main Unread and Mention counts use a covering Message range after VACUUM; the range excludes own sends without Message heap fetches | `server/src/messages/tests/unread/measurement.rs::main_unread_count_uses_covering_range_without_message_heap` |
 
+| Later versions replace the same Message's Unread Mention evidence; tombstones stop contributing | `web/src/mention-unread.test.ts::Unread replaces Mention evidence by version for edits and tombstones of the same Message` |
+
 ## Rows in other parts
 
 - [channels](channels.md): `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
@@ -76,3 +78,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [messages](messages.md): `dm_mentions_participant_roles_replies_mark_read_and_renewal_share_batched_counts`, `dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set`
 - [web](web.md): `DM Mention counts converge across live duplicate replay reconnect marks and access loss`, `Unread-only DM responses cannot cover Mention invalidations and retry through the shared schedule`, `DM access loss hides both retained baseline badges until a renewed controller baseline arrives`
 - [realtime](realtime.md): `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`
+
+- [sync](sync.md): `a plain create below a retired mutation version floor still enters Unread`

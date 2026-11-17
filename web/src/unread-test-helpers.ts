@@ -40,7 +40,7 @@ export function unreadClient(sendMessage?: TimelineApi['sendMessage']) {
   const onSessionEnded = vi.fn()
   const c = createUnreadSync({ selfId: 'me', organizationId: 'org', unreadApi, topicsApi, requestTimeoutMs: 1000, onSessionEnded,
     random: () => 0.5,
-    api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
+    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
     connect(h) { handlers.push(h); return { send() {}, close() {} } },
   })
   return { ...c, history, rows, summaries, unreadApi, topicsApi, handlers, onSessionEnded,

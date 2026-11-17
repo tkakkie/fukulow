@@ -148,7 +148,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
             }
             const arrived = m.created_seq > (before?.cursor ?? Infinity) && !before?.messages.some(old => old.created_seq === m.created_seq)
             if (arrived && w.main.hasNewer) w.main.newerCount++
-            if ((w.messages.has(m.created_seq) || m.version > m.created_seq || m.created_seq > (w.main.asOfSeq ?? 0)) && (!w.main.hasNewer || (m.topic_id && w.baselines.has(m.topic_id)))) { const state = canonical(id, w.messages.get(m.created_seq), m); if (state) w.messages.set(m.created_seq, state) }
+            if (w.messages.get(m.created_seq)?.id === m.id || (!m.deleted && m.version === m.created_seq && m.created_seq > (w.main.asOfSeq ?? 0) && (!w.main.hasNewer || (m.topic_id && w.baselines.has(m.topic_id))))) { const state = canonical(id, w.messages.get(m.created_seq), m); if (state) w.messages.set(m.created_seq, state) }
             for (const [topicId, t] of w.topics) {
               if (m.topic_id !== topicId) {
                 const held = t.messages.get(m.created_seq)

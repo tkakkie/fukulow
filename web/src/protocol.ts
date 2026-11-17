@@ -18,7 +18,8 @@ export type ChannelState = {
   watched: boolean
   cursor: number | null
   messages: Message[]
-  versions: Record<string, [number, boolean]>
+  versions: Record<string, [number, boolean, number]>
+  retiredVersions: { start: number; end: number }[]
   versionFloor: number
   versionEpoch: number
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
@@ -78,6 +79,7 @@ export type Input = (
   | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }
   | (SendTarget & { replyRootId?: string; type: 'user_send'; channel: string; clientMessageId: string; body: string })
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
+  | { type: 'events_result'; request: number; page: components['schemas']['ChannelEventPage'] }
   | { type: 'history_result'; request: number; page: MessagePage }
   | { type: 'history_failed'; request: number; status: Failure }
   | { type: 'settle_history'; channel: string; messages: Message[] }
@@ -95,7 +97,7 @@ export function initialState(selfId = ''): State {
   return { selfId, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
     reconnectAttempt: 0, channels: {}, requests: {}, timers: {} }
 }
-const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [], versions: {}, versionFloor: 0, versionEpoch: 0,
+const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [], versions: {}, retiredVersions: [], versionFloor: 0, versionEpoch: 0,
   advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 })
 const sameFields = <T extends object>(a: T, b: T) => {
   const keys = Object.keys(a) as (keyof T)[]
@@ -217,8 +219,17 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const retired = entries.splice(0, entries.length - limit)
       c.versions = Object.fromEntries(entries)
       c.versionFloor = Math.max(c.versionFloor, ...retired.map(([, value]) => value[0]))
+      const ranges = [...c.retiredVersions, ...retired.map(([, value]) => ({ start: value[2], end: value[2] }))].sort((a, b) => a.start - b.start)
+      const merged: typeof ranges = []
+      for (const range of ranges) {
+        const last = merged.at(-1)
+        if (last && range.start <= last.end + 1) last.end = Math.max(last.end, range.end)
+        else merged.push({ ...range })
+      }
+      while (merged.length > MAIN_MESSAGE_LIMIT) { const first = merged.shift()!; merged[0].start = first.start }
+      c.retiredVersions = merged
       invalidate(id)
-      c.versionEpoch = state.next
+      c.versionEpoch = token()
     }
   }
   const gap = (c: ChannelState) => c.cursor !== null &&
@@ -246,7 +257,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       c.pending = c.pending.filter(p => !settled.has(p.clientMessageId))
     }
   }
-  const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream' | 'projection', eventSeq?: number) => {
+  const merge = (id: string, records: Message[], source: 'window' | 'ack' | 'stream' | 'events' | 'projection', eventSeq?: number) => {
     const c = channel(id)
     const valid = records.filter(m => m.channel_id === id)
     if (source === 'projection' && valid.every(m => {
@@ -255,7 +266,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         (!input.refreshMentionNames && (held.mentions ?? []).length === (m.mentions ?? []).length &&
           (held.mentions ?? []).every((mention, i) => mention.member_id === m.mentions![i].member_id && mention.name === m.mentions![i].name)))
     })) { settle(id, valid); return }
-    const positions = eventSeq === undefined ? valid.map(m => m.created_seq) : [eventSeq]
+    const positions = eventSeq === undefined ? (source === 'ack' ? valid.map(m => m.created_seq) : []) : [eventSeq]
     const byId = new Map<string, Message>()
     for (const record of valid) {
       const m = record.deleted ? withoutDeletedContent(record) : record
@@ -267,8 +278,8 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     for (let m of [...byId.values()].sort((a, b) => a.created_seq - b.created_seq)) {
       const version = c.versions[m.id]
       if (version ? version[0] > m.version || (version[1] && !m.deleted) :
-        m.version <= c.versionFloor && (source === 'stream' || source === 'ack')) continue
-      if ((m.deleted || m.version > m.created_seq) && (!version || version[0] !== m.version || version[1] !== m.deleted)) c.versions = { ...c.versions, [m.id]: [m.version, m.deleted] }
+        c.retiredVersions.some(r => r.start <= m.created_seq && m.created_seq <= r.end) && (source === 'stream' || source === 'ack')) continue
+      if ((m.deleted || m.version > m.created_seq) && (!version || version[0] !== m.version || version[1] !== m.deleted)) c.versions = { ...c.versions, [m.id]: [m.version, m.deleted, m.created_seq] }
       const index = merged.findIndex(held => held.id === m.id)
       const held = merged[index]
       if (held) {
@@ -287,8 +298,12 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     }
     c.messages = merged
     const observed = source === 'projection' ? accepted.filter(m => m.deleted || m.version > m.created_seq) : accepted
-    if (observed.length) observedRecords.set(id, observed)
-    if (source !== 'projection' && positions.length) c.heldThrough = Math.max(c.heldThrough ?? 0, ...positions)
+    if (observed.length) {
+      const records = new Map((observedRecords.get(id) ?? []).map(m => [m.id, m]))
+      for (const m of observed) records.set(m.id, m)
+      observedRecords.set(id, [...records.values()])
+    }
+    if (source !== 'projection' && positions.length && (c.heldThrough !== undefined || c.cursor === null || Math.max(...positions) > c.cursor)) c.heldThrough = Math.max(c.heldThrough ?? 0, ...positions)
     if (c.messages.length > MAIN_MESSAGE_LIMIT) {
       c.messages = source === 'window' && valid.at(-1)!.created_seq < c.messages.at(-1)!.created_seq
         ? c.messages.slice(0, MAIN_MESSAGE_LIMIT) : c.messages.slice(-MAIN_MESSAGE_LIMIT)
@@ -306,7 +321,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         else merged.push(range)
       }
       // Adjacent input alone advances C3. Forgotten disjoint ranges are recovered by unfiltered fill.
-      if (source === 'stream' && c.cursor !== null && positions.includes(c.cursor + 1)) {
+      if ((source === 'stream' || source === 'events') && c.cursor !== null && positions.includes(c.cursor + 1)) {
         while (merged[0] && merged[0].start <= c.cursor + 1) c.cursor = Math.max(c.cursor, merged.shift()!.end)
       }
       if (merged.length > MAIN_MESSAGE_LIMIT) c.forgottenThrough = Math.max(c.forgottenThrough ?? 0, merged.at(-1)!.end)
@@ -485,6 +500,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       }
       break
     }
+    case 'events_result':
     case 'history_result':
     case 'history_failed': {
       const r = state.requests[input.request]
@@ -501,10 +517,18 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         } else if (r.page === 'latest') c.historyError = true
         break
       }
+      if (input.type === 'events_result') {
+        if (r.page !== 'after') break
+        const before = c.cursor
+        for (const event of input.page.events) if (event.type === 'message' && event.message.channel_id === r.channel) merge(r.channel, [event.message], 'events', event.seq)
+        if (c.cursor === before && gap(c)) c.wait = wait('fill_backoff', r.channel, c.fillAttempt++)
+        else { c.fillAttempt = 0; reconcile(r.channel, true) }
+        break
+      }
       const before = c.cursor
       const bootstrap = c.cursor === null && r.page === 'latest'
       if (bootstrap) { c.cursor = input.page.messages.at(-1)?.created_seq ?? 0; c.streamBase = c.cursor }
-      merge(r.channel, input.page.messages, r.page === 'after' ? 'stream' : 'window')
+      merge(r.channel, input.page.messages, 'window')
       // Latest/before has_more is older; after has_more must never overwrite it.
       if (r.page !== 'after') {
         if (r.page === 'before' || bootstrap || !c.messages[0] ||

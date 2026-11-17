@@ -164,6 +164,12 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
     }
   }), { url: sockets.at(-1)!.url(), channel: canonical.channel_id })
   expect(replay).toEqual([{ type: 'message', seq: canonical.created_seq, kind: 'create', message: canonical }])
+  const orgs = await secretSafe(() => a.request.get('/api/v1/me'))
+  const organization = (await orgs.json()).organizations[0].organization_id as string
+  const eventPage = await secretSafe(() => a.request.get(`/api/v1/orgs/${organization}/channels/${canonical.channel_id}/events?after_seq=0&limit=1`))
+  expect(eventPage.status()).toBe(200)
+  expect(eventPage.headers()['cache-control']).toBe('no-store')
+  expect(await eventPage.json()).toEqual({ events: replay, has_more: false })
   await Promise.all(signIns)
   expect(signIns).toHaveLength(2)
   await a.getByRole('button', { name: 'ログアウト' }).click()

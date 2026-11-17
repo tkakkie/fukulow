@@ -6,6 +6,7 @@ import { createTopics, topicsApi, type TopicsApi } from './topics'
 /** Opt-in composition for the Topic UI. Existing sync consumers keep their current history transport. */
 export function createTopicSync(options: SyncOptions & { topicsApi?: TopicsApi; activity?: Activity; isDm?(channel: string): boolean }) {
   const transport = options.api ?? {
+    listChannelEvents: (channel: string, query: api.ListChannelEventsQuery) => api.listChannelEvents(options.organizationId ?? '', channel, query),
     listMessages: (channel: string, query?: api.ListMessagesQuery) => api.listMessages(options.organizationId ?? '', channel, query),
     sendMessage: (channel: string, body: api.SendMessageRequest) => api.sendMessage(options.organizationId ?? '', channel, body),
   }

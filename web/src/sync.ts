@@ -9,6 +9,7 @@ import { createCore } from '#sync-core'
 import type { ChannelState, Effect, Input } from './protocol-types'
 
 export type TimelineApi = {
+  listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
   listMessages(channel: string, query?: ListMessagesQuery): Promise<Result<MessagePage>>
   sendMessage(channel: string, body: SendMessageRequest): Promise<Result<Message>>
 }
@@ -98,6 +99,7 @@ const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
   const transport = options.api ?? {
+    listChannelEvents: (channel: string, query: api.ListChannelEventsQuery) => api.listChannelEvents(options.organizationId ?? '', channel, query),
     listMessages: (channel: string, query?: ListMessagesQuery) => api.listMessages(options.organizationId ?? '', channel, query),
     sendMessage: (channel: string, body: SendMessageRequest) => api.sendMessage(options.organizationId ?? '', channel, body),
   }
@@ -251,10 +253,10 @@ export function createSync(options: SyncOptions) {
   function dispatch(input: Input): Promise<void> {
     if (input.type === 'event' && input.event.type === 'message') rememberIdentityResponse(input.event.message)
     else if (input.type === 'ack') rememberIdentityResponse(input.message)
-    else if (input.type === 'history_result') rememberIdentityResponse(input.page)
+    else if (input.type === 'history_result' || input.type === 'events_result') rememberIdentityResponse(input.page)
     else if (input.type === 'settle_history') rememberIdentityResponse(input.messages)
     const incoming = input.type === 'event' && input.event.type === 'message' ? [input.event.message]
-      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : []
+      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' ? [e.message] : []) : []
     if (incoming.some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
       input = { ...input, refreshMentionNames: true }
     const previous = state
@@ -459,7 +461,13 @@ export function createSync(options: SyncOptions) {
         }
         break
       case 'fetch_history': {
-        const query = effect.page === 'after' ? { after_seq: effect.seq } : { before_seq: effect.seq }
+        if (effect.page === 'after') {
+          const result = await request(effect.id, () => transport.listChannelEvents(effect.channel, { after_seq: effect.seq! }))
+          await dispatch(result.ok ? { type: 'events_result', request: effect.id, page: result.data }
+            : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
+          break
+        }
+        const query = { before_seq: effect.seq }
         const result = await request(effect.id, () => effect.page === 'latest'
           ? transport.listMessages(effect.channel) : transport.listMessages(effect.channel, query))
         await dispatch(result.ok ? { type: 'history_result', request: effect.id, page: result.data }

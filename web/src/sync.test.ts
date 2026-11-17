@@ -119,7 +119,7 @@ it('controller keeps admission 503 retryable and retries manually with the same 
       status: 503, headers: { 'Retry-After': '3' },
     }))
     .mockResolvedValueOnce(new Response(JSON.stringify(message), { status: 201 }))
-  const client = controllerClient({ api: {
+  const client = controllerClient({ api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
     listMessages: (channel, query) => api.listMessages('o', channel, query, fetchMock),
     sendMessage: (channel, body) => api.sendMessage('o', channel, body, fetchMock),
   } })

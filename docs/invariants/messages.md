@@ -75,6 +75,9 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 | DM targets outside the pair disclose no Mention identity, row or count, including Member, Owner/Admin, Guest, foreign and inactive targets | `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_nonparticipant_member`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_nonparticipant_owner`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_nonparticipant_admin`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_guest_without_grant`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_other_organization`, `server/src/messages/tests/mentions/dms.rs::dm_mention_denies_inactive_member` |
 | Inactive or lapsed DM peers refuse new sends without Mention writes; canonical retries keep accepted sets and renewal starts at zero Mention unread | `server/src/messages/tests/mentions/dms.rs::dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set` |
 
+| REST event pages use log positions, replay hydration and fail-closed coverage, with default 50/max 200 and exclusive ascending continuation | `server/src/messages/tests/channel_log.rs::channel_event_pages_are_bounded_exclusive_and_hydrate_current_state`, `server/src/messages/tests/channel_log.rs::channel_event_pages_fail_closed_on_missing_log_positions` |
+| REST event pages deny private nonmembers and foreign Organizations with authorized controls; query/auth error order matches history | `server/src/messages/tests/channel_log.rs::channel_event_pages_deny_private_nonmembers_and_foreign_organizations_with_controls` |
+
 ## Rows in other parts
 
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.

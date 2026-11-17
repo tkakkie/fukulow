@@ -749,7 +749,7 @@
           "$comment": "A message event arrived (live, replayed or echo).",
           "type": "object",
           "required": ["type", "channel", "seq", "kind", "message"],
-          "properties": { "type": { "const": "message" }, "seq": { "$ref": "#/$defs/Seq" }, "kind": { "const": "create" }, "channel": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
+          "properties": { "type": { "const": "message" }, "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "move", "delete"] }, "channel": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
           "additionalProperties": false
         },
         {
@@ -770,6 +770,17 @@
             "has_more": { "type": "boolean" }
           },
           "additionalProperties": false
+        },
+        {
+          "$comment": "A Channel event page from /events; positions, never creation ordering, prove C3 coverage.",
+          "type": "object", "required": ["type", "respond_to", "events", "has_more"],
+          "properties": {
+            "type": { "const": "events_result" }, "respond_to": { "$ref": "#/$defs/Label" },
+            "events": { "type": "array", "items": {
+              "type": "object", "required": ["seq", "kind", "message"],
+              "properties": { "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "move", "delete"] }, "message": { "$ref": "#/$defs/MessageSpec" } }, "additionalProperties": false
+            } }, "has_more": { "type": "boolean" }
+          }, "additionalProperties": false
         },
         {
           "$comment": "A history request failed.",

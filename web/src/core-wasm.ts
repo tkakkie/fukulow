@@ -49,7 +49,7 @@ export function createCore(selfId: string): SyncCore {
       const out = read<Delta>(core.step(JSON.stringify(coreInput(input))))
       expandBodies(out, out.bodies)
       const incoming = input.type === 'event' && input.event.type === 'message' ? [input.event.message]
-        : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : []
+        : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' ? [e.message] : []) : []
       const originals = new Map(incoming.map(m => [m.id, m]))
       const channelViews = out.changedChannels.length ? { ...view.channels } : view.channels
       const records = new Map(out.records.map(([id, messages]) => [id, messages.map(m => {

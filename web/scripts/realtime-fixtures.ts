@@ -324,6 +324,7 @@ const respondsTo: Record<string, string> = {
   ack: 'send',
   send_failed: 'send',
   history_result: 'fetch_history',
+  events_result: 'fetch_history',
   history_failed: 'fetch_history',
   subscribed: 'subscribe',
   timer_elapsed: 'wait',
@@ -560,6 +561,9 @@ function* scenarioInputs(scenario: ClientScenario): Generator<ResolvedInput, str
     }
     if (Array.isArray(step.input.messages)) {
       input.messages = (step.input.messages as Record<string, Json>[]).flatMap((m) => expandMessage(m, channelOf(input.respond_to)))
+    }
+    if (Array.isArray(step.input.events)) {
+      input.events = step.input.events.map((event: { seq: number; kind: string; message: Record<string, Json> }) => ({ ...event, message: expandMessage(event.message, channelOf(input.respond_to))[0] }))
     }
     if (input.type === 'connection_ready') [connectPending, socketOpen] = [false, true]
     if (input.type === 'socket_closed') socketOpen = false

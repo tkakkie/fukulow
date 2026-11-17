@@ -62,3 +62,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [messages](messages.md): `mention_shared_surfaces_keep_sets_and_follow_non_author_rename`, `mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic`
 - [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`
+
+- [sync](sync.md): `an unpinned main window updates retained identities without inserting out-of-window mutations`, `a Topic latest read started after retirement cannot resurrect a subsequently retired tombstone`

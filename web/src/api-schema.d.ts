@@ -111,6 +111,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/channels/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read event positions for C3 gap recovery. Auth extraction and query validation
+         *     precede Channel visibility, exactly as on the history GET.
+         */
+        get: operations["list_channel_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/channels/{id}/members": {
         parameters: {
             query?: never;
@@ -696,6 +716,11 @@ export interface components {
         };
         /** @enum {string} */
         ChannelEventKind: "create" | "edit" | "move" | "delete";
+        /** @description Bounded ascending Channel log page, with the same envelopes as WebSocket replay. */
+        ChannelEventPage: {
+            events: components["schemas"]["ServerEvent"][];
+            has_more: boolean;
+        };
         ChannelList: {
             channels: components["schemas"]["UnreadChannel"][];
         };
@@ -1269,6 +1294,7 @@ export type ChannelAccessRevoked = components['schemas']['ChannelAccessRevoked']
 export type ChannelActivity = components['schemas']['ChannelActivity'];
 export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
 export type ChannelEventKind = components['schemas']['ChannelEventKind'];
+export type ChannelEventPage = components['schemas']['ChannelEventPage'];
 export type ChannelList = components['schemas']['ChannelList'];
 export type ChannelListChanged = components['schemas']['ChannelListChanged'];
 export type ChannelMember = components['schemas']['ChannelMember'];
@@ -1873,6 +1899,83 @@ export interface operations {
                 };
             };
             /** @description Database failure while resolving the session or creating the Channel and its membership */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_channel_events: {
+        parameters: {
+            query: {
+                /** @description Exclusive event position; 0 starts at the beginning. */
+                after_seq: number;
+                /** @description Page size, default 50, maximum 200. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ascending Channel event envelopes after the exclusive event cursor, with current-state replay hydration and directional has_more */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelEventPage"];
+                };
+            };
+            /** @description Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged */
             500: {
                 headers: {
                     [name: string]: unknown;

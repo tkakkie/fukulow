@@ -282,7 +282,7 @@ it('keeps filtered records out of cursor evidence and fills a real gap only with
   expect(vi.getTimerCount()).toBe(0)
   c.event(13)
   await vi.advanceTimersByTimeAsync(100)
-  expect(c.listMessages.mock.calls).toEqual([['A', { after_seq: 10 }]])
+  expect(c.listChannelEvents.mock.calls).toEqual([['A', { after_seq: 10 }]])
   expect(c.sync.get().channels.A.cursor).toBe(13)
   expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([10, 12])
   await c.sync.close()
@@ -1025,7 +1025,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
     },
     topicsApi,
     sync: {
-      api: { listMessages, sendMessage },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages, sendMessage },
       connect(h) {
         handlers.push(h)
         return { send: m => { controls.push(m) }, close: vi.fn() }
@@ -1304,7 +1304,7 @@ it('recovers C9 Topic state by selecting a different Channel and back', async ()
   const channel = (id: string): Channel => ({ id, kind: 'channel', name: id, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true } } })
   const session = createSession({ selfId: 'me', onEnded: vi.fn(), topicsApi: c.topicsApi,
     channelsApi: { listChannels: async () => ok({ channels: [channel('A'), channel('B')] }), createChannel: async () => ok(channel('B')) },
-    sync: { api: { listMessages: c.listMessages, sendMessage: c.sendMessage },
+    sync: { api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: c.listMessages, sendMessage: c.sendMessage },
       connect(h) { c.handlers.push(h); return { send: m => { c.controls.push(m) }, close: vi.fn() } } },
   })
   c.handlers[0].onReady(); await flush()

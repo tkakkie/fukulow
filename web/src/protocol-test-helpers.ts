@@ -32,12 +32,14 @@ export function protocolClient(onInput?: (input: Input) => void) {
         case 'session_start': case 'session_replaced': input = { type: i.type, selfId: 'me' }; break
         case 'connection_ready': input = { type: i.type, connection: state.connection! }; break
         case 'socket_closed': input = { type: i.type, connection: state.connection!, code: i.code as number }; break
-        case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: typeof i.seq === 'number' ? i.seq : msg().created_seq, message: msg() } }; break
+        case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : msg().created_seq, message: msg() } }; break
         case 'subscribed': input = { type: 'event', connection: state.connection!, subscription: e?.id as number | undefined,
           event: { type: 'subscribed', channel_id: channel, caught_up_seq: i.caught_up_seq as number } }; break
         case 'channel_access_lost': input = { type: 'event', connection: state.connection!, event: { type: 'channel_access_lost', channel_id: channel } }; break
         case 'error_event': input = { type: 'event', connection: state.connection!, event: { type: 'error', channel_id: channel,
           code: i.code as string } }; break
+        case 'events_result': input = { type: 'events_result', request: e!.id as number,
+          page: { events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more as boolean } }; break
         case 'history_result': input = { type: i.type, request: e!.id as number,
           page: { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more as boolean } }; break
         case 'send_failed': input = { type: i.type, request: e!.id as number,

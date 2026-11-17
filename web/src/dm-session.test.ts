@@ -25,7 +25,7 @@ function client() {
     },
     topicsApi: { listTimeline, listTopics: async () => ({ ok: false, kind: 'network' }), getTopicSummary: async () => ({ ok: false, kind: 'network' }), listTopicMessages: async () => ({ ok: false, kind: 'network' }) },
     unreadApi: { listChannels, markRead, getTopicSummary: async () => ({ ok: false, kind: 'network' }) },
-    sync: { connect(h) { socket = h; return { send() {}, close() {} } }, api: { listMessages, sendMessage: async () => ({ ok: false, kind: 'network' }) }, random: () => 0.5 },
+    sync: { connect(h) { socket = h; return { send() {}, close() {} } }, api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages, sendMessage: async () => ({ ok: false, kind: 'network' }) }, random: () => 0.5 },
   })
   return { session, listMessages, listTimeline, markRead, first, onEnded, open,
     set rows(value: Dm[]) { rows = value }, get socket() { return socket },

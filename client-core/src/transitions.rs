@@ -273,7 +273,12 @@ impl Step<'_> {
                 event,
                 subscription,
             } => self.event(connection, event, subscription),
-            Input::HistoryResult { request, page } => self.history_response(request, Ok(page)),
+            Input::HistoryResult { request, page } => {
+                self.history_response(request, Ok(crate::responses::HistoryPage::Messages(page)))
+            }
+            Input::EventsResult { request, page } => {
+                self.history_response(request, Ok(crate::responses::HistoryPage::Events(page)))
+            }
             Input::HistoryFailed { request, status } => self.history_response(request, Err(status)),
             Input::Ack { request, message } => self.send_response(request, Ok(message)),
             Input::SendFailed {

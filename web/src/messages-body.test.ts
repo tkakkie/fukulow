@@ -59,7 +59,7 @@ describe('message body validation', () => {
       selfId: 'me',
       newId: () => 'c1',
       connect: () => ({ send() {}, close() {} }),
-      api: { listMessages: vi.fn(), sendMessage },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn(), sendMessage },
     })
     await sync.start()
     const a = sync.getTimeline('A')
@@ -179,7 +179,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
       drafts,
       newId: () => `cid-${++idSeq}`,
       connect: () => ({ send() {}, close() {} }),
-      api: { listMessages: vi.fn(), sendMessage },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn(), sendMessage },
     })
     await sync.start()
     const a = sync.getTimeline('A')
