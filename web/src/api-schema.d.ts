@@ -213,6 +213,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/channels/{id}/reply-counts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["reply_counts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/channels/{id}/timeline": {
         parameters: {
             query?: never;
@@ -998,6 +1014,34 @@ export interface components {
             /** Format: int32 */
             limit?: number | null;
         };
+        ReplyCount: {
+            /** Format: uuid */
+            message_id: string;
+            /**
+             * Format: int64
+             * @description Exact number of live Replies in the entire chain, excluding the root.
+             */
+            reply_count: number;
+            /** Format: uuid */
+            root_id: string;
+        };
+        ReplyCountPage: {
+            /**
+             * Format: int64
+             * @description Committed Channel watermark W. Both anchors and Replies are bounded by W.
+             *     This baseline is a projection and never advances a sync cursor or read position.
+             */
+            as_of_seq: number;
+            /**
+             * @description One entry per distinct requested id visible in this Channel at W, sorted by id.
+             *     Unknown and foreign ids are omitted without distinction.
+             */
+            counts: components["schemas"]["ReplyCount"][];
+        };
+        ReplyCountRequest: {
+            /** @description Root or descendant ids. Limit applies before duplicate ids are merged. */
+            ids: string[];
+        };
         RevokeOtherSessionsRequest: {
             /** Format: password */
             current_password: string;
@@ -1255,6 +1299,9 @@ export type ReadPosition = components['schemas']['ReadPosition'];
 export type ReadPositionChanged = components['schemas']['ReadPositionChanged'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
 export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
+export type ReplyCount = components['schemas']['ReplyCount'];
+export type ReplyCountPage = components['schemas']['ReplyCountPage'];
+export type ReplyCountRequest = components['schemas']['ReplyCountRequest'];
 export type RevokeOtherSessionsRequest = components['schemas']['RevokeOtherSessionsRequest'];
 export type Role = components['schemas']['Role'];
 export type SendMessageRequest = components['schemas']['SendMessageRequest'];
@@ -2567,6 +2614,102 @@ export interface operations {
                 };
             };
             /** @description Watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    reply_counts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+                /** @description Channel id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplyCountRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact chain counts at as_of_seq; unknown or foreign ids omitted; no-store, no side effects, cursor-neutral */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplyCountPage"];
+                };
+            };
+            /** @description Malformed ids or body, or input length outside 1..=100 before deduplication; validated before Organization/Channel authorization */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found; authorization denials precede watermark admission */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Expected application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or commit barrier timeout */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

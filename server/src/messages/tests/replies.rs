@@ -2,6 +2,7 @@ use super::*;
 use std::time::Duration;
 
 mod atomicity;
+pub(crate) mod counts;
 mod denials;
 mod measurement;
 mod paging;

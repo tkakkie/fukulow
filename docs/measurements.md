@@ -1056,3 +1056,20 @@ Artifacts record commits, immutable image IDs, machine/settings/harness hashes; 
   - A is the whole diff since PR #388's base.
 
   #196 stays open.
+
+## Authoritative Reply count SQL plans (#409, 2026-11-17)
+
+Reproduce with `DATABASE_URL` set to a throwaway PostgreSQL owner connection: `cargo test --locked -p fukulow-server --lib reply_count_query_plans -- --ignored --nocapture --test-threads=1`. The committed probe is `server/src/messages/tests/replies/counts/plans.rs`; it executes the production `COUNTS_SQL` in `server/src/messages/replies/counts.rs`. No new index or counter column. Fixture: 100,000 Messages, 2,000 Topics, one Channel; 100 distinct roots with 10 Replies each and one root with 10,000 Replies; W=100,000. Counts and returned anchor cardinalities are checked before each plan.
+
+Conditions: arm64 Mac17,2, 10 CPUs/32 GiB, Docker 29.9.3, PostgreSQL 18.6, Rust 1.99.1, shared host. `fukulow_sqlx_test_app` is the restricted app test role with production grants/policies; NOSUPERUSER/NOBYPASSRLS and active Message RLS are asserted. Each mode uses an Organization-scoped REPEATABLE READ READ ONLY transaction, JIT off, and actual `PREPARE` / `EXPLAIN (ANALYZE, BUFFERS) EXECUTE` with forced custom/generic plans. `VACUUM (ANALYZE)` follows seeding; a correctness read warms each shape. One retained SQL plan per shape/mode; no other test or build from this worktree ran during the samples. Other sessions were not isolated.
+
+| Shape | Plan mode | Planning / execution ms | Top-level shared buffer hits |
+|---|---|---:|---:|
+| 100 ids, 100 roots × 10 Replies | Custom | 0.825 / 4.387 | 627 |
+| 100 ids, 100 roots × 10 Replies | Generic | 0.853 / 2.201 | 632 |
+| One root, 10,000 Replies | Custom | 0.435 / 4.790 | 174 |
+| One root, 10,000 Replies | Generic | 0.039 / 5.384 | 174 |
+
+Plans materialize bounded anchors, deduplicate roots, aggregate once per root with `messages_reply_chain_seq`, then join back to anchors and sort by requested id. Batch aggregates perform 100 index-only scans × 10 rows; the long chain performs one × 10,000. All Reply aggregate scans have zero heap fetches (301 shared hits for the batch, 170 for the long chain); no sequential Message scan or disk read appears. Anchors use `messages_pkey` (custom batch) or `messages_org_channel_id_key` (other cases), with heap access for root metadata. The generic plans retain `$1`–`$4` in their predicates. Full plans/buffers: `/private/tmp/fk409-plans-final.log` (outside Git).
+
+These warm SQL-only samples exclude HTTP/authentication, watermark admission/barrier, pool acquisition and concurrent writes; they do not establish p95 or production capacity. Formal load verification of the provisional 100-id p95 <=50 ms and extreme-chain p95 <=200 ms targets remains open. No heavy load was run.
