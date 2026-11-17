@@ -8,3 +8,7 @@ a1eab394259f3761d9af929beda247709e08f6d1:server/src/realtime/tests/limits.rs:gen
 # the path-keyed format was fixed by the next commit.
 c4b4b0c537687e5e2a4982403bb0819034a9606d:load/search-engines/manifest-v1.json:generic-api-key:34
 c4b4b0c537687e5e2a4982403bb0819034a9606d:load/search-engines/manifest-v1.json:generic-api-key:48
+# Disposable #409 measurement passwords in commit 8b0b593, not secrets;
+# the next commit generates them at run time.
+8b0b593df02ab2ab64f99bef0f16bcbf2e7474e0:load/reply-counts-run.ts:generic-api-key:127
+8b0b593df02ab2ab64f99bef0f16bcbf2e7474e0:load/reply-counts-run.ts:generic-api-key:133
