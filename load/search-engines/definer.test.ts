@@ -43,7 +43,7 @@ test('column grants equal the columns the verifier expects',()=>{
 });
 test('denials cover each rule with a positive control',()=>{
   const names = denialCases.map(c=>c.name).join('\n');
-  for (const rule of [/other Organization/,/private Channel non-member/,/guest without grant/,/deactivated/,/NULL Organization/,/trailing backslash/,/empty query/])
+  for (const rule of [/other Organization/,/private Channel non-member/,/non-member Owner/,/non-member Admin/,/DM non-participant/,/revoked after the Message was sent/,/demoted to Guest loses public access/,/DM non-participant Owner/,/DM non-participant Member/,/stale grant/,/guest without grant/,/deactivated/,/NULL Organization/,/trailing backslash/,/empty query/])
     assert.match(names,rule);
   assert.ok(denialCases.filter(c=>c.expect.length).length>=4);
 });

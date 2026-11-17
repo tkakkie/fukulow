@@ -1,5 +1,5 @@
 {
-  "sha256": "d106fcdbd6bc6f2b8278d2ff890b5fe44f1d1cfd78a03a540a01c9a8e060d4a0",
+  "sha256": "90a056eddccf6da730fae4b261bf370c42eddbaa120041c8ee39ee4a8c10b015",
   "frozen": {
     "version": 2,
     "date": "2026-11-17",
@@ -56,7 +56,7 @@
       },
       {
         "path": "load/search-engines/definer.ts",
-        "sha256": "a2267c3952428f4a81cc22e5118a51539c06d2da985d23b79ff9d2b072ad36c5"
+        "sha256": "ad4f2f8d6f4917d9a3bd06405243cc600d4d0c164bcee1a9c28bd2569799c641"
       },
       {
         "path": "load/search-engines/manifest.ts",
@@ -108,7 +108,7 @@
       },
       {
         "path": "load/search-engines/summarize.ts",
-        "sha256": "336f221675f614fa4c36e4630900ea268cdcbd350ce80c02df4bf91ba340d678"
+        "sha256": "b3c82fd9cf6fe4b6510466a50e12f20af968cf6cf03fee5c2703d380ce9f8e55"
       },
       {
         "path": "load/search-engines/trgm.sql",
