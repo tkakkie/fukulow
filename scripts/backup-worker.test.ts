@@ -81,13 +81,20 @@ class Binding implements R2Binding {
   }
   async delete(key: string) { await this.before?.('delete', key); await this.bucket.delete(key) }
 }
+function cachedUsage(now = epoch) {
+  const month = new Date(now).toISOString().slice(0, 7), days: Record<string, { classA: number; classB: number }> = {}
+  for (let time = Date.parse(month + '-01'); time + day + 6 * 60 * 60 * 1000 <= now; time += day) {
+    days[new Date(time).toISOString().slice(0, 10)] = { classA: 0, classB: 1 }
+  }
+  return { month, days }
+}
 function fixture() {
   let now = epoch
   const clock = () => now, storage = new Storage(), binding = new Binding(new FakeBucket(clock))
   for (let i = 0; i < 30; i++) seed(binding.bucket, epoch - i * day)
   const source = seed(binding.bucket, epoch - 70 * day), candidate = seed(binding.bucket, epoch - 80 * day)
   const drill = seed(binding.bucket, epoch - 70 * day, true, epoch - day)
-  storage.values.set(stateKey, { version: 1, state: { sentAlerts: [], aliveDate: '2026-11-17' } })
+  storage.values.set(stateKey, { version: 1, state: { sentAlerts: [], aliveDate: '2026-11-17', usageCache: cachedUsage() } })
   const events: string[] = [], requests: { url: string; init?: RequestInit }[] = []
   const request: Fetch = async (url, init) => {
     requests.push({ url: String(url), init })
@@ -189,6 +196,7 @@ test('DO state missing or corrupt alerts and freezes then retry recovers with pe
     const count = f.events.length
     assert.equal((await f.create().fetch()).status, 204)
     assert.equal(f.events.length, count)
+    for (let i = 0; i < 5; i++) assert.equal((await f.create().fetch()).status, 204)
     assert.equal(f.binding.bucket.objects.has(f.candidate + 'verified.json'), false)
     assert.ok(!f.events.join().includes('PRIVATE_SENTINEL'))
   }
@@ -281,7 +289,7 @@ test('VPS upload and retry can progress concurrently with the checker without ve
 test('R2 binding follows all cursors and fails closed on inconsistent truncation metadata or pages', async () => {
   const f = fixture(); f.binding.pageSize = 7
   const objects = await backupAdapter(f.binding, noGuard).list()
-  assert.equal(objects.length, f.binding.bucket.objects.size)
+  assert.equal(objects!.length, f.binding.bucket.objects.size)
   assert.ok(f.binding.lists.length > 1)
   assert.equal(f.binding.lists[0].cursor, undefined)
   assert.ok(f.binding.lists.slice(1).every(page => !!page.cursor))
@@ -363,7 +371,7 @@ test('fetch analytics uses the shared account-wide parser and unknown usage free
       { dimensions: { actionType: 'GetObject' }, sum: { requests: 3 } },
     ] }] } } })
   })
-  assert.deepEqual(await usage.read(epoch), { classA: 34, classB: 51 })
+  assert.deepEqual(await usage.read(epoch, { usageCache: cachedUsage() }), { classA: 2, classB: 19 })
   f.env.ANALYTICS_TOKEN = ''
   assert.equal((await f.create().fetch()).status, 204)
   assert.ok(f.events.some(e => e.includes('operations-unknown')))
@@ -430,4 +438,158 @@ test('failed lease release keeps valid state and blocks retries until expiry whi
     assert.equal((await f.create().fetch()).status, 500)
     assert.equal(f.binding.bucket.calls.length, before)
   }
+})
+
+test('month end failures batch every active alert and reserve checker-failed within fifty external fetches', async () => {
+  const f = fixture(), now = Date.UTC(2026, 9, 31, 12)
+  f.advance(now - epoch)
+  f.storage.values.set(stateKey, { version: 1, state: { sentAlerts: [] } })
+  f.binding.bucket.objects.clear()
+  for (let i = 0; i < 8; i++) seed(f.binding.bucket, now - (i + 2) * day)
+  seed(f.binding.bucket, now - 50 * day, true)
+  // Malformed inventory also contributes to capacity without allowing pruning.
+  const alien = { key: 'unknown/object', size: 9_500_000_000, uploaded: new Date(now) }
+  const list = f.binding.list.bind(f.binding)
+  f.binding.list = async options => { const result = await list(options); result.objects.push(alien); return result }
+  const requests: string[] = [], contents: string[] = []
+  const request: Fetch = async (url, init) => {
+    requests.push(String(url))
+    if (String(url) === f.env.ANALYTICS_URL) return Response.json({ data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [
+      { dimensions: { actionType: 'GetObject' }, sum: { requests: 1 } },
+    ] }] } } })
+    contents.push(JSON.parse(String(init?.body)).content)
+    return new Response(null, { status: 503, headers: { 'retry-after': '0' } })
+  }
+  const checker = new BackupChecker({ storage: f.storage }, f.env, { now: f.clock, request })
+  assert.equal((await checker.fetch()).status, 500)
+  assert.equal(requests.filter(url => url === f.env.ANALYTICS_URL).length, 4)
+  assert.equal(contents.length, 6)
+  assert.ok(requests.length <= 50)
+  assert.equal(new Set(contents.slice(0, 3)).size, 1)
+  for (const event of ['malformed-generations', 'stale-backup', 'insufficient-generations', 'drill-overdue',
+    'capacity-70', 'capacity-90', 'operations-unknown', 'pruning-refused', 'checker-alive']) assert.ok(contents[0].includes(event), event)
+  assert.deepEqual(contents.slice(3), Array(3).fill('Fukulow backup: checker-failed.'))
+  assert.ok(!f.binding.bucket.calls.some(call => call.startsWith('DELETE')))
+  const state = decodeState(f.storage.values.get(stateKey)).state
+  assert.deepEqual(state.sentAlerts, [])
+  assert.equal(state.aliveDate, undefined)
+  assert.equal(Object.keys(state.usageCache!.days).length, 3)
+})
+
+test('Worker batches all supported alerts with alive and preserves dedup and at least once retries', async () => {
+  const { checkerAlerts } = await import('./backup-checker-state.ts')
+  const content: string[] = []
+  const notify = discordNotifier('https://notify.invalid/', noGuard, async (_url, init) => {
+    content.push(JSON.parse(String(init?.body)).content)
+    return new Response(null, { status: 204 })
+  })
+  await notify(JSON.stringify({ event: 'checker-summary', events: [...checkerAlerts,
+    JSON.stringify({ event: 'checker-alive', newestCapture: null, backupBytes: 0, imageBytes: 0, total: 0, percentage: 0, operations: null })] }))
+  assert.equal(content.length, 1)
+  assert.ok(content[0].length <= 2000)
+  for (const event of checkerAlerts) assert.ok(content[0].includes(event))
+  const f = fixture()
+  f.storage.values.delete(stateKey)
+  assert.equal((await f.create().fetch()).status, 204)
+  assert.equal(f.events.length, 1)
+  assert.ok(f.events[0].includes('state-missing') && f.events[0].includes('checker-alive'))
+  assert.equal((await f.create().fetch()).status, 204)
+  assert.equal(f.events.length, 1)
+  // Replay the pre-delivery snapshot, as if delivery succeeded but saving died.
+  f.storage.values.delete(stateKey)
+  assert.equal((await f.create().fetch()).status, 204)
+  assert.equal(f.events.length, 2)
+})
+
+test('corrupt or prematurely cached usage alerts and freezes Worker pruning until safe backfill', async () => {
+  for (const usageCache of [{ month: '2026-11', days: { '2026-11-01': { classA: -1, classB: 0 } } },
+    { month: '2026-11', days: { '2026-11-17': { classA: 0, classB: 0 } } }]) {
+    const f = fixture()
+    f.storage.values.set(stateKey, { version: 1, state: { sentAlerts: [], usageCache } })
+    assert.equal((await f.create().fetch()).status, 204)
+    assert.equal(f.events.length, 1)
+    assert.ok(f.events[0].includes('state-corrupt') && f.events[0].includes('operations-unknown') && f.events[0].includes('pruning-refused'))
+    assert.ok(!f.binding.bucket.calls.some(call => call.startsWith('DELETE')))
+    assert.equal(decodeState(f.storage.values.get(stateKey)).warning, undefined)
+  }
+})
+
+test('internal budget accommodates thirty eight generations and five prunes including fenced DO operations', async () => {
+  const f = fixture()
+  for (let i = 0; i < 4; i++) seed(f.binding.bucket, epoch - (90 + i) * day)
+  seed(f.binding.bucket, epoch - 100 * day, true, epoch - 50 * day)
+  assert.equal((await inventory(f.binding.bucket, epoch)).verified.length, 38)
+  let operations = 0
+  f.storage.before = async () => { operations++ }
+  const transaction = f.storage.transaction.bind(f.storage)
+  f.storage.transaction = async body => { operations++; return transaction(body) }
+  f.binding.before = async () => { operations++ }
+  f.env.IMAGES.list = async () => { operations++; return { objects: [], truncated: false } }
+  const before = f.binding.bucket.objects.size
+  assert.equal((await f.create().fetch()).status, 204)
+  assert.equal(before - f.binding.bucket.objects.size, 15)
+  assert.ok(operations <= 800, String(operations))
+  assert.ok(f.binding.bucket.objects.has(f.source + 'verified.json'))
+  assert.ok(f.binding.bucket.objects.has(f.drill + 'verified.json'))
+  const excessive = fixture()
+  excessive.binding.pageSize = 1
+  let calls = 0
+  excessive.storage.before = async () => { calls++ }
+  const tx = excessive.storage.transaction.bind(excessive.storage)
+  excessive.storage.transaction = async body => { calls++; return tx(body) }
+  excessive.binding.before = async () => { calls++ }
+  assert.equal((await excessive.create().fetch()).status, 500)
+  assert.ok(calls <= 800, String(calls))
+  assert.ok(excessive.events.some(event => event.includes('checker-failed')))
+  assert.ok(!excessive.binding.bucket.calls.some(call => call.startsWith('DELETE')))
+})
+
+test('image listing stops at internal budget with unknown capacity alert and frozen pruning', async () => {
+  const f = fixture()
+  for (let i = 0; i < 4; i++) seed(f.binding.bucket, epoch - (90 + i) * day)
+  seed(f.binding.bucket, epoch - 100 * day, true, epoch - 50 * day)
+  f.storage.values.set(stateKey, { version: 1, state: { sentAlerts: [], usageCache: cachedUsage() } })
+  let operations = 0, pages = 0
+  f.storage.before = async () => { operations++ }
+  const transaction = f.storage.transaction.bind(f.storage)
+  f.storage.transaction = async body => { operations++; return transaction(body) }
+  f.binding.before = async () => { operations++ }
+  f.env.IMAGES.list = async () => {
+    operations++
+    const page = ++pages
+    if (page > 1000) throw new Error('test must not permit an unbounded listing')
+    return { objects: [{ key: String(page), size: 1, uploaded: new Date(epoch) }], truncated: true, cursor: String(page) }
+  }
+  assert.equal((await f.create().fetch()).status, 204)
+  assert.ok(pages > 1 && pages < 30, String(pages))
+  assert.ok(operations <= 800, String(operations))
+  assert.equal(f.events.length, 1)
+  assert.ok(f.events[0].includes('capacity-unknown') && f.events[0].includes('pruning-refused'))
+  assert.match(f.events[0], /imageBytes=null total=null percentage=null/)
+  assert.ok(!f.binding.bucket.calls.some(call => call.startsWith('DELETE')))
+  assert.equal(f.storage.values.has(leaseKey), false)
+})
+
+test('shared external adapter budget rejects work before fetch and retains three failure attempts', async () => {
+  const { RunBudget } = await import('../workers/backup-checker/budget.ts')
+  const budget = new RunBudget(), calls: string[] = []
+  const request: Fetch = async url => {
+    calls.push(String(url))
+    return String(url).includes('analytics') ? Response.json({ data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [
+      { dimensions: { actionType: 'GetObject' }, sum: { requests: 1 } },
+    ] }] } } }) : new Response(null, { status: 503 })
+  }
+  const usage = analyticsUsage({ url: 'https://analytics.invalid/', token: 'test-only', account: 'test-only' }, noGuard, request, budget)
+  const notify = discordNotifier('https://notify.invalid/', noGuard, request, async () => {}, Date.now, budget)
+  // Nine normal attempts: four + four analytics, then one notification attempt.
+  for (let i = 0; i < 2; i++) await assert.rejects(usage.read(Date.UTC(2026, 9, 31, 12)), /unavailable/)
+  await assert.rejects(notify('stale-backup'), /budget/)
+  assert.equal(calls.length, 9)
+  await assert.rejects(usage.read(Date.UTC(2026, 9, 1, 12)), /unavailable/)
+  assert.equal(calls.length, 9)
+  await assert.rejects(notify('checker-failed'), /unavailable/)
+  assert.equal(calls.length, 12)
+  assert.equal(calls.filter(url => url.includes('notify')).length, 4)
+  await assert.rejects(notify('checker-failed'), /budget/)
+  assert.equal(calls.length, 12)
 })

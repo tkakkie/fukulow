@@ -5,8 +5,9 @@ import { validUsage, type UsageClient, type OperationUsage } from './backup-usag
 
 export type { CheckerState } from './backup-checker-state.ts'
 interface CheckOptions {
-  backups: BackupBucket; images: { list(): Promise<ObjectInfo[]> }; now: () => number
+  backups: BackupBucket; images: { list(): Promise<ObjectInfo[] | null> }; now: () => number
   notify: (event: string) => Promise<void>; state: CheckerState; usage: UsageClient
+  notifyBatch?: (events: string[]) => Promise<void>; assertBudget?: () => void
   persist?: (state: CheckerState) => Promise<void>
   initialAlerts?: string[]; freeze?: boolean
 }
@@ -41,12 +42,16 @@ async function checkLocked(options: CheckOptions) {
     await persist()
   }
   let operations: OperationUsage | null = null
+  const oldCache = JSON.stringify(options.state.usageCache)
   try {
-    const value = await options.usage.read(now)
+    const value = await options.usage.read(now, options.state)
     if (validUsage(value)) operations = { classA: value.classA, classB: value.classB }
   } catch { /* Unknown usage must alert, never become zero. */ }
+  options.assertBudget?.()
+  if (JSON.stringify(options.state.usageCache) !== oldCache && !options.freeze) await persist()
   if (!operations) alerts.push('operations-unknown')
   const data = await inventory(options.backups, now)
+  options.assertBudget?.()
   const backups = data.verified.filter(g => g.prefix.startsWith('backups/'))
   const completionTime = (g: Generation) => Math.max(...g.objects.map(o => o.uploaded))
   const drills = data.verified.filter(g => g.prefix.startsWith('restore-verified/'))
@@ -63,14 +68,15 @@ async function checkLocked(options: CheckOptions) {
   }
   const images = await options.images.list()
   const backupBytes = data.objects.reduce((sum, o) => sum + o.size, 0)
-  const imageBytes = images.reduce((sum, o) => sum + o.size, 0)
-  const total = backupBytes + imageBytes, percentage = total / 10_000_000_000 * 100
-  if (percentage >= 70) alerts.push('capacity-70')
-  if (percentage >= 90) alerts.push('capacity-90')
+  const imageBytes = images?.reduce((sum, o) => sum + o.size, 0) ?? null
+  const total = imageBytes === null ? null : backupBytes + imageBytes, percentage = total === null ? null : total / 10_000_000_000 * 100
+  if (images === null) alerts.push('capacity-unknown')
+  if (percentage !== null && percentage >= 70) alerts.push('capacity-70')
+  if (percentage !== null && percentage >= 90) alerts.push('capacity-90')
   if (operations && operations.classA >= 700_000) alerts.push('class-a-70')
   if (operations && operations.classB >= 7_000_000) alerts.push('class-b-70')
   // All deletion is frozen on unsafe inventory, not just the backup prefix.
-  if (options.freeze || !operations || stale || backups.length < 30 || data.malformed.length) alerts.push('pruning-refused')
+  if (images === null || options.freeze || !operations || stale || backups.length < 30 || data.malformed.length) alerts.push('pruning-refused')
   else {
     const candidates: Generation[] = []
     for (const generation of backups.slice(30)) {
@@ -87,13 +93,25 @@ async function checkLocked(options: CheckOptions) {
     }
     if (!candidates.length && backups.length > 30) alerts.push('pruning-guarded')
   }
-  for (const event of alerts) await alert(event)
   const date = new Date(now).toISOString().slice(0, 10)
-  if (options.state.aliveDate !== date) {
-    await options.notify(JSON.stringify({ event: 'checker-alive', newestCapture: latest?.manifest.captureTime ?? null,
-      backupBytes, imageBytes, total, percentage, operations }))
-    options.state.aliveDate = date
-    await persist()
+  const alive = options.state.aliveDate !== date ? JSON.stringify({ event: 'checker-alive', newestCapture: latest?.manifest.captureTime ?? null,
+    backupBytes, imageBytes, total, percentage, operations }) : undefined
+  if (options.notifyBatch) {
+    const events = alerts.filter(event => !options.state.sentAlerts?.includes(event))
+    if (alive) events.push(alive)
+    if (events.length) {
+      await options.notifyBatch(events)
+      if (alive) options.state.aliveDate = date
+      options.state.sentAlerts = alerts
+      await persist()
+    }
+  } else {
+    for (const event of alerts) await alert(event)
+    if (alive) {
+      await options.notify(alive)
+      options.state.aliveDate = date
+      await persist()
+    }
   }
   options.state.sentAlerts = alerts
   await persist()

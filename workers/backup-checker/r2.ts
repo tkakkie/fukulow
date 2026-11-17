@@ -1,3 +1,4 @@
+import { RunBudget } from './budget.ts'
 import type { BackupBucket, ObjectInfo } from '../../scripts/backup-r2-inventory.ts'
 import type { Guard, R2Binding, R2Listing, R2Object } from './bindings.ts'
 
@@ -9,13 +10,15 @@ function info(object: R2Object): ObjectInfo {
   return { key: object.key, size: object.size, uploaded: object.uploaded.getTime(),
     checksum: sha ? btoa(String.fromCharCode(...new Uint8Array(sha))) : '' }
 }
-export function imagesAdapter(binding: R2Listing, guard: Guard, maxPages = 10_000) {
-  return { async list(): Promise<ObjectInfo[]> {
+export function imagesAdapter(binding: R2Listing, guard: Guard, maxPages = 10_000, budget = new RunBudget(), imageOnly = true) {
+  return { async list(): Promise<ObjectInfo[] | null> {
     if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error('Invalid R2 page cap')
     const objects: ObjectInfo[] = [], keys = new Set<string>(), cursors = new Set<string>()
     let cursor: string | undefined
     for (let page = 0; page < maxPages; page++) {
+      if (imageOnly && !budget.imagePageAvailable()) return null
       await guard()
+      budget.internal(true)
       const result = await binding.list({ limit: 1000, ...(cursor ? { cursor } : {}) })
       await guard()
       if (!result || !Array.isArray(result.objects) || result.objects.length > 1000 || typeof result.truncated !== 'boolean' ||
@@ -35,11 +38,16 @@ export function imagesAdapter(binding: R2Listing, guard: Guard, maxPages = 10_00
     throw new Error('R2 page cap exceeded')
   } }
 }
-export function backupAdapter(binding: R2Binding, guard: Guard): BackupBucket {
+export function backupAdapter(binding: R2Binding, guard: Guard, budget = new RunBudget()): BackupBucket {
   return {
-    ...imagesAdapter(binding, guard),
+    async list() {
+      const objects = await imagesAdapter(binding, guard, 10_000, budget, false).list()
+      if (!objects) throw new Error('Backup inventory unavailable')
+      return objects
+    },
     async head(key) {
       await guard()
+      budget.internal(true)
       const object = await binding.head(key)
       await guard()
       if (!object) return null
@@ -51,6 +59,7 @@ export function backupAdapter(binding: R2Binding, guard: Guard): BackupBucket {
       // Only small JSON objects may be fetched by the independent checker.
       if (!/\/(manifest|verified)\.json$/.test(key)) throw new Error('Checker body access refused')
       await guard()
+      budget.internal(true)
       const object = await binding.get(key)
       await guard()
       if (!object || info(object).key !== key || object.size > 16_384) throw new Error('Invalid R2 JSON object')
@@ -61,6 +70,7 @@ export function backupAdapter(binding: R2Binding, guard: Guard): BackupBucket {
     },
     async delete(key) {
       await guard()
+      budget.internal(true)
       await binding.delete(key)
       await guard()
     },

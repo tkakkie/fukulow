@@ -90,6 +90,16 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 | Concurrent VPS uploads and fresh-suffix retries are neither verified, malformed nor pruned until completion or grace expiry | `scripts/backup-worker.test.ts::VPS upload and retry can progress concurrently with the checker without verification anomaly or pruning` |
 | Worker R2 inventory never accepts inconsistent pagination or partial evidence for pruning | `scripts/backup-worker.test.ts::R2 binding follows all cursors and fails closed on inconsistent truncation metadata or pages` |
 | Worker notifier uses shared fixed text, at most three attempts and Retry-After capped at thirty seconds | `scripts/backup-worker.test.ts::fetch Discord notifier shares fixed text bounds retries and caps Retry-After` |
+| Worker month-end alerts and alive share one message; failure retries retain attempts within fifty external fetches | `scripts/backup-worker.test.ts::month end failures batch every active alert and reserve checker-failed within fifty external fetches` |
+| Worker batches all supported alerts; delivered state deduplicates and delivery-before-persistence crashes may repeat notifications | `scripts/backup-worker.test.ts::Worker batches all supported alerts with alive and preserves dedup and at least once retries` |
+| Analytics and Discord share a twelve-fetch ceiling; nine normal attempts leave three reserved failure attempts | `scripts/backup-worker.test.ts::shared external adapter budget rejects work before fetch and retains three failure attempts` |
+| Closed-day cache backfill queries at most three misses plus today; incomplete month coverage stays unknown | `scripts/backup-usage-model.test.ts::usage backfill bounds misses and persists closed days across clients until full month coverage` |
+| UTC month rollover drops the old usage cache; empty month-start ranges never invent zero usage | `scripts/backup-usage-model.test.ts::usage rollover discards previous month and midnight never invents zero usage` |
+| Usage days cache only six hours after UTC closure; today and recent days are queried again | `scripts/backup-usage-model.test.ts::usage only caches closed days at the six hour analytics lag boundary` |
+| Cached usage requires strict calendar dates, month membership and safe nonnegative totals; corruption is never trusted or zero | `scripts/backup-usage-model.test.ts::corrupt cached usage is refused instead of silently becoming trusted or zero` |
+| Corrupt or prematurely closed cached usage alerts and freezes all Worker pruning | `scripts/backup-worker.test.ts::corrupt or prematurely cached usage alerts and freezes Worker pruning until safe backfill` |
+| Internal operations stay within 800 including fenced DO work, 38 generations and five prunes; excessive backup pages fail with an alert | `scripts/backup-worker.test.ts::internal budget accommodates thirty eight generations and five prunes including fenced DO operations` |
+| Image listing stops before internal budget exhaustion, reports unknown capacity and freezes pruning without partial totals | `scripts/backup-worker.test.ts::image listing stops at internal budget with unknown capacity alert and frozen pruning` |
 
 ## Rows in other parts
 

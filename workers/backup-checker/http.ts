@@ -1,3 +1,4 @@
+import { RunBudget } from './budget.ts'
 import { notificationText } from '../../scripts/backup-notification-text.ts'
 import { accountUsage } from '../../scripts/backup-usage-model.ts'
 import type { Guard } from './bindings.ts'
@@ -10,12 +11,13 @@ function https(value: string): string {
   return url.href
 }
 export function discordNotifier(url: string, guard: Guard, request: Fetch = fetch,
-  sleep: (ms: number) => Promise<void> = pause, now = Date.now) {
+  sleep: (ms: number) => Promise<void> = pause, now = Date.now, budget = new RunBudget()) {
   return async (event: string): Promise<void> => {
     let content: string
     try { content = notificationText(event) } catch { throw new Error('Notification failed category=event') }
     for (let attempt = 0; attempt < 3; attempt++) {
       await guard()
+      budget.external(event === 'checker-failed')
       let status = 0, delay = 1000
       try {
         const response = await request(https(url), { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -37,11 +39,12 @@ export function discordNotifier(url: string, guard: Guard, request: Fetch = fetc
     throw new Error('Notification failed category=unavailable')
   }
 }
-export function analyticsUsage(config: { url: string; token: string; account: string }, guard: Guard, request: Fetch = fetch) {
+export function analyticsUsage(config: { url: string; token: string; account: string }, guard: Guard, request: Fetch = fetch, budget = new RunBudget()) {
   return accountUsage({ async query(body) {
     try {
       await guard()
       if (!config.token) throw new Error('Missing analytics secret')
+      budget.external()
       const response = await request(https(config.url), { method: 'POST',
         headers: { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
         body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) })

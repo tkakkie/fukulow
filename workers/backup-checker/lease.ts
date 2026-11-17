@@ -51,7 +51,7 @@ export class CheckerLease {
           await fence(tx)
           const state = await tx.get(stateKey)
           await fence(tx)
-          return decodeState(state)
+          return decodeState(state, this.now())
         }),
         save: state => this.storage.transaction(async tx => {
           await fence(tx)
