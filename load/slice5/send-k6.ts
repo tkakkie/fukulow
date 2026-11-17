@@ -32,7 +32,13 @@ export const options: Options = {
     .map(m => [m, [m.startsWith('s5_success') ? 'max>=0' : 'count>=0']]))),
 };
 
+function initialize(lane: string) {
+  if (execution.vu.iterationInScenario !== 0) return;
+  // Explicit zeros distinguish an empty warmup/drain window from missing metrics.
+  for (const window of windows) for (const n of names) counters[n].add(0, { scenario: lane, window });
+}
 function post(member: number, channel: string, body: { client_message_id: string; body: string }, lane: string) {
+  initialize(lane);
   const at = Date.now() - execution.scenario.startTime;
   const window = mode === 'open' ? 'all' : at < warmup * 1000 ? 'warmup' : at < (warmup + seconds) * 1000 ? 'measured' : 'after';
   const ip = member % 10000;
@@ -52,6 +58,7 @@ export function send() {
   post(i % tokens.length, data.channels[i % channels], { client_message_id: uuid(), body: data.body }, 'send');
 }
 export function reader() {
+  initialize('reader');
   const at = Date.now() - execution.scenario.startTime;
   const window = mode === 'open' ? 'all' : at < warmup * 1000 ? 'warmup' : at < (warmup + seconds) * 1000 ? 'measured' : 'after';
   const r = http.get(`${__ENV.BASE_URL}/api/v1/orgs/${data.otherOrganization}/channels`, { headers: { Authorization: `Bearer ${data.reader}` }, timeout: '10s', redirects: 0 });

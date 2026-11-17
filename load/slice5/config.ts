@@ -37,3 +37,18 @@ export const thresholds = {
 } as const;
 export const validity = { minimumOfferedFraction: 0.95, maxSampleGapMs: 2500 } as const;
 export const nights = { 1: { parts: ['A'], hardTimeoutMinutes: 210 }, 2: { parts: ['B', 'C', 'D'], hardTimeoutMinutes: 210 } } as const;
+
+// Formal runs must not inherit the feasibility test's smoke scale override.
+export function timelineEnv(env: NodeJS.ProcessEnv, smokeTopics?: string): NodeJS.ProcessEnv {
+  const out = { ...env };
+  delete out.MEASURE_TOPICS;
+  if (smokeTopics !== undefined) out.MEASURE_TOPICS = smokeTopics;
+  return out;
+}
+export function requireMergedHarness(smoke: boolean, merged: boolean) {
+  if (!smoke && !merged) throw new Error('Formal run requires the harness commit on origin/main');
+}
+export function replayPosition(size: number, window: number, limit: number, depth: string, reader: number, k: number) {
+  const spin = (reader * 7919 + k * 104729) >>> 0;
+  return depth === 'recent' ? size - window + spin % (window - limit) : spin % Math.floor(size / 2);
+}

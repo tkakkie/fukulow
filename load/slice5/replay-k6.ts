@@ -5,6 +5,7 @@ import http from 'k6/http';
 import { SharedArray } from 'k6/data';
 import { Counter, Trend } from 'k6/metrics';
 import type { Options } from 'k6/options';
+import { replayPosition } from './config.ts';
 import { uuid } from '../seed.ts';
 
 const data = JSON.parse(open('/fixture/data.json')) as { organization: string; otherOrganization: string; channel: string; size: number; reader: string; generation: string | null };
@@ -24,7 +25,7 @@ export const options: Options = {
   scenarios: {
     sender: { executor: 'constant-arrival-rate', rate: senderRate, timeUnit: '1s', duration: `${senderSeconds}s`, preAllocatedVUs: 10, maxVUs: 100, gracefulStop: '11s', exec: 'sender' },
     other: { executor: 'constant-arrival-rate', rate: 2, timeUnit: '1s', duration: `${senderSeconds}s`, preAllocatedVUs: 2, maxVUs: 20, gracefulStop: '11s', exec: 'other' },
-    readers: { executor: 'per-vu-iterations', vus: readers, iterations: warmups + requests, startTime: '5s', maxDuration: `${senderSeconds - 10}s`, exec: 'reader' },
+    ...Object.fromEntries(Array.from({ length: readers }, (_, i) => [`reader-${i}`, { executor: 'per-vu-iterations', vus: 1, iterations: warmups + requests, startTime: '5s', maxDuration: `${senderSeconds - 10}s`, exec: 'reader' }])),
   },
   summaryTrendStats: ['p(50)', 'p(95)', 'max'],
   thresholds: Object.fromEntries([...['s5_other_errors', 's5_other_attempted', 's5_pages', 's5_invalid_pages', 's5_reader_errors', 's5_reader_outside_sender', ...sendNames.map(n => `s5_send_${n}`)].map(m => [m, ['count>=0']]),
@@ -49,12 +50,8 @@ export function other() {
   otherAttempted.add(1); otherErrors.add(Number(r.status !== 200));
 }
 // Deterministic positions: recent = the last `recentWindow` positions of the settled fixture, deep = its older half.
-export function position(vu: number, k: number) {
-  const spin = (vu * 7919 + k * 104729) >>> 0;
-  return depth === 'recent' ? data.size - recentWindow + spin % (recentWindow - limit) : spin % Math.floor(data.size / 2);
-}
 export function reader() {
-  const k = execution.vu.iterationInScenario, after = position(execution.vu.idInTest, k);
+  const k = execution.vu.iterationInScenario, after = replayPosition(data.size, recentWindow, limit, depth, Number(execution.scenario.name.slice(7)), k);
   const path = arm === 'A' ? `events?after_seq=${after}&limit=${limit}&history_generation=${data.generation}` : `messages?after_seq=${after}&limit=${limit}`;
   const r = http.get(`${__ENV.BASE_URL}/api/v1/orgs/${data.organization}/channels/${data.channel}/${path}`,
     { headers: { Authorization: `Bearer ${tokens[execution.vu.idInTest % tokens.length]}` }, timeout: '10s', redirects: 0 });

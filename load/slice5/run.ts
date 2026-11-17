@@ -8,9 +8,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { arch, cpus, hostname, platform, release, tmpdir, totalmem } from 'node:os';
 import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
-import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, type Arm } from './config.ts';
+import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
 import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
-import { judgePartA, judgePartB, judgePartC, judgePartD, parseTimeline, vacuumCost, type Counts, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
+import { judgePartA, judgePartB, judgePartC, judgePartD, closedLoopNonSuccess, parseTimeline, timelineTopics, vacuumCost, type Counts, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
 
 const usage = 'node load/slice5/run.ts --work /abs/work (--build | --night 1|2 --out /abs/new/dir) [--smoke] [--parts A,B,C,D]';
@@ -174,10 +174,10 @@ async function partARun(arm: Arm, round: number, cell: typeof partA.cells[number
         const wal = walWindow(stack, before, after);
         const dump = walDump(stack, before.lsn, after.lsn, `${dir}/waldump-${rate}.txt`);
         writeFileSync(`${dir}/pg_stat_statements-${rate}.txt`, stack.sql('SELECT calls, round(mean_exec_time::numeric,3), round(total_exec_time::numeric,1), left(query,200) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 25'));
-        const window = samples.window(r.start, r.start + plan.seconds * 1000);
-        steps.push({ rate, seconds: plan.seconds, send: counts(r.result.send?.all), retry: counts(r.result.retry?.all), evidence: window.evidence, wal,
+        const window = samples.window(r.start, r.start + (plan.seconds + partA.drainSeconds) * 1000);
+        steps.push({ rate, seconds: plan.seconds, send: counts(r.result.send?.all), retry: counts(r.result.retry?.all), reader: counts(r.result.reader?.all), evidence: window.evidence, wal,
           vacuumAfter: { walBytes: NaN, ms: NaN }, checkpointAfter: { walBytes: NaN, ms: NaN, buffersWritten: NaN },
-          ...{ cpu: window.cpu, reader: r.result.reader?.all, walDump: dump, lsn: { start: before.lsn, end: after.lsn } } } as StepA);
+          ...{ cpu: window.cpu, walDump: dump, lsn: { start: before.lsn, end: after.lsn } } } as StepA);
       }
       const vacuum = timed(stack, 'VACUUM (ANALYZE);'), checkpoint = timed(stack, 'CHECKPOINT;');
       steps.at(-1)!.vacuumAfter = vacuum; steps.at(-1)!.checkpointAfter = checkpoint;
@@ -209,7 +209,7 @@ async function partBRun(arm: Arm, round: number, cellName: string): Promise<RunB
     const window = samples.window(r.start + plan.warmupB * 1000, r.start + (plan.warmupB + plan.secondsB) * 1000);
     const lane = r.result.send as Record<string, Record<string, number>>;
     // A missing window is missing evidence, never zero errors.
-    const nonSuccess = Object.values(lane).reduce((s, w) => w.attempted >= 0 && w.accepted >= 0 ? s + (w.attempted - w.accepted) : NaN, 0);
+    const nonSuccess = closedLoopNonSuccess(r.result);
     const result: RunB = { part: 'B', cell: cellName, round, arm, commit: full[arm], image: images[arm]!, settingsHash: settings, fixtureChecksum: checksum, complete: true, smoke,
       acceptedPerSecond: lane.measured.accepted / plan.secondsB, measured: counts(lane.measured), nonSuccess,
       hostCpuMeanPercent: window.cpu.vmMean, evidence: window.evidence };
@@ -219,20 +219,20 @@ async function partBRun(arm: Arm, round: number, cellName: string): Promise<RunB
 }
 
 async function partCRun(arm: Arm, round: number): Promise<RunC[]> {
-  const id = `C-${round}-${arm}`;
-  return withStack(arm, id, { burst: partA.sendBurst, refill: partA.sendRefillPerSecond }, async (stack, seeded, dir, privateDir) => {
-    const sizes = seeded.channels.map((_, i) => plan.replaySizes[i] ?? 0);
-    const { checksum, settings } = prefill(stack, arm, seeded, sizes);
-    settle(stack);
-    save(`${privateDir}/tokens.json`, seeded.tokens);
-    let generation: string | null = null;
-    if (arm === 'A') {
-      const r = await fetch(`${stack.base}/api/v1/orgs/${seeded.organization}/channels/${seeded.channels[0]}/events?after_seq=0&limit=1`, { headers: { Authorization: `Bearer ${seeded.tokens[0]}` } });
-      if (r.status !== 200) throw new Error('history_generation lookup failed');
-      generation = (await r.json() as { history_generation: string }).history_generation;
-    }
-    const out: RunC[] = [];
-    for (const cellName of partC.cells) {
+  const out: RunC[] = [];
+  for (const cellName of partC.cells) {
+    const id = `C-${cellName}-${round}-${arm}`;
+    const cell = await withStack(arm, id, { burst: partA.sendBurst, refill: partA.sendRefillPerSecond }, async (stack, seeded, dir, privateDir) => {
+      const sizes = seeded.channels.map((_, i) => plan.replaySizes[i] ?? 0);
+      const { checksum, settings } = prefill(stack, arm, seeded, sizes);
+      settle(stack);
+      save(`${privateDir}/tokens.json`, seeded.tokens);
+      let generation: string | null = null;
+      if (arm === 'A') {
+        const r = await fetch(`${stack.base}/api/v1/orgs/${seeded.organization}/channels/${seeded.channels[0]}/events?after_seq=0&limit=1`, { headers: { Authorization: `Bearer ${seeded.tokens[0]}` } });
+        if (r.status !== 200) throw new Error('history_generation lookup failed');
+        generation = (await r.json() as { history_generation: string }).history_generation;
+      }
       check();
       const [size, depth] = cellName.split('-'), index = size === '1M' ? 0 : 1;
       save(`${privateDir}/data.json`, { organization: seeded.organization, otherOrganization: seeded.otherOrganization, reader: seeded.reader,
@@ -250,18 +250,20 @@ async function partCRun(arm: Arm, round: number): Promise<RunC[]> {
       const window = samples.window(r.start, r.start + plan.senderSeconds * 1000);
       const res = r.result;
       const run: RunC = { part: 'C', cell: cellName, round, arm, commit: full[arm], image: images[arm]!, settingsHash: settings, fixtureChecksum: checksum, complete: true, smoke,
-        p95: res.p95, requests: res.pages, invalidPages: res.invalidPages + (res.outsideSender > 0 ? res.outsideSender : 0), readerErrors: res.readerErrors,
+        p95: res.p95, requests: res.pages, invalidPages: res.invalidPages, outsideSender: res.outsideSender, readerErrors: res.readerErrors,
         sender: counts(res.sender), senderRate: partC.senderRate, senderSeconds: plan.senderSeconds, evidence: window.evidence };
       // R2 (Q4, report-only): WebSocket replay of a 50-position gap, after and never alongside the judged R1.
       const ws = await generator(stack, privateDir, 'load/slice5/replay-ws-k6.ts', { SLICE5_ARM: arm, SLICE5_LIMIT: String(partC.limit),
         SLICE5_READERS: String(partC.readers), SLICE5_WS_ITERATIONS: String(smoke ? 3 : partC.wsIterations) }, 240_000, generatorName());
       writeFileSync(`${dir}/k6-r2-${cellName}.log`, ws.log);
+      run.r2 = ws.code === 0 && ws.result ? { status: 'REPORT ONLY', ...ws.result } : { status: 'NOT EVALUATED' };
       save(`${dir}/result-${cellName}.json`, { ...run, p50: res.p50, max: res.max, other: res.other, cpu: window.cpu, outsideSender: res.outsideSender,
         r2: ws.code === 0 && ws.result ? { status: 'REPORT ONLY', ...ws.result } : { status: 'NOT EVALUATED', reason: 'R2 generator failed' } });
-      out.push(run);
-    }
-    return out;
-  });
+      return run;
+    });
+    out.push(cell);
+  }
+  return out;
 }
 
 async function partDRun(arm: Arm, round: number): Promise<RunD> {
@@ -277,12 +279,12 @@ async function partDRun(arm: Arm, round: number): Promise<RunD> {
     if (ready < 2) throw new Error('PostgreSQL not ready');
     const port = docker('port', name, '5432/tcp').split(':').at(-1);
     const r = await run('cargo', ['test', '--locked', '--release', '-p', 'fukulow-server', '--lib', partD.target, '--', '--ignored', '--nocapture'], { cwd: source(arm),
-      env: { ...process.env, DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${port}/postgres`, ...(smoke ? { MEASURE_TOPICS: tiny.topics } : {}) }, timeoutMs: 30 * 60_000 });
+      env: { ...timelineEnv(process.env, smoke ? tiny.topics : undefined), DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${port}/postgres` }, timeoutMs: 30 * 60_000 });
     writeFileSync(`${dir}/cargo.log`, (r.stdout + r.stderr).replaceAll(password, '<redacted>'));
     const rows = parseTimeline(r.stderr + r.stdout);
     if (r.code !== 0 && !rows.length) throw new Error('Part D test failed before reporting');
     // A missed gate panics after reporting: that is a FAIL from the rows, not an INVALID run.
-    const result: RunD = { part: 'D', round, arm, commit: full[arm], complete: rows.length === 4, smoke, rows };
+    const result: RunD = { part: 'D', round, arm, commit: full[arm], complete: rows.length === 4, smoke, topics: timelineTopics(r.stderr + r.stdout), rows };
     save(`${dir}/result.json`, { ...result, exitCode: r.code });
     return result;
   } finally { try { docker('rm', '-f', name); } catch { cleanupErrors.push(`${id}: PostgreSQL cleanup failed`); } }
@@ -305,6 +307,7 @@ async function attempt<T>(part: string, id: string, f: () => Promise<T>): Promis
 
 let failed = false;
 try {
+  requireMergedHarness(smoke, smoke || command('git', ['merge-base', 'HEAD', 'origin/main']) === command('git', ['rev-parse', 'HEAD']));
   for (const arm of ['B', 'A'] as Arm[]) {
     extract(arm);
     const label = docker('image', 'inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.revision"}}', tag(arm));

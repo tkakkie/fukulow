@@ -51,10 +51,13 @@ export const checksumSQL = `SELECT md5(string_agg(row, ',' ORDER BY row)) FROM (
 
 export const relationBytesSQL = `SELECT COALESCE(sum(pg_total_relation_size(relid)), 0)::bigint FROM pg_stat_user_tables`;
 
-// Relations whose autovacuum or autoanalyze inside a step invalidates its WAL: the Message tables and their TOAST.
-export const watchedRelationsSQL = `SELECT COALESCE(json_agg(oid::bigint), '[]') FROM (
-  SELECT c.oid FROM pg_class c WHERE c.oid IN (SELECT to_regclass('public.' || t) FROM unnest(ARRAY[${insertAutovacuumOff.map(t => `'${t}'`).join(',')}]) t)
-  UNION SELECT c.reltoastrelid FROM pg_class c WHERE c.reltoastrelid <> 0 AND c.oid IN (SELECT to_regclass('public.' || t) FROM unnest(ARRAY[${insertAutovacuumOff.map(t => `'${t}'`).join(',')}]) t)) r`;
+// Relations whose autovacuum or autoanalyze inside a step invalidates its WAL: the Message tables, their TOAST and both sets of indexes.
+export const watchedRelationsSQL = `WITH tables AS (
+  SELECT c.oid, c.reltoastrelid FROM pg_class c
+  WHERE c.oid IN (SELECT to_regclass('public.' || t) FROM unnest(ARRAY[${insertAutovacuumOff.map(t => `'${t}'`).join(',')}]) t)
+), heaps AS (SELECT oid FROM tables UNION SELECT reltoastrelid FROM tables WHERE reltoastrelid <> 0),
+watched AS (SELECT oid FROM heaps UNION SELECT indexrelid FROM pg_index WHERE indrelid IN (SELECT oid FROM heaps))
+SELECT COALESCE(json_agg(oid::bigint), '[]') FROM watched`;
 
 // What the server actually applied: the Q2 settings and the watched tables' reloptions (arm-independent shape).
 export const appliedSettingsSQL = `SELECT json_build_object(
